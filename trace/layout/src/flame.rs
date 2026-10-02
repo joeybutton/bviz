@@ -713,10 +713,13 @@ impl Flamer {
 
 /// A whole-profile name scan (rank table + mnemonic index) held so a
 /// track-selection flame graph can be rebuilt for any lane subset without
-/// rescanning. The scan covers every lane, so it ranks and labels any
-/// selection the caller later chooses.
+/// rescanning, and the profile's wall share, held for every reader of it. The
+/// scan covers every lane, so it ranks and labels any selection the caller
+/// later chooses. Each is computed on first use, so a flamer costs nothing to
+/// make until one is asked for.
 pub struct TrackFlamer {
-    flamer: Flamer,
+    profile: Arc<Profile>,
+    flamer: OnceLock<Flamer>,
     /// The lanes reduced over the whole timeline, filled on first use. A lane's
     /// spans emit path keys and reduce into per-node totals that do not depend
     /// on the selection but do key by label.
@@ -797,7 +800,8 @@ impl<T> ByLabels<T> {
 impl TrackFlamer {
     pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
         TrackFlamer {
-            flamer: Flamer::new(profile, worker_count()),
+            profile: Arc::clone(profile),
+            flamer: OnceLock::new(),
             lane_tables: ByLabels::default(),
             windowed: ByLabels::default(),
             wall_share: OnceLock::new(),
@@ -806,9 +810,25 @@ impl TrackFlamer {
         }
     }
 
+    /// A flamer whose scan is done, so that making one times the scan alone.
+    pub fn scanned(profile: &Arc<Profile>) -> TrackFlamer {
+        let scanned = TrackFlamer::new(profile);
+        scanned.flamer();
+        scanned
+    }
+
+    pub fn profile(&self) -> &Arc<Profile> {
+        &self.profile
+    }
+
+    fn flamer(&self) -> &Flamer {
+        self.flamer
+            .get_or_init(|| Flamer::new(&self.profile, worker_count()))
+    }
+
     fn wall_share(&self) -> &WallShare {
         self.wall_share
-            .get_or_init(|| WallShare::new(&self.flamer.profile, worker_count()))
+            .get_or_init(|| WallShare::new(&self.profile, worker_count()))
     }
 
     #[cfg(test)]
@@ -826,7 +846,7 @@ impl TrackFlamer {
     ) -> (Vec<LaneTable>, Vec<Vec<W::Weight>>) {
         #[cfg(test)]
         self.count_walk(window);
-        build_lane_tables(&self.flamer, labels, window, worker_count(), weigher_of)
+        build_lane_tables(self.flamer(), labels, window, worker_count(), weigher_of)
     }
 
     fn reduce(
@@ -883,7 +903,7 @@ impl TrackFlamer {
         tables.wall_us.get_or_init(|| {
             #[cfg(test)]
             self.count_walk(&tables.window);
-            wall_columns(&self.flamer, tables, self.wall_share(), worker_count())
+            wall_columns(self.flamer(), tables, self.wall_share(), worker_count())
         })
     }
 
@@ -922,7 +942,7 @@ impl TrackFlamer {
         });
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
-        seal_arena(&self.flamer.profile, arena, kids)
+        seal_arena(&self.profile, arena, kids)
     }
 
     /// [`build`](Self::build)'s graph weighed by wall share, merged from the
@@ -955,7 +975,7 @@ impl TrackFlamer {
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
         WallShareFlame {
-            flame: seal_arena(&self.flamer.profile, arena, kids),
+            flame: seal_arena(&self.profile, arena, kids),
             duration_us,
         }
     }
@@ -3636,6 +3656,18 @@ mod tests {
         // never weighed by wall share builds it.
         let untouched = TrackFlamer::new(&p).build(FlameLabels::Name, &win, |_| true);
         assert_eq!(by_duration.nodes(), untouched.nodes());
+    }
+
+    #[test]
+    fn a_flamer_scans_and_splits_its_profile_only_once_a_build_needs_it() {
+        let p = clipping_profile();
+        let whole = TimeSelection::default();
+        let scan = TrackFlamer::new(&p);
+        assert!(scan.flamer.get().is_none() && scan.wall_share.get().is_none());
+        scan.build(FlameLabels::Name, &whole, |_| true);
+        assert!(scan.flamer.get().is_some() && scan.wall_share.get().is_none());
+        scan.build_wall_share(FlameLabels::Name, &whole, |_| true);
+        assert!(scan.wall_share.get().is_some());
     }
 
     #[test]

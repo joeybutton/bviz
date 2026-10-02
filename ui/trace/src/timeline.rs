@@ -7,10 +7,9 @@ use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TimelineBars,
-    TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers,
-    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
-    thumb_offset,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, TIMELINE_KEY_CONTEXT, TimelineBars, TracePanel,
+    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler,
+    paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip, thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -454,10 +453,7 @@ impl Timeline {
     fn regions(&self, cx: &App) -> Regions {
         let (n_counters, flame_total) = {
             let model = self.model.read(cx);
-            let n_counters = match model.source() {
-                Source::Loaded(p) => p.counters().len(),
-                _ => 0,
-            };
+            let n_counters = model.profile().map_or(0, |p| p.counters().len());
             let flame_total = model.lane_layout().map(|l| l.total_height).unwrap_or(0.0);
             (n_counters, flame_total)
         };
@@ -476,8 +472,7 @@ impl Timeline {
     fn scroll_bars(&self, cx: &App) -> TimelineBars {
         let (span, flame_total) = {
             let model = self.model.read(cx);
-            let (Source::Loaded(profile), Some(lanes)) = (model.source(), model.lane_layout())
-            else {
+            let (Some(profile), Some(lanes)) = (model.profile(), model.lane_layout()) else {
                 return TimelineBars::default();
             };
             (profile.span(), lanes.total_height)
@@ -667,9 +662,7 @@ impl Timeline {
     /// The instant a window-space cursor points at; `None` while no profile is
     /// loaded.
     fn time_at(&self, pos: Point<Pixels>, cx: &App) -> Option<i64> {
-        let Source::Loaded(profile) = self.model.read(cx).source() else {
-            return None;
-        };
+        let profile = self.model.read(cx).profile()?;
         let x_px = f32::from(pos.x) - self.regions(cx).content_left;
         Some(time_at_x(self.view, profile.span(), x_px))
     }
@@ -684,7 +677,7 @@ impl Timeline {
         if !(in_ruler || (e.modifiers.shift && regions.in_flame(e.position))) {
             return false;
         }
-        let Source::Loaded(profile) = self.model.read(cx).source() else {
+        let Some(profile) = self.model.read(cx).profile() else {
             return false;
         };
         let bounds = profile.span();
@@ -775,9 +768,8 @@ impl Timeline {
         if self.model.read(cx).lane_layout().is_none() {
             return;
         }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Some(profile) = self.model.read(cx).profile().cloned() else {
+            return;
         };
         let span = profile.span();
         let regions = self.regions(cx);
@@ -795,9 +787,8 @@ impl Timeline {
         if self.model.read(cx).lane_layout().is_none() {
             return;
         }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Some(profile) = self.model.read(cx).profile().cloned() else {
+            return;
         };
         let span = profile.span();
         let regions = self.regions(cx);
@@ -924,7 +915,7 @@ impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (profile, lanes) = {
             let model = self.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
+            let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
             let Some(lanes) = model.lane_layout() else {
@@ -963,9 +954,8 @@ fn timeline_on_drag(
             if timeline.model.read(cx).lane_layout().is_none() {
                 return;
             }
-            let profile = match timeline.model.read(cx).source() {
-                Source::Loaded(p) => p.clone(),
-                _ => return,
+            let Some(profile) = timeline.model.read(cx).profile().cloned() else {
+                return;
             };
             let span = profile.span();
             let regions = timeline.regions(cx);
@@ -1024,7 +1014,7 @@ impl Render for SliceCanvas {
         let (profile, lanes, chrome, counters, gutter_width) = {
             let timeline = parent.read(cx);
             let model = timeline.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
+            let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
             let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {

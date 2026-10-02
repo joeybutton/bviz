@@ -52,7 +52,6 @@ use gpui::{
     fill, point, prelude::*, px, relative, size,
 };
 use std::borrow::Cow;
-use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
 
@@ -220,7 +219,7 @@ const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
-pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
+pub(crate) type Source = bviz_ui_components::Source<model::LoadedProfile>;
 
 /// The trace document's timeline: the flame chart with its gutter, ruler and
 /// counters strip, the divider that resizes the strip, and the tracks menu over
@@ -352,10 +351,7 @@ impl TracePanel {
     fn region_inputs(&self, cx: &App) -> RegionInputs {
         let model = self.model.read(cx);
         RegionInputs {
-            n_counters: match model.source() {
-                Source::Loaded(p) => p.counters().len(),
-                _ => 0,
-            },
+            n_counters: model.profile().map_or(0, |p| p.counters().len()),
             counters: self.counters,
             gutter_width: self.gutter_width,
             flame_total: model.lane_layout().map(|l| l.total_height).unwrap_or(0.0),
@@ -449,9 +445,7 @@ pub(crate) fn time_window_chip(
 ) -> Option<Div> {
     let summary = {
         let m = model.read(cx);
-        let Source::Loaded(profile) = m.source() else {
-            return None;
-        };
+        let profile = m.profile()?;
         let span = profile.span();
         let shown = m.aggregates();
         time_window_summary(
@@ -494,7 +488,8 @@ pub(crate) fn profile_status(model: &Entity<TraceModel>, cx: &App) -> SharedStri
     model
         .read(cx)
         .source()
-        .status("No profile", |p| {
+        .status("No profile", |loaded| {
+            let p = loaded.profile();
             let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
             format!(
                 "{} threads · {} slices · {:.3}s",

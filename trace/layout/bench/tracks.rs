@@ -112,7 +112,7 @@ fn main() {
     // The whole-profile scan the view holds after the first build; every later
     // selection rebuilds from it rather than rescanning.
     let scan_cold = min_secs(iters, || {
-        std::hint::black_box(TrackFlamer::new(&profile));
+        std::hint::black_box(TrackFlamer::scanned(&profile));
     });
     // The first rebuild off a scan pays that labelling's per-lane reduction, so
     // this timing is warm: the pure merge every selection change after it costs.

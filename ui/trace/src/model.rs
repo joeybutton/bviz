@@ -31,6 +31,23 @@ pub(crate) struct AggregateBuildStarted;
 /// rather than on every notification the model sends.
 pub(crate) struct SourceReplaced;
 
+/// A loaded profile with what is derived from it once for every reader of it.
+pub(crate) struct LoadedProfile {
+    flamer: Arc<TrackFlamer>,
+}
+
+impl LoadedProfile {
+    fn new(profile: Profile) -> LoadedProfile {
+        LoadedProfile {
+            flamer: Arc::new(TrackFlamer::new(&Arc::new(profile))),
+        }
+    }
+
+    pub(crate) fn profile(&self) -> &Arc<Profile> {
+        self.flamer.profile()
+    }
+}
+
 /// The shared trace document and the selection and visibility state derived from
 /// it, plus the layouts and aggregates cached from those. Shared as an entity by
 /// every view of one profile, so each reads one source of truth; a view's own
@@ -95,10 +112,6 @@ pub(crate) struct TraceModel {
     /// value stays shown while a rebuild runs, so a selection change doesn't
     /// blank the view.
     aggregates: Option<Arc<ScopeAggregate>>,
-    /// The loaded profile's whole-profile flame name scan, reused across track
-    /// selections; `None` until the first aggregate build scans it. Valid for any
-    /// selection, so it is dropped only when a new profile loads.
-    flame_scan: Option<Arc<TrackFlamer>>,
     /// Background-build bookkeeping for `aggregates`, keyed on
     /// `aggregate_key`.
     agg: Rebuild<u64>,
@@ -124,7 +137,7 @@ impl TraceModel {
                 move || profile.join(),
                 |model, result, cx| {
                     let source = match result {
-                        Ok(profile) => Source::Loaded(Arc::new(profile)),
+                        Ok(profile) => Source::Loaded(LoadedProfile::new(profile)),
                         Err(err) => Source::Failed(err),
                     };
                     model.set_source(source, cx);
@@ -151,7 +164,6 @@ impl TraceModel {
             visible_lanes: RefCell::new(None),
             group_chrome: RefCell::new(None),
             aggregates: None,
-            flame_scan: None,
             agg: Rebuild::new(),
             _load: load,
         }
@@ -163,6 +175,13 @@ impl TraceModel {
 
     pub(crate) fn session(&self) -> Option<&Entity<Session>> {
         self.session.as_ref()
+    }
+
+    pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(loaded.profile()),
+            _ => None,
+        }
     }
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
@@ -213,8 +232,7 @@ impl TraceModel {
         self.time_selection.clear();
         self.source = source;
         cx.emit(SourceReplaced);
-        if let Source::Loaded(profile) = &self.source {
-            let profile = profile.clone();
+        if let Some(profile) = self.profile().cloned() {
             self.init_tracks(&profile, cx);
         }
     }
@@ -242,9 +260,7 @@ impl TraceModel {
     /// The full lane layout for the loaded profile, built on first use and reused
     /// across paints and mouse handlers. `None` until a profile is loaded.
     fn full_lane_layout(&self) -> Option<Rc<LaneLayout>> {
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
+        let profile = self.profile()?;
         if self.lanes.borrow().is_none() {
             let t = std::time::Instant::now();
             let layout = lay_out_lanes(profile, &METRICS);
@@ -280,7 +296,7 @@ impl TraceModel {
         let Some(full) = self.full_lane_layout() else {
             return;
         };
-        let Source::Loaded(profile) = &self.source else {
+        let Some(profile) = self.profile() else {
             return;
         };
         let (layout, chrome) = build_grouped_layout(
@@ -362,7 +378,7 @@ impl TraceModel {
     pub(crate) fn set_group_visible(&mut self, group: usize, visible: bool) {
         let class = GROUP_ORDER[group];
         let targets: Vec<usize> = {
-            let Source::Loaded(profile) = &self.source else {
+            let Some(profile) = self.profile() else {
                 return;
             };
             profile
@@ -527,10 +543,10 @@ impl TraceModel {
     /// panel holding state derived from the aggregate each hear only their own
     /// step, exactly once per build.
     pub(crate) fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
-        let profile = match &self.source {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Source::Loaded(loaded) = &self.source else {
+            return;
         };
+        let scan = loaded.flamer.clone();
         let key = self.aggregate_key;
         if self.agg.is_ready(key) {
             // The shown value is already current; cancel a build for a key the
@@ -546,13 +562,11 @@ impl TraceModel {
         let selected = self.selected_tracks.clone();
         let time_window = self.time_selection.clone();
         let mode = self.flame_mode;
-        let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {
-            let (scan, aggregate) = cx
+            let aggregate = cx
                 .background_executor()
                 .spawn(async move {
                     let t = std::time::Instant::now();
-                    let scan = cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
                     let aggregate =
                         ScopeAggregate::build_for_tracks_reusing(&scan, mode, &time_window, |i| {
                             selected.get(i).copied().unwrap_or(false)
@@ -563,7 +577,7 @@ impl TraceModel {
                             t.elapsed().as_secs_f64()
                         );
                     }
-                    (scan, aggregate)
+                    aggregate
                 })
                 .await;
             model
@@ -572,7 +586,6 @@ impl TraceModel {
                     if !m.agg.accept(generation, key) {
                         return;
                     }
-                    m.flame_scan = Some(scan);
                     m.aggregates = Some(Arc::new(aggregate));
                     cx.notify();
                 })
@@ -586,7 +599,6 @@ impl TraceModel {
     /// change, a replaced document leaves the old graph nothing to describe.
     fn invalidate_aggregates(&mut self) {
         self.aggregates = None;
-        self.flame_scan = None;
         self.agg.invalidate();
     }
 
