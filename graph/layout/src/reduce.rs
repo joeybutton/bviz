@@ -807,7 +807,13 @@ impl Condensation {
                 pred[w as usize].push(u as u32);
             }
         }
-        let of = components(succ, &pred);
+        Self::with_reverse(succ, &pred)
+    }
+
+    /// [`Condensation::new`] of the graph `succ` holds, for a caller holding
+    /// the same graph's edges reversed as `pred`.
+    pub(crate) fn with_reverse(succ: &[Vec<u32>], pred: &[Vec<u32>]) -> Self {
+        let of = components(succ, pred);
         let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
         // The indices grouped by component, in ascending order within each,
         // and by component where its group ends.

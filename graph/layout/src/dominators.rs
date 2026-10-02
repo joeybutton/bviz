@@ -22,7 +22,7 @@ use crate::graph::{Graph, Kind};
 use crate::intern::{Id, Names, stable_hash};
 use crate::metrics::{Count, Scope, Unit, UnitGraph, unit_graph};
 use crate::provenance::Provenance;
-use crate::reduce::{DenseIds, components, reach_counts};
+use crate::reduce::{Condensation, DenseIds, reach_counts};
 
 /// The dominator tree of the counted points of a scope the roots reach. A
 /// point not counted towards others is no product of the build and takes no
@@ -403,9 +403,9 @@ pub struct ScopeGraph {
     index: DenseIds,
     /// By point, the hash of its name.
     keys: Vec<u64>,
-    /// By point, the strongly connected component it belongs to.
-    component: Vec<u32>,
-    components: usize,
+    /// The strongly connected components of the points, each component's
+    /// successors being those it depends on.
+    condensation: Condensation,
     /// The top-level points, in ascending order.
     tops: Vec<u32>,
     counted: u32,
@@ -426,18 +426,12 @@ impl ScopeGraph {
             .iter()
             .map(|point| stable_hash(names.resolve(point.id)))
             .collect();
-        let component = components(&unit.dependencies, &unit.dependents);
-        let components = component.iter().max().map_or(0, |&c| c as usize + 1);
-        let mut depended_on = vec![false; components];
-        for (dependent, dependencies) in unit.dependencies.iter().enumerate() {
-            for &dependency in dependencies {
-                let c = component[dependency as usize];
-                if c != component[dependent] {
-                    depended_on[c as usize] = true;
-                }
-            }
+        let condensation = Condensation::with_reverse(&unit.dependencies, &unit.dependents);
+        let mut depended_on = vec![false; condensation.succ.len()];
+        for &dependency in condensation.succ.iter().flatten() {
+            depended_on[dependency as usize] = true;
         }
-        let tops = (unit.points.iter().zip(&component).enumerate())
+        let tops = (unit.points.iter().zip(&condensation.of).enumerate())
             .filter(|(_, (point, c))| point.counted && !depended_on[**c as usize])
             .map(|(p, _)| p as u32)
             .collect();
@@ -447,8 +441,7 @@ impl ScopeGraph {
             unit,
             index,
             keys,
-            component,
-            components,
+            condensation,
             tops,
             counted,
         }
@@ -548,7 +541,7 @@ impl ScopeGraph {
         let dependents = dependents(unit, &tree, &order);
         let tops = order[..bounds[0] as usize].iter();
         let cycle = tops
-            .map(|&w| self.component[tree.point(w) as usize])
+            .map(|&w| self.condensation.of[tree.point(w) as usize])
             .collect();
         let shared_tops = &nodes[roots.len()..bounds[0] as usize];
         let shared_weight = shared_tops.iter().map(|node| node.weight).sum();
@@ -582,25 +575,27 @@ impl ScopeGraph {
         tree: &'a DominatorTree,
     ) -> impl Fn(usize) -> Standing + 'a {
         let unit = &self.unit;
+        let component = &self.condensation.of;
+        let components = self.condensation.succ.len();
         let mut is_root = vec![false; unit.points.len()];
-        let mut roots_in = vec![0u32; self.components];
+        let mut roots_in = vec![0u32; components];
         for &p in roots {
             is_root[p as usize] = true;
-            roots_in[self.component[p as usize] as usize] += 1;
+            roots_in[component[p as usize] as usize] += 1;
         }
-        let below = reach_counts(&unit.dependents, |p| is_root[p], |p| self.keys[p]);
+        let below = self.roots_reaching(roots, &is_root, ROOT_SET_WORDS);
         // By component, whether a point the tree reaches outside it depends
         // on a member, which only a point some root outside it reaches does.
-        let mut entered = vec![false; self.components];
+        let mut entered = vec![false; components];
         for &q in &tree.points {
-            let c = self.component[q as usize];
+            let c = component[q as usize];
             for &d in &unit.dependencies[q as usize] {
-                let entering = self.component[d as usize];
+                let entering = component[d as usize];
                 entered[entering as usize] |= entering != c;
             }
         }
         move |p: usize| {
-            let c = self.component[p] as usize;
+            let c = component[p] as usize;
             match (is_root[p], entered[c]) {
                 (false, _) => Standing::Below(below[p]),
                 (true, false) => Standing::Root {
@@ -619,6 +614,57 @@ impl ScopeGraph {
         }
     }
 }
+
+impl ScopeGraph {
+    /// By point, how many of `roots`, which `is_root` marks by point, reach
+    /// it, other than itself. Each component carries the set of roots
+    /// reaching it, handed on to the components it depends on in one pass,
+    /// which counts exactly where the sets take at most `most_words` words in
+    /// all; past that the counts are those [`reach_counts`] gives.
+    fn roots_reaching(&self, roots: &[u32], is_root: &[bool], most_words: usize) -> Vec<Count> {
+        let condensation = &self.condensation;
+        let words = roots.len().div_ceil(WORD_BITS);
+        let components = condensation.succ.len();
+        if words * components > most_words {
+            return reach_counts(&self.unit.dependents, |p| is_root[p], |p| self.keys[p]);
+        }
+        let mut sets = vec![0u64; words * components];
+        for (bit, &p) in roots.iter().enumerate() {
+            let c = condensation.of[p as usize] as usize;
+            sets[c * words + bit / WORD_BITS] |= 1 << (bit % WORD_BITS);
+        }
+        let mut handed: Vec<u64> = vec![0; words];
+        for &c in &condensation.order {
+            let c = c as usize;
+            handed.copy_from_slice(&sets[c * words..(c + 1) * words]);
+            if handed.iter().all(|&word| word == 0) {
+                continue;
+            }
+            for &d in &condensation.succ[c] {
+                let d = d as usize;
+                let into = &mut sets[d * words..(d + 1) * words];
+                for (into, &from) in into.iter_mut().zip(&handed) {
+                    *into |= from;
+                }
+            }
+        }
+        let reaching = |c: u32| {
+            let set = &sets[c as usize * words..(c as usize + 1) * words];
+            set.iter().map(|word| word.count_ones()).sum::<u32>()
+        };
+        (condensation.of.iter().zip(is_root))
+            .map(|(&c, &root)| Count::Exact(reaching(c) - u32::from(root)))
+            .collect()
+    }
+}
+
+/// How many roots one word of a set of roots holds.
+const WORD_BITS: usize = u64::BITS as usize;
+
+/// The most words, in all, the sets of roots reaching the components of a
+/// scope may take, which holds them to 32 MiB; past it the counts are
+/// estimated.
+const ROOT_SET_WORDS: usize = 1 << 22;
 
 /// A [`ScopeGraph`] whose points are the configured targets.
 #[derive(Clone, Copy)]
@@ -1437,6 +1483,32 @@ mod tests {
         let tree = tree_with(&graph, &names, &facets, Unit::ConfiguredTarget);
         for copy in ["a (one)", "a (two)"] {
             assert_eq!(tree.elsewhere(node(&tree, &names, copy)), None, "{copy}");
+        }
+    }
+
+    /// The roots reaching each point, counted through sets of roots or by
+    /// [`reach_counts`] where the sets would grow too large, come to the same
+    /// on graphs small enough for both to count exactly.
+    #[test]
+    fn the_roots_reaching_a_point_count_alike_either_way() {
+        let mut next = random_indices();
+        for (nodes, edges, roots) in [(30, 45, 3), (120, 300, 70), (120, 160, 120)] {
+            let deps: Vec<(usize, usize)> =
+                (0..edges).map(|_| (next(nodes), next(nodes))).collect();
+            let (graph, names) = random_build(Unit::ConfiguredTarget, nodes, &deps, 0, &mut next);
+            let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
+            let scope = Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap();
+            let prepared = ScopeGraph::new(&graph, &names, &Facets::default(), &everything, scope);
+            let mut chosen: Vec<u32> = (0..roots).map(|_| next(nodes) as u32).collect();
+            chosen.sort_unstable();
+            chosen.dedup();
+            let mut is_root = vec![false; nodes];
+            for &p in &chosen {
+                is_root[p as usize] = true;
+            }
+            let by_sets = prepared.roots_reaching(&chosen, &is_root, usize::MAX);
+            let counted = prepared.roots_reaching(&chosen, &is_root, 0);
+            assert_eq!(by_sets, counted, "{nodes} nodes, {edges} edges");
         }
     }
 
