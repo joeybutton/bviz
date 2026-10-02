@@ -173,7 +173,7 @@ pub(crate) struct Swatch {
 pub(crate) fn legend_strip(
     legend: &[(SharedString, Hue)],
     swatch: Swatch,
-    hints: impl IntoIterator<Item = SharedString>,
+    hints: impl IntoIterator<Item = impl IntoElement>,
     palette: &Palette,
 ) -> Div {
     let entry = |(name, hue): &(SharedString, Hue)| {

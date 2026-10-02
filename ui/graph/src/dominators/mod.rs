@@ -10,11 +10,11 @@ use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
-use crate::point::{KindNames, identify, unit_names};
+use crate::point::{KindNames, configuration, identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Chosen, Dominators, Roots, Standing, Targets};
+use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
@@ -26,7 +26,8 @@ use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, relative,
+    Rgba, SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px,
+    relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -424,6 +425,7 @@ impl DominatorsPanel {
                 let legend = colouring.legend(points(), &shared.facets);
                 let targets =
                     (unit == Unit::ConfiguredTarget).then(|| Targets::of(&tree, &shared.facets));
+                let reached = tree.roots().any(|root| paint::reached(&tree, root));
                 Coloured {
                     key,
                     tree,
@@ -431,6 +433,7 @@ impl DominatorsPanel {
                     colouring: Arc::new(colouring),
                     legend,
                     targets,
+                    reached,
                 }
             },
             |view, coloured, cx| {
@@ -748,6 +751,8 @@ struct Coloured {
     /// The targets each node's subtree holds, where its points are configured
     /// targets.
     targets: Option<Targets>,
+    /// Whether the build also reaches a root of `tree` as a dependency.
+    reached: bool,
 }
 
 impl Coloured {
@@ -776,6 +781,15 @@ impl Drawn {
     /// What the cell on top holds.
     fn top(&self) -> Holds {
         self.focused().map_or(Holds::Build, Focused::holds)
+    }
+
+    /// Whether a cell the icicle draws from its top can stand for a root
+    /// the build also reaches as a dependency.
+    fn draws_reached(&self) -> bool {
+        match &self.focus {
+            None => self.coloured.reached,
+            Some(focus) => focus.reached,
+        }
     }
 }
 
@@ -886,8 +900,8 @@ impl From<Crumb> for Focused {
     }
 }
 
-/// Where the icicle is drawn from, with the path above it that the breadcrumb
-/// names taken once as the focus is set.
+/// Where the icicle is drawn from, with what is read of the tree for it
+/// taken once as the focus is set.
 #[derive(Clone)]
 struct Focus {
     on: Focused,
@@ -895,6 +909,10 @@ struct Focus {
     above: Vec<Crumb>,
     /// Whether more steps stand above those of `above`.
     elided: bool,
+    /// Whether a cell drawn from `on` can stand for a root the build also
+    /// reaches as a dependency: `on` itself, or where it is a run of roots,
+    /// one it gathers.
+    reached: bool,
 }
 
 /// The most steps above the focus the breadcrumb names.
@@ -909,7 +927,19 @@ impl Focus {
         let elided = above.len() > CRUMBS;
         above.truncate(CRUMBS);
         above.reverse();
-        Self { on, above, elided }
+        let reached = match on {
+            Focused::Node(node) => paint::reached(tree, node),
+            Focused::Run(run) if run.parent() == Parent::Build => {
+                run.siblings().any(|root| paint::reached(tree, root))
+            }
+            Focused::Shared | Focused::Run(_) => false,
+        };
+        Self {
+            on,
+            above,
+            elided,
+            reached,
+        }
     }
 }
 
@@ -1072,9 +1102,18 @@ fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
 fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: &mut Vec<String>) {
     let unit = tree.scope().unit();
     let word = by.word();
+    let elsewhere = tree
+        .elsewhere(node)
+        .map(|elsewhere| reached_elsewhere(elsewhere, unit, shared));
     let (count, said): (_, fn(Count, &str, &str) -> String) = match tree.standing(node) {
         Standing::Root { in_cycle } => {
-            return lines.push(format!("{word}: {}", by.why(in_cycle)));
+            return match elsewhere {
+                None => lines.push(format!("{word}: {}", by.why(in_cycle))),
+                Some(elsewhere) => {
+                    lines.push(format!("{word} here, and a dependency elsewhere:"));
+                    lines.extend(elsewhere);
+                }
+            };
         }
         Standing::ReachedRoot(count) => (count, reached_from),
         Standing::Below(count) => (count, shared_by),
@@ -1090,6 +1129,35 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     let more = count.less(named.len() as u32);
     if !named.is_empty() && more.value() > 0 {
         lines.push(format!("{LISTED}and {more} more"));
+    }
+    if let Some(elsewhere) = elsewhere {
+        lines.push("and a dependency elsewhere:".to_owned());
+        lines.extend(elsewhere);
+    }
+}
+
+/// What a tooltip lists of a root of `unit` another copy of whose target the
+/// build reaches through a dependency, as `elsewhere` tells: a dependent
+/// reaching that copy and the configuration of the copy, and how many more
+/// copies are reached so.
+fn reached_elsewhere(elsewhere: Elsewhere, unit: Unit, shared: &Shared) -> Vec<String> {
+    let dependent = point_name(elsewhere.dependent, unit, shared);
+    let copy = match configuration(elsewhere.copy, shared) {
+        Some(configuration) => format!("its copy in {configuration}"),
+        None => "another copy of it".to_owned(),
+    };
+    let reached = format!("{LISTED}{dependent} reaches {copy}");
+    let more = other_copies(elsewhere.copies.saturating_sub(1));
+    std::iter::once(reached).chain(more).collect()
+}
+
+/// What a tooltip says of the `more` copies of a root's target, beside the
+/// one it names, that the build reaches through a dependency.
+fn other_copies(more: u32) -> Option<String> {
+    match more {
+        0 => None,
+        1 => Some(format!("{LISTED}1 other copy is a dependency too")),
+        _ => Some(format!("{LISTED}{more} other copies are dependencies too")),
     }
 }
 
@@ -1109,6 +1177,16 @@ impl RootedBy {
         match self {
             RootedBy::Tops => TOP_LEVEL,
             RootedBy::Targets => REQUESTED,
+        }
+    }
+
+    /// What the legend says of the roots so chosen that the build also
+    /// reaches through a dependency. Nothing depends on a top-level point,
+    /// so there it is another copy of its target that something depends on.
+    fn also_a_dependency(self) -> &'static str {
+        match self {
+            RootedBy::Tops => "whose target is also a dependency",
+            RootedBy::Targets => "also reached as a dependency",
         }
     }
 
@@ -1303,8 +1381,21 @@ impl Render for DominatorsPanel {
             diameter: LEGEND_SWATCH,
         };
         // A legend of one hue names nothing the unit picked does not.
-        let legend = drawn.coloured.legend.len() > 1;
-        let legend = legend.then(|| legend_strip(&drawn.coloured.legend, swatch, [], &palette));
+        let hues = match drawn.coloured.legend.len() {
+            0 | 1 => &[][..],
+            _ => &drawn.coloured.legend[..],
+        };
+        let unit = drawn.coloured.tree.scope().unit();
+        // The key's cells wear a hue the cells drawn wear.
+        let key_fill = match drawn.coloured.legend.first() {
+            Some((_, hue)) => hue.color(&palette),
+            None => palette.data.neutral.into(),
+        };
+        let key = drawn
+            .draws_reached()
+            .then(|| reached_key(unit, drawn.coloured.by(), key_fill, &palette));
+        let legend = (!hues.is_empty() || key.is_some())
+            .then(|| legend_strip(hues, swatch, key.into_iter().flatten(), &palette));
         root.children(legend).child(
             div()
                 .id("dominators-icicle")
@@ -1348,6 +1439,37 @@ fn strip(
             bar.trailing(busy("dominators-computing", "computing…", palette))
         })
 }
+
+/// The legend's key to the notch, telling the roots of `unit`, chosen `by`,
+/// that the build also reaches as a dependency apart from the others, each
+/// beside a cell filled `fill` drawn as the icicle draws it.
+fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Div; 2] {
+    let ink = paint::notch_ink(fill, palette.background);
+    let entry = |reached: bool, name: String| {
+        let notch = reached.then(|| {
+            canvas(
+                |_, _, _| {},
+                move |cell, _, window, _| {
+                    paint::paint_notch(cell, ink, window);
+                },
+            )
+            .size_full()
+        });
+        let cell = div()
+            .flex_none()
+            .w(KEY_CELL_WIDTH)
+            .h(paint::NOTCH * 2.)
+            .bg(fill)
+            .children(notch);
+        div().flex().items_center().gap_1().child(cell).child(name)
+    };
+    let roots = format!("{} {}", by.word(), unit_names(unit).many);
+    let reached = format!("{roots} {}", by.also_a_dependency());
+    [entry(false, roots), entry(true, reached)]
+}
+
+/// How wide a cell beside a key's entry is drawn.
+const KEY_CELL_WIDTH: Pixels = px(16.);
 
 /// How wide a legend swatch is drawn.
 const LEGEND_SWATCH: Pixels = px(8.);
@@ -1536,6 +1658,15 @@ mod tests {
         assert_eq!(tally(unit, 9, 1, 0), "9 configured targets · 1 root");
         let outside = "1 configured target · 2 roots · 7 outside";
         assert_eq!(tally(unit, 1, 2, 7), outside);
+    }
+
+    #[test]
+    fn the_other_copies_reached_are_counted_only_where_there_are_any() {
+        assert_eq!(other_copies(0), None);
+        let one = "  · 1 other copy is a dependency too";
+        assert_eq!(other_copies(1).unwrap(), one);
+        let several = "  · 2 other copies are dependencies too";
+        assert_eq!(other_copies(2).unwrap(), several);
     }
 
     #[test]

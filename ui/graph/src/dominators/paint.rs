@@ -10,13 +10,15 @@ use crate::model::Shared;
 use crate::paint::UNMARKED_FADE;
 use crate::point::{configuration_readings, mnemonic, point_label, primary_output, unit_names};
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::Dominators;
+use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
 use bviz_ui_assets::shape_line;
 use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
-use bviz_ui_theme::{label_on, mix};
-use gpui::{App, BorderStyle, Bounds, Hsla, Pixels, Rgba, Window, px, quad, size};
+use bviz_ui_theme::{label_on, mix, over};
+use gpui::{
+    App, BorderStyle, Bounds, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point, px, quad, size,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -41,6 +43,54 @@ const SEAM_MIX: f32 = 0.35;
 /// How far a cell gathering siblings too narrow to draw recedes towards the
 /// canvas from the neutral it is filled with, so it reads as no point itself.
 const REST_RECEDE: f32 = 0.5;
+
+/// How long the legs of the notch in the corner of a root the build also
+/// reaches as a dependency are: twice the pad a cell's name is inset by, the
+/// longest whose slanted edge passes the corner of the name's box without
+/// entering it.
+pub(crate) const NOTCH: Pixels = px(2. * TEXT_PAD);
+
+/// Whether `node` of `tree` is a root the build also reaches through a
+/// dependency, which a notch filling the top-left corner of its cell marks.
+pub(crate) fn reached(tree: &Dominators, node: u32) -> bool {
+    match tree.standing(node) {
+        Standing::ReachedRoot(_) => true,
+        Standing::Root { .. } => tree.elsewhere(node).is_some(),
+        Standing::Below(_) => false,
+    }
+}
+
+/// The corners of the notch on a cell `width` wide, from the cell's top-left
+/// corner, where its right angle lies: the right triangle with legs
+/// [`NOTCH`] long, cut off at the cell's right edge, so a cell narrower than
+/// the leg carries the part of it within the cell. On a cell as wide as the
+/// leg or wider the two corners on the cut coincide at the end of the top leg.
+fn notch(width: Pixels) -> [Point<Pixels>; 4] {
+    let reach = width.min(NOTCH);
+    [
+        point(px(0.), px(0.)),
+        point(reach, px(0.)),
+        point(reach, NOTCH - reach),
+        point(px(0.), NOTCH),
+    ]
+}
+
+/// Inks the notch of the cell `rect` in `ink`. The notch is laid on the cell
+/// as its edges round to device pixels, so its legs lie on the cell's edges
+/// and it neither bleeds past the cell nor leaves a sliver of the cell's fill
+/// beside them.
+pub(crate) fn paint_notch(rect: Bounds<Pixels>, ink: Rgba, window: &mut Window) {
+    let (origin, far) = (
+        window.pixel_snap_point(rect.origin),
+        window.pixel_snap_point(rect.bottom_right()),
+    );
+    let corners = notch(far.x - origin.x).map(|corner| origin + corner);
+    let mut path = PathBuilder::fill();
+    path.add_polygon(&corners, true);
+    if let Ok(path) = path.build() {
+        window.paint_path(path, ink);
+    }
+}
 
 /// How tall a row of the icicle stands: a name at the inherited text size,
 /// padded above and below, and the gap to the next row.
@@ -121,13 +171,13 @@ pub(crate) fn paint_icicle(
             Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
             _ => 1.0,
         };
+        let drawn_fill = Rgba {
+            a: fill.a * strength,
+            ..fill
+        };
         paint_labeled_box(
             rect,
-            Rgba {
-                a: fill.a * strength,
-                ..fill
-            }
-            .into(),
+            drawn_fill.into(),
             &name,
             Hsla {
                 a: label.a * strength,
@@ -137,7 +187,23 @@ pub(crate) fn paint_icicle(
             window,
             cx,
         );
+        if let Holds::Node(node) = cell.holds
+            && reached(&scene.tree, node)
+        {
+            paint_notch(rect, notch_ink(drawn_fill, palette.background), window);
+        }
     }
+}
+
+/// The ink of a notch on a cell drawn in `fill` over `background`: the ink a
+/// name takes on the cell as it is seen, laid as opaque as the cell, so a
+/// cell the filter fades carries it faded but still seen. It is returned
+/// already composited over the cell, opaque, so the notch hides whatever the
+/// cell's own paint lays beneath it.
+pub(crate) fn notch_ink(fill: Rgba, background: Rgba) -> Rgba {
+    let cell = over(fill, background);
+    let ink = Rgba::from(label_on(cell));
+    over(Rgba { a: fill.a, ..ink }, cell)
 }
 
 /// The part of `cell`'s row its box covers, clear of the gap to the next row.
@@ -379,6 +445,99 @@ mod tests {
     /// Text as wide as it has characters.
     fn chars(text: &str) -> f32 {
         text.chars().count() as f32
+    }
+
+    /// On whatever fill a root wears, and whether or not the filter fades
+    /// it, the ink of its notch stands off the cell it lies on.
+    #[test]
+    fn the_ink_of_a_notch_is_seen_on_every_fill_faded_or_not() {
+        use bviz_ui_theme::{
+            MIN_DISTINCT_COLOR, MIN_SECONDARY_CONTRAST, built_in_themes, contrast_ratio, distance,
+        };
+        for theme in built_in_themes().iter() {
+            let palette = Palette::from_theme(theme);
+            let fills = palette.data.chromatic().into_iter().map(Rgba::from);
+            for fill in fills.chain([palette.data.neutral.into()]) {
+                let ink = notch_ink(fill, palette.background);
+                let contrast = contrast_ratio(ink, fill);
+                assert!(
+                    contrast >= MIN_SECONDARY_CONTRAST,
+                    "{}: {contrast}",
+                    theme.name
+                );
+                for strength in [1.0, UNMARKED_FADE] {
+                    let drawn = Rgba {
+                        a: strength,
+                        ..fill
+                    };
+                    let cell = over(drawn, palette.background);
+                    let inked = over(notch_ink(drawn, palette.background), cell);
+                    let apart = distance(inked, cell);
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{} at {strength}: {apart}",
+                        theme.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_notch_is_a_right_triangle_in_the_cell_s_top_left_corner() {
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        let leg = f32::from(NOTCH);
+        assert_eq!(
+            notch(px(60.)),
+            [at(0., 0.), at(leg, 0.), at(leg, 0.), at(0., leg)]
+        );
+    }
+
+    /// A cell narrower than the notch's leg carries the triangle cut off at
+    /// its right edge: as tall as the leg at its left edge and as tall as the
+    /// slant leaves at its right.
+    #[test]
+    fn a_notch_on_a_narrow_cell_is_cut_off_at_its_right_edge() {
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        let (width, leg) = (f32::from(MIN_CELL_WIDTH), f32::from(NOTCH));
+        assert_eq!(
+            notch(MIN_CELL_WIDTH),
+            [
+                at(0., 0.),
+                at(width, 0.),
+                at(width, leg - width),
+                at(0., leg)
+            ]
+        );
+    }
+
+    /// The ink of a faded cell's notch is opaque, so the cell's own paint
+    /// does not show through it.
+    #[test]
+    fn the_ink_of_a_notch_is_opaque_on_a_faded_cell() {
+        let palette = Palette::from_theme(&bviz_ui_theme::built_in_themes()[0]);
+        let fill = Rgba {
+            a: UNMARKED_FADE,
+            ..Rgba::from(palette.data.neutral)
+        };
+        let opacity = notch_ink(fill, palette.background).a;
+        assert!((opacity - 1.0).abs() < f32::EPSILON, "{opacity}");
+    }
+
+    /// A notch stays out of the box a cell's name is set in, which starts a
+    /// pad in from the cell's top-left corner: every corner of the notch lies
+    /// on or within the slant `x + y = NOTCH`, and the box's nearest corner on
+    /// or beyond it.
+    #[test]
+    fn a_notch_stays_clear_of_the_name() {
+        let name = Bounds::new(point(px(TEXT_PAD), px(TEXT_PAD)), size(px(40.), px(12.)));
+        let along = |corner: Point<Pixels>| corner.x + corner.y;
+        for width in [MIN_CELL_WIDTH, px(60.)] {
+            for corner in notch(width) {
+                assert!(along(corner) <= NOTCH, "{corner:?}");
+            }
+        }
+        assert!(along(name.origin) >= NOTCH);
     }
 
     #[test]
