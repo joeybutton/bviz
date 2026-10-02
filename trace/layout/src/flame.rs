@@ -305,8 +305,7 @@ pub struct FlameNode {
     pub count: u32,
     pub depth: u32,
     /// The deepest node depth in this node's subtree (itself included), which
-    /// layout reads to pick the sibling a marker stands for (see
-    /// [`lay_out_flame`]).
+    /// layout reads for how deep the members of a remainder reach.
     pub subtree_max_depth: u32,
     pub children: Span32,
 }
@@ -477,6 +476,17 @@ impl FlameGraph {
         }
     }
 
+    /// The summed [`FlameNode::total_us`] of `remainder`'s members. Summed when
+    /// asked for, since a layout visits every member of every run it lays out
+    /// and a reader wants the sum of the one run under the cursor.
+    pub fn remainder_total_us(&self, remainder: &FlameRemainder) -> i64 {
+        let first = remainder.first as usize;
+        self.children_of(remainder.parent.0 as usize)[first..first + remainder.frames as usize]
+            .iter()
+            .map(|&member| self.total_us[member as usize])
+            .sum()
+    }
+
     /// The [`SpanSelf::self_us`] of the frame `node`, in the graph's own
     /// weight.
     pub fn span_self_us(&self, node: FlameNodeId) -> i64 {
@@ -515,6 +525,11 @@ impl FlameGraph {
         self.child_pool[self.child_off[i] as usize + k] as usize
     }
 
+    /// The node ids of node `i`'s children, in widest-first order.
+    pub(crate) fn children_of(&self, i: usize) -> &[u32] {
+        &self.child_pool[self.child_off[i] as usize..self.child_off[i + 1] as usize]
+    }
+
     /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
     /// through the profile the graph was built from.
     pub fn str(&self, s: Str) -> &str {
@@ -546,16 +561,33 @@ pub struct FlameMetrics {
     pub row_height: f32,
 }
 
-/// A flame-graph node laid out for painting. The field copies identify the node
-/// for hit-testing and tooltips; `name` is resolved with the producing
-/// [`FlameGraph`]'s [`str`](FlameGraph::str).
+/// A box of the flame graph laid out for painting, hit-testing and tooltips.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlameBox {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// The row the box's top edge lies on.
     pub depth: u32,
+    pub content: FlameBoxContent,
+}
+
+/// What a [`FlameBox`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlameBoxContent {
+    Frame(FlameFrame),
+    Remainder(FlameRemainder),
+    /// The rows beneath a remainder that the subtrees of its members in the
+    /// box's columns reach down to. It stands for no frame of those subtrees,
+    /// none of which is laid out.
+    RemainderDepth(FlameRemainder),
+}
+
+/// One node of a [`FlameGraph`], as its [`FlameNode`] gives it; `name` is
+/// resolved with that graph's [`str`](FlameGraph::str).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameFrame {
     pub node: FlameNodeId,
     pub name: Str,
     pub total_us: i64,
@@ -567,6 +599,46 @@ pub struct FlameBox {
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlameNodeId(u32);
+
+/// A run of two or more consecutive siblings, each too narrow to draw on its
+/// own at the zoom the box was laid out for. Only [`lay_out_flame`] makes one,
+/// so a single sibling is always a [`FlameFrame`]. It names its members in the
+/// graph the layout was made from, which alone resolves them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameRemainder {
+    /// The node the members are children of.
+    parent: FlameNodeId,
+    /// The first member's index among that node's children.
+    first: u32,
+    frames: u32,
+    role: Option<SpanRole>,
+    siblings: RemainderSiblings,
+}
+
+/// What a remainder's parent holds beside the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemainderSiblings {
+    /// Nothing: the run is every child of its parent.
+    None,
+    /// Children wide enough for a box of their own.
+    Wider,
+}
+
+impl FlameRemainder {
+    /// How many siblings the run holds.
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// The role the siblings share, `None` where they differ.
+    pub fn role(&self) -> Option<SpanRole> {
+        self.role
+    }
+
+    pub fn siblings(&self) -> RemainderSiblings {
+        self.siblings
+    }
+}
 
 /// The inner of an `action '…'` name, `None` for any other shape. A
 /// critical-path component is named `action '<desc>'` where `<desc>` is the
@@ -2105,42 +2177,34 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
 /// and only boxes overlapping the viewport are laid out — an off-screen subtree
 /// is pruned — so the layout is local to what is on screen, not the whole graph.
 ///
-/// Each box is placed against the boxes already painted at its depth by
-/// `paint::painted`. Where a marker's slot stands for a run of sub-pixel
-/// siblings, the one reaching the **deepest** is the one drawn and recursed into
-/// (the rest dropped): keeping the leftmost instead would let its shallow subtree
-/// hide a deeper sibling's, so the depth drawn at a slot would jump as the zoom
-/// shifted which sibling was leftmost. Keeping the deepest makes a slot's depth
-/// stable. That sibling keeps its own content span for dividing its children, so
-/// only the painted rect follows the slot. Coordinates are carried in `f64` so
-/// the proportional division holds precision at deep zoom, and each box is
-/// clamped to a viewport-sized margin so no huge value reaches its `f32` fields.
-/// Boxes come back in paint order, parents before children.
+/// A run of consecutive siblings each narrower than the minimum box width is
+/// one [`FlameRemainder`] box, and no member's subtree is laid out beneath it.
+///
+/// Coordinates are carried in `f64` so the proportional division holds
+/// precision at deep zoom, and each box is clamped to a viewport-sized margin so
+/// no huge value reaches its `f32` fields. Boxes come back in paint order,
+/// parents before children.
 pub fn lay_out_flame(
     graph: &FlameGraph,
     content_w: f64,
     placement: FlamePlacement,
 ) -> Vec<FlameBox> {
-    let mut out = Vec::new();
-    let mut covered = vec![f64::NEG_INFINITY; graph.max_depth as usize + 1];
+    let mut layout = Layout {
+        graph,
+        placement,
+        covered: vec![f64::NEG_INFINITY; graph.max_depth as usize + 1],
+        reach: Vec::new(),
+        out: Vec::new(),
+    };
     let content = Span {
         x: 0.0,
         w: content_w,
     };
     let root = in_view(content, placement.scroll_x);
-    if let Some(paint) = painted(root, covered[0], placement.min_px as f64) {
-        place(
-            graph,
-            0,
-            0,
-            content,
-            paint,
-            placement,
-            &mut covered,
-            &mut out,
-        );
+    if let Some(paint) = painted(root, layout.covered[0], placement.min_px as f64) {
+        layout.place(0, 0, content, paint);
     }
-    out
+    layout.out
 }
 
 /// Horizontal scroll offset, viewport width, row sizing, and minimum box width
@@ -2161,155 +2225,285 @@ fn in_view(content: Span, scroll_x: f64) -> Span {
     }
 }
 
-/// Emit `idx`'s box at `paint`, the viewport span it is drawn at — for a marker,
-/// the slot standing for a run of siblings (see [`deepest_in_slot`]) — and lay
-/// its children out across `content`, its own span in content pixels. `covered`
-/// carries the painted right edge per depth row across the recursion.
-#[allow(clippy::too_many_arguments)]
-fn place(
-    graph: &FlameGraph,
-    idx: usize,
-    depth: u32,
-    content: Span,
-    paint: Span,
-    placement: FlamePlacement,
-    covered: &mut [f64],
-    out: &mut Vec<FlameBox>,
-) {
-    let FlamePlacement {
-        scroll_x,
-        view_w,
-        metrics,
-        min_px,
-    } = placement;
-    let (min, view_w) = (min_px as f64, view_w as f64);
-    if paint.end() <= 0.0 || paint.x >= view_w {
-        return;
-    }
-    covered[depth as usize] = paint.end();
-    // Clamp to a viewport-sized margin so a wide box spanning far off-screen
-    // never stores a huge coordinate; a visible marker's left edge is already
-    // small.
-    let px = paint.x.max(-view_w);
-    let pr = paint.end().min(2.0 * view_w);
-    out.push(box_of(
-        graph,
-        idx,
-        depth,
-        px as f32,
-        (pr - px) as f32,
-        metrics,
-    ));
-    let width = graph.width_us(idx);
-    if width == 0 {
-        return;
-    }
-    let child_w = |c: usize| content.w * graph.width_us(c) as f64 / width as f64;
-    let row = depth as usize + 1;
-    let mut cursor = content.x;
-    let mut i = 0;
-    while i < graph.child_count(idx) {
-        let child = graph.child_id(idx, i);
-        let cc = Span {
-            x: cursor,
-            w: child_w(child),
-        };
-        let Some(slot) = painted(in_view(cc, scroll_x), covered[row], min) else {
-            cursor = cc.end();
-            i += 1;
-            continue;
-        };
-        if cc.w >= min {
-            place(graph, child, depth + 1, cc, slot, placement, covered, out);
-            cursor = cc.end();
-            i += 1;
-            continue;
-        }
-        let run = deepest_in_slot(graph, idx, i, cc, slot, scroll_x, min, &child_w);
-        place(
-            graph,
-            run.best,
-            depth + 1,
-            run.content,
-            slot,
-            placement,
-            covered,
-            out,
-        );
-        cursor = run.cursor;
-        i = run.next;
-    }
+/// A layout in progress.
+struct Layout<'a> {
+    graph: &'a FlameGraph,
+    placement: FlamePlacement<'a>,
+    /// The painted right edge per depth row.
+    covered: Vec<f64>,
+    /// The deepest row the subtrees of the last scanned run's members reach,
+    /// per column of its [`ThinRun::shown`], left to right.
+    reach: Vec<u32>,
+    out: Vec<FlameBox>,
 }
 
-/// The sibling a marker's slot is placed for, and where the run it stands for
-/// ends.
-struct Run {
-    /// The node id of the sibling placed for the run.
-    best: usize,
-    /// `best`'s own span in content pixels, which its children divide.
-    content: Span,
+/// The consecutive siblings, from one narrower than the minimum box on, up to
+/// the next at least that wide.
+struct ThinRun {
     /// The content x past the whole run.
-    cursor: f64,
+    end: f64,
     /// The index of the first sibling beyond the run.
     next: usize,
+    /// What stands for the run where it holds more than the one sibling, whose
+    /// own frame stands for it otherwise.
+    remainder: Option<FlameRemainder>,
+    /// The run's columns — each as wide as the minimum box, counted from the
+    /// run's left edge — that a member on the viewport starts in.
+    shown: std::ops::Range<usize>,
 }
 
-/// The run of consecutive siblings a marker's `slot` stands for: the one at
-/// `start`, spanning `first`, plus every following sibling the slot leaves
-/// nothing to paint. Among them the one whose subtree reaches deepest is placed —
-/// see [`lay_out_flame`] for why the deepest, not the leftmost, must win.
-#[allow(clippy::too_many_arguments)]
-fn deepest_in_slot(
-    graph: &FlameGraph,
-    parent: usize,
-    start: usize,
-    first: Span,
-    slot: Span,
-    scroll_x: f64,
-    min: f64,
-    child_w: &impl Fn(usize) -> f64,
-) -> Run {
-    let mut best = graph.child_id(parent, start);
-    let mut content = first;
-    let mut cursor = first.end();
-    let mut next = start + 1;
-    while next < graph.child_count(parent) {
-        let child = graph.child_id(parent, next);
-        let cc = Span {
-            x: cursor,
-            w: child_w(child),
+impl Layout<'_> {
+    fn min(&self) -> f64 {
+        self.placement.min_px as f64
+    }
+
+    /// Emit a box of `content` at `paint`, the viewport span it is drawn at,
+    /// from row `depth` down `rows` rows, recording it in `covered`. `false`
+    /// where `paint` lies off the viewport, which emits nothing.
+    fn push_box(&mut self, content: FlameBoxContent, depth: u32, rows: u32, paint: Span) -> bool {
+        let view_w = self.placement.view_w as f64;
+        if paint.end() <= 0.0 || paint.x >= view_w {
+            return false;
+        }
+        for covered in &mut self.covered[depth as usize..(depth + rows) as usize] {
+            *covered = covered.max(paint.end());
+        }
+        // Clamp to a viewport-sized margin so a wide box spanning far off-screen
+        // never stores a huge coordinate; a visible marker's left edge is already
+        // small.
+        let px = paint.x.max(-view_w);
+        let pr = paint.end().min(2.0 * view_w);
+        let row_height = self.placement.metrics.row_height;
+        self.out.push(FlameBox {
+            x: px as f32,
+            y: depth as f32 * row_height,
+            w: (pr - px) as f32,
+            h: rows as f32 * row_height,
+            depth,
+            content,
+        });
+        true
+    }
+
+    /// Emit `idx`'s box at `paint` and lay its children out across `content`,
+    /// its own span in content pixels.
+    fn place(&mut self, idx: usize, depth: u32, content: Span, paint: Span) {
+        let frame = FlameBoxContent::Frame(frame_of(self.graph, idx));
+        if self.push_box(frame, depth, 1, paint) {
+            self.place_children(idx, depth, content);
+        }
+    }
+
+    /// Lay the children of `idx`, a node at `depth`, out across `content`, its
+    /// own span in content pixels.
+    fn place_children(&mut self, idx: usize, depth: u32, content: Span) {
+        let graph = self.graph;
+        let width = graph.width_us(idx);
+        if width == 0 {
+            return;
+        }
+        let (scroll_x, min) = (self.placement.scroll_x, self.min());
+        let child_w = |c: usize| content.w * graph.width_us(c) as f64 / width as f64;
+        let row = depth + 1;
+        let children = graph.children_of(idx);
+        let mut cursor = content.x;
+        let mut i = 0;
+        while let Some(&child) = children.get(i) {
+            let child = child as usize;
+            let cc = Span {
+                x: cursor,
+                w: child_w(child),
+            };
+            if cc.w >= min {
+                self.place(child, row, cc, in_view(cc, scroll_x));
+                cursor = cc.end();
+                i += 1;
+                continue;
+            }
+            let run = self.thin_run(idx, i, cc, &child_w);
+            let covered = self.covered[row as usize];
+            match run.remainder {
+                None => {
+                    if let Some(paint) = painted(in_view(cc, scroll_x), covered, min) {
+                        self.place(child, row, cc, paint);
+                    }
+                }
+                Some(remainder) => {
+                    let span = Span {
+                        x: cc.x,
+                        w: run.end - cc.x,
+                    };
+                    if let Some(paint) = painted(in_view(span, scroll_x), covered, min)
+                        && self.push_box(FlameBoxContent::Remainder(remainder), row, 1, paint)
+                    {
+                        let left = in_view(cc, scroll_x).x;
+                        self.place_reach(remainder, row, run.shown, left, paint);
+                    }
+                }
+            }
+            cursor = run.end;
+            i = run.next;
+        }
+    }
+
+    /// The [`ThinRun`] opening at `parent`'s `start`-th child, which spans
+    /// `first`, leaving in `reach` how deep its members go.
+    fn thin_run(
+        &mut self,
+        parent: usize,
+        start: usize,
+        first: Span,
+        child_w: &impl Fn(usize) -> f64,
+    ) -> ThinRun {
+        let graph = self.graph;
+        let min = self.min();
+        let (scroll_x, view_w) = (self.placement.scroll_x, self.placement.view_w as f64);
+        // The first column to reach into the viewport, the content x it starts
+        // at, and the content x the viewport ends at.
+        let first_shown = ((scroll_x - first.x) / min).floor().max(0.0);
+        let shown_from = first.x + first_shown * min;
+        let shown_until = scroll_x + view_w;
+        // The viewport cuts a column at either edge of those it holds whole.
+        let most_shown = (view_w / min) as usize + 2;
+        if self.reach.len() < most_shown {
+            self.reach.resize(most_shown, 0);
+        }
+        let children = graph.children_of(parent);
+        let mut scan = RunScan {
+            graph,
+            children,
+            child_w,
+            min,
+            next: start,
+            end: first.x,
+            w: Some(first.w),
+            role: Some(graph.role(children[start] as usize)),
         };
-        if painted(in_view(cc, scroll_x), slot.end(), min).is_some() {
-            break;
+        while scan.take_before(shown_from).is_some() {}
+        // Each column holds a member's start: a member is narrower than a
+        // column, so the one after the last to start in a column starts in the
+        // next.
+        let mut shown = 0;
+        while scan.starts_before(shown_until) {
+            let column_end = shown_from + (shown + 1) as f64 * min;
+            let mut deepest = 0;
+            while let Some(member) = scan.take_before(column_end) {
+                deepest = deepest.max(graph.subtree_max_depth(member));
+            }
+            self.reach[shown] = deepest;
+            shown += 1;
         }
-        if graph.subtree_max_depth(child) > graph.subtree_max_depth(best) {
-            (best, content) = (child, cc);
+        while scan.take_before(f64::INFINITY).is_some() {}
+        let frames = scan.next - start;
+        let siblings = match frames == children.len() {
+            true => RemainderSiblings::None,
+            false => RemainderSiblings::Wider,
+        };
+        let remainder = (frames > 1).then_some(FlameRemainder {
+            parent: FlameNodeId(parent as u32),
+            first: start as u32,
+            frames: frames as u32,
+            role: scan.role,
+            siblings,
+        });
+        let first_shown = first_shown as usize;
+        ThinRun {
+            end: scan.end,
+            next: scan.next,
+            remainder,
+            shown: first_shown..first_shown + shown,
         }
-        cursor = cc.end();
-        next += 1;
     }
-    Run {
-        best,
-        content,
-        cursor,
-        next,
+
+    /// Emit, beneath `remainder`'s box on `row` at `paint`, how deep its
+    /// members reach: one box per stretch of its `shown` columns that `reach`
+    /// has reaching the same row. `left` is the viewport x the run's own span
+    /// starts at, which its columns are counted from.
+    fn place_reach(
+        &mut self,
+        remainder: FlameRemainder,
+        row: u32,
+        shown: std::ops::Range<usize>,
+        left: f64,
+        paint: Span,
+    ) {
+        let min = self.min();
+        let content = FlameBoxContent::RemainderDepth(remainder);
+        // A run narrower than one column is painted as wide as a column, from
+        // where `painted` put it.
+        let edge = |column: usize| match column {
+            0 => paint.x,
+            _ => (left + column as f64 * min).min(paint.end()),
+        };
+        let columns = shown.len();
+        let mut i = 0;
+        while i < columns {
+            let deepest = self.reach[i];
+            let mut j = i + 1;
+            while j < columns && self.reach[j] == deepest {
+                j += 1;
+            }
+            let x = edge(shown.start + i);
+            let end = match j < columns {
+                true => edge(shown.start + j),
+                false => paint.end(),
+            };
+            if deepest > row && end > x {
+                self.push_box(content, row + 1, deepest - row, Span { x, w: end - x });
+            }
+            i = j;
+        }
     }
 }
 
-fn box_of(
-    graph: &FlameGraph,
-    idx: usize,
-    depth: u32,
-    x: f32,
-    w: f32,
-    metrics: &FlameMetrics,
-) -> FlameBox {
-    FlameBox {
-        x,
-        y: depth as f32 * metrics.row_height,
-        w,
-        h: metrics.row_height,
-        depth,
+/// A walk along the siblings of a [`ThinRun`].
+struct RunScan<'a, W> {
+    graph: &'a FlameGraph,
+    /// Every child of the run's parent.
+    children: &'a [u32],
+    child_w: &'a W,
+    min: f64,
+    /// The index of the sibling to take next.
+    next: usize,
+    /// The content x that sibling starts at.
+    end: f64,
+    /// That sibling's width where it is of the run, and `None` past the run's
+    /// last.
+    w: Option<f64>,
+    /// The role the siblings taken share.
+    role: Option<SpanRole>,
+}
+
+impl<W: Fn(usize) -> f64> RunScan<'_, W> {
+    /// Whether the run holds a sibling yet to take that starts before `x`.
+    fn starts_before(&self, x: f64) -> bool {
+        self.w.is_some() && self.end < x
+    }
+
+    /// Take the next sibling into the run where it starts before `x`,
+    /// returning its node.
+    fn take_before(&mut self, x: f64) -> Option<usize> {
+        let w = self.w.filter(|_| self.end < x)?;
+        let member = self.children[self.next] as usize;
+        if self
+            .role
+            .is_some_and(|shared| shared != self.graph.role(member))
+        {
+            self.role = None;
+        }
+        self.end += w;
+        self.next += 1;
+        self.w = self
+            .children
+            .get(self.next)
+            .map(|&sibling| (self.child_w)(sibling as usize))
+            .filter(|&w| w < self.min);
+        Some(member)
+    }
+}
+
+fn frame_of(graph: &FlameGraph, idx: usize) -> FlameFrame {
+    FlameFrame {
         node: FlameNodeId(idx as u32),
         name: graph.name(idx),
         total_us: graph.total_us(idx),
@@ -2327,9 +2521,12 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 mod tests {
     use super::*;
     use crate::selection::span_between;
-    use crate::test_profile::{TestSlice, action, action_named, profile, slice, track};
+    use crate::test_profile::{
+        TestSlice, action, action_named, profile, random_profile, slice, track,
+    };
     use crate::tests::assert_gapless;
     use bviz_trace_profile::LaneClass;
+    use fastrand::Rng;
 
     fn child(graph: &FlameGraph, node: &FlameNode, name: &str) -> FlameNode {
         graph
@@ -3989,11 +4186,8 @@ mod tests {
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
-        let a = boxes
-            .iter()
-            .find(|b| g.str(b.name) == "CppCompile")
-            .unwrap();
-        let b = boxes.iter().find(|b| g.str(b.name) == "Rustc").unwrap();
+        let a = frame_box(&g, &boxes, "CppCompile").unwrap();
+        let b = frame_box(&g, &boxes, "Rustc").unwrap();
         assert_eq!(a.w, 200.0);
         assert_eq!(b.w, 100.0);
         assert_eq!(a.x, 0.0);
@@ -4003,74 +4197,436 @@ mod tests {
         assert!(a.w + b.w <= root_box.w + f32::EPSILON);
     }
 
-    #[test]
-    fn sub_pixel_boxes_widen_to_markers_and_coalesce() {
-        // Over 100px: "wide" fills most of the row; "aaa" and "bbb" are each
-        // sub-pixel and land in the same trailing column.
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![
-                action("wide", 0, 500),
-                action("aaa", 500, 1),
-                action("bbb", 501, 1),
-            ],
-        )]);
-        let g = flame(&p);
-        // Fully visible: 100px wide graph, no scroll, 100px viewport.
-        let boxes = lay_out_flame(
-            &g,
-            100.0,
+    /// `g` laid out over `content_w` pixels, unscrolled, in a viewport that
+    /// shows all of it, with a one-pixel minimum box width.
+    fn lay_out(g: &FlameGraph, content_w: f64) -> Vec<FlameBox> {
+        lay_out_flame(
+            g,
+            content_w,
             FlamePlacement {
                 scroll_x: 0.0,
-                view_w: 100.0,
+                view_w: content_w.ceil() as f32,
                 metrics: &METRICS,
                 min_px: 1.0,
             },
-        );
-        let wide = boxes.iter().find(|b| g.str(b.name) == "wide").unwrap();
-        // Wide keeps its proportional slot at the left.
-        assert_eq!(wide.x, 0.0);
-        assert!(wide.w > 1.0);
-        // The first sub-pixel box widens to a one-pixel marker rather than
-        // vanishing; the second coalesces into its column and is dropped.
-        let aaa = boxes.iter().find(|b| g.str(b.name) == "aaa").unwrap();
-        assert_eq!(aaa.w, 1.0);
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "bbb"));
+        )
+    }
+
+    /// The name of the frame `b` stands for, `None` for a box standing for
+    /// none.
+    fn frame_name<'a>(g: &'a FlameGraph, b: &FlameBox) -> Option<&'a str> {
+        match b.content {
+            FlameBoxContent::Frame(frame) => Some(g.str(frame.name)),
+            FlameBoxContent::Remainder(_) | FlameBoxContent::RemainderDepth(_) => None,
+        }
+    }
+
+    /// The box of the frame named `name`, if one was laid out.
+    fn frame_box<'a>(g: &FlameGraph, boxes: &'a [FlameBox], name: &str) -> Option<&'a FlameBox> {
+        boxes.iter().find(|b| frame_name(g, b) == Some(name))
+    }
+
+    /// The remainder a box at `depth` stands for.
+    fn remainder_at(
+        boxes: &[FlameBox],
+        depth: u32,
+    ) -> impl Iterator<Item = (&FlameBox, FlameRemainder)> {
+        boxes
+            .iter()
+            .filter(move |b| b.depth == depth)
+            .filter_map(|b| match b.content {
+                FlameBoxContent::Remainder(r) => Some((b, r)),
+                FlameBoxContent::Frame(_) | FlameBoxContent::RemainderDepth(_) => None,
+            })
+    }
+
+    /// Every remainder box of `g`'s layout at `depth` as `(x, w, frames,
+    /// total_us)`, in paint order.
+    fn remainders(g: &FlameGraph, boxes: &[FlameBox], depth: u32) -> Vec<(f32, f32, u32, i64)> {
+        remainder_at(boxes, depth)
+            .map(|(b, r)| (b.x, b.w, r.frames(), g.remainder_total_us(&r)))
+            .collect()
+    }
+
+    /// Every box of a remainder's depth as `(x, w, first row, rows)`, in paint
+    /// order.
+    fn remainder_depths(boxes: &[FlameBox]) -> Vec<(f32, f32, u32, f32)> {
+        boxes
+            .iter()
+            .filter(|b| matches!(b.content, FlameBoxContent::RemainderDepth(_)))
+            .map(|b| (b.x, b.w, b.depth, b.h / METRICS.row_height))
+            .collect()
     }
 
     #[test]
-    fn deepest_sub_pixel_sibling_wins_its_column() {
-        // Two sub-pixel siblings in one column: "shallow" is a leaf and sorts
-        // first (wider), "deep" is narrower but nests "deepchild". The column
-        // must show "deep"'s spike, not the leftmost "shallow"'s, so its depth
-        // stays put as the zoom shifts which sibling leads.
+    fn a_run_of_sub_pixel_siblings_is_one_remainder_of_their_count_and_total() {
+        // At 0.125px per microsecond "wide" takes 127.5px; "aaa", "bbb" and
+        // "ccc" are each sub-pixel, and half a pixel together.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
             vec![
-                slice("pad", "general information", 0, 990),
-                slice("shallow", "general information", 990, 6),
-                slice("deep", "general information", 996, 4),
-                slice("deepchild", "general information", 996, 1),
+                action("wide", 0, 1020),
+                action("aaa", 1020, 2),
+                action("bbb", 1022, 1),
+                action("ccc", 1023, 1),
             ],
         )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 128.0);
+        let wide = frame_box(&g, &boxes, "wide").unwrap();
+        assert_eq!((wide.x, wide.w), (0.0, 127.5));
+        // Half a pixel wide, the run is drawn as a marker of one.
+        assert_eq!(remainders(&g, &boxes, 1), [(127.5, 1.0, 3, 4)]);
+        for name in ["aaa", "bbb", "ccc"] {
+            assert!(frame_box(&g, &boxes, name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_single_sub_pixel_sibling_stays_itself() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("wide", 0, 500), action("aaa", 500, 1)],
+        )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 100.0);
+        assert_eq!(frame_box(&g, &boxes, "aaa").unwrap().w, 1.0);
+        assert_eq!(remainders(&g, &boxes, 1), []);
+    }
+
+    #[test]
+    fn a_remainder_is_as_wide_as_its_members_together() {
+        // "pad" takes 5.5px of the 13.75px content; the eleven 3us siblings
+        // after it are 0.75px each.
+        let mut slices = vec![slice("pad", "general information", 0, 22)];
+        slices.extend(
+            (0..11).map(|i: i64| slice(&format!("r{i:02}"), "general information", 22 + 3 * i, 3)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
         let g = flame(&p);
+        let boxes = lay_out(&g, 13.75);
+        assert_eq!(remainders(&g, &boxes, 1), [(5.5, 8.25, 11, 33)]);
+        assert_eq!(painted_row(&boxes, 1), [(0.0, 5.5), (5.5, 8.25)]);
+    }
+
+    /// Three parents side by side at 0.5px per microsecond: "p" holding sixteen
+    /// 1us children, "q" one 12us child, and "r" eight 1us children.
+    fn runs_around_a_wide_box() -> FlameGraph {
+        let mut slices = vec![slice("p", "general information", 0, 16)];
+        slices
+            .extend((0..16).map(|i: i64| slice(&format!("p{i:02}"), "general information", i, 1)));
+        slices.push(slice("q", "general information", 16, 12));
+        slices.push(slice("q00", "general information", 16, 12));
+        slices.push(slice("r", "general information", 28, 8));
+        slices.extend(
+            (0..8).map(|i: i64| slice(&format!("r{i:02}"), "general information", 28 + i, 1)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        flame_as(&p, FlameLabels::Name)
+    }
+
+    #[test]
+    fn a_wide_box_between_two_runs_keeps_them_two_remainders() {
+        let g = runs_around_a_wide_box();
+        let boxes = lay_out(&g, 18.0);
+        assert_eq!(
+            remainders(&g, &boxes, 2),
+            [(0.0, 8.0, 16, 16), (14.0, 4.0, 8, 8)]
+        );
+        let wide = frame_box(&g, &boxes, "q00").unwrap();
+        assert_eq!((wide.x, wide.w), (8.0, 6.0));
+    }
+
+    #[test]
+    fn runs_under_adjoining_parents_are_a_remainder_each() {
+        // "p" and "q" each hold eight 1us children, 0.5px apiece.
+        let mut slices = Vec::with_capacity(18);
+        for (parent, start) in [("p", 0), ("q", 8)] {
+            slices.push(slice(parent, "general information", start, 8));
+            slices.extend(
+                (0..8).map(|i: i64| {
+                    slice(&format!("{parent}{i}"), "general information", start + i, 1)
+                }),
+            );
+        }
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let g = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            remainders(&g, &lay_out(&g, 8.0), 2),
+            [(0.0, 4.0, 8, 8), (4.0, 4.0, 8, 8)]
+        );
+    }
+
+    #[test]
+    fn widening_the_view_resolves_a_remainder_into_its_members() {
+        let g = runs_around_a_wide_box();
+        // At 2px per microsecond every member clears the minimum width.
+        let boxes = lay_out(&g, 72.0);
+        assert_eq!(remainders(&g, &boxes, 2), []);
+        for i in 0..16 {
+            let member = frame_box(&g, &boxes, &format!("p{i:02}")).unwrap();
+            assert_eq!((member.x, member.w), (2.0 * i as f32, 2.0), "p{i:02}");
+        }
+        for i in 0..8 {
+            let member = frame_box(&g, &boxes, &format!("r{i:02}")).unwrap();
+            assert_eq!(
+                (member.x, member.w),
+                (56.0 + 2.0 * i as f32, 2.0),
+                "r{i:02}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remainder_partly_off_the_viewport_stands_for_its_whole_run() {
+        let g = runs_around_a_wide_box();
+        // The viewport shows content pixels 3 to 7 of 18: half of the first
+        // run's eight, and none of the second run.
         let boxes = lay_out_flame(
             &g,
-            100.0,
+            18.0,
             FlamePlacement {
-                scroll_x: 0.0,
-                view_w: 100.0,
+                scroll_x: 3.0,
+                view_w: 4.0,
                 metrics: &METRICS,
                 min_px: 1.0,
             },
         );
-        assert!(boxes.iter().any(|b| g.str(b.name) == "pad"));
-        assert!(boxes.iter().any(|b| g.str(b.name) == "deep"));
-        assert!(boxes.iter().any(|b| g.str(b.name) == "deepchild"));
-        // The shallower leftmost sibling is dropped in favour of the deeper one.
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "shallow"));
+        assert_eq!(remainders(&g, &boxes, 2), [(-3.0, 8.0, 16, 16)]);
+    }
+
+    #[test]
+    fn a_remainder_says_whether_its_parent_holds_wider_children_beside_it() {
+        let siblings = |g: &FlameGraph, content_w, depth| -> Vec<RemainderSiblings> {
+            remainder_at(&lay_out(g, content_w), depth)
+                .map(|(_, r)| r.siblings())
+                .collect()
+        };
+        // Every child of "p" and of "r" is in its run.
+        let all = runs_around_a_wide_box();
+        assert_eq!(
+            siblings(&all, 18.0, 2),
+            [RemainderSiblings::None, RemainderSiblings::None]
+        );
+        // "pad" is a box of its own beside the run.
+        let mut slices = vec![slice("pad", "general information", 0, 22)];
+        slices.extend(
+            (0..11).map(|i: i64| slice(&format!("r{i:02}"), "general information", 22 + 3 * i, 3)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let beside = flame_as(&p, FlameLabels::Name);
+        assert_eq!(siblings(&beside, 13.75, 1), [RemainderSiblings::Wider]);
+    }
+
+    #[test]
+    fn a_remainder_carries_the_role_its_members_share() {
+        let role = |last_category| {
+            let mut slices = vec![slice("pad", "general information", 0, 990)];
+            slices
+                .extend((0..4).map(|i: i64| slice(&format!("/f{i}"), "VFS stat", 990 + 2 * i, 2)));
+            slices.push(slice("/last", last_category, 998, 2));
+            let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+            let g = flame_as(&p, FlameLabels::Name);
+            let boxes = lay_out(&g, 100.0);
+            assert_eq!(remainders(&g, &boxes, 1), [(99.0, 1.0, 5, 10)]);
+            let (_, remainder) = remainder_at(&boxes, 1).next().unwrap();
+            remainder.role().map(|role| role.workload)
+        };
+        assert_eq!(role("VFS stat"), Some(Workload::Filesystem));
+        assert_eq!(role("gc notification"), None);
+    }
+
+    /// "pad" beside eight 4us members named in the order of their boxes. The
+    /// first three are leaves, the next two wrap one child apiece, the two
+    /// after those a child and a grandchild, and the last is a leaf.
+    fn members_of_three_depths() -> FlameGraph {
+        const NESTING: [usize; 8] = [0, 0, 0, 1, 1, 2, 2, 0];
+        let mut slices = vec![slice("pad", "general information", 0, 80)];
+        for (i, nested) in NESTING.into_iter().enumerate() {
+            let start = 80 + 4 * i as i64;
+            slices.push(slice(&format!("m{i}"), "general information", start, 4));
+            for level in 0..nested {
+                let name = format!("m{i}-{level}");
+                slices.push(slice(&name, "general information", start, 4));
+            }
+        }
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        flame_as(&p, FlameLabels::Name)
+    }
+
+    #[test]
+    fn beneath_a_remainder_each_column_shows_how_deep_its_members_reach() {
+        let g = members_of_three_depths();
+        // 0.125px per microsecond: a member is half a pixel, two to a column,
+        // and the run four columns from 10px on.
+        let boxes = lay_out(&g, 14.0);
+        assert_eq!(remainders(&g, &boxes, 1), [(10.0, 4.0, 8, 32)]);
+        // The first column holds leaves alone and shows nothing. The second
+        // reaches one row down for its deeper member, and the last two reach
+        // two rows as one box.
+        assert_eq!(
+            remainder_depths(&boxes),
+            [(11.0, 1.0, 2, 1.0), (12.0, 2.0, 2, 2.0)]
+        );
+        // No member is a box of its own, nor is anything nested in one.
+        let frames: Vec<&str> = boxes.iter().filter_map(|b| frame_name(&g, b)).collect();
+        assert_eq!(frames, ["All", "pad"]);
+        let (_, remainder) = remainder_at(&boxes, 1).next().unwrap();
+        for b in &boxes {
+            if let FlameBoxContent::RemainderDepth(of) = b.content {
+                assert_eq!(of, remainder);
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_narrower_than_a_box_shows_its_depth_under_the_marker_it_is_drawn_as() {
+        // "shallow" and "deep" are a tenth of a pixel together, from 99.9px on,
+        // and "deep" nests one span.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("pad", "general information", 0, 9990),
+                slice("shallow", "general information", 9990, 6),
+                slice("deep", "general information", 9996, 4),
+                slice("deepchild", "general information", 9996, 1),
+            ],
+        )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 100.0);
+        assert_eq!(remainders(&g, &boxes, 1), [(99.9, 1.0, 2, 10)]);
+        assert_eq!(remainder_depths(&boxes), [(99.9, 1.0, 2, 1.0)]);
+        assert!(frame_box(&g, &boxes, "deepchild").is_none());
+    }
+
+    /// The node each node of `g` is a child of; the root's entry is its own.
+    fn parents(g: &FlameGraph) -> Vec<usize> {
+        let mut parents = vec![0; g.len()];
+        for i in 0..g.len() {
+            for k in 0..g.child_count(i) {
+                parents[g.child_id(i, k)] = i;
+            }
+        }
+        parents
+    }
+
+    #[test]
+    fn a_painted_box_strays_from_its_row_and_its_parent_by_less_than_a_box() {
+        /// How many random profiles are laid out.
+        const PROFILES: usize = 48;
+        /// Every random span begins before this.
+        const HORIZON_US: i64 = 80;
+        /// What f32 box edges may differ by from the f64 ones they round.
+        const ROUNDING: f32 = 1e-3;
+        const MIN_PX: f32 = 1.0;
+        // Content widths around and far above the minimum box width, each with
+        // the scroll offsets it is laid out at as a fraction of itself.
+        const VIEWS: [(f64, [f64; 3]); 5] = [
+            (3.0, [0.0, 0.37, 0.9]),
+            (7.3, [0.0, 0.37, 0.9]),
+            (20.0, [0.0, 0.11, 0.5]),
+            (333.3, [0.0, 0.25, 0.6]),
+            (5000.0, [0.0, 0.31, 0.83]),
+        ];
+        const VIEW_W: f32 = 40.0;
+        const SEED: u64 = 0x1234_5678_9ABC_DEF1;
+
+        let mut rng = Rng::with_seed(SEED);
+        for case in 0..PROFILES {
+            let p = random_profile(&mut rng, HORIZON_US);
+            for labels in [FlameLabels::Kind, FlameLabels::Name] {
+                let top_down = flame_as(&p, labels);
+                for g in [invert(top_down.clone()), top_down] {
+                    let parents = parents(&g);
+                    for (content_w, scrolls) in VIEWS {
+                        for scroll in scrolls {
+                            let boxes = lay_out_flame(
+                                &g,
+                                content_w,
+                                FlamePlacement {
+                                    scroll_x: scroll * content_w,
+                                    view_w: VIEW_W,
+                                    metrics: &METRICS,
+                                    min_px: MIN_PX,
+                                },
+                            );
+                            let at = format!("profile {case} {labels:?} {content_w}px at {scroll}");
+                            assert_boxes_keep_to_their_places(
+                                &parents, &boxes, MIN_PX, ROUNDING, &at,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Holds a layout to what [`painted`] leaves true of it. A box is drawn at
+    /// its own span, or as a marker moved and widened by less than `min_px`, so
+    /// two boxes sharing a row overlap by less than that, a frame's box starts
+    /// before its parent's ends and ends less than a pixel short of where its
+    /// parent's starts, and every frame drawn hangs under one that is drawn.
+    fn assert_boxes_keep_to_their_places(
+        parents: &[usize],
+        boxes: &[FlameBox],
+        min_px: f32,
+        rounding: f32,
+        at: &str,
+    ) {
+        let rows = |b: &FlameBox| b.depth..b.depth + (b.h / METRICS.row_height).round() as u32;
+        let frame_of = |node: usize| {
+            boxes.iter().find(|b| match b.content {
+                FlameBoxContent::Frame(frame) => frame.node.0 as usize == node,
+                _ => false,
+            })
+        };
+        for (i, b) in boxes.iter().enumerate() {
+            assert!(b.w > 0.0 && b.h > 0.0, "{b:?} {at}");
+            for o in &boxes[i + 1..] {
+                if rows(b).end <= rows(o).start || rows(o).end <= rows(b).start {
+                    continue;
+                }
+                let overlap = (b.x + b.w).min(o.x + o.w) - b.x.max(o.x);
+                assert!(overlap < min_px + rounding, "{b:?} over {o:?} {at}");
+            }
+            match b.content {
+                FlameBoxContent::Frame(frame) if b.depth > 0 => {
+                    let parent = frame_of(parents[frame.node.0 as usize])
+                        .unwrap_or_else(|| panic!("no parent drawn for {b:?} {at}"));
+                    assert_eq!(parent.depth + 1, b.depth, "{b:?} {at}");
+                    assert!(
+                        b.x < parent.x + parent.w + rounding,
+                        "{b:?} under {parent:?} {at}"
+                    );
+                    assert!(
+                        b.x + b.w > parent.x - 1.0 - rounding,
+                        "{b:?} under {parent:?} {at}"
+                    );
+                }
+                FlameBoxContent::Frame(_) => {}
+                FlameBoxContent::Remainder(_) => {
+                    let covered = boxes.iter().any(|o| {
+                        o.depth + 1 == b.depth
+                            && matches!(o.content, FlameBoxContent::Frame(_))
+                            && b.x < o.x + o.w + rounding
+                            && b.x + b.w > o.x - 1.0 - rounding
+                    });
+                    assert!(covered, "nothing above {b:?} {at}");
+                }
+                FlameBoxContent::RemainderDepth(of) => {
+                    let remainder = boxes.iter().find(|o| {
+                        o.depth + 1 == b.depth
+                            && o.content == FlameBoxContent::Remainder(of)
+                            && o.x - rounding <= b.x
+                            && b.x + b.w <= o.x + o.w + rounding
+                    });
+                    assert!(remainder.is_some(), "no remainder above {b:?} {at}");
+                }
+            }
+        }
     }
 
     /// The painted `(x, w)` of every box at `depth`, in paint order.
@@ -4166,8 +4722,8 @@ mod tests {
                 min_px: 1.0,
             },
         );
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "left"));
-        let right = boxes.iter().find(|b| g.str(b.name) == "right").unwrap();
+        assert!(frame_box(&g, &boxes, "left").is_none());
+        let right = frame_box(&g, &boxes, "right").unwrap();
         // Its content x is 500; viewport-relative that is 500 - 600 = -100 (still
         // within the -view_w margin, so unclamped).
         assert_eq!(right.x, -100.0);

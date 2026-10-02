@@ -4,7 +4,7 @@
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, label_on, mix, over};
-use gpui::{Div, Hsla, Rgba, div, hsla, prelude::*, px};
+use gpui::{BorderStyle, Div, Hsla, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
@@ -43,6 +43,22 @@ pub(crate) struct ReadoutTag {
 /// enough on the canvas for the closest pair of them to stop reading as two
 /// colors.
 const OVERHEAD_FADE: f32 = 0.4;
+
+/// How far the wash filling a remainder recedes toward the canvas from the
+/// colour of its outline.
+const REMAINDER_WASH_FADE: f32 = 0.6;
+
+/// How far the fill of the rows a remainder reaches recedes toward the canvas
+/// from the hueless data colour.
+const REMAINDER_DEPTH_FADE: f32 = 0.7;
+
+/// A remainder's paint: an outline around a wash of its own colour, where a
+/// frame is one solid fill.
+pub(crate) struct RemainderPaint {
+    pub(crate) outline: Hsla,
+    pub(crate) wash: Hsla,
+    pub(crate) border: BorderStyle,
+}
 
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
@@ -251,6 +267,28 @@ impl Palette {
         }
     }
 
+    /// What a remainder whose members share `role`, or share none, is drawn in.
+    /// The hueless colour outlines members of several roles, which the hue of
+    /// no one of them describes, in dashes that tell it from the outline of
+    /// members that are all of the Other workload.
+    pub(crate) fn remainder(&self, role: Option<SpanRole>) -> RemainderPaint {
+        let (outline, border) = match role {
+            Some(role) => (self.role_fill(role), BorderStyle::Solid),
+            None => (self.data.neutral, BorderStyle::Dashed),
+        };
+        RemainderPaint {
+            outline,
+            wash: mix(outline, self.background, REMAINDER_WASH_FADE).into(),
+            border,
+        }
+    }
+
+    /// Fill for the rows beneath a remainder that its members reach, which
+    /// stand for no frame and so carry no role.
+    pub(crate) fn remainder_depth_fill(&self) -> Hsla {
+        mix(self.data.neutral, self.background, REMAINDER_DEPTH_FADE).into()
+    }
+
     /// The style a labeled box paints with.
     pub(crate) fn label_box(&self) -> LabelBoxStyle {
         LabelBoxStyle {
@@ -411,6 +449,52 @@ mod tests {
                     assert!(apart >= MIN_DISTINCT_COLOR, "{apart}");
                 }
             }
+        }
+    }
+
+    /// A remainder is told from a frame by being an outline around a wash, so
+    /// the wash has to part from the outline, and from the canvas the outline
+    /// stands on.
+    #[test]
+    fn a_remainders_wash_is_told_from_its_outline_and_from_the_canvas() {
+        for palette in palettes() {
+            let roles = HUED_WORKLOADS
+                .into_iter()
+                .chain([Workload::Other])
+                .flat_map(|workload| [true, false].map(|payload| SpanRole { workload, payload }))
+                .map(Some)
+                .chain([None]);
+            for role in roles {
+                let RemainderPaint { outline, wash, .. } = palette.remainder(role);
+                let from_outline = distance(wash, outline);
+                assert!(
+                    from_outline >= MIN_DISTINCT_COLOR,
+                    "{role:?}: {from_outline}"
+                );
+                let from_canvas = level_step(wash, palette.background);
+                assert!(
+                    from_canvas >= MIN_EDGED_STEP,
+                    "{role:?}: {from_canvas} levels"
+                );
+            }
+        }
+    }
+
+    /// The rows a remainder reaches are drawn with no edge, and stand for no
+    /// frame: the fill has to show on the canvas without being taken for the
+    /// hueless fill of a frame of the Other workload.
+    #[test]
+    fn the_depth_beneath_a_remainder_is_told_from_the_canvas_and_from_a_frame() {
+        for palette in palettes() {
+            let depth = palette.remainder_depth_fill();
+            let from_canvas = level_step(depth, palette.background);
+            assert!(from_canvas >= MIN_VISIBLE_STEP, "{from_canvas} levels");
+            let hueless = palette.role_fill(SpanRole {
+                workload: Workload::Other,
+                payload: false,
+            });
+            let from_frame = distance(depth, hueless);
+            assert!(from_frame >= MIN_DISTINCT_COLOR, "{from_frame}");
         }
     }
 

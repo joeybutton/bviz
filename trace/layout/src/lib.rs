@@ -13,8 +13,9 @@ mod wall_share;
 pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
 pub use cull::{Cull, Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameDirection, FlameGraph, FlameLabels, FlameMetrics, FlameMode, FlameNode,
-    FlameNodeId, FlamePlacement, FlameWeight, TrackFlamer, flame_height, lay_out_flame,
+    FlameBox, FlameBoxContent, FlameDirection, FlameFrame, FlameGraph, FlameLabels, FlameMetrics,
+    FlameMode, FlameNode, FlameNodeId, FlamePlacement, FlameRemainder, FlameWeight,
+    RemainderSiblings, TrackFlamer, flame_height, lay_out_flame,
 };
 pub use lanes::{Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use scopes::ScopeAggregate;

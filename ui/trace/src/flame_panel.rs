@@ -1,13 +1,14 @@
 use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
     LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
     profile_status, scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
-    FlameBox, FlameDirection, FlameLabels, FlameMetrics, FlameMode, FlamePlacement, FlameView,
-    FlameWeight, ScopeAggregate, flame_height, lay_out_flame,
+    FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
+    FlamePlacement, FlameRemainder, FlameView, FlameWeight, RemainderSiblings, ScopeAggregate,
+    flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
@@ -18,8 +19,8 @@ use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, point,
-    prelude::*, px, size,
+    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, fill,
+    point, prelude::*, px, quad, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -105,9 +106,9 @@ impl FlameBoxCache {
             .then_some(&self.boxes)
     }
 
-    /// The box under a window-space `pos`, which maps to a depth row via the
-    /// vertical scroll `scroll_y` and to an x relative to `fl`'s content column.
-    /// `None` when the cursor lies off that rect, the row carries no box there, or
+    /// The box under a window-space `pos`, which maps to a height in the tree
+    /// via the vertical scroll `scroll_y` and to an x relative to `fl`'s content
+    /// column. `None` when the cursor lies off that rect, no box is drawn there, or
     /// a key no longer matches. Every change to the panel's view, scroll, or
     /// bounds rebuilds the canvas scene, whose paint re-memoizes ahead of the
     /// overlay that reads this, so a hit test taken during paint names a box of
@@ -129,11 +130,10 @@ impl FlameBoxCache {
             fl.width,
         )?;
         let content_y = f32::from(pos.y) - fl.top + scroll_y;
-        let depth = (content_y / flame_metrics().row_height) as u32;
         let vx = f32::from(pos.x) - fl.left;
         let boxed = *boxes
             .iter()
-            .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)?;
+            .find(|b| content_y >= b.y && content_y < b.y + b.h && vx >= b.x && vx < b.x + b.w)?;
         Some(HoveredBox {
             aggregates: self.aggregates.clone(),
             boxed,
@@ -141,7 +141,7 @@ impl FlameBoxCache {
     }
 }
 
-/// A hovered flame box paired with the aggregate its name handle resolves
+/// A hovered flame box paired with the aggregate a frame's name handle resolves
 /// through.
 struct HoveredBox {
     aggregates: Arc<ScopeAggregate>,
@@ -249,42 +249,114 @@ fn flame_boxes(
         .clone()
 }
 
-/// The tooltip's lines for `hovered`: the frame's name, what the name leaves
-/// open about its spans (see [`FlameGraph::kind_or_category`]) where that is
-/// not the name itself, and its figures, labelled with the weight of the
-/// aggregate the box belongs to.
+/// Narrowest a remainder is drawn with its outline. Any narrower and the
+/// outline would leave none of the wash showing that tells it from a frame.
+const REMAINDER_OUTLINE_MIN_PX: f32 = 3.0;
+
+const REMAINDER_OUTLINE_PX: f32 = 1.0;
+
+/// Paints a remainder's box: the wash and the outline of
+/// [`Palette::remainder`], labelled with [`remainder_label`].
+fn paint_remainder(
+    rect: Bounds<Pixels>,
+    remainder: &FlameRemainder,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let RemainderPaint {
+        outline,
+        wash,
+        border,
+    } = palette.remainder(remainder.role());
+    if f32::from(rect.size.width) < REMAINDER_OUTLINE_MIN_PX {
+        window.paint_quad(fill(rect, wash));
+        return;
+    }
+    paint_labeled_box(
+        rect,
+        wash,
+        &remainder_label(remainder),
+        bviz_ui_theme::label_on(wash),
+        palette.label_box(),
+        window,
+        cx,
+    );
+    window.paint_quad(quad(
+        rect,
+        px(0.),
+        gpui::transparent_black(),
+        px(REMAINDER_OUTLINE_PX),
+        outline,
+        border,
+    ));
+}
+
+/// How many frames a remainder stands for, as others where its parent holds
+/// frames drawn beside it.
+fn remainder_label(remainder: &FlameRemainder) -> String {
+    let frames = remainder.frames();
+    match remainder.siblings() {
+        RemainderSiblings::None => format!("({frames} frames)"),
+        RemainderSiblings::Wider => format!("({frames} others)"),
+    }
+}
+
+/// The tooltip's lines for `hovered`, its figures labelled with the weight of
+/// the aggregate the box belongs to. A frame gives its name and what the name
+/// leaves open about its spans (see [`FlameGraph::kind_or_category`]) where
+/// that is not the name itself; a remainder, and the depth drawn beneath one,
+/// says what the remainder's label counts.
 fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let HoveredBox { aggregates, boxed } = hovered;
     let flame = &aggregates.flame;
     let root_total_us = flame.root_total_us();
-    let pct = if root_total_us > 0 {
-        100.0 * boxed.total_us as f64 / root_total_us as f64
-    } else {
-        0.0
+    let pct = |total_us: i64| {
+        if root_total_us > 0 {
+            100.0 * total_us as f64 / root_total_us as f64
+        } else {
+            0.0
+        }
     };
     let measure = match aggregates.mode.weight {
         FlameWeight::Duration => "summed time",
         FlameWeight::WallShare => "share of wall time",
     };
-    let detail = format!(
-        "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
-        format_duration(boxed.total_us),
-        format_duration(flame.span_self_us(boxed.node)),
-        boxed.count,
-        if boxed.count == 1 { "" } else { "s" },
-        pct,
-    );
-    let context = flame
-        .kind_or_category(boxed.node)
-        .filter(|&c| c != boxed.name);
-    [
-        Some(flame.str(boxed.name).to_string()),
-        context.map(|c| flame.str(c).to_string()),
-        Some(detail),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    match boxed.content {
+        FlameBoxContent::Frame(frame) => {
+            let detail = format!(
+                "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
+                format_duration(frame.total_us),
+                format_duration(flame.span_self_us(frame.node)),
+                frame.count,
+                if frame.count == 1 { "" } else { "s" },
+                pct(frame.total_us),
+            );
+            let context = flame
+                .kind_or_category(frame.node)
+                .filter(|&c| c != frame.name);
+            [
+                Some(flame.str(frame.name).to_string()),
+                context.map(|c| flame.str(c).to_string()),
+                Some(detail),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        FlameBoxContent::Remainder(remainder) | FlameBoxContent::RemainderDepth(remainder) => {
+            let total_us = flame.remainder_total_us(&remainder);
+            vec![
+                remainder_label(&remainder),
+                "frames too narrow to draw apart at this zoom".to_string(),
+                format!(
+                    "{measure}: total {}, {:.1}% of view",
+                    format_duration(total_us),
+                    pct(total_us),
+                ),
+            ]
+        }
+    }
 }
 
 /// Paints `hovered`'s tooltip near `at`.
@@ -900,11 +972,11 @@ impl Render for FlameCanvas {
 }
 
 /// The box layer's paint closure: the aggregated flame graph filling the body
-/// — each box a work-class-colored quad with a truncated label, clipped to the
-/// content rect, scrolled vertically by the panel's scroll and zoomed/panned
-/// horizontally by its view — plus the vertical and horizontal scroll bars for
-/// whichever axis overflows. No time-axis chrome applies, so none is drawn. It
-/// reads the live view state through `parent`.
+/// — each box painted as what it stands for, a frame with a truncated label,
+/// clipped to the content rect, scrolled vertically by the panel's scroll and
+/// zoomed/panned horizontally by its view — plus the vertical and horizontal
+/// scroll bars for whichever axis overflows. No time-axis chrome applies, so
+/// none is drawn. It reads the live view state through `parent`.
 fn flame_paint(
     aggregates: Arc<ScopeAggregate>,
     parent: Entity<FlamePanel>,
@@ -957,16 +1029,26 @@ fn flame_paint(
                     continue;
                 }
                 let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-                let fill = palette.role_fill(b.role);
-                paint_labeled_box(
-                    rect,
-                    fill,
-                    graph.str(b.name),
-                    bviz_ui_theme::label_on(fill),
-                    palette.label_box(),
-                    window,
-                    cx,
-                );
+                match b.content {
+                    FlameBoxContent::Frame(frame) => {
+                        let role_fill = palette.role_fill(frame.role);
+                        paint_labeled_box(
+                            rect,
+                            role_fill,
+                            graph.str(frame.name),
+                            bviz_ui_theme::label_on(role_fill),
+                            palette.label_box(),
+                            window,
+                            cx,
+                        );
+                    }
+                    FlameBoxContent::Remainder(remainder) => {
+                        paint_remainder(rect, &remainder, &palette, window, cx);
+                    }
+                    FlameBoxContent::RemainderDepth(_) => {
+                        window.paint_quad(fill(rect, palette.remainder_depth_fill()));
+                    }
+                }
             }
         });
 
@@ -979,7 +1061,9 @@ fn flame_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TimeSelection};
+    use bviz_trace_layout::{
+        FlameDirection, FlameGraph, FlameLabels, FlameMode, FlameWeight, TimeSelection,
+    };
     use bviz_trace_profile::Profile;
 
     /// Width of the content column the fixture layouts are placed for, wide
@@ -1063,6 +1147,15 @@ mod tests {
         (cache, fl)
     }
 
+    /// The name of the frame `b` stands for, `None` for a box standing for
+    /// none.
+    fn frame_name<'a>(graph: &'a FlameGraph, b: &FlameBox) -> Option<&'a str> {
+        match b.content {
+            FlameBoxContent::Frame(frame) => Some(graph.str(frame.name)),
+            FlameBoxContent::Remainder(_) | FlameBoxContent::RemainderDepth(_) => None,
+        }
+    }
+
     /// Where the unscrolled panel draws `b`'s center, in window space.
     fn center_of(fl: FlameLayout, b: &FlameBox) -> Point<Pixels> {
         point(px(fl.left + b.x + b.w / 2.0), px(fl.top + b.y + b.h / 2.0))
@@ -1076,7 +1169,7 @@ mod tests {
         let names: Vec<&str> = cache
             .boxes
             .iter()
-            .map(|b| aggregates.flame.str(b.name))
+            .filter_map(|b| frame_name(&aggregates.flame, b))
             .collect();
         assert!(
             names.contains(&"compile") && names.contains(&"link"),
@@ -1099,7 +1192,7 @@ mod tests {
             let compile = cache
                 .boxes
                 .iter()
-                .find(|b| aggregates.flame.str(b.name) == "compile")
+                .find(|b| frame_name(&aggregates.flame, b) == Some("compile"))
                 .expect("the compile frame");
             let hovered = cache
                 .hit(&aggregates, fl, 0.0, center_of(fl, compile))
@@ -1120,6 +1213,146 @@ mod tests {
                 "compile",
                 "general information",
                 "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
+            ]
+        );
+    }
+
+    /// A profile of two execution lanes. On the first, "build" holds "compile"
+    /// and then forty spans each a small fraction of a [`VIEW_W`]-wide column's
+    /// pixel; on the second, "link" runs alongside those forty, so their share
+    /// of the elapsed time is half their duration.
+    fn thin_tail_fixture() -> Arc<Profile> {
+        const THIN: usize = 40;
+        let mut events = Vec::with_capacity(THIN + 5);
+        for tid in [1, 2] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+            ));
+        }
+        let span = |tid: u32, name: &str, ts: usize, dur: usize| {
+            format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":{tid}}}"#,
+            )
+        };
+        events.push(span(1, "build", 0, 10_000));
+        events.push(span(1, "compile", 0, 8_000));
+        events.extend((0..THIN).map(|i| span(1, &format!("t{i:02}"), 8_000 + 5 * i, 5)));
+        events.push(span(2, "link", 5_000, 5_000));
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    #[test]
+    fn the_tooltip_of_a_remainder_gives_its_count_and_summed_weight() {
+        let profile = thin_tail_fixture();
+        let lines = |weight| {
+            let aggregates = aggregate_weighing(&profile, weight);
+            let (cache, fl) = laid_out(&aggregates);
+            let remainder = cache
+                .boxes
+                .iter()
+                .find(|b| matches!(b.content, FlameBoxContent::Remainder(_)))
+                .expect("the thin spans' remainder");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, remainder))
+                .expect("the box at its own center");
+            assert_eq!(&hovered.boxed, remainder);
+            flame_tooltip_lines(&hovered)
+        };
+        assert_eq!(
+            lines(FlameWeight::Duration),
+            [
+                "(40 others)",
+                "frames too narrow to draw apart at this zoom",
+                "summed time: total 200µs, 1.3% of view"
+            ]
+        );
+        assert_eq!(
+            lines(FlameWeight::WallShare),
+            [
+                "(40 others)",
+                "frames too narrow to draw apart at this zoom",
+                "share of wall time: total 100µs, 1.0% of view"
+            ]
+        );
+    }
+
+    /// A profile of one lane on which "build" holds forty spans and nothing
+    /// else, each a small fraction of a [`VIEW_W`]-wide column's pixel and
+    /// holding one span of its own length.
+    fn thin_children_fixture() -> Arc<Profile> {
+        const THIN: usize = 40;
+        let mut events = vec![
+            r#"{"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}}"#
+                .to_string(),
+        ];
+        let span = |name: &str, ts: usize, dur: usize| {
+            format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":1}}"#,
+            )
+        };
+        events.push(span("build", 0, 10_000));
+        for i in 0..THIN {
+            events.push(span(&format!("t{i:02}"), 5 * i, 5));
+            events.push(span(&format!("n{i:02}"), 5 * i, 5));
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    #[test]
+    fn a_remainder_of_every_child_of_its_parent_counts_frames_and_not_others() {
+        let aggregates = aggregate(&thin_children_fixture());
+        let (cache, fl) = laid_out(&aggregates);
+        let lines_at = |b: &FlameBox| {
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, b))
+                .expect("the box at its own center");
+            assert_eq!(&hovered.boxed, b);
+            flame_tooltip_lines(&hovered)
+        };
+        let of_kind = |wanted: fn(&FlameBoxContent) -> bool| {
+            let mut found = cache.boxes.iter().filter(|b| wanted(&b.content));
+            let boxed = found.next().expect("a box of the kind");
+            assert!(found.next().is_none());
+            boxed
+        };
+        let remainder = of_kind(|c| matches!(c, FlameBoxContent::Remainder(_)));
+        let lines = [
+            "(40 frames)",
+            "frames too narrow to draw apart at this zoom",
+            "summed time: total 200µs, 2.0% of view",
+        ];
+        assert_eq!(lines_at(remainder), lines);
+        // The row the thin spans' own children reach is the remainder's too,
+        // and names none of them.
+        let depth = of_kind(|c| matches!(c, FlameBoxContent::RemainderDepth(_)));
+        assert_eq!(
+            (depth.x, depth.w, depth.depth),
+            (remainder.x, remainder.w, remainder.depth + 1)
+        );
+        assert_eq!(lines_at(depth), lines);
+        let names: Vec<&str> = cache
+            .boxes
+            .iter()
+            .filter_map(|b| frame_name(&aggregates.flame, b))
+            .collect();
+        assert_eq!(names, ["All", "build"]);
+    }
+
+    #[test]
+    fn the_tooltip_of_the_root_gives_the_whole_view() {
+        let aggregates = aggregate(&fixture());
+        let (cache, fl) = laid_out(&aggregates);
+        let root = cache.boxes.first().expect("the root frame");
+        let hovered = cache
+            .hit(&aggregates, fl, 0.0, center_of(fl, root))
+            .expect("the box at its own center");
+        assert_eq!(
+            flame_tooltip_lines(&hovered),
+            [
+                "All",
+                "summed time: total 1.00ms, self 0µs, 0 spans, 100.0% of view"
             ]
         );
     }
@@ -1178,7 +1411,7 @@ mod tests {
         let boxed = cache
             .boxes
             .iter()
-            .find(|b| b.depth == depth && aggregates.flame.str(b.name) == name)
+            .find(|b| b.depth == depth && frame_name(&aggregates.flame, b) == Some(name))
             .unwrap_or_else(|| panic!("no {name} box at depth {depth}"));
         let hovered = cache
             .hit(&aggregates, fl, 0.0, center_of(fl, boxed))
@@ -1208,7 +1441,7 @@ mod tests {
             let fetching = cache
                 .boxes
                 .iter()
-                .find(|b| flame.str(b.name) == "Fetching repository")
+                .find(|b| frame_name(flame, b) == Some("Fetching repository"))
                 .expect("the fetch's frame");
             let hovered = cache
                 .hit(&aggregates, fl, 0.0, center_of(fl, fetching))
