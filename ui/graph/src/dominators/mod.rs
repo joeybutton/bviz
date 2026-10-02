@@ -13,7 +13,7 @@ use crate::point::{identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Dominators, Standing};
+use bviz_graph_layout::dominators::{Dominators, Standing, Targets};
 use bviz_graph_layout::metrics::{Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
@@ -218,11 +218,14 @@ impl DominatorsPanel {
                 let points = || (0..tree.total()).map(|node| (tree.id(node), tree.kind(node)));
                 let colouring = Colouring::of(unit, points().map(|(id, _)| id), &shared.facets);
                 let legend = colouring.legend(points(), &shared.facets);
+                let targets =
+                    (unit == Unit::ConfiguredTarget).then(|| Targets::of(&tree, &shared.facets));
                 Coloured {
                     tree,
                     shared,
                     colouring: Arc::new(colouring),
                     legend,
+                    targets,
                 }
             },
             |view, coloured, cx| {
@@ -360,12 +363,7 @@ impl DominatorsPanel {
                 *hover = cell.map(|cell| Hover {
                     cell,
                     at,
-                    lines: describe(
-                        &drawn.coloured.tree,
-                        cell.holds,
-                        focus,
-                        &drawn.coloured.shared,
-                    ),
+                    lines: describe(&drawn.coloured, cell.holds, focus),
                 });
             }
         }
@@ -424,6 +422,9 @@ struct Coloured {
     shared: Shared,
     colouring: Arc<Colouring>,
     legend: Vec<(SharedString, Hue)>,
+    /// The targets each node's subtree holds, where its points are configured
+    /// targets.
+    targets: Option<Targets>,
 }
 
 /// A tree drawn, and how the reader has it drawn, which lasts only as long as
@@ -552,15 +553,11 @@ struct Frame {
     row: Pixels,
 }
 
-/// What the tooltip over the cell holding `holds` of `tree` drawn from `focus`
-/// reads: what it stands for, and how much of the build exists only because
-/// of it.
-fn describe(
-    tree: &Dominators,
-    holds: Holds,
-    focus: Option<Focused>,
-    shared: &Shared,
-) -> Vec<String> {
+/// What the tooltip over the cell holding `holds` of the tree of `coloured`
+/// drawn from `focus` reads: what it stands for, and how much of the build
+/// exists only because of it.
+fn describe(coloured: &Coloured, holds: Holds, focus: Option<Focused>) -> Vec<String> {
+    let (tree, shared) = (&*coloured.tree, &coloured.shared);
     let unit = tree.scope().unit();
     let names = unit_names(unit);
     let stand_on = |weight: u32, on: &str| {
@@ -587,7 +584,20 @@ fn describe(
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
-            lines.push(stand_on(weight, "this"));
+            let copies = coloured
+                .targets
+                .as_ref()
+                .map(|targets| targets.copies(node));
+            let this = if copies.is_some_and(|copies| copies > 1) {
+                "this copy"
+            } else {
+                "this"
+            };
+            lines.push(stand_on(weight, this));
+            if let Some(targets) = &coloured.targets {
+                let held = targets.held(node);
+                lines.extend(targets_held(held.targets(), held.only_here()));
+            }
             lines.push(shares(weight, focus.filter(|_| !on_top)));
             match tree.parent(node) {
                 Some(parent) => {
@@ -608,6 +618,22 @@ fn describe(
         }
     }
     lines
+}
+
+/// What a tooltip says of the `targets` distinct targets a configured
+/// target's subtree holds, `only_here` of which are configured nowhere else;
+/// absent where it holds none.
+fn targets_held(targets: u32, only_here: u32) -> Option<String> {
+    let elsewhere = match (targets, only_here) {
+        (0, _) => return None,
+        (1, 0) => "also configured elsewhere".to_owned(),
+        (1, _) => "configured only here".to_owned(),
+        (_, 0) => "each also configured elsewhere".to_owned(),
+        _ if only_here == targets => "all configured only here".to_owned(),
+        _ => format!("{only_here} of them configured only here"),
+    };
+    let covered = unit_names(Unit::Target).counted(targets);
+    Some(format!("covering {covered}, {elsewhere}"))
 }
 
 /// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`: that
@@ -951,5 +977,24 @@ impl Render for IcicleCanvas {
             },
         )
         .size_full()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_targets_a_subtree_holds_read_by_where_else_they_are_configured() {
+        let read = |targets, only_here| targets_held(targets, only_here);
+        assert_eq!(read(0, 0), None);
+        let read = |targets, only_here| read(targets, only_here).unwrap();
+        assert_eq!(read(1, 0), "covering 1 target, also configured elsewhere");
+        assert_eq!(read(1, 1), "covering 1 target, configured only here");
+        let each_elsewhere = "covering 3 targets, each also configured elsewhere";
+        assert_eq!(read(3, 0), each_elsewhere);
+        assert_eq!(read(3, 3), "covering 3 targets, all configured only here");
+        let some_here = "covering 3 targets, 1 of them configured only here";
+        assert_eq!(read(3, 1), some_here);
     }
 }
