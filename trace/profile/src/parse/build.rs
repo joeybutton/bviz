@@ -8,9 +8,9 @@ use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    CategoryId, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker, Profile,
-    ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses, lane_class,
-    occupied_span, span_role,
+    Category, CategoryId, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker,
+    Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses,
+    lane_class, occupied_span, span_role,
 };
 
 use super::serde_events::{ArgEntry, ArgVal, RawEvent, arg_i64, arg_str};
@@ -687,6 +687,13 @@ fn build_parts(
         let threads = build_thread_tracks(merged, &thread_meta, &mut pool.writer);
         let (series_pool, point_pool, counters) =
             build_counter_lanes(counter_order, counters, pool);
+        let categories = categories
+            .into_iter()
+            .map(|name| {
+                let text = pool.interner.resolve(name);
+                Category::new(name, text, |kind| pool.writer.intern(kind))
+            })
+            .collect();
 
         ProfileParts {
             text: String::new(),

@@ -501,9 +501,10 @@ fn action_inner(name: &str) -> Option<&str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlameLabels {
     /// The kind of thing a span is an instance of, where its name says which
-    /// instance: an action's mnemonic where one resolves ("Rustc"), and the
-    /// category of a span named after what it works on ("Fetching
-    /// repository"). Every span of one kind merges into one frame.
+    /// instance: an action's mnemonic where one resolves ("Rustc"), the category
+    /// of a span named after what it works on ("Fetching repository"), and the
+    /// kind a name leads with ("fetching"). Every span of one kind merges into
+    /// one frame.
     Mnemonic,
     /// Every span's own name, so an action frame names its target ("Compiling
     /// //x/y:z") and the tree is the profile's own nesting.
@@ -592,8 +593,8 @@ impl Flamer {
     }
 
     /// How a span aggregates under `labels`. A span whose mnemonic resolves is
-    /// labelled by it, so all Rustc collapse together, and one of a category
-    /// naming its spans per instance by that category; any other span — and
+    /// labelled by it, so all Rustc collapse together, and one whose name says
+    /// which instance of a kind it is by that kind; any other span — and
     /// every span under [`FlameLabels::Name`] — is labelled by its own name (the
     /// informative label for the rest: "checkOutputs", "subprocess.run", …). The
     /// tree shape comes from time-containment, not from these labels; a label
@@ -2533,6 +2534,137 @@ mod tests {
             ]
         );
         assert!((0..named.len()).all(|i| !named.is_detail(i)));
+    }
+
+    #[test]
+    fn a_span_named_kind_then_instance_is_labelled_by_the_kind_and_detailed_by_its_name() {
+        let info = |name, start, dur| slice(name, "general information", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                info("fetching: repository @@a", 0, 100),
+                info("fetching: repository @@b: c", 100, 40),
+                info("extracting: repository @@a", 200, 30),
+                // No kind leads these: one lacks the separator, the other
+                // carries it after a kind that is not this category's.
+                info("fetching", 300, 20),
+                info("local: sh", 400, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        // The span named by the kind alone is no instance of it: it keeps the
+        // role of a span named for what it does, and so a frame of its own.
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("extracting".to_owned(), 30),
+                ("fetching".to_owned(), 20),
+                ("fetching".to_owned(), 140),
+                ("local: sh".to_owned(), 10),
+            ]
+        );
+        let fetching = g
+            .children(&g.root())
+            .into_iter()
+            .find(|c| g.str(c.name) == "fetching" && c.role.workload == Workload::RemoteCache)
+            .expect("the kind's frame");
+        assert_eq!((fetching.total_us, fetching.count), (140, 2));
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [
+                ("fetching: repository @@a".to_owned(), 100),
+                ("fetching: repository @@b: c".to_owned(), 40),
+            ]
+        );
+        let extracting = child(&g, &g.root(), "extracting");
+        assert_eq!(
+            child_totals(&g, &extracting),
+            [("extracting: repository @@a".to_owned(), 30)]
+        );
+        assert!(g.children(&child(&g, &g.root(), "local: sh")).is_empty());
+    }
+
+    #[test]
+    fn a_command_of_a_repository_rule_is_a_kind_apart_from_the_rule_that_runs_it() {
+        let rule = |name, start, dur| slice(name, "Starlark repository function call", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::RepoFetch,
+            vec![
+                rule("rules_cc+", 0, 100),
+                rule("local: /bin/sh -c a: b", 10, 60),
+                rule("rules_go+", 100, 50),
+                rule("local: /bin/true", 110, 20),
+            ],
+        )]);
+        let g = flame(&p);
+        let rules = child(&g, &g.root(), "Starlark repository function call");
+        assert_eq!(g.children(&g.root()).len(), 1);
+        assert_eq!((rules.total_us, rules.count), (150, 2));
+        assert_eq!(
+            child_totals(&g, &rules),
+            [
+                ("local".to_owned(), 80),
+                ("rules_cc+".to_owned(), 40),
+                ("rules_go+".to_owned(), 30),
+            ]
+        );
+        let local = child(&g, &rules, "local");
+        assert_eq!(local.role.workload, Workload::Subprocess);
+        assert_eq!(rules.role.workload, Workload::Starlark);
+        assert_eq!(
+            child_totals(&g, &local),
+            [
+                ("local: /bin/sh -c a: b".to_owned(), 60),
+                ("local: /bin/true".to_owned(), 20),
+            ]
+        );
+        // Bottom-up the commands are one root and the rules another.
+        let inverted = inverted_as(&p, FlameLabels::Mnemonic);
+        assert_eq!(
+            child_totals(&inverted, &inverted.root()),
+            [
+                ("Starlark repository function call".to_owned(), 70),
+                ("local".to_owned(), 80),
+            ]
+        );
+        // Labelled by name every span is a frame of its own.
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            child_totals(&named, &named.root()),
+            [("rules_cc+".to_owned(), 100), ("rules_go+".to_owned(), 50)]
+        );
+        assert!((0..named.len()).all(|i| !named.is_detail(i)));
+    }
+
+    #[test]
+    fn a_kind_no_span_of_the_lanes_built_carries_still_builds() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![slice("buildTargets", "general information", 0, 10)],
+            ),
+            track(
+                2,
+                LaneClass::RepoFetch,
+                vec![slice(
+                    "fetching: repository @@a",
+                    "general information",
+                    0,
+                    10,
+                )],
+            ),
+        ]);
+        let t = p.threads();
+        let analysis = |i: usize| t[i].lane_class == LaneClass::Analysis;
+        let scoped = Flamer::scoped(&p, 1, analysis);
+        assert!(p.kinds().all(|kind| scoped.ranks.rank.contains_key(&kind)));
+        let g = TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), |i| {
+            !analysis(i)
+        });
+        assert_eq!(child_totals(&g, &g.root()), [("fetching".to_owned(), 10)]);
     }
 
     #[test]

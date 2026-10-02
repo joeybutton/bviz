@@ -138,12 +138,37 @@ pub struct Profile {
 
 /// One Bazel `cat` of a profile.
 #[derive(Debug, PartialEq)]
-struct Category {
+pub(crate) struct Category {
     name: Str,
-    /// See [`names_instances`].
-    names_instances: bool,
+    kinds: Option<Kinds>,
     /// See [`fixed_name`].
     fixed_name: Option<&'static str>,
+}
+
+/// What labels the spans of a category whose names say which instance of a
+/// kind each is.
+#[derive(Debug, PartialEq)]
+struct Kinds {
+    naming: KindNaming,
+    /// The label of each kind of `naming.named`, in that order.
+    named: Vec<Str>,
+}
+
+impl Category {
+    /// The category `name`, whose text is `text`. A kind a span name leads
+    /// with is no string of any event's own, so `intern` gives it the handle
+    /// that labels its spans.
+    pub(crate) fn new(name: Str, text: &str, intern: impl FnMut(&str) -> Str) -> Category {
+        let kinds = kind_naming(text).map(|naming| Kinds {
+            naming,
+            named: naming.named.iter().copied().map(intern).collect(),
+        });
+        Category {
+            name,
+            kinds,
+            fixed_name: fixed_name(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -520,18 +545,21 @@ pub fn parks_thread(category: &str) -> bool {
     category == "skyframe evaluator"
 }
 
-/// The Bazel `cat`s whose spans are named after the one thing each works on — a
+/// The Bazel `cat`s whose spans, but for those leading with one of the
+/// category's [`NAMED_KINDS`], are named after the one thing each works on — a
 /// repository, a package, a label, a path. Every emitter Bazel 9.1.0 has of
-/// these `ProfilerTask`s passes such an identifier for the description:
+/// these `ProfilerTask`s that writes none of those kinds passes such an
+/// identifier for the description:
 /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/ProfilerTask.java>
 ///
 /// The identifier is not always one instance's own (see [`FIXED_NAMES`]), and
 /// the root package of the main repository is written as the empty string:
 /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/cmdline/PackageIdentifier.java#L266-L272>
-const PER_INSTANCE_CATEGORIES: [&str; 17] = [
+const PER_INSTANCE_CATEGORIES: [&str; 18] = [
     "Fetching repository",
     "Vendoring repository",
     "package creation",
+    "Starlark repository function call",
     "Starlark thread context",
     "Starlark Parser",
     "VFS stat",
@@ -548,11 +576,73 @@ const PER_INSTANCE_CATEGORIES: [&str; 17] = [
     "include scanner",
 ];
 
-/// Whether the category of a span of this Bazel `cat` says what kind of work
-/// the span is, and its name which instance of it (see
-/// [`PER_INSTANCE_CATEGORIES`]).
-fn names_instances(category: &str) -> bool {
-    PER_INSTANCE_CATEGORIES.contains(&category)
+/// What stands between the kind and the instance in a span name that gives both.
+const KIND_SEPARATOR: &str = ": ";
+
+/// The kinds a span name leads with, ahead of [`KIND_SEPARATOR`] and the
+/// instance the span works on, under each Bazel `cat` whose emitters write
+/// such names in Bazel 9.1.0: a download or an extraction by what it is for, a
+/// repository rule's command by its command line, a module resolution step by
+/// its module, extension or URL, and a wait for local resources by its action.
+const NAMED_KINDS: [(&str, &[&str]); 4] = [
+    ("general information", &["fetching", "extracting"]),
+    ("Starlark repository function call", &["local", "remote"]),
+    (
+        "bazel module processing",
+        &[
+            "download file",
+            "fetch module file",
+            "evaluate module file",
+            "evaluate module extension",
+            "compute repo spec",
+            "getting yanked versions",
+        ],
+    ),
+    ("action resource lock", &["Acquiring resources for"]),
+];
+
+/// How the spans of one Bazel `cat` say what kind of thing each is an instance
+/// of, where their names say which instance rather than what the span does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KindNaming {
+    /// The kinds a name may lead with.
+    named: &'static [&'static str],
+    /// Whether a span leading with none of `named` is an instance of the
+    /// category itself.
+    category: bool,
+}
+
+/// What a span is an instance of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    /// Its category.
+    Category,
+    /// The kind at this position of its category's [`KindNaming::named`].
+    Named(usize),
+}
+
+impl KindNaming {
+    fn kind_of(self, name: &str) -> Option<SpanKind> {
+        let leads_with = |kind: &&str| {
+            name.strip_prefix(*kind)
+                .is_some_and(|rest| rest.starts_with(KIND_SEPARATOR))
+        };
+        match self.named.iter().position(leads_with) {
+            Some(i) => Some(SpanKind::Named(i)),
+            None => self.category.then_some(SpanKind::Category),
+        }
+    }
+}
+
+/// How the spans of this Bazel `cat` say their kind, and `None` for a category
+/// whose every span is named after what it does.
+fn kind_naming(category: &str) -> Option<KindNaming> {
+    let named = NAMED_KINDS
+        .iter()
+        .find(|(of, _)| *of == category)
+        .map_or(&[][..], |(_, kinds)| kinds);
+    let category = PER_INSTANCE_CATEGORIES.contains(&category);
+    (category || !named.is_empty()).then_some(KindNaming { named, category })
 }
 
 /// The name that spans of a Bazel `cat` among the [`PER_INSTANCE_CATEGORIES`]
@@ -792,12 +882,16 @@ impl Profile {
     }
 
     /// The kind `slice` is an instance of, as the label that names the kind —
-    /// its category, where that names its spans per instance — and `None` for
-    /// a slice named after what it does. A slice whose category has no id
-    /// reads as the latter.
+    /// its category, or the kind its name leads with — and `None` for a slice
+    /// named after what it does. A slice whose category has no id reads as the
+    /// latter.
     pub fn kind_of(&self, slice: &Slice) -> Option<Str> {
         let category = &self.categories[slice.category?.position()];
-        category.names_instances.then_some(category.name)
+        let kinds = category.kinds.as_ref()?;
+        Some(match kinds.naming.kind_of(self.str(slice.name))? {
+            SpanKind::Category => category.name,
+            SpanKind::Named(i) => kinds.named[i],
+        })
     }
 
     /// The name of `slice` where it says which instance of its kind the slice
@@ -811,12 +905,19 @@ impl Profile {
         (!name.is_empty() && fixed != Some(self.str(name))).then_some(name)
     }
 
-    /// Every label [`kind_of`](Self::kind_of) can give.
+    /// Every label [`kind_of`](Self::kind_of) can give, whether or not a slice
+    /// of the profile takes it.
     pub fn kinds(&self) -> impl Iterator<Item = Str> + '_ {
-        self.categories
-            .iter()
-            .filter(|category| category.names_instances)
-            .map(|category| category.name)
+        self.categories.iter().flat_map(|category| {
+            let kinds = category.kinds.as_ref();
+            let own = kinds
+                .filter(|kinds| kinds.naming.category)
+                .map(|_| category.name);
+            let named = kinds
+                .into_iter()
+                .flat_map(|kinds| kinds.named.iter().copied());
+            own.into_iter().chain(named)
+        })
     }
 
     /// Resolves an interned handle to its text.
@@ -916,17 +1017,6 @@ impl Profile {
             categories,
         } = parts;
         phase_markers.sort_by_key(|m| m.start_us);
-        let categories = categories
-            .into_iter()
-            .map(|name| {
-                let category = &text[name.range()];
-                Category {
-                    name,
-                    names_instances: names_instances(category),
-                    fixed_name: fixed_name(category),
-                }
-            })
-            .collect();
         Profile {
             text,
             slice_pool,
@@ -961,7 +1051,7 @@ pub(crate) struct ProfileParts {
     pub phase_markers: Vec<PhaseMarker>,
     pub span: TimeSpan,
     pub distinct_strings: usize,
-    pub categories: Vec<Str>,
+    pub categories: Vec<Category>,
 }
 
 #[cfg(test)]
@@ -1192,17 +1282,176 @@ mod tests {
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
     }
 
+    /// The kind [`kind_naming`] reads a span as an instance of, as text.
+    fn kind(category: &'static str, name: &str) -> Option<&'static str> {
+        let naming = kind_naming(category)?;
+        match naming.kind_of(name)? {
+            SpanKind::Category => Some(category),
+            SpanKind::Named(i) => Some(naming.named[i]),
+        }
+    }
+
     #[test]
-    fn a_category_naming_its_spans_after_what_they_work_on_names_instances() {
-        for category in [
-            "Fetching repository",
-            "package creation",
-            "Starlark thread context",
-            "VFS stat",
-            "globbing",
-            "include scanner",
+    fn a_span_named_after_what_it_works_on_is_an_instance_of_its_category() {
+        for (category, name) in [
+            ("Fetching repository", "@@rules_cc+"),
+            ("Vendoring repository", "@@rules_cc+"),
+            ("package creation", "@@rules_cc+//cc"),
+            ("package creation", ""),
+            ("Starlark thread context", "repository @@rules_cc+"),
+            ("Starlark thread context", "//cc:defs"),
+            ("Starlark repository function call", "rules_cc+"),
+            ("Starlark Parser", "/work/cc/BUILD.bazel"),
+            ("VFS stat", "/work/cc"),
+            ("VFS md5", "/work/cc/defs.bzl"),
+            ("globbing", "/work/cc"),
+            (
+                "filesystem traversal",
+                "DirectTraversalRoot{rootPart=/work}",
+            ),
+            ("include scanner", "cc/defs.h"),
+            // A separator alone makes no kind of what stands ahead of it.
+            ("Fetching repository", "local: @@rules_cc+"),
+            ("VFS stat", "/work/a: b"),
         ] {
-            assert!(names_instances(category), "{category}");
+            assert_eq!(kind(category, name), Some(category), "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_span_named_kind_then_instance_is_an_instance_of_the_kind_it_leads_with() {
+        for (category, name, expected) in [
+            (
+                "general information",
+                "fetching: repository @@rules_cc+",
+                "fetching",
+            ),
+            (
+                "general information",
+                "extracting: module extension @@rules_go+//go:extensions.bzl%go_sdk",
+                "extracting",
+            ),
+            (
+                "Starlark repository function call",
+                "local: /usr/bin/uname -m",
+                "local",
+            ),
+            (
+                "Starlark repository function call",
+                "remote: /usr/bin/uname -m",
+                "remote",
+            ),
+            (
+                "bazel module processing",
+                "download file: https://bcr.example/modules/foo/1.0/MODULE.bazel",
+                "download file",
+            ),
+            (
+                "bazel module processing",
+                "fetch module file: rules_cc@0.1.5",
+                "fetch module file",
+            ),
+            (
+                "bazel module processing",
+                "evaluate module file: rules_cc@0.1.5",
+                "evaluate module file",
+            ),
+            (
+                "bazel module processing",
+                "evaluate module extension: crate",
+                "evaluate module extension",
+            ),
+            (
+                "bazel module processing",
+                "compute repo spec: rules_cc@0.1.5",
+                "compute repo spec",
+            ),
+            (
+                "bazel module processing",
+                "getting yanked versions: rules_cc",
+                "getting yanked versions",
+            ),
+            (
+                "action resource lock",
+                "Acquiring resources for: Compiling cc/defs.cc",
+                "Acquiring resources for",
+            ),
+            // Only the first separator divides the kind from the instance.
+            (
+                "general information",
+                "fetching: repository @@a: b: c",
+                "fetching",
+            ),
+            (
+                "Starlark repository function call",
+                "local: sh -c echo fetching: x",
+                "local",
+            ),
+        ] {
+            assert_eq!(kind(category, name), Some(expected), "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_span_named_after_what_it_does_is_an_instance_of_nothing() {
+        for (category, name) in [
+            // Fixed step names beside the per-instance ones of their category.
+            ("general information", "buildTargets"),
+            ("general information", "subprocess.run"),
+            ("bazel module processing", "check bazel compatibility"),
+            ("bazel module processing", "discovery"),
+            ("action resource lock", "action.enterActionPreparation"),
+            // A kind without its separator, with nothing after it, under
+            // another category, or past the head of the name.
+            ("general information", "fetching"),
+            ("general information", "fetching:"),
+            ("general information", "fetching repository @@a"),
+            ("general information", "local: /usr/bin/uname -m"),
+            ("general information", "prefetching: x"),
+            ("general information", "upload fetching: x"),
+            ("bazel module processing", "fetching: repository @@a"),
+            ("bazel module processing", "check lockfile for crate"),
+            // A separator after a kind no emitter writes.
+            ("general information", "Remote.download: x"),
+            ("bazel module processing", "parse lockfile: x"),
+            // Function names, shared by every call.
+            ("Starlark user function call", "_impl"),
+            ("skyfunction", "CONFIGURED_TARGET"),
+            // Named by the action, which its mnemonic groups.
+            ("action processing", "Compiling cc/defs.cc"),
+            ("some future task", "x: y"),
+            ("", ""),
+        ] {
+            assert_eq!(kind(category, name), None, "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_name_leading_with_a_kind_and_its_separator_alone_is_an_instance_of_that_kind() {
+        assert_eq!(kind("general information", "fetching: "), Some("fetching"));
+    }
+
+    #[test]
+    fn the_spans_of_a_kind_share_one_role() {
+        // A kind labels one frame for all its spans, which a role differing by
+        // instance would split in two.
+        for category in PER_INSTANCE_CATEGORIES {
+            assert_eq!(
+                span_role(category, "@@rules_cc+"),
+                span_role(category, "/work/cc/defs.bzl"),
+                "{category}"
+            );
+        }
+        for (category, kinds) in NAMED_KINDS {
+            for kind in kinds {
+                let role =
+                    |instance| span_role(category, &format!("{kind}{KIND_SEPARATOR}{instance}"));
+                assert_eq!(
+                    role("@@rules_cc+"),
+                    role("/work/cc/defs.bzl"),
+                    "{category} / {kind}"
+                );
+            }
         }
     }
 
@@ -1211,6 +1460,8 @@ mod tests {
         let events = [
             ("Fetching repository", "@@rules_cc+"),
             ("general information", "buildTargets"),
+            ("general information", "fetching: repository @@rules_cc+"),
+            ("general information", "extracting: repository @@rules_cc+"),
             ("package creation", ""),
         ]
         .map(|(category, name)| {
@@ -1225,9 +1476,24 @@ mod tests {
         };
         assert_eq!(kind("@@rules_cc+"), Some("Fetching repository"));
         assert_eq!(kind("buildTargets"), None);
+        assert_eq!(kind("fetching: repository @@rules_cc+"), Some("fetching"));
+        assert_eq!(
+            kind("extracting: repository @@rules_cc+"),
+            Some("extracting")
+        );
         assert_eq!(kind(""), Some("package creation"));
+        // A kind of a category the profile has is a label whether or not a
+        // span leads with it.
         let kinds: Vec<&str> = p.kinds().map(|kind| p.str(kind)).collect();
-        assert_eq!(kinds, ["Fetching repository", "package creation"]);
+        assert_eq!(
+            kinds,
+            [
+                "Fetching repository",
+                "fetching",
+                "extracting",
+                "package creation"
+            ]
+        );
     }
 
     #[test]
@@ -1261,39 +1527,6 @@ mod tests {
                 ("package creation", Some("an initializer")),
             ]
         );
-    }
-
-    #[test]
-    fn the_spans_of_a_per_instance_category_share_one_role() {
-        // A category labels one frame for all its spans, which a role differing
-        // by name would split in two.
-        for category in PER_INSTANCE_CATEGORIES {
-            assert_eq!(
-                span_role(category, "@@rules_cc+"),
-                span_role(category, "local: /work/cc/defs.bzl"),
-                "{category}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_category_naming_its_spans_after_what_they_do_names_no_instances() {
-        for category in [
-            // A catch-all of unrelated activities.
-            "general information",
-            // Function names, shared by every call.
-            "Starlark user function call",
-            "skyfunction",
-            // Named by the action, which its mnemonic already groups.
-            "action processing",
-            // Fixed step names beside per-instance ones.
-            "bazel module processing",
-            "Starlark repository function call",
-            "some future task",
-            "",
-        ] {
-            assert!(!names_instances(category), "{category}");
-        }
     }
 
     fn timed_slice(start_us: i64, dur_us: i64) -> Slice {

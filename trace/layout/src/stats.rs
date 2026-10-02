@@ -237,28 +237,34 @@ mod tests {
     }
 
     #[test]
-    fn a_per_instance_category_is_one_row_and_its_instances_none() {
-        // Two repository fetches, one holding a span named for what it does:
-        // the category is one row summing both fetches' own time, the nested
-        // span keeps a row of its own, and no repository has one.
+    fn a_kind_is_one_row_and_its_instances_none() {
+        // Two repository fetches, one holding a span named for what it does
+        // that in turn holds a download named for its repository: each kind is
+        // one row of its spans' own time, the span between them keeps a row of
+        // its own, and no repository has one.
         let p = profile(vec![track(
             1,
             LaneClass::Analysis,
             vec![
                 slice("@@a", "Fetching repository", 0, 100),
                 slice("download", "generic", 0, 70),
+                slice("fetching: repository @@a", "general information", 0, 50),
                 slice("@@b", "Fetching repository", 100, 40),
+                slice("fetching: repository @@b", "general information", 100, 10),
             ],
         )]);
         let g = flame(&p);
         let rows = stats_from_flame(&g);
-        assert_eq!(rows.len(), 2);
-        let fetching = row(&g, &rows, "Fetching repository");
-        assert_eq!(
-            (fetching.count, fetching.self_us, fetching.max_us),
-            (2, 70, 70)
-        );
-        assert_eq!(row(&g, &rows, "download").self_us, 70);
+        assert_eq!(rows.len(), 3);
+        let figures = |key| {
+            let r = row(&g, &rows, key);
+            (r.count, r.self_us, r.max_us)
+        };
+        assert_eq!(figures("Fetching repository"), (2, 60, 60));
+        assert_eq!(figures("download"), (1, 20, 20));
+        // The two downloads sit at different places in the tree, so they are
+        // two frames of one row.
+        assert_eq!(figures("fetching"), (2, 60, 50));
         assert_eq!(self_sum(&rows), 140);
     }
 
