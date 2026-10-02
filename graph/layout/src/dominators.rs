@@ -50,6 +50,9 @@ pub struct Dominators {
     /// By top, the strongly connected component of the scope's points its
     /// point belongs to.
     cycle: Vec<u32>,
+    /// By root, where the roots are configured targets, another copy of its
+    /// target the tree depends on.
+    elsewhere: Vec<Option<Elsewhere>>,
 }
 
 struct Dominated {
@@ -75,6 +78,21 @@ impl Standing {
     pub fn is_root(self) -> bool {
         !matches!(self, Standing::Below(_))
     }
+}
+
+/// What flags a root of configured targets whose target the build also
+/// reaches as a dependency: another configured copy of the same target that
+/// is a point of the tree and that a point of the tree depends on. The root
+/// itself may have no dependent, so each root of a target configured at the
+/// top in many configurations is flagged once any one copy is depended on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Elsewhere {
+    pub copy: Id,
+    /// A point of the tree depending on `copy`.
+    pub dependent: Id,
+    /// How many copies of the target other than the root a point of the tree
+    /// depends on, `copy` among them.
+    pub copies: u32,
 }
 
 /// The points a dominator tree is rooted at.
@@ -208,6 +226,12 @@ impl Dominators {
 
     pub fn standing(&self, node: u32) -> Standing {
         self.nodes[node as usize].standing
+    }
+
+    /// Where `node` is a root of configured targets, another copy of its
+    /// target the build reaches through a dependency.
+    pub fn elsewhere(&self, node: u32) -> Option<Elsewhere> {
+        self.elsewhere.get(node as usize).copied().flatten()
     }
 
     /// Up to `limit` roots depending on `node`, the nearest first, short of
@@ -366,7 +390,7 @@ pub fn dominators(
     provenance: &Provenance,
     scope: Scope,
 ) -> Dominators {
-    ScopeGraph::new(graph, names, facets, provenance, scope).dominators(names, &Roots::Tops)
+    ScopeGraph::new(graph, names, facets, provenance, scope).dominators(names, facets, &Roots::Tops)
 }
 
 /// The points of one scope and the dependencies between them, with what a
@@ -442,7 +466,7 @@ impl ScopeGraph {
 
     /// The dominator tree from `roots`, of which those that are no counted
     /// point of the scope are passed over.
-    pub fn dominators(&self, names: &Names, roots: &Roots) -> Dominators {
+    pub fn dominators(&self, names: &Names, facets: &Facets, roots: &Roots) -> Dominators {
         let unit = &self.unit;
         let roots: Vec<u32> = match roots {
             Roots::Tops => self.tops.clone(),
@@ -528,6 +552,14 @@ impl ScopeGraph {
             .collect();
         let shared_tops = &nodes[roots.len()..bounds[0] as usize];
         let shared_weight = shared_tops.iter().map(|node| node.weight).sum();
+        let elsewhere = match self.scope.unit() {
+            Unit::ConfiguredTarget => {
+                let copies = Copies::of(self, facets, &tree);
+                let rooted = order[..roots.len()].iter();
+                rooted.map(|&w| copies.elsewhere(tree.point(w))).collect()
+            }
+            Unit::Action | Unit::Target => Vec::new(),
+        };
         Dominators {
             scope: self.scope,
             nodes,
@@ -538,6 +570,7 @@ impl ScopeGraph {
             outside: self.counted - tree.points.len() as u32,
             shared_weight,
             cycle,
+            elsewhere,
         }
     }
 
@@ -621,6 +654,79 @@ impl<'a> Actions<'a> {
         let point = index.get(id);
         let of = point.map_or(&[][..], |p| &unit.dependents[p as usize]);
         of.iter().map(|&p| unit.points[p as usize].id)
+    }
+}
+
+/// The points of a tree that are configured copies of one target and that a
+/// point of the tree depends on, by target.
+struct Copies<'a> {
+    scope: &'a ScopeGraph,
+    facets: &'a Facets,
+    tree: &'a DominatorTree,
+    by_target: FxHashMap<Id, Depended>,
+}
+
+/// The copies of one target a point of the tree depends on: how many, and the
+/// two first by [stable key](StableKeys), each with its first dependent, so
+/// that one is left to name beside any one copy.
+#[derive(Default)]
+struct Depended {
+    copies: u32,
+    first: [Option<(u32, u32)>; 2],
+}
+
+impl<'a> Copies<'a> {
+    fn of(scope: &'a ScopeGraph, facets: &'a Facets, tree: &'a DominatorTree) -> Self {
+        let key = |p: u32| (scope.keys[p as usize], p);
+        let mut by_target: FxHashMap<Id, Depended> =
+            FxHashMap::with_capacity_and_hasher(tree.points.len(), Default::default());
+        for &p in &tree.points {
+            let Some(target) = facets.label(scope.unit.points[p as usize].id) else {
+                continue;
+            };
+            let reached = (scope.unit.dependents[p as usize].iter())
+                .copied()
+                .filter(|&q| tree.reached(q));
+            let Some(dependent) = reached.min_by_key(|&q| key(q)) else {
+                continue;
+            };
+            let depended = by_target.entry(target).or_default();
+            depended.copies += 1;
+            let held = &mut depended.first;
+            match *held {
+                [Some(one), _] if key(p) < key(one.0) => *held = [Some((p, dependent)), held[0]],
+                [Some(_), Some(two)] if key(p) >= key(two.0) => {}
+                [Some(one), _] => *held = [Some(one), Some((p, dependent))],
+                [None, _] => held[0] = Some((p, dependent)),
+            }
+        }
+        Copies {
+            scope,
+            facets,
+            tree,
+            by_target,
+        }
+    }
+
+    /// Another copy of the target `root` is a copy of that the tree depends
+    /// on, `root` being a point the tree reaches.
+    fn elsewhere(&self, root: u32) -> Option<Elsewhere> {
+        let points = &self.scope.unit.points;
+        let target = self.facets.label(points[root as usize].id)?;
+        let depended = self.by_target.get(&target)?;
+        let itself =
+            (self.scope.unit.dependents[root as usize].iter()).any(|&q| self.tree.reached(q));
+        let copies = depended.copies - u32::from(itself);
+        let (copy, dependent) = depended
+            .first
+            .into_iter()
+            .flatten()
+            .find(|&(copy, _)| copy != root)?;
+        Some(Elsewhere {
+            copy: points[copy as usize].id,
+            dependent: points[dependent as usize].id,
+            copies,
+        })
     }
 }
 
@@ -884,7 +990,7 @@ mod tests {
         let facets = Facets::default();
         let prepared = ScopeGraph::new(graph, names, &facets, &everything, scope);
         let roots = Chosen::new(roots.iter().map(|&root| names.get(root).unwrap()));
-        prepared.dominators(names, &Roots::Chosen(roots))
+        prepared.dominators(names, &facets, &Roots::Chosen(roots))
     }
 
     /// Leaves of weight one named `names`, drawn in the order of their names'
@@ -1266,6 +1372,74 @@ mod tests {
         assert_eq!((tree.total(), tree.roots(), tree.outside()), (0, 0..0, 2));
     }
 
+    /// A build of `cargo` at the top, beside the copy of `cargo` in the exec
+    /// configuration a wrapper builds: the copy at the top is a root the
+    /// build also reaches, as a dependency of the wrapper, in another
+    /// configuration.
+    fn cargo() -> (Graph, Names, Facets) {
+        let (graph, mut names) = configured(&[
+            ("cargo (exec)", "wrapper"),
+            ("cargo (exec)", "other wrapper"),
+            ("lib", "cargo"),
+            ("lib", "lonely"),
+        ]);
+        let mut facets = Facets::default();
+        for (configured, target) in [
+            ("cargo", "//:cargo"),
+            ("cargo (exec)", "//:cargo"),
+            ("wrapper", "//:wrapper"),
+            ("other wrapper", "//:wrapper"),
+            ("lib", "//:lib"),
+            ("lonely", "//:lonely"),
+        ] {
+            let target = names.intern(target);
+            facets.set_label(names.get(configured).unwrap(), target);
+        }
+        (graph, names, facets)
+    }
+
+    #[test]
+    fn a_root_whose_target_the_tree_depends_on_elsewhere_is_flagged() {
+        let (graph, names, facets) = cargo();
+        let tree = tree_with(&graph, &names, &facets, Unit::ConfiguredTarget);
+        let cargo = node(&tree, &names, "cargo");
+        let flagged = tree.elsewhere(cargo).expect("cargo reached elsewhere");
+        assert_eq!(names.resolve(flagged.copy), "cargo (exec)");
+        assert!(["wrapper", "other wrapper"].contains(&names.resolve(flagged.dependent)));
+        assert_eq!(flagged.copies, 1);
+        for name in ["wrapper", "other wrapper", "lonely", "lib"] {
+            assert_eq!(tree.elsewhere(node(&tree, &names, name)), None, "{name}");
+        }
+    }
+
+    /// A copy outside the tree is no part of the build the tree stands for.
+    #[test]
+    fn a_copy_outside_the_tree_reaches_no_root() {
+        let (graph, names, facets) = cargo();
+        let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
+        let scope = Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap();
+        let prepared = ScopeGraph::new(&graph, &names, &facets, &everything, scope);
+        let roots = Chosen::new(["cargo", "lonely"].map(|name| names.get(name).unwrap()));
+        let tree = prepared.dominators(&names, &facets, &Roots::Chosen(roots));
+        assert_eq!(tree.elsewhere(node(&tree, &names, "cargo")), None);
+    }
+
+    /// Two copies of one target both at the top are two roots, neither of
+    /// which the build reaches through a dependency.
+    #[test]
+    fn copies_of_one_target_all_at_the_top_flag_no_root() {
+        let (graph, mut names) = configured(&[("lib", "a (one)"), ("lib", "a (two)")]);
+        let mut facets = Facets::default();
+        let target = names.intern("//:a");
+        for copy in ["a (one)", "a (two)"] {
+            facets.set_label(names.get(copy).unwrap(), target);
+        }
+        let tree = tree_with(&graph, &names, &facets, Unit::ConfiguredTarget);
+        for copy in ["a (one)", "a (two)"] {
+            assert_eq!(tree.elsewhere(node(&tree, &names, copy)), None, "{copy}");
+        }
+    }
+
     #[test]
     fn children_go_heaviest_first_and_by_key_among_equals() {
         assert_eq!(
@@ -1616,7 +1790,7 @@ mod tests {
                     let facets = Facets::default();
                     let prepared = ScopeGraph::new(&graph, &names, &facets, &everything, scope);
                     let chosen = Chosen::new(roots.iter().map(|&p| Id(p as u32)));
-                    let tree = prepared.dominators(&names, &Roots::Chosen(chosen));
+                    let tree = prepared.dominators(&names, &facets, &Roots::Chosen(chosen));
                     let point =
                         |node: u32| names.resolve(tree.id(node))[1..].parse::<usize>().unwrap();
 
