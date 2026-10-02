@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use bviz_parallel::workers;
 use bviz_trace_profile::{
-    FetchSide, LaneClass, Profile, Repository, Slice, fetch_side, parks_thread,
+    CounterPoint, FetchSide, LaneClass, Profile, Repository, Slice, fetch_side, parks_thread,
 };
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
@@ -798,6 +798,11 @@ impl WallShare {
         WallShare { clocks, lanes }
     }
 
+    pub(crate) fn working_lanes(&self) -> WorkingLanes {
+        let working = &self.clocks.working;
+        WorkingLanes::over(&working.at_us, &working.sharers, WORKING_LANES_MAX_STEPS)
+    }
+
     /// The share of the lane at `lane` in [`Profile::threads`].
     pub(crate) fn lane(&self, lane: usize) -> LaneShare<'_> {
         LaneShare {
@@ -806,6 +811,140 @@ impl WallShare {
             hints: Hints::default(),
         }
     }
+}
+
+/// The most steps a profile's [`WorkingLanes`] hold. A profile holds the
+/// series for as long as it is loaded and a chart walks every step in its
+/// view on each paint, so this bounds both, to a megabyte or two held,
+/// whatever the number of spans behind the count.
+const WORKING_LANES_MAX_STEPS: usize = 1 << 16;
+
+/// How many lanes a profile's wall share is split among over its time: the
+/// number an instant given to the lanes in [`Tier::Working`] is divided by.
+/// It is zero wherever that tier is not the foremost — through a collector's
+/// pause, which stalls every lane, and while only parked lanes have a span
+/// open — and leaves the critical-path lane out, as the split does.
+///
+/// The count is a series of steps, each holding until the next. A series
+/// within its bound has a step for every change of the count. A series cut
+/// down to its bound gives each step the least and the most of the counts in
+/// effect until the next.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkingLanes {
+    least: Vec<CounterPoint>,
+    /// `None` where every step is of a single count.
+    most: Option<Vec<CounterPoint>>,
+    max: f64,
+}
+
+impl WorkingLanes {
+    /// The least count in effect over each step, ascending by time.
+    pub fn least(&self) -> &[CounterPoint] {
+        &self.least
+    }
+
+    /// The most in effect over each step of [`least`](Self::least), at the
+    /// same instants, and `None` for a series whose every step is of the
+    /// single count `least` gives.
+    pub fn most(&self) -> Option<&[CounterPoint]> {
+        self.most.as_deref()
+    }
+
+    /// The largest count the series reaches, zero where it has no step.
+    pub fn max(&self) -> f64 {
+        self.max
+    }
+
+    /// The series of a count that becomes `count[i]` at `at_us[i]`, ascending
+    /// and from zero, in at most `max_steps` steps, which are two or more.
+    fn over(at_us: &[i64], count: &[u32], max_steps: usize) -> WorkingLanes {
+        let max = count.iter().copied().max().map_or(0.0, f64::from);
+        if at_us.len() <= max_steps {
+            let least = at_us.iter().zip(count).map(|(&at, &n)| step_point(at, n));
+            return WorkingLanes {
+                least: least.collect(),
+                most: None,
+                max,
+            };
+        }
+        let (least, most) = cut_into_cells(at_us, count, max_steps);
+        WorkingLanes {
+            least,
+            most: Some(most),
+            max,
+        }
+    }
+}
+
+fn step_point(ts_us: i64, count: u32) -> CounterPoint {
+    CounterPoint {
+        ts_us,
+        value: f64::from(count),
+    }
+}
+
+/// The steps of a count that becomes `count[i]` at `at_us[i]`, ascending, and
+/// changes more often than `max_steps` steps hold: the least and the most of
+/// the counts in effect over each step, as two series at the same instants.
+fn cut_into_cells(
+    at_us: &[i64],
+    count: &[u32],
+    max_steps: usize,
+) -> (Vec<CounterPoint>, Vec<CounterPoint>) {
+    let mut least = Vec::with_capacity(max_steps);
+    let mut most = Vec::with_capacity(max_steps);
+    let mut step = |at_us, low, high| {
+        least.push(step_point(at_us, low));
+        most.push(step_point(at_us, high));
+    };
+    // A cell gives two steps at most: its own, and the count at its end.
+    let cells = max_steps / 2;
+    let (first_us, last_us) = (at_us[0], at_us[at_us.len() - 1]);
+    let cell_us = last_us.saturating_sub(first_us) / cells as i64 + 1;
+    // The count in effect ahead of the change at `next`.
+    let mut held = 0;
+    // The end of the last cell if it stood for several changes.
+    let mut restate_at_us = None;
+    let mut next = 0;
+    while next < at_us.len() {
+        let cell_start_us = at_us[next] - (at_us[next] - first_us) % cell_us;
+        let cell_end_us = cell_start_us.saturating_add(cell_us);
+        let changes = at_us[next..].partition_point(|&at| at < cell_end_us);
+        let stands_at_us = match changes {
+            1 => at_us[next],
+            _ => cell_start_us,
+        };
+        if let Some(at) = restate_at_us.take()
+            && at < stands_at_us
+        {
+            step(at, held, held);
+        }
+        if changes == 1 {
+            step(at_us[next], count[next], count[next]);
+        } else {
+            // The count held into the cell is in effect up to the first
+            // change within it.
+            let entering = (at_us[next] > cell_start_us).then_some(held);
+            let (low, high) = count_range(entering, &count[next..next + changes]);
+            step(cell_start_us, low, high);
+            restate_at_us = Some(cell_end_us);
+        }
+        next += changes;
+        held = count[next - 1];
+    }
+    if let Some(at) = restate_at_us {
+        step(at, held, held);
+    }
+    (least, most)
+}
+
+/// The least and the most of `entering`, if any, and the counts `within`,
+/// which are one or more.
+fn count_range(entering: Option<u32>, within: &[u32]) -> (u32, u32) {
+    let ends = entering.unwrap_or(within[0]);
+    within
+        .iter()
+        .fold((ends, ends), |(low, high), &n| (low.min(n), high.max(n)))
 }
 
 /// One lane's share of elapsed time, for weighing stretches of it. It keeps
@@ -1265,6 +1404,220 @@ mod tests {
         }
         // Thirds everywhere: the host or its worker beside the two others.
         assert_eq!(shares(&p, 0, 100), [28, 5, 33, 33]);
+    }
+
+    fn pairs(points: &[CounterPoint]) -> Vec<(i64, f64)> {
+        points.iter().map(|p| (p.ts_us, p.value)).collect()
+    }
+
+    /// The profile's working-lanes series as `(time, count)` pairs.
+    fn working_lanes(p: &Arc<Profile>) -> Vec<(i64, f64)> {
+        let lanes = WallShare::new(p, 2).working_lanes();
+        assert_eq!(lanes.most(), None);
+        pairs(lanes.least())
+    }
+
+    #[test]
+    fn the_working_lanes_step_wherever_a_lane_begins_or_ends_its_work() {
+        let p = profile(vec![
+            track(1, LaneClass::Execution, vec![work(0, 100)]),
+            track(2, LaneClass::Execution, vec![work(50, 100), work(170, 10)]),
+        ]);
+        assert_eq!(
+            working_lanes(&p),
+            [
+                (0, 1.0),
+                (50, 2.0),
+                (100, 1.0),
+                (150, 0.0),
+                (170, 1.0),
+                (180, 0.0)
+            ]
+        );
+        assert_eq!(WallShare::new(&p, 2).working_lanes().max(), 2.0);
+    }
+
+    #[test]
+    fn a_parked_lane_is_not_among_the_working() {
+        // The main thread waits throughout, working only from 50 to 100.
+        let p = profile(vec![
+            track(1, LaneClass::Main, vec![wait(0, 300), work(50, 50)]),
+            track(2, LaneClass::Execution, vec![work(80, 100)]),
+        ]);
+        assert_eq!(
+            working_lanes(&p),
+            [(50, 1.0), (80, 2.0), (100, 1.0), (180, 0.0)]
+        );
+    }
+
+    #[test]
+    fn a_fetch_host_is_among_the_working_only_while_its_worker_is_not() {
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, vec![fetch_host("r", 0, 100)]),
+            track(2, LaneClass::RepoFetch, vec![fetch_worker("r", 40, 30)]),
+            track(3, LaneClass::Execution, vec![work(20, 30)]),
+        ]);
+        // The worker takes the host's place from 40 to 70.
+        assert_eq!(
+            working_lanes(&p),
+            [(0, 1.0), (20, 2.0), (50, 1.0), (100, 0.0)]
+        );
+    }
+
+    #[test]
+    fn no_lane_works_through_a_collector_pause() {
+        let p = profile(vec![
+            track(1, LaneClass::Gc, vec![pause(40, 20), pause(150, 10)]),
+            track(2, LaneClass::Execution, vec![work(0, 100)]),
+            track(3, LaneClass::Execution, vec![work(0, 100)]),
+        ]);
+        // The pause past every lane's work changes nothing.
+        assert_eq!(
+            working_lanes(&p),
+            [(0, 2.0), (40, 0.0), (60, 2.0), (100, 0.0)]
+        );
+    }
+
+    #[test]
+    fn the_critical_path_lane_is_not_among_the_working() {
+        let p = profile(vec![
+            track(
+                0,
+                LaneClass::CriticalPath,
+                vec![slice("action 'a'", "critical path component", 0, 100)],
+            ),
+            track(1, LaneClass::Execution, vec![work(20, 50)]),
+        ]);
+        assert_eq!(working_lanes(&p), [(20, 1.0), (70, 0.0)]);
+    }
+
+    #[test]
+    fn a_profile_no_lane_works_in_has_no_working_lanes() {
+        let p = profile(vec![track(1, LaneClass::Main, vec![wait(0, 100)])]);
+        assert_eq!(working_lanes(&p), []);
+        assert_eq!(WallShare::new(&p, 2).working_lanes().max(), 0.0);
+    }
+
+    #[test]
+    fn a_series_within_its_bound_has_a_step_for_every_change() {
+        let (at_us, count) = ([0, 10, 12, 14, 30, 100], [1, 2, 3, 2, 1, 0]);
+        let lanes = WorkingLanes::over(&at_us, &count, at_us.len());
+        assert_eq!(
+            pairs(lanes.least()),
+            [
+                (0, 1.0),
+                (10, 2.0),
+                (12, 3.0),
+                (14, 2.0),
+                (30, 1.0),
+                (100, 0.0)
+            ]
+        );
+        assert_eq!(lanes.most(), None);
+        assert_eq!(lanes.max(), 3.0);
+    }
+
+    /// The least and the most of each step of a series cut into cells.
+    fn ranges(lanes: &WorkingLanes) -> [Vec<(i64, f64)>; 2] {
+        let most = lanes.most().expect("a series cut into cells");
+        [pairs(lanes.least()), pairs(most)]
+    }
+
+    #[test]
+    fn changes_sharing_a_cell_stand_as_the_range_of_their_counts() {
+        // Two cells of 51 over a hundred microseconds: five changes fall in
+        // the first, whose last count is stated at its end, and one in the
+        // second, which stays where it is.
+        let lanes = WorkingLanes::over(&[0, 10, 12, 14, 30, 100], &[1, 2, 3, 2, 1, 0], 4);
+        let [least, most] = ranges(&lanes);
+        assert_eq!(least, [(0, 1.0), (51, 1.0), (100, 0.0)]);
+        assert_eq!(most, [(0, 3.0), (51, 1.0), (100, 0.0)]);
+        assert_eq!(lanes.max(), 3.0);
+    }
+
+    #[test]
+    fn a_cell_of_several_changes_counts_what_was_in_effect_as_it_began() {
+        // Two cells of 10. The second opens on the 7 its first change, at 12,
+        // ends, and stands where the first's last count would be stated.
+        let lanes = WorkingLanes::over(&[0, 3, 12, 15, 19], &[5, 7, 1, 2, 0], 4);
+        let [least, most] = ranges(&lanes);
+        assert_eq!(least, [(0, 5.0), (10, 0.0), (20, 0.0)]);
+        assert_eq!(most, [(0, 7.0), (10, 7.0), (20, 0.0)]);
+    }
+
+    #[test]
+    fn a_pause_within_a_cell_of_several_changes_reads_as_its_least() {
+        // One cell: the count drops to zero from 4 to 6.
+        let lanes = WorkingLanes::over(&[0, 4, 6, 9], &[8, 0, 8, 0], 2);
+        let [least, most] = ranges(&lanes);
+        assert_eq!(least, [(0, 0.0), (10, 0.0)]);
+        assert_eq!(most, [(0, 8.0), (10, 0.0)]);
+    }
+
+    #[test]
+    fn random_counts_cut_into_cells_keep_the_range_of_every_step() {
+        const CASES: usize = 200;
+        const MAX_CHANGES: usize = 60;
+        const MAX_GAP_US: i64 = 40;
+        const MAX_COUNT: u32 = 9;
+        const SEED: u64 = 0x2545_F491_4F6C_DD1D;
+
+        let mut rng = Rng::with_seed(SEED);
+        for case in 0..CASES {
+            let changes = rng.usize(1..=MAX_CHANGES);
+            let mut at_us = Vec::with_capacity(changes);
+            let mut count = Vec::with_capacity(changes);
+            let mut now = rng.i64(-500..500);
+            for change in 0..changes {
+                at_us.push(now);
+                now += rng.i64(1..=MAX_GAP_US);
+                count.push(match change + 1 == changes {
+                    true => 0,
+                    false => rng.u32(..MAX_COUNT),
+                });
+            }
+            // The count in effect at `t`.
+            let exact_at = |t: i64| match at_us.partition_point(|&at| at <= t) {
+                0 => 0,
+                after => count[after - 1],
+            };
+            let peak = count.iter().copied().max().map(f64::from);
+            for max_steps in [2, 3, 7, 50, 5000] {
+                let lanes = WorkingLanes::over(&at_us, &count, max_steps);
+                assert_eq!(Some(lanes.max()), peak, "case {case}");
+                let least = pairs(lanes.least());
+                assert!(least.len() <= max_steps, "case {case}");
+                assert!(
+                    least.windows(2).all(|w| w[0].0 < w[1].0),
+                    "case {case}: {least:?}"
+                );
+                assert_eq!(least.last().map(|p| p.1), Some(0.0), "case {case}");
+                let Some(most) = lanes.most() else {
+                    assert!(changes <= max_steps, "case {case}");
+                    let exact = at_us.iter().map(|&at| (at, f64::from(exact_at(at))));
+                    assert_eq!(least, exact.collect::<Vec<_>>(), "case {case}");
+                    continue;
+                };
+                assert!(changes > max_steps, "case {case}");
+                let most = pairs(most);
+                assert_eq!(most.len(), least.len(), "case {case}");
+                // Every step but the last bounds the counts in effect from its
+                // instant to the next step's.
+                for (i, step) in least.windows(2).enumerate() {
+                    let (from, until) = (step[0].0, step[1].0);
+                    assert_eq!(most[i].0, from, "case {case}");
+                    let within = (from..until).map(exact_at);
+                    let low = within.clone().min().map(f64::from);
+                    let high = within.max().map(f64::from);
+                    assert_eq!(
+                        (Some(least[i].1), Some(most[i].1)),
+                        (low, high),
+                        "case {case} steps {max_steps} over [{from}, {until})"
+                    );
+                }
+                assert_eq!(most.last(), least.last(), "case {case}");
+            }
+        }
     }
 
     #[test]

@@ -216,18 +216,57 @@ pub(crate) fn sample_at(points: &[CounterPoint], t: f64) -> Option<f64> {
     Some(points[after - 1].value)
 }
 
-/// The unit a counter lane's values carry, inferred from its name since the
-/// trace format stores none. Empty for unitless counts (action counts,
-/// SkyFunctions, RPCs, load averages).
+/// The unit a counter lane's values carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CounterUnit {
     Cores,
     Megabytes,
     Megabits,
     Percent,
+    Lanes,
+    /// A unitless count (action counts, SkyFunctions, RPCs, load averages).
     Plain,
 }
 
+/// How a counter lane's values spread over the height of its chart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueScale {
+    Linear,
+    /// By the square root of the value, which spreads the low end of a wide
+    /// range.
+    SquareRoot,
+}
+
+impl CounterUnit {
+    /// Lanes are counted from a few, where a build runs narrow, to as many as
+    /// the machine runs at once, and it is the few that a chart of them is
+    /// read for.
+    pub(crate) fn value_scale(self) -> ValueScale {
+        match self {
+            CounterUnit::Lanes => ValueScale::SquareRoot,
+            CounterUnit::Cores
+            | CounterUnit::Megabytes
+            | CounterUnit::Megabits
+            | CounterUnit::Percent
+            | CounterUnit::Plain => ValueScale::Linear,
+        }
+    }
+}
+
+impl ValueScale {
+    /// How far up a chart reaching `max` the value stands, from 0 at its
+    /// floor to 1 at `max`.
+    pub(crate) fn height_of(self, value: f64, max: f64) -> f32 {
+        let linear = (value / max) as f32;
+        match self {
+            ValueScale::Linear => linear,
+            ValueScale::SquareRoot => linear.sqrt(),
+        }
+    }
+}
+
+/// The unit of a recorded counter lane, inferred from its name since the trace
+/// format stores none.
 pub(crate) fn unit_for(lane: &str) -> CounterUnit {
     let lane = lane.to_lowercase();
     if lane.contains("cpu usage") {
@@ -256,6 +295,7 @@ pub(crate) fn format_counter(value: f64, unit: CounterUnit) -> String {
         }
         CounterUnit::Megabits => format!("{value:.2} Mbps"),
         CounterUnit::Percent => format!("{value:.0}%"),
+        CounterUnit::Lanes => format!("{value:.0}"),
         CounterUnit::Plain => format!("{value:.1}"),
     }
 }
@@ -465,6 +505,19 @@ mod tests {
     }
 
     #[test]
+    fn lanes_spread_by_their_square_root_and_the_recorded_units_linearly() {
+        let lanes = CounterUnit::Lanes.value_scale();
+        assert_eq!(lanes.height_of(0.0, 64.0), 0.0);
+        assert_eq!(lanes.height_of(4.0, 64.0), 0.25);
+        assert_eq!(lanes.height_of(16.0, 64.0), 0.5);
+        assert_eq!(lanes.height_of(64.0, 64.0), 1.0);
+        for name in ["CPU usage (Bazel)", "System memory usage", "action count"] {
+            let recorded = unit_for(name).value_scale();
+            assert_eq!(recorded.height_of(4.0, 64.0), 0.0625, "{name}");
+        }
+    }
+
+    #[test]
     fn format_counter_uses_unit_and_thresholds() {
         assert_eq!(format_counter(3.5, CounterUnit::Cores), "3.50 cores");
         assert_eq!(format_counter(512.0, CounterUnit::Megabytes), "512 MB");
@@ -474,5 +527,7 @@ mod tests {
         assert_eq!(format_counter(12.5, CounterUnit::Megabits), "12.50 Mbps");
         assert_eq!(format_counter(80.0, CounterUnit::Percent), "80%");
         assert_eq!(format_counter(42.0, CounterUnit::Plain), "42.0");
+        assert_eq!(format_counter(42.0, CounterUnit::Lanes), "42");
+        assert_eq!(format_counter(0.0, CounterUnit::Lanes), "0");
     }
 }

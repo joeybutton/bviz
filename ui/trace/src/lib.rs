@@ -346,12 +346,12 @@ impl TracePanel {
     }
 
     /// [`Regions`] for the current viewport (captured by the timeline), strip and
-    /// gutter sizes, the loaded profile's counter count, and the flame lanes'
+    /// gutter sizes, the loaded profile's counter track count, and the flame lanes'
     /// total height.
     fn region_inputs(&self, cx: &App) -> RegionInputs {
         let model = self.model.read(cx);
         RegionInputs {
-            n_counters: model.profile().map_or(0, |p| p.counters().len()),
+            n_counters: model.profile().map_or(0, |p| counters::track_count(p)),
             counters: self.counters,
             gutter_width: self.gutter_width,
             flame_total: model.lane_layout().map(|l| l.total_height).unwrap_or(0.0),
@@ -1422,13 +1422,7 @@ fn paint_counter_labels(
     for gl in regions.counter_lanes(counter_scroll) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-        paint_gutter_label(
-            g,
-            profile.str(profile.counters()[gl.lane].name),
-            ty,
-            window,
-            cx,
-        );
+        paint_gutter_label(g, counters::track_name(profile, gl.lane), ty, window, cx);
     }
 }
 

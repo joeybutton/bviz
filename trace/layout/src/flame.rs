@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::{Span, painted};
 use crate::selection::TimeSelection;
-use crate::wall_share::{LaneShare, WallShare};
+use crate::wall_share::{LaneShare, WallShare, WorkingLanes};
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
@@ -829,6 +829,11 @@ impl TrackFlamer {
     fn wall_share(&self) -> &WallShare {
         self.wall_share
             .get_or_init(|| WallShare::new(&self.profile, worker_count()))
+    }
+
+    /// The [`WorkingLanes`] of the wall share this flamer weighs by.
+    pub fn working_lanes(&self) -> WorkingLanes {
+        self.wall_share().working_lanes()
     }
 
     #[cfg(test)]

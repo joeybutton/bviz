@@ -7,7 +7,7 @@ use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_invocation::Session;
 use bviz_trace_layout::{
-    FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, lay_out_lanes,
+    FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
@@ -31,20 +31,69 @@ pub(crate) struct AggregateBuildStarted;
 /// rather than on every notification the model sends.
 pub(crate) struct SourceReplaced;
 
+/// The loaded profile's working lanes are derived. Carried as an event because
+/// only the timeline's cached scene draws them, which a notification replays
+/// rather than rebuilds.
+pub(crate) struct WorkingLanesDerived;
+
 /// A loaded profile with what is derived from it once for every reader of it.
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
+    working_lanes: DerivedLanes,
+}
+
+/// A profile's [`WorkingLanes`], which are derived off the UI thread.
+enum DerivedLanes {
+    Deriving {
+        /// Held with the profile it reads, so that it ends once another is
+        /// loaded.
+        _derivation: Task<()>,
+    },
+    Derived(WorkingLanes),
 }
 
 impl LoadedProfile {
-    fn new(profile: Profile) -> LoadedProfile {
+    /// `profile` as loaded, its working lanes on their way to the model of
+    /// `cx`.
+    fn new(profile: Profile, cx: &mut Context<TraceModel>) -> LoadedProfile {
+        let flamer = Arc::new(TrackFlamer::new(&Arc::new(profile)));
+        let derived_from = flamer.clone();
+        let deriving = cx.spawn(async move |model, cx| {
+            let derive = async move {
+                let lanes = derived_from.working_lanes();
+                (derived_from, lanes)
+            };
+            let (derived_from, lanes) = cx.background_executor().spawn(derive).await;
+            model
+                .update(cx, |model, cx| {
+                    if model.adopt_working_lanes(&derived_from, lanes) {
+                        cx.emit(WorkingLanesDerived);
+                    }
+                })
+                .ok();
+        });
+        LoadedProfile::deriving(flamer, deriving)
+    }
+
+    fn deriving(flamer: Arc<TrackFlamer>, _derivation: Task<()>) -> LoadedProfile {
         LoadedProfile {
-            flamer: Arc::new(TrackFlamer::new(&Arc::new(profile))),
+            flamer,
+            working_lanes: DerivedLanes::Deriving { _derivation },
         }
     }
 
     pub(crate) fn profile(&self) -> &Arc<Profile> {
         self.flamer.profile()
+    }
+
+    /// Takes `lanes` as its own if they were derived from its own `flamer`,
+    /// and says whether it did.
+    fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
+        let own = Arc::ptr_eq(&self.flamer, flamer);
+        if own {
+            self.working_lanes = DerivedLanes::Derived(lanes);
+        }
+        own
     }
 }
 
@@ -121,6 +170,7 @@ pub(crate) struct TraceModel {
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
+impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded once the read finishes
@@ -137,7 +187,7 @@ impl TraceModel {
                 move || profile.join(),
                 |model, result, cx| {
                     let source = match result {
-                        Ok(profile) => Source::Loaded(LoadedProfile::new(profile)),
+                        Ok(profile) => Source::Loaded(LoadedProfile::new(profile, cx)),
                         Err(err) => Source::Failed(err),
                     };
                     model.set_source(source, cx);
@@ -181,6 +231,24 @@ impl TraceModel {
         match &self.source {
             Source::Loaded(loaded) => Some(loaded.profile()),
             _ => None,
+        }
+    }
+
+    /// The loaded profile's working lanes, once derived.
+    pub(crate) fn working_lanes(&self) -> Option<&WorkingLanes> {
+        match &self.source {
+            Source::Loaded(LoadedProfile {
+                working_lanes: DerivedLanes::Derived(lanes),
+                ..
+            }) => Some(lanes),
+            _ => None,
+        }
+    }
+
+    fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
+        match &mut self.source {
+            Source::Loaded(loaded) => loaded.adopt_working_lanes(flamer, lanes),
+            _ => false,
         }
     }
 
@@ -615,16 +683,45 @@ impl TraceModel {
 
 #[cfg(test)]
 mod tests {
-    use super::TraceModel;
+    use super::{LoadedProfile, TraceModel};
+    use crate::Source;
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight};
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer};
+    use bviz_trace_profile::Profile;
     use gpui::Task;
+    use std::sync::Arc;
 
     /// A document whose read has not finished, for exercising the state a panel
     /// drives it through.
     fn model() -> TraceModel {
         TraceModel::new(None, Task::ready(()))
+    }
+
+    /// The flamer of a profile of one lane working over `[0, 100)`.
+    fn flamer() -> Arc<TrackFlamer> {
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}},
+            {"cat":"general information","name":"a","ph":"X","ts":0,"dur":100,"tid":1}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        Arc::new(TrackFlamer::new(&Arc::new(profile)))
+    }
+
+    #[test]
+    fn working_lanes_are_adopted_only_by_the_loaded_profile_they_were_derived_from() {
+        let mut model = model();
+        let replaced = flamer();
+        assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
+
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), Task::ready(())));
+        assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
+        assert!(model.working_lanes().is_none());
+
+        assert!(model.adopt_working_lanes(&loaded, loaded.working_lanes()));
+        let adopted = model.working_lanes().expect("the loaded profile's lanes");
+        assert_eq!(*adopted, loaded.working_lanes());
     }
 
     #[test]
