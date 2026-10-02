@@ -4,7 +4,7 @@
 use super::{DominatorsPanel, LeaveRoots, RootedBy};
 use crate::Palette;
 use crate::model::{GraphModel, Prepared};
-use crate::point::unit_names;
+use crate::point::{point_label, unit_names};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
@@ -112,10 +112,15 @@ pub(super) fn find(
 ) -> Result<Found, PatternError> {
     let set = TargetSet::parse(text)?;
     let index = targets.get();
-    let Resolved { targets: named, .. } = index.resolve(&set)?;
+    let Resolved {
+        targets: named,
+        left_out,
+    } = index.resolve(&set)?;
     let mut notices: Vec<String> = Vec::new();
-    notices.extend(manual_untold(&set, index.tags()).map(str::to_owned));
     let shared = targets.shared();
+    let left_out = left_out.iter().map(|&id| point_label(id, shared));
+    notices.extend(manual_left_out(left_out.collect()));
+    notices.extend(manual_untold(&set, index.tags()).map(str::to_owned));
     let (base, facets) = (&shared.base, &shared.facets);
     let top = |configured| TopLevel::of(&named, base, facets, configured);
     let (points, top) = match within.views() {
@@ -140,6 +145,43 @@ pub(super) fn find(
         named: Chosen::new(named),
         notices,
     })
+}
+
+/// The most manual targets the field names as left out by a wildcard.
+const NAMED_MANUAL: usize = 3;
+
+/// What the field notes of the manual targets the set's wildcards left out,
+/// labelled `left_out`, naming the first few; nothing where there are none.
+/// The targets a bare package names come first, being the ones a reader
+/// names without a wildcard and then misses under one.
+fn manual_left_out(mut left_out: Vec<String>) -> Option<String> {
+    let count = left_out.len();
+    let (targets, name_them) = match count {
+        0 => return None,
+        1 => ("target", "name it to include it"),
+        _ => ("targets", "name them to include them"),
+    };
+    left_out.sort_by_key(|label| !names_its_package(label));
+    left_out.truncate(NAMED_MANUAL);
+    let more = if left_out.len() < count { ", …" } else { "" };
+    let named = left_out.join(", ");
+    Some(format!(
+        "{count} manual {targets} left out by wildcards: {named}{more} — {name_them}"
+    ))
+}
+
+/// Whether `label` is the target the bare name of its package stands for,
+/// as `//foo/bar:bar` is what `//foo/bar` names, and `@repo//:repo` what
+/// `@repo` does.
+fn names_its_package(label: &str) -> bool {
+    let Some((package, name)) = label.rsplit_once(':') else {
+        return true;
+    };
+    let last = match package.strip_suffix("//") {
+        Some(repo) => repo.trim_start_matches('@'),
+        None => package.rsplit_once('/').map_or(package, |(_, last)| last),
+    };
+    last == name
 }
 
 /// What the field notes of `set` where `tags`, how far the inputs state the
@@ -276,6 +318,50 @@ mod tests {
             noted(0, 1, 0),
             ["1 generated file can't be traced to its rule in this input"]
         );
+    }
+
+    #[test]
+    fn the_manual_targets_left_out_are_counted_and_the_first_named() {
+        let noted = |labels: &[&str]| {
+            manual_left_out(labels.iter().map(|label| label.to_string()).collect())
+        };
+        assert_eq!(noted(&[]), None);
+        assert_eq!(
+            noted(&["//dist:dist"]).unwrap(),
+            "1 manual target left out by wildcards: //dist:dist — name it to include it"
+        );
+        assert_eq!(
+            noted(&["//a:x", "//b:y"]).unwrap(),
+            "2 manual targets left out by wildcards: //a:x, //b:y — name them to include them"
+        );
+        assert_eq!(
+            noted(&["//a:w", "//a:x", "//a:y", "//a:z"]).unwrap(),
+            "4 manual targets left out by wildcards: //a:w, //a:x, //a:y, … — name them to \
+             include them"
+        );
+    }
+
+    #[test]
+    fn the_manual_targets_a_bare_package_names_are_named_first() {
+        let labels = [
+            "//dist:a",
+            "//dist:b",
+            "//dist:c",
+            "//dist:dist",
+            "//tools/env:env",
+        ];
+        let noted = manual_left_out(labels.map(str::to_owned).to_vec()).unwrap();
+        assert_eq!(
+            noted,
+            "5 manual targets left out by wildcards: //dist:dist, //tools/env:env, //dist:a, … — \
+             name them to include them"
+        );
+        for named_bare in ["//dist", "//dist:dist", "@repo//:repo", "@repo//a/b:b"] {
+            assert!(names_its_package(named_bare), "{named_bare}");
+        }
+        for named_whole in ["//dist:all", "//:dist", "@repo//:all", "//a/b:a"] {
+            assert!(!names_its_package(named_whole), "{named_whole}");
+        }
     }
 
     /// Only a wildcard adding targets leaves the manual ones out, so only a
