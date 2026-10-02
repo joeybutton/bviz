@@ -12,6 +12,21 @@ pub(crate) struct KindNames {
     pub(crate) many: &'static str,
 }
 
+impl KindNames {
+    /// How a reader names `count` things of the kind, one or several.
+    pub(crate) fn of(&self, count: u32) -> &'static str {
+        match count {
+            1 => self.one,
+            _ => self.many,
+        }
+    }
+
+    /// `count` and how a reader names that many things of the kind.
+    pub(crate) fn counted(&self, count: u32) -> String {
+        format!("{count} {}", self.of(count))
+    }
+}
+
 /// How a reader names one point of `unit`, and several.
 pub(crate) fn unit_names(unit: Unit) -> KindNames {
     let (one, many) = match unit {

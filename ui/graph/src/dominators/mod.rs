@@ -13,7 +13,7 @@ use crate::point::{identify, unit_names};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::Dominators;
+use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::{Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_ui_components::{
@@ -552,9 +552,6 @@ struct Frame {
     row: Pixels,
 }
 
-/// The most lines a tooltip reads.
-const TOOLTIP_LINES: usize = 9;
-
 /// What the tooltip over the cell holding `holds` of `tree` drawn from `focus`
 /// reads: what it stands for, and how much of the build exists only because
 /// of it.
@@ -566,13 +563,9 @@ fn describe(
 ) -> Vec<String> {
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let points = |count: u32| match count {
-        1 => format!("1 {}", names.one),
-        _ => format!("{count} {}", names.many),
-    };
     let stand_on = |weight: u32, on: &str| {
         let exist = if weight == 1 { "exists" } else { "exist" };
-        format!("{} {exist} only because of {on}", points(weight))
+        format!("{} {exist} only because of {on}", names.counted(weight))
     };
     let shares = |weight: u32, within: Option<Focused>| {
         let of_build = format!("{} of the build", share(weight, tree.total()));
@@ -588,25 +581,27 @@ fn describe(
         }
     };
     let on_top = Focused::of(holds) == focus;
-    let mut lines = Vec::with_capacity(TOOLTIP_LINES);
+    let mut lines = Vec::new();
     match holds {
-        Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), points(tree.total())]),
+        Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
             lines.push(stand_on(weight, "this"));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
-            let dominator = match tree.parent(node) {
-                Some(parent) => point_name(tree.id(parent), unit, shared),
-                None => WHOLE_BUILD.to_owned(),
-            };
-            lines.push(format!("immediately dominated by {dominator}"));
+            match tree.parent(node) {
+                Some(parent) => {
+                    let dominator = point_name(tree.id(parent), unit, shared);
+                    lines.push(format!("immediately dominated by {dominator}"));
+                }
+                None => standing(tree, node, shared, &mut lines),
+            }
         }
         Holds::Rest(run) => {
             let (count, weight) = (run.count(), run.weight());
             lines.push(match on_top {
                 true => run_name(tree, shared, run),
-                false => format!("{} too narrow to draw apart", points(count)),
+                false => format!("{} too narrow to draw apart", names.counted(count)),
             });
             lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
@@ -614,6 +609,51 @@ fn describe(
     }
     lines
 }
+
+/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`: that
+/// it is top-level, or how many top-level points share it, listing the
+/// first few.
+fn standing(tree: &Dominators, node: u32, shared: &Shared, lines: &mut Vec<String>) {
+    let unit = tree.scope().unit();
+    let count = match tree.standing(node) {
+        Standing::TopLevel { in_cycle } => {
+            let depended_on = match in_cycle {
+                false => "nothing depends on it",
+                true => "nothing outside its cycle depends on it",
+            };
+            return lines.push(format!("{TOP_LEVEL}: {depended_on}"));
+        }
+        Standing::Below(count) => count,
+    };
+    let named = tree.top_level_above(node, NAMED_TOP_LEVEL);
+    let colon = if named.is_empty() { "" } else { ":" };
+    let named_as = unit_names(unit).of(count.value());
+    lines.push(format!("{}{colon}", shared_by(count, named_as)));
+    let listed = named
+        .iter()
+        .map(|&above| point_name(tree.id(above), unit, shared));
+    lines.extend(listed.map(|name| format!("{LISTED}{name}")));
+    let more = count.less(named.len() as u32);
+    if !named.is_empty() && more.value() > 0 {
+        lines.push(format!("{LISTED}and {more} more"));
+    }
+}
+
+/// Leads each line of a list within a tooltip.
+const LISTED: &str = "  · ";
+
+/// What a reader calls a point nothing depends on but the other members of
+/// a cycle it belongs to.
+const TOP_LEVEL: &str = "top-level";
+
+/// How a reader says that `how_many` top-level points, called `named`, share
+/// a point.
+fn shared_by(how_many: impl std::fmt::Display, named: &str) -> String {
+    format!("shared by {how_many} {TOP_LEVEL} {named}")
+}
+
+/// The most top-level points a tooltip names as sharing a top.
+const NAMED_TOP_LEVEL: usize = 3;
 
 /// What a click on the cell holding `holds` under `top` does, and a double
 /// click where it holds a point and a graph panel `reveals` it; absent where a

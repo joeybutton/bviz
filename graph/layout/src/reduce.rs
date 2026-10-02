@@ -658,9 +658,11 @@ impl Count {
         matches!(self, Count::Estimated(_))
     }
 
-    fn less(self, n: u32) -> Self {
+    /// The count with `n` of what it counts left out, and zero where `n`
+    /// exceeds it.
+    pub fn less(self, n: u32) -> Self {
         match self {
-            Count::Exact(m) => Count::Exact(m - n),
+            Count::Exact(m) => Count::Exact(m.saturating_sub(n)),
             Count::Estimated(m) => Count::Estimated(m.saturating_sub(n)),
         }
     }
@@ -892,6 +894,13 @@ mod tests {
     use crate::intern::Names;
     use fastrand::Rng;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_count_less_more_than_it_holds_is_zero() {
+        assert_eq!(Count::Exact(3).less(2), Count::Exact(1));
+        assert_eq!(Count::Exact(2).less(3), Count::Exact(0));
+        assert_eq!(Count::Estimated(2).less(3), Count::Estimated(0));
+    }
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
         let mut g = Graph::new();
