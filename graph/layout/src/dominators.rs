@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
@@ -150,6 +150,118 @@ impl Dominators {
             }
         }
         found
+    }
+}
+
+/// How the points of a dominator tree group into the targets they are
+/// configurations of, as [`Facets::label`] names them.
+pub struct Targets {
+    /// By node.
+    held: Vec<Held>,
+    /// By node, how many points of the tree are configurations of its target,
+    /// itself among them; none where it names no target.
+    copies: Vec<u32>,
+}
+
+/// The targets the points a node dominates are configurations of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Held {
+    targets: u32,
+    /// At most `targets`.
+    only_here: u32,
+}
+
+impl Held {
+    /// How many distinct targets.
+    pub fn targets(self) -> u32 {
+        self.targets
+    }
+
+    /// How many of those targets no point outside the subtree is a
+    /// configuration of.
+    pub fn only_here(self) -> u32 {
+        self.only_here
+    }
+}
+
+impl Targets {
+    /// Each node's subtree is gathered into a count by target once, its
+    /// children's counts merged smaller into larger, so the whole pass takes
+    /// O(n log n) for a tree of n points.
+    pub fn of(tree: &Dominators, facets: &Facets) -> Self {
+        let n = tree.total() as usize;
+        let label: Vec<Option<Id>> = (0..tree.total())
+            .map(|node| facets.label(tree.id(node)))
+            .collect();
+        let mut copies_of: FxHashMap<Id, u32> =
+            FxHashMap::with_capacity_and_hasher(n, Default::default());
+        for &target in label.iter().flatten() {
+            *copies_of.entry(target).or_default() += 1;
+        }
+        let mut gathered: Vec<Option<Gathered>> = Vec::with_capacity(n);
+        gathered.resize_with(n, || None);
+        let mut held = vec![
+            Held {
+                targets: 0,
+                only_here: 0
+            };
+            n
+        ];
+        for node in (0..tree.total()).rev() {
+            let mut children: Vec<Gathered> = tree
+                .children(node)
+                .filter_map(|child| gathered[child as usize].take())
+                .collect();
+            let largest = (0..children.len()).max_by_key(|&c| children[c].count.len());
+            let mut into = match largest {
+                Some(largest) => children.swap_remove(largest),
+                None => Gathered::default(),
+            };
+            for child in children {
+                for (target, count) in child.count {
+                    into.add(target, count, copies_of[&target]);
+                }
+            }
+            if let Some(target) = label[node as usize] {
+                into.add(target, 1, copies_of[&target]);
+            }
+            held[node as usize] = Held {
+                targets: into.count.len() as u32,
+                only_here: into.whole,
+            };
+            gathered[node as usize] = Some(into);
+        }
+        let copies = label
+            .iter()
+            .map(|target| target.map_or(0, |target| copies_of[&target]))
+            .collect();
+        Self { held, copies }
+    }
+
+    pub fn held(&self, node: u32) -> Held {
+        self.held[node as usize]
+    }
+
+    pub fn copies(&self, node: u32) -> u32 {
+        self.copies[node as usize]
+    }
+}
+
+/// The points of a subtree, counted by target.
+#[derive(Default)]
+struct Gathered {
+    count: FxHashMap<Id, u32>,
+    /// How many targets every point of which the subtree holds.
+    whole: u32,
+}
+
+impl Gathered {
+    /// Counts `count` more points of `target`, which has `copies` points in
+    /// the tree.
+    fn add(&mut self, target: Id, count: u32, copies: u32) {
+        let counted = self.count.entry(target).or_default();
+        *counted += count;
+        self.whole += u32::from(*counted == copies);
     }
 }
 
@@ -636,6 +748,101 @@ mod tests {
         assert_eq!(named, ["near"]);
         let base = tree.standing(node(&tree, &names, "0"));
         assert_eq!(base, Standing::Below(Count::Exact(2)));
+    }
+
+    /// `app` builds `lib` in its own configuration and a `tool` in the exec
+    /// one, which builds `lib` there too: the tool's subtree holds one of the
+    /// two configurations of `lib`, and all of the tool.
+    #[test]
+    fn a_subtree_counts_its_targets_and_those_configured_only_in_it() {
+        let (graph, mut names) = configured(&[
+            ("lib", "app"),
+            ("tool (exec)", "app"),
+            ("lib (exec)", "tool (exec)"),
+        ]);
+        let mut facets = Facets::default();
+        for (configured, target) in [
+            ("app", "//:app"),
+            ("lib", "//:lib"),
+            ("lib (exec)", "//:lib"),
+            ("tool (exec)", "//:tool"),
+        ] {
+            let target = names.intern(target);
+            facets.set_label(names.get(configured).unwrap(), target);
+        }
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        let targets = Targets::of(&tree, &facets);
+        let held = |name| {
+            let held = targets.held(node(&tree, &names, name));
+            (held.targets(), held.only_here())
+        };
+        assert_eq!(held("app"), (3, 3));
+        assert_eq!(held("tool (exec)"), (2, 1));
+        assert_eq!(held("lib (exec)"), (1, 0));
+        assert_eq!(targets.copies(node(&tree, &names, "lib (exec)")), 2);
+        assert_eq!(targets.copies(node(&tree, &names, "app")), 1);
+    }
+
+    /// On random trees whose points are configurations of a few targets,
+    /// each subtree counts what enumerating it finds.
+    #[test]
+    fn random_subtrees_count_the_targets_enumerating_them_finds() {
+        const TARGETS: usize = 6;
+        let mut next = random_indices();
+        for (nodes, edges) in [(30, 45), (120, 160), (120, 300)] {
+            let deps: Vec<(usize, usize)> = (0..edges)
+                .map(|_| {
+                    let (a, b) = (next(nodes), next(nodes));
+                    (a.max(b), a.min(b))
+                })
+                .collect();
+            let (graph, mut names) =
+                random_build(Unit::ConfiguredTarget, nodes, &deps, 0, &mut next);
+            let mut facets = Facets::default();
+            let targets: Vec<Id> = (0..TARGETS)
+                .map(|t| names.intern(&format!("//:t{t}")))
+                .collect();
+            for p in 0..nodes {
+                facets.set_label(Id(p as u32), targets[next(TARGETS)]);
+            }
+            let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+            let counted = Targets::of(&tree, &facets);
+            let label = |node: u32| facets.label(tree.id(node)).unwrap();
+            let all: Vec<Id> = (0..tree.total()).map(label).collect();
+            for node in 0..tree.total() {
+                let mut subtree = vec![node];
+                let mut at = 0;
+                while let Some(&v) = subtree.get(at) {
+                    subtree.extend(tree.children(v));
+                    at += 1;
+                }
+                let mut held: Vec<Id> = subtree.iter().map(|&v| label(v)).collect();
+                held.sort_unstable();
+                let in_subtree = |t: Id| held.iter().filter(|&&h| h == t).count();
+                let in_tree = |t: Id| all.iter().filter(|&&h| h == t).count();
+                let mut distinct = held.clone();
+                distinct.dedup();
+                let only_here = distinct
+                    .iter()
+                    .filter(|&&t| in_subtree(t) == in_tree(t))
+                    .count() as u32;
+                let found = counted.held(node);
+                assert_eq!(
+                    (found.targets(), found.only_here()),
+                    (distinct.len() as u32, only_here)
+                );
+                assert_eq!(counted.copies(node), in_tree(label(node)) as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_naming_no_target_counts_none() {
+        let (graph, names) = configured(&[("lib", "app")]);
+        let tree = tree_of(&graph, &names, Unit::ConfiguredTarget);
+        let targets = Targets::of(&tree, &Facets::default());
+        let app = node(&tree, &names, "app");
+        assert_eq!((targets.held(app).targets(), targets.copies(app)), (0, 0));
     }
 
     #[test]
