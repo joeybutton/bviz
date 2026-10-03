@@ -1,7 +1,9 @@
+mod actions;
 mod concurrent_interner;
 mod model;
 mod parse;
 
+pub use actions::Action;
 pub use model::{
     CategoryId, CounterLane, CounterPoint, CounterSeries, FetchSide, LaneClass, Metadata, OptStr,
     PhaseMarker, Profile, Repository, Slice, SliceDetail, Span32, SpanRole, Str,
