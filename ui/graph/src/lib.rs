@@ -31,10 +31,10 @@ mod checklist;
 mod colour;
 mod column;
 mod derive;
-mod dominators;
 mod drag;
 mod duration;
 mod emphasis;
+mod exclusive;
 mod framing;
 mod hints;
 mod hue;
@@ -66,9 +66,9 @@ use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
-pub use dominators::DominatorsPanel;
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
+pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
@@ -94,12 +94,12 @@ pub fn register_keys(cx: &mut App) {
     let outside_search = Some(predicate.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
-    let dominators = format!(
+    let exclusive = format!(
         "{} && !{}",
-        dominators::KEY_CONTEXT,
-        dominators::ROOTS_KEY_CONTEXT
+        exclusive::KEY_CONTEXT,
+        exclusive::ROOTS_KEY_CONTEXT
     );
-    let outside_roots = Some(dominators.as_str());
+    let outside_roots = Some(exclusive.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
@@ -108,12 +108,12 @@ pub fn register_keys(cx: &mut App) {
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
-        KeyBinding::new("0", dominators::ShowWholeBuild, outside_roots),
-        KeyBinding::new("backspace", dominators::FocusUp, outside_roots),
+        KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
+        KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
         KeyBinding::new(
             "escape",
-            dominators::LeaveRoots,
-            Some(dominators::ROOTS_KEY_CONTEXT),
+            exclusive::LeaveRoots,
+            Some(exclusive::ROOTS_KEY_CONTEXT),
         ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
@@ -1045,10 +1045,10 @@ pub fn open(
         let model = model.clone();
         move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx))
     });
-    let dominators = ViewSpec::new(move |cx| cx.new(|cx| DominatorsPanel::new(model.clone(), cx)));
+    let exclusive = ViewSpec::new(move |cx| cx.new(|cx| ExclusivePanel::new(model.clone(), cx)));
     Member::new(
         label,
-        PanelGroup::tabs(graph, vec![scatter, dominators]).with_weight(Weight::CHART),
+        PanelGroup::tabs(graph, vec![scatter, exclusive]).with_weight(Weight::CHART),
     )
 }
 

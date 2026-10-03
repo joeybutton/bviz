@@ -38,19 +38,19 @@ use roots::{Found, Within};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The key context scoping the dominators panel's own bindings, so a key
-/// pressed here reaches this panel and no other.
-pub(crate) const KEY_CONTEXT: &str = "GraphDominators";
+/// The key context scoping the panel's own bindings, so a key pressed here
+/// reaches this panel and no other.
+pub(crate) const KEY_CONTEXT: &str = "GraphExclusive";
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 
 gpui::actions!(bviz_graph, [ShowWholeBuild, FocusUp, LeaveRoots]);
 
 /// What the panel reads while the tree is being computed.
-const COMPUTING: &str = "Computing dominators…";
+const COMPUTING: &str = "Computing exclusive deps…";
 
 /// The dominator tree of a graph's points, drawn as an icicle.
-pub struct DominatorsPanel {
+pub struct ExclusivePanel {
     focus_handle: FocusHandle,
     /// The graph whose tree is drawn, which computes it.
     model: Entity<GraphModel>,
@@ -97,7 +97,7 @@ pub struct DominatorsPanel {
     _roots_typed: Subscription,
 }
 
-impl DominatorsPanel {
+impl ExclusivePanel {
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
@@ -122,7 +122,7 @@ impl DominatorsPanel {
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
         let roots_field = cx.new(|cx| {
             QueryField::new(
-                "dominators-roots",
+                "exclusive-roots",
                 roots::PLACEHOLDER,
                 roots::FIELD_WIDTH,
                 cx,
@@ -608,17 +608,14 @@ impl DominatorsPanel {
 /// something no other action reads, so they stand directly under the whole
 /// build, each a sliver of its row, while configured targets mostly stand
 /// under one another and leave the row to cells wide enough to name.
-fn unit_picker(
-    model: &Entity<GraphModel>,
-    cx: &mut Context<DominatorsPanel>,
-) -> Option<UnitPicker> {
+fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> Option<UnitPicker> {
     let inputs = model.read(cx).loaded()?.shared.inputs;
     let opening = Some(Unit::ConfiguredTarget);
     UnitPicker::new(
-        "dominators-unit",
+        "exclusive-unit",
         inputs,
         opening,
-        DominatorsPanel::choose,
+        ExclusivePanel::choose,
         cx,
     )
 }
@@ -1279,25 +1276,29 @@ fn tally(unit: Unit, total: u32, roots: u32, outside: u32) -> String {
     }
 }
 
-impl EventEmitter<PanelEvent> for DominatorsPanel {}
+impl EventEmitter<PanelEvent> for ExclusivePanel {}
 
-impl Focusable for DominatorsPanel {
+impl Focusable for ExclusivePanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl Panel for DominatorsPanel {
+impl Panel for ExclusivePanel {
     fn kind() -> PanelKind {
         PanelKind {
-            view: ViewKind::new("graph-dominators"),
-            label: "Dominators",
+            view: ViewKind::new("graph-exclusive"),
+            label: "Exclusive deps",
             key_context: KEY_CONTEXT,
         }
     }
 
     fn title(&self, _cx: &App) -> SharedString {
         Self::kind().label.into()
+    }
+
+    fn description() -> Option<&'static str> {
+        Some("What exists only because of each target (the build's dominator tree)")
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1326,7 +1327,7 @@ impl Panel for DominatorsPanel {
     }
 }
 
-impl Render for DominatorsPanel {
+impl Render for ExclusivePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let root = div()
@@ -1398,7 +1399,7 @@ impl Render for DominatorsPanel {
             .then(|| legend_strip(hues, swatch, key.into_iter().flatten(), &palette));
         root.children(legend).child(
             div()
-                .id("dominators-icicle")
+                .id("exclusive-icicle")
                 .relative()
                 .flex_1()
                 .min_h(px(0.))
@@ -1436,7 +1437,7 @@ fn strip(
         .child(field)
         .when_some(crumbs, |bar, crumbs| bar.child(crumbs))
         .when(computing, |bar| {
-            bar.trailing(busy("dominators-computing", "computing…", palette))
+            bar.trailing(busy("exclusive-computing", "computing…", palette))
         })
 }
 
@@ -1479,7 +1480,7 @@ const LEGEND_SWATCH: Pixels = px(8.);
 /// its room the dominators above the focus give way first, and the focus is
 /// cut short only once they are gone. A name reading alike with another
 /// crumb's is followed by what tells it apart.
-fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -> Option<Div> {
+fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) -> Option<Div> {
     let focus = drawn.focus.as_ref()?;
     let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
     let by = drawn.coloured.by();
@@ -1509,7 +1510,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<DominatorsPanel>) -
         // A click landing once another tree is drawn names none of its nodes.
         let tree = Arc::clone(&drawn.coloured.tree);
         crumb(name, hint)
-            .id(("dominators-crumb", index))
+            .id(("exclusive-crumb", index))
             .cursor_pointer()
             .text_color(palette.colors.text_muted)
             .hover(|style| style.text_color(palette.label))
@@ -1569,7 +1570,7 @@ fn separator() -> AnyElement {
 /// pointer, painted apart from the cells so that neither repaints any of them.
 /// Its layout records where the cells lie for the pointer handlers, and lets
 /// go of a cell laid out elsewhere.
-fn hover_layer(view: Entity<DominatorsPanel>, palette: Palette) -> impl IntoElement {
+fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
         move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
@@ -1613,7 +1614,7 @@ fn hover_layer(view: Entity<DominatorsPanel>, palette: Palette) -> impl IntoElem
 /// drawn unchanged.
 struct IcicleCanvas {
     /// The panel whose tree this draws.
-    parent: WeakEntity<DominatorsPanel>,
+    parent: WeakEntity<ExclusivePanel>,
 }
 
 impl Render for IcicleCanvas {

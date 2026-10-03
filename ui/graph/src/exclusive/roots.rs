@@ -1,7 +1,7 @@
 //! The field naming the roots of a dominator tree as a Bazel target set, and
 //! the points of a unit such a set roots the tree at.
 
-use super::{DominatorsPanel, LeaveRoots, RootedBy};
+use super::{ExclusivePanel, LeaveRoots, RootedBy};
 use crate::Palette;
 use crate::model::{GraphModel, Prepared};
 use crate::point::{point_label, unit_names};
@@ -16,7 +16,7 @@ use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 
 /// The key context the roots field carries, by which the panel's own
 /// single-key bindings stand down while a target set is typed into it.
-pub(crate) const KEY_CONTEXT: &str = "GraphDominatorsRoots";
+pub(crate) const KEY_CONTEXT: &str = "GraphExclusiveRoots";
 
 /// Width the field is drawn at, wide enough for its placeholder.
 pub(super) const FIELD_WIDTH: Pixels = px(380.);
@@ -242,11 +242,11 @@ fn copies_noted(guessed: u32, generated: u32, uncopied: u32) -> impl Iterator<It
 pub(super) fn field(
     input: &Entity<QueryField>,
     palette: &Palette,
-    cx: &Context<DominatorsPanel>,
+    cx: &Context<ExclusivePanel>,
 ) -> Stateful<Div> {
     let tip = TooltipColors::from_colors(&palette.colors);
     div()
-        .id("dominators-roots")
+        .id("exclusive-roots")
         .key_context(KEY_CONTEXT)
         .on_action(cx.listener(|view, _: &LeaveRoots, window, cx| {
             view.focus_handle.focus(window, cx);
