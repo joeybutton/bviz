@@ -87,7 +87,13 @@ fn lasted(run: Duration) -> String {
     } else if seconds < HOUR {
         format!("{}m {:02}s", seconds / MINUTE, seconds % MINUTE)
     } else {
-        format!("{}h {:02}m", seconds / HOUR, seconds % HOUR / MINUTE)
+        const MINUTES_PER_HOUR: u64 = HOUR / MINUTE;
+        let minutes = (run.as_secs_f64() / MINUTE as f64).round() as u64;
+        format!(
+            "{}h {:02}m",
+            minutes / MINUTES_PER_HOUR,
+            minutes % MINUTES_PER_HOUR
+        )
     }
 }
 
@@ -507,7 +513,9 @@ mod tests {
         assert_eq!(lasted(59_999), "1m 00s");
         assert_eq!(lasted(125_400), "2m 05s");
         assert_eq!(lasted(3_599_600), "1h 00m");
-        assert_eq!(lasted((3 * 3600 + 7 * 60 + 59) * 1000), "3h 07m");
+        assert_eq!(lasted((3 * 3600 + 7 * 60 + 29) * 1000), "3h 07m");
+        assert_eq!(lasted((3 * 3600 + 7 * 60 + 30) * 1000), "3h 08m");
+        assert_eq!(lasted((3 * 3600 + 59 * 60 + 30) * 1000), "4h 00m");
     }
 
     #[test]
