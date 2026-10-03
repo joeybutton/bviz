@@ -50,6 +50,7 @@ mod scroll;
 mod search;
 mod selection;
 mod status;
+mod timing;
 mod toolbar;
 mod why;
 
