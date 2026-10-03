@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 mod build;
 mod camera;
 mod checklist;
+mod colour;
 mod column;
 mod derive;
 mod drag;
@@ -56,6 +57,7 @@ mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
+use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
@@ -198,6 +200,10 @@ pub struct GraphPanel {
     mode_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
     _mode_choices: Subscription,
+    colouring: Colouring,
+    colour_picker: Entity<Dropdown>,
+    /// Carries the picker's selections into [`colour::set`].
+    _colour_choices: Subscription,
     /// The node classes the loaded graph holds boxes for, in the order the class
     /// checklist's rows stand.
     classes: Vec<Kind>,
@@ -322,6 +328,27 @@ impl GraphPanel {
                 view.set_mode(mode, cx);
             }
         });
+        let colouring = Colouring::default();
+        let timed = model
+            .read(cx)
+            .loaded()
+            .is_some_and(|loaded| loaded.times().is_ok());
+        let colour_picker = cx.new(|cx| {
+            let mut picker = Dropdown::new(
+                "colouring",
+                Colouring::ALL.map(Colouring::label),
+                colouring.index(),
+                cx,
+            );
+            colour::offer(&mut picker, timed, cx);
+            picker
+        });
+        let colour_choices = cx.subscribe(&colour_picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            if let Some(colouring) = Colouring::at(*index) {
+                colour::set(view, colouring, cx);
+            }
+        });
         let selection = Selection::none();
         let relation_picker = cx.new(|cx| {
             Dropdown::new(
@@ -361,7 +388,10 @@ impl GraphPanel {
         let search_typing = cx.observe(search.field(), |view, _, cx| search::typed(view, cx));
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas { parent });
-        let changed = cx.observe(&model, |view, _, cx| view.invalidate_canvas(cx));
+        let changed = cx.observe(&model, |view, _, cx| {
+            colour::sync(view, cx);
+            view.invalidate_canvas(cx);
+        });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
             checklist::adopt(view, cx);
@@ -389,6 +419,9 @@ impl GraphPanel {
             mode,
             mode_picker,
             _mode_choices: choices,
+            colouring,
+            colour_picker,
+            _colour_choices: colour_choices,
             classes: Vec::new(),
             class_filter,
             _class_choices: class_choices,
@@ -728,6 +761,7 @@ impl Render for GraphPanel {
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
                     why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
+                    colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
                     report_control: report::control(self, cx).map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
@@ -777,6 +811,7 @@ impl Render for GraphCanvas {
             hovered: view.hovered.filter(|_| view.neighborhood_enabled),
             selected: view.selection.node(),
             highlight: view.emphasis.highlight(),
+            colouring: view.colouring,
             drawn,
         };
         let prepaint = build_prepaint(parent.clone(), content, recenter_target);
@@ -807,6 +842,8 @@ struct Controls {
     pin_control: Option<AnyElement>,
     /// The questions asked of the selected box, which stand beside the pin.
     why_controls: Option<AnyElement>,
+    /// Chooses what the boxes' fills say.
+    colour_picker: AnyElement,
     /// Puts the card reading what the build reported up and away, offered
     /// where the build reported anything.
     report_control: Option<AnyElement>,

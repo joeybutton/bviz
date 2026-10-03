@@ -145,6 +145,10 @@ impl Loaded {
         self.taken_up
     }
 
+    pub(crate) fn times(&self) -> Result<&NodeTimes, Untimed> {
+        self.times.as_ref().map_err(|untimed| *untimed)
+    }
+
     /// Takes up what the build and the profile of `session` report of the
     /// graph's nodes, and says whether that changed anything a view of the
     /// graph shows. Each is read again only once it is reported anew.

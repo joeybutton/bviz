@@ -2,9 +2,10 @@
 //! graph.
 
 use crate::status::Landings;
-use bviz_graph_layout::{Graph, Id, Names};
+use bviz_graph_layout::{Graph, Id, Kind, Names};
 use bviz_invocation::{Spent, Timings};
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 /// Why a graph's nodes carry no action time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,13 @@ pub(crate) enum Untimed {
     Unplaced,
 }
 
+/// Of the actions a profile recorded, how many land on a node of a graph.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Coverage {
+    pub(crate) placed: u32,
+    pub(crate) profiled: u32,
+}
+
 /// The time spent on one node.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Timed {
@@ -28,6 +36,46 @@ pub(crate) struct Timed {
     pub(crate) own: Spent,
     /// `own` and the actions landing on every node the node contains.
     pub(crate) held: Spent,
+}
+
+/// The time every shorter one is placed as on a log scale: an action that
+/// short is all but instant, and a scale reaching down toward no time at all
+/// would crowd every other time against its top.
+const SHORTEST_PLACED: Duration = Duration::from_millis(1);
+
+/// The least and the most time a node of one kind holds, of those that hold
+/// any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Extent {
+    least: Duration,
+    most: Duration,
+}
+
+impl Extent {
+    fn of(wall: Duration) -> Self {
+        Extent {
+            least: wall,
+            most: wall,
+        }
+    }
+
+    fn widen(&mut self, wall: Duration) {
+        self.least = self.least.min(wall);
+        self.most = self.most.max(wall);
+    }
+
+    /// Where `wall` stands in the extent on a log scale, from 0 at its least
+    /// to 1 at its most, clamped to that range, with every time shorter than
+    /// [`SHORTEST_PLACED`] placed as that. An extent of one time places it at
+    /// its most.
+    pub(crate) fn place(self, wall: Duration) -> f32 {
+        let log = |wall: Duration| wall.max(SHORTEST_PLACED).as_secs_f64().ln();
+        let span = log(self.most) - log(self.least);
+        if span <= 0.0 {
+            return 1.0;
+        }
+        ((log(wall) - log(self.least)) / span).clamp(0.0, 1.0) as f32
+    }
 }
 
 /// A node's place in [`NodeTimes::timed`].
@@ -54,6 +102,9 @@ pub(crate) struct NodeTimes {
     /// By node id, where in `timed` the node's time is.
     slots: Vec<Option<Slot>>,
     timed: Vec<Timed>,
+    /// By node kind, the extent of the time its nodes hold.
+    extents: Vec<(Kind, Extent)>,
+    coverage: Coverage,
 }
 
 /// Where in `graph`, which `names` names, the actions `timings` recorded
@@ -84,33 +135,71 @@ impl NodeTimes {
             slots: vec![None; landings.ids()],
             timed: Vec::with_capacity(landing),
         };
-        let mut placed = false;
+        let mut coverage = Coverage {
+            placed: 0,
+            profiled: timings.spent().total().actions,
+        };
         for (primary_output, owner, timing) in timings.actions() {
             if let Some(node) = landings.action(primary_output, owner) {
                 landed.timed(node).own.add_action(timing);
-                placed = true;
+                coverage.placed += 1;
             }
         }
         for (owner, spent) in timings.by_owner() {
             if let Some(node) = landings.landing(owner).node() {
                 landed.timed(node).own.add(spent);
-                placed = true;
+                coverage.placed += spent.total().actions;
             }
         }
-        if !placed {
+        if coverage.placed == 0 {
             return Err(Untimed::Unplaced);
         }
         let (slots, timed) = landed.roll_up(graph);
-        Ok(NodeTimes { slots, timed })
+        let mut times = NodeTimes {
+            slots,
+            timed,
+            extents: Vec::new(),
+            coverage,
+        };
+        times.extents = times.measure(graph);
+        Ok(times)
+    }
+
+    /// The extent of each kind's time over the timed nodes of `graph`.
+    fn measure(&self, graph: &Graph) -> Vec<(Kind, Extent)> {
+        let mut extents: Vec<(Kind, Extent)> = Vec::new();
+        for node in &graph.nodes {
+            let Some(timed) = self.get(node.id) else {
+                continue;
+            };
+            let wall = timed.held.total().wall;
+            match extents.iter_mut().find(|(kind, _)| *kind == node.kind) {
+                Some((_, extent)) => extent.widen(wall),
+                None => extents.push((node.kind, Extent::of(wall))),
+            }
+        }
+        extents
+    }
+
+    /// The extent of the time the nodes of `kind` hold, absent where none of
+    /// them holds any.
+    pub(crate) fn extent(&self, kind: Kind) -> Option<Extent> {
+        self.extents
+            .iter()
+            .find(|(of, _)| *of == kind)
+            .map(|(_, extent)| *extent)
     }
 
     /// The time spent on the node `id` names, absent where no action lands on
     /// it or on anything it contains. An id past the graph's own, as a merge
     /// group's is, reads as an untimed node.
-    #[cfg(test)]
     pub(crate) fn get(&self, id: Id) -> Option<&Timed> {
         let slot = (*self.slots.get(id.0 as usize)?)?;
         Some(&self.timed[slot.index()])
+    }
+
+    pub(crate) fn coverage(&self) -> Coverage {
+        self.coverage
     }
 }
 
@@ -379,6 +468,74 @@ mod tests {
 
         assert_eq!(times.get(configured).unwrap().own.total(), share(1, 9));
         assert_eq!(held(&times, package), Some(share(1, 9)));
+    }
+
+    #[test]
+    fn coverage_counts_the_profiled_actions_landing_on_a_node() {
+        let mut built = Built::default();
+        let (_, _, bin) = built.target("app", "bin");
+        built.action("bazel-out/bin/app/bin", bin);
+        let run = timing(1, Runner::Local);
+        let recorded = timings(&[
+            (Some("bazel-out/bin/app/bin"), None, run),
+            (Some("bazel-out/bin/app/gen"), owner("//app:bin"), run),
+            (Some("bazel-out/bin/gone/gone"), owner("//gone:gone"), run),
+            (None, owner("//app:bin"), run),
+            (None, owner("//app:bin"), run),
+            (None, None, run),
+        ]);
+
+        let times = built.resolve(&recorded).expect("timed");
+
+        assert_eq!(
+            times.coverage(),
+            Coverage {
+                placed: 4,
+                profiled: 6
+            }
+        );
+    }
+
+    #[test]
+    fn each_kind_spans_the_least_to_the_most_time_its_nodes_hold() {
+        let mut built = Built::default();
+        let (app, _, bin) = built.target("app", "bin");
+        let fast = built.action("bazel-out/fast", bin);
+        let slow = built.action("bazel-out/slow", bin);
+        let (lib_package, _, lib) = built.target("lib", "lib");
+        let middling = built.action("bazel-out/middling", lib);
+        let recorded = timings(&[
+            (Some("bazel-out/fast"), None, timing(10, Runner::Local)),
+            (Some("bazel-out/slow"), None, timing(1_000, Runner::Local)),
+            (Some("bazel-out/middling"), None, timing(100, Runner::Local)),
+        ]);
+
+        let times = built.resolve(&recorded).expect("timed");
+        let place = |kind, id| {
+            let extent = times.extent(kind).expect("timed kind");
+            extent.place(times.get(id).unwrap().held.total().wall)
+        };
+
+        assert_eq!(place(Kind::Action, fast), 0.0);
+        assert_eq!(place(Kind::Action, slow), 1.0);
+        assert!((place(Kind::Action, middling) - 0.5).abs() < 1e-6);
+        assert_eq!(place(Kind::ConfiguredTarget, bin), 1.0);
+        assert_eq!(place(Kind::ConfiguredTarget, lib), 0.0);
+        assert_eq!(place(Kind::Package, app), 1.0);
+        assert_eq!(place(Kind::Package, lib_package), 0.0);
+        assert_eq!(times.extent(Kind::Source), None);
+        let once = Duration::from_millis(3);
+        assert_eq!(
+            Extent::of(once).place(once),
+            1.0,
+            "one time places at the most"
+        );
+        let mut instant = Extent::of(Duration::ZERO);
+        instant.widen(Duration::from_secs(1));
+        assert!(
+            (instant.place(Duration::from_millis(31)) - 0.5).abs() < 0.01,
+            "a time of none is placed as the shortest placed"
+        );
     }
 
     /// The ids are handed out so that one container precedes what it holds

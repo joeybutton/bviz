@@ -1,10 +1,12 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
+use crate::colour::Colouring;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::status::{Status, Statuses};
+use crate::timing::NodeTimes;
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
@@ -173,6 +175,18 @@ const PARALLEL_SPACING: f32 = MARKED_WIDTH + LANE_GAP;
 /// staying apart from one another and off the canvas.
 const KIND_BLEND: f32 = 0.6;
 
+/// How far the canvas is carried toward the yellow slot to fill the box
+/// holding the least time of its kind.
+const RAMP_LEAST: f32 = 0.225;
+
+/// How far the canvas is carried toward the blue slot to fill the box holding
+/// the most time of its kind.
+const RAMP_MOST: f32 = 0.45;
+
+/// How far an open container's fill is tinted toward the reading it wears
+/// closed.
+const OPEN_TINT: f32 = 0.5;
+
 /// How far a group's fill is tinted toward the accent of the files it holds: far
 /// enough to be told from a plain container fill, and not so far that the group
 /// passes for one of the files.
@@ -210,6 +224,7 @@ pub(crate) struct Scene {
     pub(crate) selected: Option<Id>,
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
+    pub(crate) colouring: Colouring,
 }
 
 impl Scene {
@@ -332,6 +347,7 @@ pub(crate) fn canvas_body(
             return;
         };
         let statuses = loaded.statuses();
+        let fills = Fills::of(scene.colouring, loaded.times().ok());
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -357,7 +373,7 @@ pub(crate) fn canvas_body(
             )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &marks, statuses);
+                let b = PaintBox::of(&p, &scene, &marks, statuses, &fills);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -483,6 +499,48 @@ impl Palette {
         }
     }
 
+    /// Fill for a box by the kind of node it stands for.
+    fn kind_fill(&self, kind: Kind, compound: bool) -> Rgba {
+        match compound {
+            true => self.container_fill(kind),
+            false => self.leaf_fill(kind),
+        }
+    }
+
+    /// Fill for a box holding time, `place` being where that time stands from
+    /// 0 for the least its kind holds to 1 for the most: a ramp from a pale
+    /// yellow to a deeper blue, which stands further off the canvas the more
+    /// time it says. Within the bounds every fill is held to — a name legible
+    /// on it, the connectors and the marks drawn over it clear of it — and the
+    /// least-timed box apart from an untimed one, its ends stand as far apart
+    /// as the bounds let them.
+    fn time_fill(&self, place: f32) -> Rgba {
+        let least = bviz_ui_theme::mix(self.background, self.data.yellow, RAMP_LEAST);
+        let most = bviz_ui_theme::mix(self.background, self.data.blue, RAMP_MOST);
+        bviz_ui_theme::mix(least, most, place)
+    }
+
+    /// `fill` as a box wears it: whole on a box drawn closed, and on an open
+    /// container only as a tint of the container's own fill, far enough that
+    /// its reading shows and short of the whole: an open container is the
+    /// ground the boxes it holds are drawn on, and one of those wearing the
+    /// same reading in full must still stand off it.
+    fn held_fill(&self, kind: Kind, compound: bool, fill: Rgba) -> Rgba {
+        match compound {
+            true => bviz_ui_theme::mix(self.container_fill(kind), fill, OPEN_TINT),
+            false => fill,
+        }
+    }
+
+    /// Fill for a box no time lands on: a container keeps the fill it wears
+    /// by kind, and a leaf takes the neutral slot.
+    fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
+        match compound {
+            true => self.container_fill(kind),
+            false => bviz_ui_theme::mix(self.data.neutral, self.background, KIND_BLEND),
+        }
+    }
+
     /// Connector color, keyed by the query an edge came from, so static (query),
     /// configured (cquery), and execution-phase (aquery) dependencies read
     /// distinctly; a filter's synthetic transitive edges take a fourth hue of
@@ -556,6 +614,37 @@ impl Palette {
     }
 }
 
+/// What a frame fills its boxes by: the colouring chosen, with what that
+/// colouring reads.
+enum Fills<'a> {
+    Kind,
+    Time(&'a NodeTimes),
+}
+
+impl<'a> Fills<'a> {
+    /// The fills `colouring` gives the boxes of a graph whose nodes carry
+    /// `times`. A colouring by time over a graph carrying none fills by kind.
+    fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
+        match (colouring, times) {
+            (Colouring::Time, Some(times)) => Fills::Time(times),
+            _ => Fills::Kind,
+        }
+    }
+
+    fn fill(&self, b: &bviz_graph_layout::Box, palette: &Palette) -> Rgba {
+        match self {
+            Fills::Kind => palette.kind_fill(b.kind, b.compound),
+            Fills::Time(times) => match times.get(b.id).zip(times.extent(b.kind)) {
+                Some((timed, extent)) => {
+                    let fill = palette.time_fill(extent.place(timed.held.total().wall));
+                    palette.held_fill(b.kind, b.compound, fill)
+                }
+                None => palette.untimed_fill(b.kind, b.compound),
+            },
+        }
+    }
+}
+
 /// A disclosure title as a frame painted it, by which a gesture landing on the
 /// title reaches the box it names.
 pub(crate) struct TitleTarget {
@@ -614,15 +703,17 @@ struct PaintBox<'a> {
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks, statuses: &Statuses) -> Self {
+    fn of(
+        p: &Placed<'a>,
+        scene: &Scene,
+        marks: &Marks,
+        statuses: &Statuses,
+        fills: &Fills,
+    ) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
         let alpha = alpha * receded(marks.strength(marked), scene.filter_strength(b.id));
-        let palette = &scene.palette;
-        let fill = match b.compound {
-            true => palette.container_fill(b.kind),
-            false => palette.leaf_fill(b.kind),
-        };
+        let fill = fills.fill(b, &scene.palette);
         let toggled = match scene.highlight {
             Some((id, alpha)) if id == b.id => alpha,
             _ => 0.0,
@@ -2425,7 +2516,8 @@ mod colors {
     use super::*;
     use bviz_ui_theme::{
         MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
-        built_in_themes, contrast_ratio, distance, label_on, level_step, luminance, oklch, over,
+        MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, distance, label_on, level_step,
+        luminance, oklch, over,
     };
     use gpui::SharedString;
 
@@ -2436,6 +2528,9 @@ mod colors {
     /// One node kind per container fill: the two that carry a fill of their own,
     /// and one standing for every kind that takes the plain one.
     const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::MergeGroup, Kind::Target];
+
+    /// One node kind per container fill a container holding actions wears.
+    const TIMED_CONTAINER_KINDS: [Kind; 2] = [Kind::Package, Kind::Target];
 
     /// Every provenance a connector is drawn in.
     const EDGE_KINDS: [EdgeKind; 4] = [
@@ -2454,13 +2549,29 @@ mod colors {
             .collect()
     }
 
+    /// Places along the time ramp standing for every fill it gives: its two
+    /// ends and evenly between.
+    const RAMP_PLACES: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
     /// Every fill a box is painted in, each once.
     fn box_fills(p: &Palette) -> Vec<Rgba> {
         ACCENTED_KINDS
             .iter()
             .map(|kind| p.leaf_fill(*kind))
             .chain(CONTAINER_KINDS.iter().map(|kind| p.container_fill(*kind)))
+            .chain([p.untimed_fill(Kind::Action, false)])
+            .chain(readings(p).into_iter().flat_map(|fill| {
+                TIMED_CONTAINER_KINDS
+                    .map(|kind| p.held_fill(kind, true, fill))
+                    .into_iter()
+                    .chain([fill])
+            }))
             .collect()
+    }
+
+    /// Every fill a closed box coloured by time wears.
+    fn readings(p: &Palette) -> Vec<Rgba> {
+        RAMP_PLACES.map(|place| p.time_fill(place)).into()
     }
 
     /// Every ground a connector is drawn over, each once. A marked connector runs
@@ -2510,6 +2621,49 @@ mod colors {
                         apart >= MIN_DISTINCT_COLOR,
                         "{theme} {kind:?}/{other:?}: {apart}"
                     );
+                }
+            }
+        }
+    }
+
+    /// An untimed box must not pass for one holding the least time of its
+    /// kind, and the ramp must stand further off the canvas at every step
+    /// along it.
+    #[test]
+    fn the_time_ramp_is_told_from_an_untimed_box_and_steps_off_the_canvas() {
+        for (theme, p) in palettes() {
+            let least = p.time_fill(0.0);
+            for untimed in [
+                p.untimed_fill(Kind::Action, false),
+                p.untimed_fill(Kind::Target, true),
+                p.untimed_fill(Kind::Package, true),
+            ] {
+                let apart = distance(least, untimed);
+                assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
+            }
+            let canvas = luminance(p.background);
+            let off_canvas: Vec<f32> = RAMP_PLACES
+                .iter()
+                .map(|place| (luminance(p.time_fill(*place)) - canvas).abs())
+                .collect();
+            assert!(off_canvas.is_sorted(), "{theme}: {off_canvas:?}");
+        }
+    }
+
+    /// A box held in an open container that reads the same as the container
+    /// must still stand off it, or the container swallows it.
+    #[test]
+    fn a_box_stands_off_the_open_container_reading_the_same() {
+        for (theme, p) in palettes() {
+            for fill in readings(&p) {
+                for kind in TIMED_CONTAINER_KINDS {
+                    let open = p.held_fill(kind, true, fill);
+                    let apart = distance(open, fill);
+                    assert!(apart >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {apart}");
+                    for ground in [open, over(p.highlight_wash(1.0), open)] {
+                        let held = contrast_ratio(label_on(open), ground);
+                        assert!(held >= MIN_TEXT_CONTRAST, "{theme} {kind:?}: {held}");
+                    }
                 }
             }
         }

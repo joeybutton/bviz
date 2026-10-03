@@ -38,6 +38,7 @@ pub(crate) fn toolbar(
             .selected(reduced),
         );
     }
+    bar = bar.child(controls.colour_picker);
     if let Some(report) = controls.report_control {
         bar = bar.child(report);
     }
