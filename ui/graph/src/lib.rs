@@ -32,6 +32,7 @@ mod colour;
 mod column;
 mod derive;
 mod drag;
+mod duration;
 mod emphasis;
 mod framing;
 mod legend;
