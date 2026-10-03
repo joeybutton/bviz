@@ -11,7 +11,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
-use gpui::{Context, Entity, EventEmitter, Task};
+use gpui::{Context, Entity, EventEmitter, Task, WeakEntity};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,6 +40,10 @@ pub(crate) struct WorkingLanesDerived;
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
     working_lanes: DerivedLanes,
+    /// Derives the profile's action timings and reports them to its session;
+    /// held with the profile, so that a profile replaced before its timings
+    /// are ready reports none.
+    _reporting_timings: Option<Task<()>>,
 }
 
 /// A profile's [`WorkingLanes`], which are derived off the UI thread.
@@ -54,8 +58,12 @@ enum DerivedLanes {
 
 impl LoadedProfile {
     /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx`.
-    fn new(profile: Profile, cx: &mut Context<TraceModel>) -> LoadedProfile {
+    /// `cx` and its action timings to `session`.
+    fn new(
+        profile: Profile,
+        session: Option<WeakEntity<Session>>,
+        cx: &mut Context<TraceModel>,
+    ) -> LoadedProfile {
         let flamer = Arc::new(TrackFlamer::new(&Arc::new(profile)));
         let derived_from = flamer.clone();
         let deriving = cx.spawn(async move |model, cx| {
@@ -72,13 +80,32 @@ impl LoadedProfile {
                 })
                 .ok();
         });
-        LoadedProfile::deriving(flamer, deriving)
+        let reporting_timings = session.map(|session| {
+            let timed = flamer.profile().clone();
+            cx.spawn(async move |_, cx| {
+                let timings = cx
+                    .background_executor()
+                    .spawn(async move { timed.timings() })
+                    .await;
+                session
+                    .update(cx, |session, cx| {
+                        session.report_timings(timings);
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        });
+        LoadedProfile {
+            _reporting_timings: reporting_timings,
+            ..LoadedProfile::deriving(flamer, deriving)
+        }
     }
 
     fn deriving(flamer: Arc<TrackFlamer>, _derivation: Task<()>) -> LoadedProfile {
         LoadedProfile {
             flamer,
             working_lanes: DerivedLanes::Deriving { _derivation },
+            _reporting_timings: None,
         }
     }
 
@@ -187,7 +214,10 @@ impl TraceModel {
                 move || profile.join(),
                 |model, result, cx| {
                     let source = match result {
-                        Ok(profile) => Source::Loaded(LoadedProfile::new(profile, cx)),
+                        Ok(profile) => {
+                            let session = model.session.as_ref().map(Entity::downgrade);
+                            Source::Loaded(LoadedProfile::new(profile, session, cx))
+                        }
                         Err(err) => Source::Failed(err),
                     };
                     model.set_source(source, cx);
