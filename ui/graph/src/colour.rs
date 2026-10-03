@@ -55,13 +55,7 @@ const TARGET_LABEL_FLAG: &str = "--experimental_profile_include_target_label";
 /// the graph places, or why it places none.
 fn note(times: Result<&NodeTimes, Untimed>) -> SharedString {
     match times {
-        Ok(times) => {
-            let coverage = times.coverage();
-            format!(
-                "{} of {} profiled actions placed on this graph",
-                coverage.placed, coverage.profiled
-            )
-        }
+        Ok(times) => times.coverage().line(),
         Err(Untimed::NoProfile) => {
             "Open the build's profile with the graph to colour its boxes by their actions"
                 .to_owned()

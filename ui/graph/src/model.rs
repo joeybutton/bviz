@@ -111,8 +111,6 @@ pub(crate) struct Loaded {
     /// How long the actions the invocation's profile recorded took, placed on
     /// the graph's nodes.
     times: Result<NodeTimes, Untimed>,
-    /// Which of its session's timings `times` is read from, as `taken_up` is
-    /// for outcomes.
     timed: Revision,
 }
 
@@ -143,6 +141,12 @@ impl Loaded {
     /// those it read.
     pub(crate) fn taken_up(&self) -> Revision {
         self.taken_up
+    }
+
+    /// Which of its session's timings the [times](Self::times) are read
+    /// from, as [`taken_up`](Self::taken_up) is for outcomes.
+    pub(crate) fn timed(&self) -> Revision {
+        self.timed
     }
 
     pub(crate) fn times(&self) -> Result<&NodeTimes, Untimed> {

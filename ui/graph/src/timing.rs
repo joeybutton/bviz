@@ -7,6 +7,8 @@ use bviz_invocation::{Runner, Share, Spent, Timings};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+mod words;
+
 /// Why a graph's nodes carry no action time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Untimed {
@@ -62,6 +64,14 @@ impl Extent {
     fn widen(&mut self, wall: Duration) {
         self.least = self.least.min(wall);
         self.most = self.most.max(wall);
+    }
+
+    pub(crate) fn least(self) -> Duration {
+        self.least
+    }
+
+    pub(crate) fn most(self) -> Duration {
+        self.most
     }
 
     /// Where `wall` stands in the extent on a log scale, from 0 at its least

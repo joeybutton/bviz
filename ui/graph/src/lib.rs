@@ -498,7 +498,13 @@ impl GraphPanel {
         let loaded = self.model.read(cx).loaded();
         let legend = zoom.zip(loaded).and_then(|(zoom, loaded)| {
             let (statuses, resolved) = (loaded.statuses(), loaded.taken_up());
-            self.legend.card(&drawn, zoom, statuses, resolved, &palette)
+            let coloured = legend::Coloured {
+                colouring: self.colouring,
+                times: loaded.times().ok(),
+                timed: loaded.timed(),
+            };
+            self.legend
+                .card(&drawn, zoom, statuses, resolved, coloured, &palette)
         });
         let entity = cx.entity();
         div()

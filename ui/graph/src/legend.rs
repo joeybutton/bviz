@@ -1,15 +1,28 @@
 use crate::Palette;
+use crate::colour::Colouring;
 use crate::derive::{Drawn, ViewKey};
-use crate::paint::{BADGE_FLOOR, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
+use crate::duration::lasted;
+use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
 use crate::status::{Status, Statuses};
+use crate::timing::{Extent, NodeTimes, Ran};
 use bviz_graph_layout::transition::Transition;
-use bviz_graph_layout::{EdgeKind, LaidOut};
-use bviz_invocation::Revision;
+use bviz_graph_layout::{EdgeKind, Kind, LaidOut};
+use bviz_invocation::{Revision, Runner};
 use bviz_ui_components::overlay_canvas;
-use gpui::{Div, div, prelude::*, px};
+use gpui::{Div, Rgba, div, prelude::*, px};
 
 /// Width of the line shown beside a kind's name.
 const SWATCH_WIDTH: f32 = 16.;
+
+/// Height of a box fill shown beside what the fill says.
+const FILL_HEIGHT: f32 = 10.;
+
+/// Width of the time ramp, wide enough for its steps to read as one
+/// gradient, and of each fill shown beside it so their names line up.
+const RAMP_WIDTH: f32 = 48.;
+
+/// Steps the time ramp is shown in, each a fill a box can wear.
+const RAMP_STEPS: usize = 12;
 
 /// Dash and gap of the line shown for a bridge. A swatch is too short to
 /// reproduce the lengths a route is dashed at, so it shows the pattern at a size
@@ -61,8 +74,131 @@ pub(crate) fn status_swatch(status: Status, palette: &Palette) -> Div {
         }))
 }
 
-/// The edge kinds, transitions and statuses present in a view, found once per
-/// view so that a frame drawn over an unchanged view does not scan it again.
+/// A box's fill, as a box of `width` wears it.
+fn fill_swatch(fill: Rgba, width: f32, palette: &Palette) -> Div {
+    div()
+        .flex_none()
+        .w(px(width))
+        .h(px(FILL_HEIGHT))
+        .rounded_sm()
+        .border_1()
+        .border_color(palette.border)
+        .bg(fill)
+}
+
+/// The fills a box's time is read off, from the least its kind holds to the
+/// most.
+fn ramp_swatch(palette: &Palette) -> Div {
+    let last = (RAMP_STEPS - 1) as f32;
+    fill_swatch(palette.background, RAMP_WIDTH, palette)
+        .flex()
+        .overflow_hidden()
+        .children((0..RAMP_STEPS).map(|step| {
+            let fill = palette.time_fill(step as f32 / last);
+            div().flex_1().h_full().bg(fill)
+        }))
+}
+
+/// How the legend names the boxes of `kind`.
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Package => "packages",
+        Kind::Target => "targets",
+        Kind::ConfiguredTarget => "configured targets",
+        Kind::Action => "actions",
+        Kind::Artifact => "generated files",
+        Kind::Source => "source files",
+        Kind::TargetGroup => "package and environment groups",
+        Kind::MergeGroup => "merged file groups",
+    }
+}
+
+/// How the boxes are filled, and the times they are filled from: the
+/// times placed on the graph's nodes, read from the session's timings at
+/// `timed`.
+#[derive(Clone, Copy)]
+pub(crate) struct Coloured<'a> {
+    pub(crate) colouring: Colouring,
+    pub(crate) times: Option<&'a NodeTimes>,
+    pub(crate) timed: Revision,
+}
+
+/// What the fills of a view's boxes say beyond each box's kind.
+#[derive(Clone, Debug, PartialEq)]
+enum Reading {
+    /// Nothing: they are filled by kind.
+    Kinds,
+    /// The time of each box, each kind of box placed on a scale of its own.
+    Times {
+        /// The scale of each kind some box of the view holds time of, in
+        /// enum order.
+        scales: Vec<(Kind, Extent)>,
+        /// Whether some box of the view wears the untimed fill.
+        untimed: bool,
+    },
+    /// Where each box's actions ran.
+    Runners {
+        /// Each reading of runners some box of the view wears, in the order of
+        /// [`Runner::ALL`] and the mix last.
+        ran: Vec<Ran>,
+        /// Whether some box of the view wears the untimed fill.
+        untimed: bool,
+    },
+}
+
+impl Reading {
+    /// What the [fills](Fills::of) `coloured` gives the boxes of `g` say.
+    fn of(g: &LaidOut, coloured: Coloured) -> Self {
+        let untimed_leaf = |times: &NodeTimes| {
+            g.boxes
+                .iter()
+                .any(|b| !b.compound && times.get(b.id).is_none())
+        };
+        match Fills::of(coloured.colouring, coloured.times) {
+            Fills::Kind => Reading::Kinds,
+            Fills::Time(times) => {
+                let mut kinds: Vec<Kind> = g
+                    .boxes
+                    .iter()
+                    .filter(|b| times.get(b.id).is_some())
+                    .map(|b| b.kind)
+                    .collect();
+                kinds.sort_unstable();
+                kinds.dedup();
+                let scales = kinds
+                    .into_iter()
+                    .filter_map(|kind| Some((kind, times.extent(kind)?)))
+                    .collect();
+                Reading::Times {
+                    scales,
+                    untimed: untimed_leaf(times),
+                }
+            }
+            Fills::Runner(times) => {
+                let worn: Vec<Ran> = g
+                    .boxes
+                    .iter()
+                    .filter_map(|b| times.get(b.id))
+                    .map(|timed| Ran::of(&timed.held))
+                    .collect();
+                let ran = Runner::ALL
+                    .map(Ran::On)
+                    .into_iter()
+                    .chain([Ran::Mixed])
+                    .filter(|ran| worn.contains(ran))
+                    .collect();
+                Reading::Runners {
+                    ran,
+                    untimed: untimed_leaf(times),
+                }
+            }
+        }
+    }
+}
+
+/// The edge kinds, transitions and statuses present in a view, and what its
+/// fills say, found once per view so that a frame drawn over an unchanged view
+/// does not scan it again.
 #[derive(Default)]
 pub(crate) struct Legend {
     found: Option<Found>,
@@ -73,30 +209,36 @@ struct Found {
     view: ViewKey,
     /// Which of a session's outcomes the statuses found were resolved from.
     resolved: Revision,
+    /// Which of a session's timings the reading was found from.
+    timed: Revision,
+    colouring: Colouring,
     kinds: Vec<EdgeKind>,
     transitions: Vec<Transition>,
     standing: Vec<Status>,
+    reading: Reading,
 }
 
 impl Legend {
     /// Lists the edge kinds `drawn` draws at `zoom`, the transitions its
-    /// connectors cross and the statuses `statuses` gives its boxes, so it
-    /// explains only what is present in this view; the caller places it. `None`
-    /// when nothing is drawn, or the view is yet to be derived.
+    /// connectors cross, the statuses `statuses` gives its boxes and what
+    /// their fills say as `coloured` fills them, so it explains only what is
+    /// present in this view; the caller places it. `None` when nothing is
+    /// drawn, or the view is yet to be derived.
     ///
     /// `resolved` says which of a session's outcomes `statuses` were resolved
-    /// from. Outcomes land without the view changing, so the statuses found
-    /// stand for as long as both the view and `resolved` do.
+    /// from. Outcomes and timings land without the view changing, so what is
+    /// found stands for as long as the view, `resolved` and `coloured` do.
     pub(crate) fn card(
         &mut self,
         drawn: &Drawn,
         zoom: f32,
         statuses: &Statuses,
         resolved: Revision,
+        coloured: Coloured,
         palette: &Palette,
     ) -> Option<Div> {
-        let found = self.found(drawn, zoom, statuses, resolved)?;
-        card(&found.kinds, &found.transitions, &found.standing, palette)
+        let found = self.found(drawn, zoom, statuses, resolved, coloured)?;
+        card(found, coloured.times, palette)
     }
 
     fn found(
@@ -105,18 +247,29 @@ impl Legend {
         zoom: f32,
         statuses: &Statuses,
         resolved: Revision,
+        coloured: Coloured,
     ) -> Option<&Found> {
         let view = drawn.view_key(zoom);
         let found = match self.found.take() {
-            Some(found) if found.view == view && found.resolved == resolved => found,
+            Some(found)
+                if found.view == view
+                    && found.resolved == resolved
+                    && found.timed == coloured.timed
+                    && found.colouring == coloured.colouring =>
+            {
+                found
+            }
             _ => {
                 let g = drawn.view(zoom)?;
                 Found {
                     view,
                     resolved,
+                    timed: coloured.timed,
+                    colouring: coloured.colouring,
                     kinds: present(g),
                     transitions: crossed(g),
                     standing: standing(g, statuses),
+                    reading: Reading::of(g, coloured),
                 }
             }
         };
@@ -153,21 +306,73 @@ fn crossed(g: &LaidOut) -> Vec<Transition> {
         .collect()
 }
 
-fn card(
-    kinds: &[EdgeKind],
-    transitions: &[Transition],
-    standing: &[Status],
-    palette: &Palette,
-) -> Option<Div> {
-    let row = |swatch: Div, name: &'static str| {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(swatch)
-            .child(div().text_xs().text_color(palette.label).child(name))
+/// A row of the legend: `swatch` beside what it stands for.
+fn row(swatch: Div, name: impl IntoElement, palette: &Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(swatch)
+        .child(div().text_xs().text_color(palette.label).child(name))
+}
+
+/// A line of the legend saying how the rows below it, or above it, are to be
+/// read.
+fn note(text: String, palette: &Palette) -> Div {
+    div()
+        .text_xs()
+        .text_color(palette.colors.text_muted)
+        .child(text)
+}
+
+/// The rows explaining what the fills read as `reading` says, and how much of
+/// the profile `times` places; empty for fills by kind.
+fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> Vec<Div> {
+    let untimed_row = |width| {
+        let fill = palette.untimed_fill(Kind::Action, false);
+        row(fill_swatch(fill, width, palette), "no action time", palette)
     };
-    (!kinds.is_empty() || !transitions.is_empty() || !standing.is_empty()).then(|| {
+    let mut rows = match reading {
+        Reading::Kinds => return Vec::new(),
+        Reading::Times { scales, untimed } => {
+            let mut rows = Vec::with_capacity(scales.len() + 2);
+            rows.push(note(
+                "action time, on a log scale per kind".to_owned(),
+                palette,
+            ));
+            rows.extend(scales.iter().map(|&(kind, extent)| {
+                let (least, most) = (lasted(extent.least()), lasted(extent.most()));
+                let said = format!("{}: {least} to {most}", kind_name(kind));
+                row(ramp_swatch(palette), said, palette)
+            }));
+            rows.extend(untimed.then(|| untimed_row(RAMP_WIDTH)));
+            rows
+        }
+        Reading::Runners { ran, untimed } => {
+            let mut rows = Vec::with_capacity(ran.len() + 2);
+            rows.extend(ran.iter().map(|&ran| {
+                let swatch = fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette);
+                row(swatch, ran.label(), palette)
+            }));
+            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH)));
+            rows
+        }
+    };
+    rows.extend(times.map(|times| note(times.coverage().line(), palette)));
+    rows
+}
+
+fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<Div> {
+    let Found {
+        kinds,
+        transitions,
+        standing,
+        ..
+    } = found;
+    let reading = reading(&found.reading, times, palette);
+    let present =
+        !kinds.is_empty() || !transitions.is_empty() || !standing.is_empty() || !reading.is_empty();
+    present.then(|| {
         div()
             .block_mouse_except_scroll()
             .flex()
@@ -176,17 +381,22 @@ fn card(
             .p_2()
             .rounded_md()
             .bg(palette.container)
-            .children(kinds.iter().map(|&k| row(swatch(k, palette), k.label())))
+            .children(
+                kinds
+                    .iter()
+                    .map(|&k| row(swatch(k, palette), k.label(), palette)),
+            )
             .children(
                 transitions
                     .iter()
-                    .map(|&t| row(transition_swatch(t, palette), t.label())),
+                    .map(|&t| row(transition_swatch(t, palette), t.label(), palette)),
             )
             .children(
                 standing
                     .iter()
-                    .map(|&s| row(status_swatch(s, palette), s.label())),
+                    .map(|&s| row(status_swatch(s, palette), s.label(), palette)),
             )
+            .children(reading)
     })
 }
 
@@ -194,11 +404,24 @@ fn card(
 mod tests {
     use super::*;
     use crate::status::Nodes;
+    use crate::timing::landings;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::reduce::transitive_reduction;
     use bviz_graph_layout::{Connector, Graph, Id, Kind, Names, map_layout};
-    use bviz_invocation::{BuildOutcome, ConfiguredTarget, Outcomes, Session};
+    use bviz_invocation::{
+        BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Session, Spawns, Timings,
+    };
     use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Boxes filled by kind, over a graph no profile times.
+    fn uncoloured() -> Coloured<'static> {
+        Coloured {
+            colouring: Colouring::Kind,
+            times: None,
+            timed: Revision::default(),
+        }
+    }
 
     /// A zoom far enough out that a map draws its coarsest level.
     const COARSEST: f32 = 0.0;
@@ -211,7 +434,7 @@ mod tests {
         let unreported = Revision::default();
         Some(
             &legend
-                .found(drawn, zoom, &Statuses::default(), unreported)?
+                .found(drawn, zoom, &Statuses::default(), unreported, uncoloured())?
                 .kinds,
         )
     }
@@ -261,7 +484,7 @@ mod tests {
     }
 
     fn standing_in(legend: &mut Legend, drawn: &Drawn, statuses: &Statuses) -> Vec<Status> {
-        let found = legend.found(drawn, 1.0, statuses, Revision::default());
+        let found = legend.found(drawn, 1.0, statuses, Revision::default(), uncoloured());
         found.expect("a derived view").standing.clone()
     }
 
@@ -296,7 +519,7 @@ mod tests {
         let mut legend = Legend::default();
         let drawn = boxes(1);
         let mut standing = |statuses: &Statuses, resolved| {
-            let found = legend.found(&drawn, 1.0, statuses, resolved);
+            let found = legend.found(&drawn, 1.0, statuses, resolved, uncoloured());
             found.expect("a derived view").standing.clone()
         };
         assert_eq!(standing(&Statuses::default(), unreported), []);
@@ -310,6 +533,155 @@ mod tests {
             "a view under an unchanged key and unchanged outcomes was scanned again"
         );
         assert_eq!(standing(&changed, second), [Status::Succeeded]);
+    }
+
+    /// A package holding a target that holds a fast remotely executed action
+    /// and a slow remote cache hit, beside a target no action lands on, laid
+    /// out each as a box of one layered drawing; with the times its profile
+    /// places on them.
+    fn timed() -> (Drawn, NodeTimes) {
+        let mut graph = Graph::new();
+        let mut names = Names::default();
+        let mut add = |name: &str, kind, parent| {
+            let id = names.intern(name);
+            graph.add_node(Node::new(id, name, kind, parent));
+            id
+        };
+        let package = add("pkg:app", Kind::Package, None);
+        let target = add("target://app:bin", Kind::Target, Some(package));
+        let fast = add("action:fast", Kind::Action, Some(target));
+        let slow = add("action:slow", Kind::Action, Some(target));
+        let idle = add("target://app:idle", Kind::Target, Some(package));
+        let mut timings = Timings::default();
+        for (primary_output, millis, runner) in [
+            ("fast", 10, Runner::RemoteExecution),
+            ("slow", 1_000, Runner::RemoteCacheHit),
+        ] {
+            timings.record(Profiled {
+                primary_output: Some(primary_output),
+                owner: None,
+                wall: Duration::from_millis(millis),
+                spawns: Spawns::on(runner, Duration::from_millis(millis)),
+            });
+        }
+        let landings = landings(&graph, &names, &timings);
+        let times = NodeTimes::resolve(&landings, &graph, &timings).expect("timed");
+        let laid = |id: Id, kind, compound| bviz_graph_layout::Box {
+            id,
+            label: String::new(),
+            kind,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            compound,
+            group: false,
+        };
+        let view = LaidOut {
+            boxes: vec![
+                laid(package, Kind::Package, true),
+                laid(target, Kind::Target, true),
+                laid(fast, Kind::Action, false),
+                laid(slow, Kind::Action, false),
+                laid(idle, Kind::Target, false),
+            ],
+            ..LaidOut::default()
+        };
+        let drawn = Drawn::Layered {
+            view: Arc::new(view),
+            drawing: 1,
+        };
+        (drawn, times)
+    }
+
+    fn reading_of(
+        legend: &mut Legend,
+        drawn: &Drawn,
+        colouring: Colouring,
+        times: &NodeTimes,
+        timed: Revision,
+    ) -> Reading {
+        let coloured = Coloured {
+            colouring,
+            times: Some(times),
+            timed,
+        };
+        let found = legend.found(
+            drawn,
+            1.0,
+            &Statuses::default(),
+            Revision::default(),
+            coloured,
+        );
+        found.expect("a derived view").reading.clone()
+    }
+
+    #[test]
+    fn the_fills_of_a_view_are_explained_as_its_colouring_reads_them() {
+        let (drawn, times) = timed();
+        let mut legend = Legend::default();
+        let timed = Revision::default();
+        let extent = |kind| times.extent(kind).expect("a timed kind");
+
+        assert_eq!(
+            reading_of(&mut legend, &drawn, Colouring::Time, &times, timed),
+            Reading::Times {
+                scales: vec![
+                    (Kind::Package, extent(Kind::Package)),
+                    (Kind::Target, extent(Kind::Target)),
+                    (Kind::Action, extent(Kind::Action)),
+                ],
+                untimed: true,
+            }
+        );
+        assert_eq!(
+            extent(Kind::Action).least(),
+            Duration::from_millis(10),
+            "each kind is read on its own scale"
+        );
+        assert_eq!(
+            reading_of(&mut legend, &drawn, Colouring::Runner, &times, timed),
+            Reading::Runners {
+                ran: vec![
+                    Ran::On(Runner::RemoteExecution),
+                    Ran::On(Runner::RemoteCacheHit)
+                ],
+                untimed: true,
+            },
+            "a box that ran mostly as a cache hit reads as one"
+        );
+        assert_eq!(
+            reading_of(&mut legend, &drawn, Colouring::Kind, &times, timed),
+            Reading::Kinds
+        );
+    }
+
+    /// A profile's timings land without the view changing, so the view's key
+    /// alone does not say the legend is still right.
+    #[test]
+    fn a_view_is_scanned_again_once_its_times_are_read_from_other_timings() {
+        let (drawn, times) = timed();
+        let mut session = Session::default();
+        let untimed = session.timings_revision();
+        session.report_timings(Timings::default());
+        let timed = session.timings_revision();
+        let mut legend = Legend::default();
+        let stale = Coloured {
+            colouring: Colouring::Runner,
+            times: None,
+            timed: untimed,
+        };
+        let found = legend.found(
+            &drawn,
+            1.0,
+            &Statuses::default(),
+            Revision::default(),
+            stale,
+        );
+        assert_eq!(found.map(|found| &found.reading), Some(&Reading::Kinds));
+
+        let read = reading_of(&mut legend, &drawn, Colouring::Runner, &times, timed);
+        assert!(matches!(read, Reading::Runners { .. }), "{read:?}");
     }
 
     /// A layered drawing numbered `drawing`, of one connector carrying `kinds`.
@@ -388,7 +760,13 @@ mod tests {
         let mut legend = Legend::default();
         let transitions = |legend: &mut Legend, drawn: &Drawn| {
             legend
-                .found(drawn, 1.0, &Statuses::default(), Revision::default())
+                .found(
+                    drawn,
+                    1.0,
+                    &Statuses::default(),
+                    Revision::default(),
+                    uncoloured(),
+                )
                 .map(|found| found.transitions.clone())
         };
         let exec = crossing(1, vec![EdgeKind::Cquery], Some(Transition::Exec));

@@ -536,7 +536,7 @@ impl Palette {
     /// on it, the connectors and the marks drawn over it clear of it — and the
     /// least-timed box apart from an untimed one, its ends stand as far apart
     /// as the bounds let them.
-    fn time_fill(&self, place: f32) -> Rgba {
+    pub(crate) fn time_fill(&self, place: f32) -> Rgba {
         let least = bviz_ui_theme::mix(self.background, self.data.yellow, RAMP_LEAST);
         let most = bviz_ui_theme::mix(self.background, self.data.blue, RAMP_MOST);
         bviz_ui_theme::mix(least, most, place)
@@ -558,7 +558,7 @@ impl Palette {
     /// carried toward the canvas, and for a mix of runners the neutral slot
     /// carried toward the canvas and then away from it, so the mix reads as a
     /// fill of its own beside an untimed box and beside every runner.
-    fn ran_fill(&self, ran: Ran) -> Rgba {
+    pub(crate) fn ran_fill(&self, ran: Ran) -> Rgba {
         let Ran::On(runner) = ran else {
             let mixed = bviz_ui_theme::mix(self.data.neutral, self.background, MIXED_BLEND);
             return bviz_ui_theme::lighten(mixed, MIXED_LIFT.copysign(self.mark_lift()));
@@ -587,7 +587,7 @@ impl Palette {
 
     /// Fill for a box no time lands on: a container keeps the fill it wears
     /// by kind, and a leaf takes the neutral slot.
-    fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
+    pub(crate) fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
         match compound {
             true => self.container_fill(kind),
             false => bviz_ui_theme::mix(self.data.neutral, self.background, KIND_BLEND),
@@ -669,7 +669,7 @@ impl Palette {
 
 /// What a frame fills its boxes by: the colouring chosen, with what that
 /// colouring reads.
-enum Fills<'a> {
+pub(crate) enum Fills<'a> {
     Kind,
     Time(&'a NodeTimes),
     Runner(&'a NodeTimes),
@@ -678,7 +678,7 @@ enum Fills<'a> {
 impl<'a> Fills<'a> {
     /// The fills `colouring` gives the boxes of a graph whose nodes carry
     /// `times`. A colouring by time over a graph carrying none fills by kind.
-    fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
+    pub(crate) fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
         match (colouring, times) {
             (Colouring::Time, Some(times)) => Fills::Time(times),
             (Colouring::Runner, Some(times)) => Fills::Runner(times),
