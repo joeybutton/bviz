@@ -3,6 +3,7 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use crate::report::Report;
 use crate::status::{Nodes, Statuses};
+use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
@@ -111,6 +112,9 @@ pub(crate) struct Loaded {
     /// How long the actions the invocation's profile recorded took, placed on
     /// the graph's nodes.
     times: Result<NodeTimes, Untimed>,
+    /// Where the actions the invocation's profile recorded spent their time,
+    /// as the card over the graph lists it.
+    timecard: Timecard,
     timed: Revision,
 }
 
@@ -124,6 +128,7 @@ impl Loaded {
             reported: Report::default(),
             taken_up: Revision::default(),
             times: Err(Untimed::NoProfile),
+            timecard: Timecard::default(),
             timed: Revision::default(),
         }
     }
@@ -143,14 +148,19 @@ impl Loaded {
         self.taken_up
     }
 
-    /// Which of its session's timings the [times](Self::times) are read
-    /// from, as [`taken_up`](Self::taken_up) is for outcomes.
+    /// Which of its session's timings the [times](Self::times) and the
+    /// [timecard](Self::timecard) are read from, as
+    /// [`taken_up`](Self::taken_up) is for outcomes.
     pub(crate) fn timed(&self) -> Revision {
         self.timed
     }
 
     pub(crate) fn times(&self) -> Result<&NodeTimes, Untimed> {
         self.times.as_ref().map_err(|untimed| *untimed)
+    }
+
+    pub(crate) fn timecard(&self) -> &Timecard {
+        &self.timecard
     }
 
     /// Takes up what the build and the profile of `session` report of the
@@ -172,8 +182,10 @@ impl Loaded {
         let base = &self.shared.base;
         let landings = landings(base, &self.shared.names, timings);
         let times = NodeTimes::resolve(&landings, base, timings);
-        let changed = self.times != times;
+        let timecard = Timecard::of(timings, &landings);
+        let changed = self.times != times || self.timecard != timecard;
         self.times = times;
+        self.timecard = timecard;
         changed
     }
 

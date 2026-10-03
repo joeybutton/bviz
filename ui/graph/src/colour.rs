@@ -47,7 +47,7 @@ impl Colouring {
 }
 
 /// The profile flag naming each action's primary output.
-const PRIMARY_OUTPUT_FLAG: &str = "--experimental_profile_include_primary_output";
+pub(crate) const PRIMARY_OUTPUT_FLAG: &str = "--experimental_profile_include_primary_output";
 /// The profile flag naming each action's owning target.
 const TARGET_LABEL_FLAG: &str = "--experimental_profile_include_target_label";
 

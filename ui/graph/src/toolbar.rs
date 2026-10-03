@@ -39,8 +39,11 @@ pub(crate) fn toolbar(
         );
     }
     bar = bar.child(controls.colour_picker);
-    if let Some(report) = controls.report_control {
-        bar = bar.child(report);
+    for card in [controls.report_control, controls.timecard_control]
+        .into_iter()
+        .flatten()
+    {
+        bar = bar.child(card);
     }
     // Last, past the controls that are always up, so the strip's standing shape
     // holds still as a selection comes and goes.

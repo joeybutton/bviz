@@ -52,6 +52,7 @@ mod scroll;
 mod search;
 mod selection;
 mod status;
+mod timecard;
 mod timing;
 mod toolbar;
 mod why;
@@ -255,6 +256,7 @@ pub struct GraphPanel {
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
     report: report::Card,
+    timecard: timecard::Card,
     /// The dependency paths asked for, which the panel draws in place of its
     /// filter.
     why: why::Why,
@@ -446,6 +448,7 @@ impl GraphPanel {
             missing_open: false,
             pins: pins::Pins::new(),
             report: report::Card::new(),
+            timecard: timecard::Card::new(),
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
@@ -532,6 +535,7 @@ impl GraphPanel {
                 column::Column::new()
                     .held(pins::panel(self, &palette, cx))
                     .folding(report::card(self, &palette, cx))
+                    .folding(timecard::card(self, &palette, cx))
                     .foot(why::card(self, &palette, cx)),
             )
             .children(search::card(self, &palette, cx))
@@ -770,6 +774,8 @@ impl Render for GraphPanel {
                     why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
                     colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
                     report_control: report::control(self, cx).map(IntoElement::into_any_element),
+                    timecard_control: timecard::control(self, cx)
+                        .map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
@@ -854,6 +860,9 @@ struct Controls {
     /// Puts the card reading what the build reported up and away, offered
     /// where the build reported anything.
     report_control: Option<AnyElement>,
+    /// Puts the card saying where the profile's action time went up and
+    /// away, offered where a profile places time on the graph.
+    timecard_control: Option<AnyElement>,
     neighborhood_enabled: bool,
     /// `None` where the drawing offers no choice of edge set.
     reduced: Option<bool>,

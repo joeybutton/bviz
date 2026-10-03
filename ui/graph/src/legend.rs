@@ -86,6 +86,11 @@ fn fill_swatch(fill: Rgba, width: f32, palette: &Palette) -> Div {
         .bg(fill)
 }
 
+/// The fill a box wears whose actions ran as `ran` says.
+pub(crate) fn ran_swatch(ran: Ran, palette: &Palette) -> Div {
+    fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette)
+}
+
 /// The fills a box's time is read off, from the least its kind holds to the
 /// most.
 fn ramp_swatch(palette: &Palette) -> Div {
@@ -350,10 +355,10 @@ fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> V
         }
         Reading::Runners { ran, untimed } => {
             let mut rows = Vec::with_capacity(ran.len() + 2);
-            rows.extend(ran.iter().map(|&ran| {
-                let swatch = fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette);
-                row(swatch, ran.label(), palette)
-            }));
+            rows.extend(
+                ran.iter()
+                    .map(|&ran| row(ran_swatch(ran, palette), ran.label(), palette)),
+            );
             rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH)));
             rows
         }
