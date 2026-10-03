@@ -30,6 +30,13 @@ pub(crate) struct Coverage {
     pub(crate) profiled: u32,
 }
 
+/// An action node, by how long its action took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Slowest {
+    pub(crate) action: Id,
+    pub(crate) wall: Duration,
+}
+
 /// The time spent on one node.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Timed {
@@ -38,6 +45,9 @@ pub(crate) struct Timed {
     pub(crate) own: Spent,
     /// `own` and the actions landing on every node the node contains.
     pub(crate) held: Spent,
+    /// The slowest action node among the node and those it contains; `None`
+    /// where every action held lands on a target.
+    pub(crate) slowest: Option<Slowest>,
 }
 
 /// The time every shorter one is placed as on a log scale: an action that
@@ -272,8 +282,10 @@ impl Landed {
     /// node of `graph` containing it, timing those containers.
     fn roll_up(mut self, graph: &Graph) -> (Vec<Option<Slot>>, Vec<Timed>) {
         let mut parent = vec![None; self.slots.len()];
+        let mut action = vec![false; self.slots.len()];
         for node in &graph.nodes {
             parent[node.id.0 as usize] = node.parent;
+            action[node.id.0 as usize] = node.kind == Kind::Action;
         }
         let mut owners: Vec<Id> = Vec::with_capacity(self.timed.len());
         for (id, slot) in self.slots.iter().enumerate() {
@@ -285,9 +297,20 @@ impl Landed {
             .reserve(untimed_containers(&owners, &parent, &self.slots));
         for owner in owners {
             let own = self.timed(owner).own.clone();
+            let slowest = action[owner.0 as usize].then(|| Slowest {
+                action: owner,
+                wall: own.total().wall,
+            });
             let mut at = Some(owner);
             while let Some(node) = at {
-                self.timed(node).held.add(&own);
+                let timed = self.timed(node);
+                timed.held.add(&own);
+                if let Some(slowest) = slowest {
+                    let slower = timed.slowest.is_none_or(|held| held.wall < slowest.wall);
+                    if slower {
+                        timed.slowest = Some(slowest);
+                    }
+                }
                 at = parent[node.0 as usize];
             }
         }
@@ -461,6 +484,15 @@ mod tests {
         }
         let spent = &times.get(package).unwrap().held;
         assert_eq!(spent.of(Runner::RemoteExecution), share(1, 30));
+        let slowest = |id| times.get(id).and_then(|timed| timed.slowest);
+        let compiling = Some(Slowest {
+            action: compile,
+            wall: Duration::from_millis(30),
+        });
+        for holder in [compile, configured, target, package] {
+            assert_eq!(slowest(holder), compiling);
+        }
+        assert_eq!(slowest(link).map(|slowest| slowest.action), Some(link));
         assert_eq!(spent.of(Runner::Sandboxed), share(1, 12));
         assert_eq!(times.get(idle), None);
     }
@@ -490,6 +522,11 @@ mod tests {
             assert_eq!(held(&times, container), Some(share(2, 10)));
         }
         assert_eq!(held(&times, unconfigured), Some(share(1, 5)));
+        assert_eq!(
+            times.get(package).unwrap().slowest,
+            None,
+            "no action node is held"
+        );
         assert_eq!(held(&times, other_package), Some(share(1, 5)));
     }
 

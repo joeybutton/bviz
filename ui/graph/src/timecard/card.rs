@@ -1,9 +1,10 @@
-use super::{Shown, Slow, Timecard};
+use super::{Shown, Slow, Timecard, words};
 use crate::column::{Folding, line};
 use crate::legend::ran_swatch;
 use crate::model::Loaded;
-use crate::timing::Ran;
+use crate::timing::{Ran, Slowest};
 use crate::{GraphPanel, Palette, reveal};
+use bviz_graph_layout::Id;
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
 };
@@ -122,18 +123,16 @@ fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphP
             let Some(loaded) = timed(entity.read(cx), cx) else {
                 return Vec::new();
             };
-            let facets = &loaded.shared.facets;
-            let mnemonic = |slow: &Slow| {
-                let Shown::Action(node) = slow.shown else {
-                    return None;
-                };
-                let mnemonic = facets.mnemonic(node)?;
-                Some(facets.strings().resolve(mnemonic))
-            };
             range
                 .clone()
                 .zip(loaded.timecard().listed(range))
-                .map(|(index, slow)| row(index, slow, mnemonic(slow), &entity, &palette))
+                .map(|(index, slow)| {
+                    let mnemonic = match slow.shown {
+                        Shown::Action(node) => mnemonic(loaded, node),
+                        Shown::Owner { .. } | Shown::Off => None,
+                    };
+                    row(index, slow, mnemonic, &entity, &palette)
+                })
                 .collect::<Vec<_>>()
         }
     })
@@ -179,6 +178,38 @@ fn runners(timecard: &Timecard, palette: &Palette) -> impl Iterator<Item = Div> 
     })
 }
 
+/// The mnemonic of the action node `id`, where the graph's inputs state one.
+fn mnemonic(loaded: &Loaded, id: Id) -> Option<&str> {
+    let facets = &loaded.shared.facets;
+    Some(facets.strings().resolve(facets.mnemonic(id)?))
+}
+
+/// What the profile says of the selected box `node`, over the control
+/// showing the slowest action the box holds, which is offered where that
+/// action is not the box itself.
+fn selected(node: Id, loaded: &Loaded, cx: &Context<GraphPanel>) -> Div {
+    let timed = loaded.times().ok().and_then(|times| times.get(node));
+    let slowest = timed
+        .and_then(|timed| timed.slowest)
+        .filter(|slowest| slowest.action != node);
+    let said = div().w_full().min_w_0().child(words::selected(node, timed));
+    div()
+        .flex()
+        .flex_col()
+        .items_end()
+        .gap_1()
+        .child(said)
+        .children(slowest.map(|slowest| {
+            let Slowest { action, .. } = slowest;
+            Button::new(
+                "timecard-slowest",
+                cx.listener(move |view, _: &ClickEvent, _, cx| reveal(view, action, cx)),
+            )
+            .label(words::slowest(slowest, mnemonic(loaded, action)))
+            .compact()
+        }))
+}
+
 /// Where the profile's action time went, for the caller to place over the
 /// drawing; `None` while the card is away, and where no profile records an
 /// action.
@@ -190,7 +221,8 @@ pub(crate) fn card(
     if !view.timecard.up {
         return None;
     }
-    let timecard = timed(view, cx)?.timecard();
+    let loaded = timed(view, cx)?;
+    let timecard = loaded.timecard();
     let colors = &palette.colors;
     let head = div()
         .flex()
@@ -215,6 +247,7 @@ pub(crate) fn card(
                 ),
         )
         .children(runners(timecard, palette))
+        .children(view.selection.node().map(|node| selected(node, loaded, cx)))
         .child(
             div()
                 .min_w_0()

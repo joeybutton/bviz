@@ -3,7 +3,8 @@
 use super::{Shown, Slow, Timecard};
 use crate::colour::PRIMARY_OUTPUT_FLAG;
 use crate::duration::lasted;
-use crate::timing::Ran;
+use crate::timing::{Ran, Slowest, Timed};
+use bviz_graph_layout::Id;
 use bviz_invocation::{Share, Spent};
 
 /// `count` actions, in words.
@@ -77,6 +78,45 @@ impl Timecard {
     /// its share of them.
     pub(super) fn runner_lines(&self) -> impl Iterator<Item = (Ran, String)> + '_ {
         shares(&self.profiled)
+    }
+}
+
+/// What the card says of the selected box `node`, which `timed` says the
+/// time of; `None` saying no action lands on it or on anything it holds.
+pub(super) fn selected(node: Id, timed: Option<&Timed>) -> String {
+    let Some(timed) = timed else {
+        return "no profiled action lands on this box".to_owned();
+    };
+    let held = timed.held.total();
+    let took = lasted(held.wall);
+    match timed.slowest {
+        Some(Slowest { action, .. }) if action == node => {
+            format!("this action took {took} ({})", Ran::of(&timed.held).label())
+        }
+        _ => {
+            let runners: Vec<String> = timed
+                .held
+                .runners()
+                .map(|(runner, share)| {
+                    format!("{} {}", Ran::On(runner).label(), part_of(share, held))
+                })
+                .collect();
+            format!(
+                "this box holds {} taking {took}: {}",
+                actions(held.actions),
+                runners.join(", ")
+            )
+        }
+    }
+}
+
+/// The control showing the slowest action a box holds, `mnemonic` saying of
+/// what kind it is.
+pub(super) fn slowest(slowest: Slowest, mnemonic: Option<&str>) -> String {
+    let took = lasted(slowest.wall);
+    match mnemonic {
+        Some(mnemonic) => format!("slowest: {mnemonic}, {took}"),
+        None => format!("slowest action, {took}"),
     }
 }
 
@@ -200,6 +240,47 @@ mod tests {
                 "local, unsandboxed: 1 action, under 1ms (33%)",
                 "no spawn recorded: 2 actions, under 1ms (67%)",
             ]
+        );
+    }
+
+    #[test]
+    fn a_box_is_said_to_hold_its_actions_and_an_action_to_have_taken_its_time() {
+        let mut spent = Spent::default();
+        spent.add_action(timing(9_000, Runner::RemoteExecution));
+        spent.add_action(timing(1_000, Runner::DiskCacheHit));
+        let slowest = Slowest {
+            action: Id(7),
+            wall: Duration::from_secs(9),
+        };
+        let held = Timed {
+            own: Spent::default(),
+            held: spent.clone(),
+            slowest: Some(slowest),
+        };
+        assert_eq!(
+            selected(Id(2), Some(&held)),
+            "this box holds 2 actions taking 10.0s: remote execution 90%, disk cache hit 10%"
+        );
+        assert_eq!(
+            super::slowest(slowest, Some("Javac")),
+            "slowest: Javac, 9.0s"
+        );
+        assert_eq!(super::slowest(slowest, None), "slowest action, 9.0s");
+
+        let mut own = Spent::default();
+        own.add_action(timing(9_000, Runner::RemoteExecution));
+        let action = Timed {
+            own: own.clone(),
+            held: own,
+            slowest: Some(slowest),
+        };
+        assert_eq!(
+            selected(Id(7), Some(&action)),
+            "this action took 9.0s (remote execution)"
+        );
+        assert_eq!(
+            selected(Id(3), None),
+            "no profiled action lands on this box"
         );
     }
 
