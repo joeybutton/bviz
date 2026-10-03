@@ -19,6 +19,10 @@ impl Str {
     pub fn range(self) -> std::ops::Range<usize> {
         self.off as usize..(self.off + self.len) as usize
     }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 /// An optional interned-string handle in the size of a bare [`Str`]: offset 0
@@ -51,6 +55,25 @@ impl From<Option<Str>> for OptStr {
 impl From<OptStr> for Option<Str> {
     fn from(s: OptStr) -> Option<Str> {
         s.get()
+    }
+}
+
+/// A Bazel `cat` of a profile, as its position among [`Profile::categories`];
+/// resolve to the category with [`Profile::category`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CategoryId(std::num::NonZeroU16);
+
+impl CategoryId {
+    /// The id of the category at `position`, and `None` past the last position
+    /// an id reaches.
+    pub(crate) fn at(position: usize) -> Option<CategoryId> {
+        let ordinal = u16::try_from(position).ok()?.checked_add(1)?;
+        std::num::NonZeroU16::new(ordinal).map(CategoryId)
+    }
+
+    /// The category's place in [`Profile::categories`].
+    pub fn position(self) -> usize {
+        usize::from(self.0.get()) - 1
     }
 }
 
@@ -111,6 +134,42 @@ pub struct Profile {
     phase_markers: Vec<PhaseMarker>,
     span: TimeSpan,
     distinct_strings: usize,
+    categories: Vec<Category>,
+}
+
+/// One Bazel `cat` of a profile.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Category {
+    name: Str,
+    kinds: Option<Kinds>,
+    /// See [`fixed_name`].
+    fixed_name: Option<&'static str>,
+}
+
+/// What labels the spans of a category whose names say which instance of a
+/// kind each is.
+#[derive(Debug, PartialEq)]
+struct Kinds {
+    naming: KindNaming,
+    /// The label of each kind of `naming.named`, in that order.
+    named: Vec<Str>,
+}
+
+impl Category {
+    /// The category `name`, whose text is `text`. A kind a span name leads
+    /// with is no string of any event's own, so `intern` gives it the handle
+    /// that labels its spans.
+    pub(crate) fn new(name: Str, text: &str, intern: impl FnMut(&str) -> Str) -> Category {
+        let kinds = kind_naming(text).map(|naming| Kinds {
+            naming,
+            named: naming.named.iter().copied().map(intern).collect(),
+        });
+        Category {
+            name,
+            kinds,
+            fixed_name: fixed_name(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -158,6 +217,9 @@ pub struct Slice {
     pub dur_us: i64,
     pub depth: u32,
     pub role: SpanRole,
+    /// The slice's Bazel `cat`, which its [`SliceDetail::category`] gives as
+    /// text; `None` for one of a category past the last an id reaches.
+    pub category: Option<CategoryId>,
 }
 
 const _: () = assert!(std::mem::size_of::<Slice>() == 32);
@@ -471,6 +533,206 @@ fn general_information_role(name: &str) -> (Workload, bool) {
     }
 }
 
+/// Whether a span of this Bazel `cat` holds its thread parked: for its own time
+/// — what the spans nested in it leave over — the thread is blocked on work that
+/// other threads carry out and record on their own lanes, so that time is theirs
+/// seen a second time.
+///
+/// `ProfilerTask.SKYFRAME_EVAL` is such a span whatever its name: its single
+/// emitter wraps `ParallelEvaluator.doMutatingEvaluation`, which hands the
+/// requested keys to the evaluator pools and waits for them to finish:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/skyframe/ParallelEvaluator.java#L670-L672>
+pub fn parks_thread(category: &str) -> bool {
+    category == "skyframe evaluator"
+}
+
+/// A repository, identified by its canonical name: two spans name the same
+/// repository only where the names they give it are equal in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Repository<'a>(&'a str);
+
+/// What leads a canonical repository name where a span writes the repository
+/// as a label would: `RepositoryName.getNameWithAt`,
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/cmdline/RepositoryName.java#L270-L276>
+const CANONICAL_REPOSITORY_SIGIL: &str = "@@";
+
+/// The side of a repository fetch the spans of one Bazel `cat` record. Bazel
+/// fetches a repository on two threads, each with a span of its own open for
+/// as long as it is at it:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L155-L187>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchSide {
+    /// `ProfilerTask.REPOSITORY_FETCH`, on the Skyframe thread asked for the
+    /// repository. That thread hands the fetch to a worker thread and blocks
+    /// until the worker finishes or needs a Skyframe restart, which ends the
+    /// span; another begins when the thread takes the fetch up again:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/skyframe/WorkerSkyKeyComputeState.java#L116-L128>
+    /// So while the worker's span is open the host's time is the worker's
+    /// seen a second time, and where the worker runs under no span the host's
+    /// is the only record of the fetch.
+    Host,
+    /// `ProfilerTask.STARLARK_REPOSITORY_FN` around the call of the repository
+    /// rule's implementation function on the worker thread, open across the
+    /// host's restarts:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L668-L672>
+    Worker,
+}
+
+const FETCH_HOST_CATEGORY: &str = "Fetching repository";
+const FETCH_WORKER_CATEGORY: &str = "Starlark repository function call";
+
+/// The side of a repository fetch the spans of this Bazel `cat` record, if
+/// any.
+pub fn fetch_side(category: &str) -> Option<FetchSide> {
+    match category {
+        FETCH_HOST_CATEGORY => Some(FetchSide::Host),
+        FETCH_WORKER_CATEGORY => Some(FetchSide::Worker),
+        _ => None,
+    }
+}
+
+impl FetchSide {
+    /// The repository a span of this side named `name` fetches. A host is
+    /// named by the repository as a label writes it. A worker is named by the
+    /// bare canonical name from Bazel 9.0.0 on:
+    /// <https://github.com/bazelbuild/bazel/blob/9.0.0/src/main/java/com/google/devtools/build/lib/bazel/repository/RepositoryFetchFunction.java#L644-L646>
+    /// An earlier Bazel names it by the label of the repository rule's target,
+    /// which no host's repository equals, so no host of such a profile has a
+    /// worker:
+    /// <https://github.com/bazelbuild/bazel/blob/8.8.1/src/main/java/com/google/devtools/build/lib/bazel/repository/starlark/StarlarkRepositoryFunction.java#L309-L311>
+    /// A worker shares its category with the commands the rule runs, which
+    /// are no repository's fetch as a whole and lead with a kind (see
+    /// [`kind_naming`]).
+    pub fn repository(self, name: &str) -> Option<Repository<'_>> {
+        match self {
+            FetchSide::Host => name
+                .strip_prefix(CANONICAL_REPOSITORY_SIGIL)
+                .map(Repository),
+            FetchSide::Worker => {
+                let command = kind_naming(FETCH_WORKER_CATEGORY)
+                    .is_some_and(|naming| matches!(naming.kind_of(name), Some(SpanKind::Named(_))));
+                (!command).then_some(Repository(name))
+            }
+        }
+    }
+}
+
+/// The Bazel `cat`s whose spans, but for those leading with one of the
+/// category's [`NAMED_KINDS`], are named after the one thing each works on — a
+/// repository, a package, a label, a path. Every emitter Bazel 9.1.0 has of
+/// these `ProfilerTask`s that writes none of those kinds passes such an
+/// identifier for the description:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/ProfilerTask.java>
+///
+/// The identifier is not always one instance's own (see [`FIXED_NAMES`]), and
+/// the root package of the main repository is written as the empty string:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/cmdline/PackageIdentifier.java#L266-L272>
+const PER_INSTANCE_CATEGORIES: [&str; 18] = [
+    "Fetching repository",
+    "Vendoring repository",
+    "package creation",
+    "Starlark repository function call",
+    "Starlark thread context",
+    "Starlark Parser",
+    "VFS stat",
+    "VFS readdir",
+    "VFS readlink",
+    "VFS md5",
+    "VFS xattr",
+    "VFS delete",
+    "VFS open",
+    "VFS read",
+    "VFS write",
+    "globbing",
+    "filesystem traversal",
+    "include scanner",
+];
+
+/// What stands between the kind and the instance in a span name that gives both.
+const KIND_SEPARATOR: &str = ": ";
+
+/// The kinds a span name leads with, ahead of [`KIND_SEPARATOR`] and the
+/// instance the span works on, under each Bazel `cat` whose emitters write
+/// such names in Bazel 9.1.0: a download or an extraction by what it is for, a
+/// repository rule's command by its command line, a module resolution step by
+/// its module, extension or URL, and a wait for local resources by its action.
+const NAMED_KINDS: [(&str, &[&str]); 4] = [
+    ("general information", &["fetching", "extracting"]),
+    ("Starlark repository function call", &["local", "remote"]),
+    (
+        "bazel module processing",
+        &[
+            "download file",
+            "fetch module file",
+            "evaluate module file",
+            "evaluate module extension",
+            "compute repo spec",
+            "getting yanked versions",
+        ],
+    ),
+    ("action resource lock", &["Acquiring resources for"]),
+];
+
+/// How the spans of one Bazel `cat` say what kind of thing each is an instance
+/// of, where their names say which instance rather than what the span does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KindNaming {
+    /// The kinds a name may lead with.
+    named: &'static [&'static str],
+    /// Whether a span leading with none of `named` is an instance of the
+    /// category itself.
+    category: bool,
+}
+
+/// What a span is an instance of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanKind {
+    /// Its category.
+    Category,
+    /// The kind at this position of its category's [`KindNaming::named`].
+    Named(usize),
+}
+
+impl KindNaming {
+    fn kind_of(self, name: &str) -> Option<SpanKind> {
+        let leads_with = |kind: &&str| {
+            name.strip_prefix(*kind)
+                .is_some_and(|rest| rest.starts_with(KIND_SEPARATOR))
+        };
+        match self.named.iter().position(leads_with) {
+            Some(i) => Some(SpanKind::Named(i)),
+            None => self.category.then_some(SpanKind::Category),
+        }
+    }
+}
+
+/// How the spans of this Bazel `cat` say their kind, and `None` for a category
+/// whose every span is named after what it does.
+fn kind_naming(category: &str) -> Option<KindNaming> {
+    let named = NAMED_KINDS
+        .iter()
+        .find(|(of, _)| *of == category)
+        .map_or(&[][..], |(_, kinds)| kinds);
+    let category = PER_INSTANCE_CATEGORIES.contains(&category);
+    (category || !named.is_empty()).then_some(KindNaming { named, category })
+}
+
+/// The name that spans of a Bazel `cat` among the [`PER_INSTANCE_CATEGORIES`]
+/// carry where an emitter passes a fixed phrase for the description, which
+/// says nothing of what the span works on. A thread's context is whatever its
+/// creator set, a label or a repository for most and this for a rule
+/// initializer's:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/analysis/starlark/StarlarkRuleClassFunctions.java#L1781>
+const FIXED_NAMES: [(&str, &str); 1] = [("Starlark thread context", "an initializer")];
+
+/// The name of this Bazel `cat` among the [`FIXED_NAMES`], if it has one.
+fn fixed_name(category: &str) -> Option<&'static str> {
+    FIXED_NAMES
+        .iter()
+        .find(|(of, _)| *of == category)
+        .map(|&(_, name)| name)
+}
+
 /// A counter graph. The parser splits every counter into one lane per numeric
 /// series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -681,6 +943,61 @@ impl Profile {
         self.distinct_strings
     }
 
+    /// Every distinct Bazel `cat` of the profile's slices, in the order of
+    /// their text.
+    pub fn categories(&self) -> impl ExactSizeIterator<Item = Str> + '_ {
+        self.categories.iter().map(|category| category.name)
+    }
+
+    pub fn category(&self, id: CategoryId) -> Str {
+        self.categories[id.position()].name
+    }
+
+    /// The kind `slice` is an instance of, as the label that names the kind —
+    /// its category, or the kind its name leads with — and `None` for a slice
+    /// named after what it does. A slice whose category has no id reads as the
+    /// latter.
+    pub fn kind_of(&self, slice: &Slice) -> Option<Str> {
+        self.kind_named(slice.category?, slice.name)
+    }
+
+    /// The kind a span of `category` named `name` is an instance of (see
+    /// [`kind_of`](Self::kind_of)).
+    pub fn kind_named(&self, category: CategoryId, name: Str) -> Option<Str> {
+        let category = &self.categories[category.position()];
+        let kinds = category.kinds.as_ref()?;
+        Some(match kinds.naming.kind_of(self.str(name))? {
+            SpanKind::Category => category.name,
+            SpanKind::Named(i) => kinds.named[i],
+        })
+    }
+
+    /// The name of `slice` where it says which instance of its kind the slice
+    /// works on, and `None` where it says none: the empty name, and the fixed
+    /// one of its category (see [`FIXED_NAMES`]).
+    pub fn instance_of(&self, slice: &Slice) -> Option<Str> {
+        let fixed = slice
+            .category
+            .and_then(|id| self.categories[id.position()].fixed_name);
+        let name = slice.name;
+        (!name.is_empty() && fixed != Some(self.str(name))).then_some(name)
+    }
+
+    /// Every label [`kind_of`](Self::kind_of) can give, whether or not a slice
+    /// of the profile takes it.
+    pub fn kinds(&self) -> impl Iterator<Item = Str> + '_ {
+        self.categories.iter().flat_map(|category| {
+            let kinds = category.kinds.as_ref();
+            let own = kinds
+                .filter(|kinds| kinds.naming.category)
+                .map(|_| category.name);
+            let named = kinds
+                .into_iter()
+                .flat_map(|kinds| kinds.named.iter().copied());
+            own.into_iter().chain(named)
+        })
+    }
+
     /// Resolves an interned handle to its text.
     pub fn str(&self, s: Str) -> &str {
         &self.text[s.range()]
@@ -775,6 +1092,7 @@ impl Profile {
             mut phase_markers,
             span,
             distinct_strings,
+            categories,
         } = parts;
         phase_markers.sort_by_key(|m| m.start_us);
         Profile {
@@ -791,6 +1109,7 @@ impl Profile {
             phase_markers,
             span,
             distinct_strings,
+            categories,
         }
     }
 }
@@ -810,6 +1129,7 @@ pub(crate) struct ProfileParts {
     pub phase_markers: Vec<PhaseMarker>,
     pub span: TimeSpan,
     pub distinct_strings: usize,
+    pub categories: Vec<Category>,
 }
 
 #[cfg(test)]
@@ -1040,6 +1360,296 @@ mod tests {
         assert_eq!(role("some future task", ""), overhead(Workload::Other));
     }
 
+    /// The kind [`kind_naming`] reads a span as an instance of, as text.
+    fn kind(category: &'static str, name: &str) -> Option<&'static str> {
+        let naming = kind_naming(category)?;
+        match naming.kind_of(name)? {
+            SpanKind::Category => Some(category),
+            SpanKind::Named(i) => Some(naming.named[i]),
+        }
+    }
+
+    #[test]
+    fn a_span_named_after_what_it_works_on_is_an_instance_of_its_category() {
+        for (category, name) in [
+            ("Fetching repository", "@@rules_cc+"),
+            ("Vendoring repository", "@@rules_cc+"),
+            ("package creation", "@@rules_cc+//cc"),
+            ("package creation", ""),
+            ("Starlark thread context", "repository @@rules_cc+"),
+            ("Starlark thread context", "//cc:defs"),
+            ("Starlark repository function call", "rules_cc+"),
+            ("Starlark Parser", "/work/cc/BUILD.bazel"),
+            ("VFS stat", "/work/cc"),
+            ("VFS md5", "/work/cc/defs.bzl"),
+            ("globbing", "/work/cc"),
+            (
+                "filesystem traversal",
+                "DirectTraversalRoot{rootPart=/work}",
+            ),
+            ("include scanner", "cc/defs.h"),
+            // A separator alone makes no kind of what stands ahead of it.
+            ("Fetching repository", "local: @@rules_cc+"),
+            ("VFS stat", "/work/a: b"),
+        ] {
+            assert_eq!(kind(category, name), Some(category), "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_span_named_kind_then_instance_is_an_instance_of_the_kind_it_leads_with() {
+        for (category, name, expected) in [
+            (
+                "general information",
+                "fetching: repository @@rules_cc+",
+                "fetching",
+            ),
+            (
+                "general information",
+                "extracting: module extension @@rules_go+//go:extensions.bzl%go_sdk",
+                "extracting",
+            ),
+            (
+                "Starlark repository function call",
+                "local: /usr/bin/uname -m",
+                "local",
+            ),
+            (
+                "Starlark repository function call",
+                "remote: /usr/bin/uname -m",
+                "remote",
+            ),
+            (
+                "bazel module processing",
+                "download file: https://bcr.example/modules/foo/1.0/MODULE.bazel",
+                "download file",
+            ),
+            (
+                "bazel module processing",
+                "fetch module file: rules_cc@0.1.5",
+                "fetch module file",
+            ),
+            (
+                "bazel module processing",
+                "evaluate module file: rules_cc@0.1.5",
+                "evaluate module file",
+            ),
+            (
+                "bazel module processing",
+                "evaluate module extension: crate",
+                "evaluate module extension",
+            ),
+            (
+                "bazel module processing",
+                "compute repo spec: rules_cc@0.1.5",
+                "compute repo spec",
+            ),
+            (
+                "bazel module processing",
+                "getting yanked versions: rules_cc",
+                "getting yanked versions",
+            ),
+            (
+                "action resource lock",
+                "Acquiring resources for: Compiling cc/defs.cc",
+                "Acquiring resources for",
+            ),
+            // Only the first separator divides the kind from the instance.
+            (
+                "general information",
+                "fetching: repository @@a: b: c",
+                "fetching",
+            ),
+            (
+                "Starlark repository function call",
+                "local: sh -c echo fetching: x",
+                "local",
+            ),
+        ] {
+            assert_eq!(kind(category, name), Some(expected), "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_span_named_after_what_it_does_is_an_instance_of_nothing() {
+        for (category, name) in [
+            // Fixed step names beside the per-instance ones of their category.
+            ("general information", "buildTargets"),
+            ("general information", "subprocess.run"),
+            ("bazel module processing", "check bazel compatibility"),
+            ("bazel module processing", "discovery"),
+            ("action resource lock", "action.enterActionPreparation"),
+            // A kind without its separator, with nothing after it, under
+            // another category, or past the head of the name.
+            ("general information", "fetching"),
+            ("general information", "fetching:"),
+            ("general information", "fetching repository @@a"),
+            ("general information", "local: /usr/bin/uname -m"),
+            ("general information", "prefetching: x"),
+            ("general information", "upload fetching: x"),
+            ("bazel module processing", "fetching: repository @@a"),
+            ("bazel module processing", "check lockfile for crate"),
+            // A separator after a kind no emitter writes.
+            ("general information", "Remote.download: x"),
+            ("bazel module processing", "parse lockfile: x"),
+            // Function names, shared by every call.
+            ("Starlark user function call", "_impl"),
+            ("skyfunction", "CONFIGURED_TARGET"),
+            // Named by the action, which its mnemonic groups.
+            ("action processing", "Compiling cc/defs.cc"),
+            ("some future task", "x: y"),
+            ("", ""),
+        ] {
+            assert_eq!(kind(category, name), None, "{category} / {name}");
+        }
+    }
+
+    #[test]
+    fn a_name_leading_with_a_kind_and_its_separator_alone_is_an_instance_of_that_kind() {
+        assert_eq!(kind("general information", "fetching: "), Some("fetching"));
+    }
+
+    #[test]
+    fn the_spans_of_a_kind_share_one_role() {
+        // A kind labels one frame for all its spans, which a role differing by
+        // instance would split in two.
+        for category in PER_INSTANCE_CATEGORIES {
+            assert_eq!(
+                span_role(category, "@@rules_cc+"),
+                span_role(category, "/work/cc/defs.bzl"),
+                "{category}"
+            );
+        }
+        for (category, kinds) in NAMED_KINDS {
+            for kind in kinds {
+                let role =
+                    |instance| span_role(category, &format!("{kind}{KIND_SEPARATOR}{instance}"));
+                assert_eq!(
+                    role("@@rules_cc+"),
+                    role("/work/cc/defs.bzl"),
+                    "{category} / {kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_profile_gives_the_kind_of_each_of_its_slices() {
+        let events = [
+            ("Fetching repository", "@@rules_cc+"),
+            ("general information", "buildTargets"),
+            ("general information", "fetching: repository @@rules_cc+"),
+            ("general information", "extracting: repository @@rules_cc+"),
+            ("package creation", ""),
+        ]
+        .map(|(category, name)| {
+            format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
+        });
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let kind = |name| {
+            let slices = p.slices(&p.threads()[0]);
+            let slice = slices.iter().find(|s| p.str(s.name) == name).expect(name);
+            p.kind_of(slice).map(|kind| p.str(kind))
+        };
+        assert_eq!(kind("@@rules_cc+"), Some("Fetching repository"));
+        assert_eq!(kind("buildTargets"), None);
+        assert_eq!(kind("fetching: repository @@rules_cc+"), Some("fetching"));
+        assert_eq!(
+            kind("extracting: repository @@rules_cc+"),
+            Some("extracting")
+        );
+        assert_eq!(kind(""), Some("package creation"));
+        // A kind of a category the profile has is a label whether or not a
+        // span leads with it.
+        let kinds: Vec<&str> = p.kinds().map(|kind| p.str(kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                "Fetching repository",
+                "fetching",
+                "extracting",
+                "package creation"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_empty_or_fixed_for_its_category_tells_of_no_instance() {
+        let events = [
+            ("Starlark thread context", "//pkg:target"),
+            ("Starlark thread context", "an initializer"),
+            ("package creation", ""),
+            // The phrase is fixed under the one category alone.
+            ("package creation", "an initializer"),
+        ]
+        .map(|(category, name)| {
+            format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
+        });
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let instances: Vec<(&str, Option<&str>)> = p
+            .slices(&p.threads()[0])
+            .iter()
+            .map(|s| {
+                let category = s.category.expect("an id reaches every category here");
+                (p.str(p.category(category)), p.opt_str(p.instance_of(s)))
+            })
+            .collect();
+        assert_eq!(
+            instances,
+            [
+                ("Starlark thread context", Some("//pkg:target")),
+                ("Starlark thread context", None),
+                ("package creation", None),
+                ("package creation", Some("an initializer")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_two_sides_of_a_fetch_name_one_repository() {
+        let host = fetch_side("Fetching repository").expect("the host's category");
+        let worker = fetch_side("Starlark repository function call").expect("the worker's");
+        assert_eq!((host, worker), (FetchSide::Host, FetchSide::Worker));
+        let repository = "rules_java++toolchains+remote_jdk8_linux";
+        assert_eq!(
+            host.repository(&format!("@@{repository}")),
+            worker.repository(repository)
+        );
+        assert_eq!(worker.repository(repository), Some(Repository(repository)));
+        // A name that only begins as another does is another repository.
+        assert_ne!(
+            host.repository("@@rules_cc+"),
+            worker.repository("rules_cc++cc_configure_extension+local_config_cc")
+        );
+        assert_ne!(
+            host.repository("@@rules_cc+"),
+            worker.repository("rules_cc")
+        );
+    }
+
+    #[test]
+    fn a_span_that_fetches_no_repository_as_a_whole_is_on_neither_side() {
+        for category in [
+            "general information",
+            "Starlark thread context",
+            "Vendoring repository",
+            "bazel module processing",
+            "skyframe evaluator",
+            "",
+        ] {
+            assert_eq!(fetch_side(category), None, "{category}");
+        }
+        // A host names its repository as a label does.
+        assert_eq!(FetchSide::Host.repository("rules_cc+"), None);
+        assert_eq!(FetchSide::Host.repository("@rules_cc+"), None);
+        // The commands a repository rule runs share the worker's category.
+        for name in ["local: /usr/bin/uname -m", "remote: /usr/bin/uname -m"] {
+            assert_eq!(FetchSide::Worker.repository(name), None, "{name}");
+        }
+    }
+
     fn timed_slice(start_us: i64, dur_us: i64) -> Slice {
         Slice {
             name: Str::default(),
@@ -1047,6 +1657,7 @@ mod tests {
             dur_us,
             depth: 0,
             role: span_role("", ""),
+            category: None,
         }
     }
 

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use bviz_trace_profile::{LaneClass, Profile};
+use fastrand::Rng;
 
 /// A slice to emit as a `ph:"X"` trace event. `mnemonic` rides in `args` when set,
 /// mirroring Bazel's action slices the mnemonic index reads.
@@ -47,6 +48,39 @@ pub fn action_named(name: &str, mnemonic: &str, start_us: i64, dur_us: i64) -> T
         mnemonic: Some(mnemonic.to_owned()),
         ..slice(name, "action processing", start_us, dur_us)
     }
+}
+
+/// A span that holds its lane parked (see
+/// [`parks_thread`](bviz_trace_profile::parks_thread)).
+pub fn wait(start_us: i64, dur_us: i64) -> TestSlice {
+    slice(
+        "Parallel Evaluator evaluation",
+        "skyframe evaluator",
+        start_us,
+        dur_us,
+    )
+}
+
+/// The span a thread hosting `repository`'s fetch has open (see
+/// [`FetchSide::Host`](bviz_trace_profile::FetchSide::Host)).
+pub fn fetch_host(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+    slice(
+        &format!("@@{repository}"),
+        "Fetching repository",
+        start_us,
+        dur_us,
+    )
+}
+
+/// The span a thread working `repository`'s fetch has open (see
+/// [`FetchSide::Worker`](bviz_trace_profile::FetchSide::Worker)).
+pub fn fetch_worker(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+    slice(
+        repository,
+        "Starlark repository function call",
+        start_us,
+        dur_us,
+    )
 }
 
 /// A thread track carrying the slices of one lane. The lane class is requested
@@ -144,4 +178,62 @@ pub fn profile_with_counters(tracks: Vec<TestTrack>, counters: &[TestCounter]) -
     }
     let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
     Profile::from_bytes(json.as_bytes()).expect("parse test profile")
+}
+
+/// A small random profile: lanes of any class with at most one critical path,
+/// each holding a few spans that begin before `horizon_us`, run for up to half
+/// of it, and nest or overlap as they fall. Zero-length spans, parking waits,
+/// actions, spans named per instance, the hosts and workers of a few
+/// repositories' fetches and plain work are all among them.
+pub fn random_profile(rng: &mut Rng, horizon_us: i64) -> Arc<Profile> {
+    const MAX_LANES: i64 = 6;
+    const MAX_SLICES: usize = 8;
+    const NAMES: [&str; 4] = ["a", "b", "c", "d"];
+    // One name leads another, and few enough that hosts meet their workers.
+    const REPOSITORIES: [&str; 2] = ["a", "a+b"];
+    // Equally likely outcomes of each draw; a `match` on one gives those it
+    // does not name to its last arm.
+    const LANE_CLASS_DRAWS: u32 = 8;
+    const DURATION_DRAWS: u32 = 5;
+    const SPAN_KIND_DRAWS: u32 = 8;
+    let lanes = rng.i64(1..=MAX_LANES);
+    let mut tracks = Vec::with_capacity(lanes as usize);
+    let mut has_critical_path = false;
+    for lane in 0..lanes {
+        let lane_class = match rng.u32(..LANE_CLASS_DRAWS) {
+            0 => LaneClass::Gc,
+            1 => LaneClass::Main,
+            2 if !has_critical_path => LaneClass::CriticalPath,
+            3 => LaneClass::Analysis,
+            _ => LaneClass::Execution,
+        };
+        has_critical_path |= lane_class == LaneClass::CriticalPath;
+        let tid = match lane_class {
+            LaneClass::CriticalPath => 0,
+            _ => lane + 1,
+        };
+        let slices = (0..rng.usize(..=MAX_SLICES))
+            .map(|_| {
+                let start_us = rng.i64(0..horizon_us);
+                let dur_us = match rng.u32(..DURATION_DRAWS) {
+                    0 => 0,
+                    1 => 1,
+                    _ => rng.i64(0..horizon_us / 2),
+                };
+                let name = NAMES[rng.usize(..NAMES.len())];
+                let repository = REPOSITORIES[rng.usize(..REPOSITORIES.len())];
+                match rng.u32(..SPAN_KIND_DRAWS) {
+                    0 => wait(start_us, dur_us),
+                    1 => action_named(&format!("Compiling {name}"), "Rustc", start_us, dur_us),
+                    2 => action(name, start_us, dur_us),
+                    3 => slice(name, "package creation", start_us, dur_us),
+                    4 | 5 => fetch_host(repository, start_us, dur_us),
+                    6 => fetch_worker(repository, start_us, dur_us),
+                    _ => slice(name, "generic", start_us, dur_us),
+                }
+            })
+            .collect();
+        tracks.push(track(tid, lane_class, slices));
+    }
+    profile(tracks)
 }

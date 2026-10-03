@@ -3,8 +3,8 @@
 
 use bviz_trace_layout::{SpanRole, Workload};
 use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
-use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, mix, over};
-use gpui::{Hsla, IntoElement, Rgba, div, hsla, prelude::*, px};
+use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, label_on, mix, over};
+use gpui::{BorderStyle, Div, Hsla, Rgba, div, hsla, prelude::*, px};
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
@@ -27,6 +27,15 @@ pub(crate) fn counter_color(series: &str) -> Hsla {
     )
 }
 
+/// What a counter series' value under the crosshair is written on: a tag of
+/// the series' own fill, so the label reads the same over the filled area and
+/// over the bare chart beside it.
+pub(crate) struct ReadoutTag {
+    /// The series' fill as it stands on the canvas.
+    pub(crate) fill: Hsla,
+    pub(crate) label: Hsla,
+}
+
 /// How far an overhead fill is pulled toward the canvas, so Bazel's own machinery
 /// sits behind the payload it serves. Bounded on both sides: pulled too little,
 /// an overhead fill is still taken for the vivid fill of the next slot round the
@@ -34,6 +43,22 @@ pub(crate) fn counter_color(series: &str) -> Hsla {
 /// enough on the canvas for the closest pair of them to stop reading as two
 /// colors.
 const OVERHEAD_FADE: f32 = 0.4;
+
+/// How far the wash filling a remainder recedes toward the canvas from the
+/// colour of its outline.
+const REMAINDER_WASH_FADE: f32 = 0.6;
+
+/// How far the fill of the rows a remainder reaches recedes toward the canvas
+/// from the hueless data colour.
+const REMAINDER_DEPTH_FADE: f32 = 0.7;
+
+/// A remainder's paint: an outline around a wash of its own colour, where a
+/// frame is one solid fill.
+pub(crate) struct RemainderPaint {
+    pub(crate) outline: Hsla,
+    pub(crate) wash: Hsla,
+    pub(crate) border: BorderStyle,
+}
 
 /// Side of a legend swatch and the gap between a swatch and its label.
 const LEGEND_SWATCH: f32 = 10.0;
@@ -108,7 +133,7 @@ const LEGEND_ROLES: [(SpanRole, &str); 8] = [
 /// from the same fills the flame boxes take. Squeezed, it sheds whole entries off
 /// its right end, so every swatch it shows keeps the size that keys it to the
 /// fill.
-pub(crate) fn role_legend(palette: &Palette, text_size: f32) -> impl IntoElement {
+pub(crate) fn role_legend(palette: &Palette, text_size: f32) -> Div {
     let row = px(text_size * LEGEND_LEADING);
     div()
         .flex()
@@ -205,6 +230,15 @@ impl Palette {
         }
     }
 
+    /// The tag of a counter series whose fill is `series`.
+    pub(crate) fn readout_tag(&self, series: Hsla) -> ReadoutTag {
+        let fill = over(series, self.background);
+        ReadoutTag {
+            fill: fill.into(),
+            label: label_on(fill),
+        }
+    }
+
     /// The fill under the cursor on a picked row of the background canvas, so
     /// that pointing at a picked row leaves it marked.
     pub(crate) fn picked_hover(&self) -> Rgba {
@@ -233,6 +267,28 @@ impl Palette {
         }
     }
 
+    /// What a remainder whose members share `role`, or share none, is drawn in.
+    /// The hueless colour outlines members of several roles, which the hue of
+    /// no one of them describes, in dashes that tell it from the outline of
+    /// members that are all of the Other workload.
+    pub(crate) fn remainder(&self, role: Option<SpanRole>) -> RemainderPaint {
+        let (outline, border) = match role {
+            Some(role) => (self.role_fill(role), BorderStyle::Solid),
+            None => (self.data.neutral, BorderStyle::Dashed),
+        };
+        RemainderPaint {
+            outline,
+            wash: mix(outline, self.background, REMAINDER_WASH_FADE).into(),
+            border,
+        }
+    }
+
+    /// Fill for the rows beneath a remainder that its members reach, which
+    /// stand for no frame and so carry no role.
+    pub(crate) fn remainder_depth_fill(&self) -> Hsla {
+        mix(self.data.neutral, self.background, REMAINDER_DEPTH_FADE).into()
+    }
+
     /// The style a labeled box paints with.
     pub(crate) fn label_box(&self) -> LabelBoxStyle {
         LabelBoxStyle {
@@ -248,7 +304,8 @@ impl Palette {
 mod tests {
     use super::*;
     use bviz_ui_theme::{
-        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_VISIBLE_STEP, built_in_themes, distance, level_step,
+        MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
+        contrast_ratio, distance, level_step,
     };
 
     /// The most a hover fill may clear the surface under it, as a multiple of
@@ -302,6 +359,27 @@ mod tests {
     /// How far a fill stands off the canvas it is painted on.
     fn stand_off(palette: &Palette, role: SpanRole) -> f32 {
         distance(palette.role_fill(role), palette.background)
+    }
+
+    /// How many hues, evenly spaced round the wheel, stand for every counter
+    /// series.
+    const SERIES_HUES: u16 = 360;
+
+    #[test]
+    fn a_counter_readout_holds_text_contrast_on_its_tag_whatever_the_series() {
+        for palette in palettes() {
+            for hue in 0..SERIES_HUES {
+                let series = hsla(
+                    f32::from(hue) / f32::from(SERIES_HUES),
+                    CATEGORY_SATURATION,
+                    CATEGORY_LIGHTNESS,
+                    COUNTER_AREA_ALPHA,
+                );
+                let tag = palette.readout_tag(series);
+                let contrast = contrast_ratio(tag.label, tag.fill);
+                assert!(contrast >= MIN_TEXT_CONTRAST, "hue {hue}: {contrast}");
+            }
+        }
     }
 
     /// A hover marks the row the cursor is on and hands it back on the way out.
@@ -371,6 +449,52 @@ mod tests {
                     assert!(apart >= MIN_DISTINCT_COLOR, "{apart}");
                 }
             }
+        }
+    }
+
+    /// A remainder is told from a frame by being an outline around a wash, so
+    /// the wash has to part from the outline, and from the canvas the outline
+    /// stands on.
+    #[test]
+    fn a_remainders_wash_is_told_from_its_outline_and_from_the_canvas() {
+        for palette in palettes() {
+            let roles = HUED_WORKLOADS
+                .into_iter()
+                .chain([Workload::Other])
+                .flat_map(|workload| [true, false].map(|payload| SpanRole { workload, payload }))
+                .map(Some)
+                .chain([None]);
+            for role in roles {
+                let RemainderPaint { outline, wash, .. } = palette.remainder(role);
+                let from_outline = distance(wash, outline);
+                assert!(
+                    from_outline >= MIN_DISTINCT_COLOR,
+                    "{role:?}: {from_outline}"
+                );
+                let from_canvas = level_step(wash, palette.background);
+                assert!(
+                    from_canvas >= MIN_EDGED_STEP,
+                    "{role:?}: {from_canvas} levels"
+                );
+            }
+        }
+    }
+
+    /// The rows a remainder reaches are drawn with no edge, and stand for no
+    /// frame: the fill has to show on the canvas without being taken for the
+    /// hueless fill of a frame of the Other workload.
+    #[test]
+    fn the_depth_beneath_a_remainder_is_told_from_the_canvas_and_from_a_frame() {
+        for palette in palettes() {
+            let depth = palette.remainder_depth_fill();
+            let from_canvas = level_step(depth, palette.background);
+            assert!(from_canvas >= MIN_VISIBLE_STEP, "{from_canvas} levels");
+            let hueless = palette.role_fill(SpanRole {
+                workload: Workload::Other,
+                payload: false,
+            });
+            let from_frame = distance(depth, hueless);
+            assert!(from_frame >= MIN_DISTINCT_COLOR, "{from_frame}");
         }
     }
 

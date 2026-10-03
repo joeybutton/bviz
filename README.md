@@ -21,7 +21,7 @@ into one graph to expand, search and filter.
 ### Trace profile
 
 The timeline of a build's trace profile: what ran when, and flame graphs of
-where the time went.
+where the time went, weighed by summed time or by share of the wall time.
 
 ### Build event protocol
 

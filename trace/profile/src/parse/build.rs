@@ -3,13 +3,14 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use bviz_invocation::EpochMicros;
 use bviz_parallel::worker_count;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 
 use crate::concurrent_interner::{ConcurrentInterner, Writer};
 use crate::model::{
-    CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker, Profile, ProfileParts,
-    Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses, lane_class, occupied_span,
-    span_role,
+    Category, CategoryId, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker,
+    Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses,
+    lane_class, occupied_span, span_role,
 };
 
 use super::serde_events::{ArgEntry, ArgVal, RawEvent, arg_i64, arg_str};
@@ -64,6 +65,8 @@ pub(crate) struct Builder {
     phase_markers: Vec<PhaseMarker>,
     counter_order: Vec<Str>,
     counters: HashMap<Str, RawLane>,
+    /// Every distinct category of the staged slices.
+    categories: FxHashSet<Str>,
 }
 
 impl Builder {
@@ -77,6 +80,7 @@ impl Builder {
             phase_markers: Vec::new(),
             counter_order: Vec::new(),
             counters: HashMap::new(),
+            categories: FxHashSet::default(),
         }
     }
 
@@ -103,6 +107,7 @@ impl Builder {
                     let role = span_role(category, name);
                     let name = interner.intern(name);
                     let category = interner.intern(category);
+                    self.categories.insert(category);
                     let detail = build_slice_detail(interner, &mut self.args_pool, category, args);
                     self.staging.push((
                         tid,
@@ -116,6 +121,9 @@ impl Builder {
                             dur_us: round_us(ev.dur).max(0),
                             depth: 0,
                             role,
+                            // Numbered by the merge, once every category is
+                            // known.
+                            category: None,
                         },
                         detail,
                     ));
@@ -225,6 +233,7 @@ pub(crate) struct Merge {
     counter_order: Vec<Str>,
     counters: HashMap<Str, RawLane>,
     runs: Vec<FoldedRun>,
+    categories: FxHashSet<Str>,
 }
 
 struct FoldedRun {
@@ -246,6 +255,7 @@ impl Merge {
             counter_order: Vec::new(),
             counters: HashMap::new(),
             runs: Vec::new(),
+            categories: FxHashSet::default(),
         }
     }
 
@@ -257,6 +267,7 @@ impl Merge {
             counter_order: Vec::new(),
             counters: HashMap::new(),
             runs: Vec::with_capacity(runs),
+            categories: FxHashSet::default(),
         }
     }
 
@@ -273,7 +284,9 @@ impl Merge {
             phase_markers,
             counter_order,
             mut counters,
+            categories,
         } = builder;
+        self.categories.extend(categories);
         // The args pool is per-worker, concatenated here; a detail's `others`
         // span indexes it, so it rebases by the base this builder lands at. The
         // entries themselves are global text handles, unchanged.
@@ -362,11 +375,17 @@ fn finish_merge(
         counter_order,
         counters,
         runs,
+        categories,
     } = merge;
+    let categories = Categories::numbering(categories, pool.interner);
     let slice_total: usize = runs.iter().map(|r| r.order.len()).sum();
     let mut slice_pools = SlicePools::with_capacity(slice_total);
-    let (segments, mut tasks) =
-        carve_segments(&mut slice_pools, group_runs_by_tid(&runs), slice_total);
+    let (segments, mut tasks) = carve_segments(
+        &mut slice_pools,
+        group_runs_by_tid(&runs),
+        slice_total,
+        &categories,
+    );
     merge_lanes(&mut tasks);
     let results: Vec<(u32, i64, i64)> = tasks
         .into_iter()
@@ -386,6 +405,7 @@ fn finish_merge(
             segments: &segments,
             results: &results,
         },
+        categories.ordered,
         args_pool,
         phase_markers,
         thread_meta,
@@ -399,6 +419,26 @@ fn finish_merge(
     // page-return work; detached so the load doesn't wait on it.
     std::thread::spawn(move || drop(runs));
     parts
+}
+
+/// A profile's categories in the order of their text, which numbers them the
+/// same however the events were split among builders.
+struct Categories {
+    ordered: Vec<Str>,
+    ids: FxHashMap<Str, Option<CategoryId>>,
+}
+
+impl Categories {
+    fn numbering(distinct: FxHashSet<Str>, interner: &ConcurrentInterner) -> Categories {
+        let mut ordered: Vec<Str> = distinct.into_iter().collect();
+        ordered.sort_unstable_by_key(|&category| interner.resolve(category));
+        let ids = ordered
+            .iter()
+            .enumerate()
+            .map(|(position, &category)| (category, CategoryId::at(position)))
+            .collect();
+        Categories { ordered, ids }
+    }
 }
 
 struct SlicePools {
@@ -438,6 +478,7 @@ struct TidTask<'a> {
     dest_detail: &'a mut [std::mem::MaybeUninit<SliceDetail>],
     dest_end_max: &'a mut [std::mem::MaybeUninit<i64>],
     runs: Vec<Run<'a>>,
+    categories: &'a Categories,
     max_depth: u32,
     min_start_us: i64,
     /// The furthest any of the lane's slices reaches by
@@ -468,6 +509,7 @@ fn carve_segments<'a>(
     pools: &'a mut SlicePools,
     tid_runs: BTreeMap<i64, Vec<Run<'a>>>,
     slice_total: usize,
+    categories: &'a Categories,
 ) -> (Vec<(i64, Span32)>, Vec<TidTask<'a>>) {
     let mut segments: Vec<(i64, Span32)> = Vec::with_capacity(tid_runs.len());
     let mut tasks: Vec<TidTask> = Vec::with_capacity(tid_runs.len());
@@ -490,6 +532,7 @@ fn carve_segments<'a>(
             dest_detail,
             dest_end_max,
             runs,
+            categories,
             max_depth: 0,
             min_start_us: i64::MAX,
             max_occupied_us: i64::MIN,
@@ -525,10 +568,10 @@ fn merge_lanes(tasks: &mut [TidTask]) {
 /// stable sort of the runs concatenated in fold order.
 ///
 /// Filling a slot carries the rest of the per-slice work in the same pass: it
-/// rebases the detail's arg-pool span onto its run's base, assigns the depth
-/// the ancestor stack gives, folds the slice into the lane's time extent, and
-/// hands the end-max slot the running end its slices have reached, feeding
-/// [`Profile::end_maxes`].
+/// rebases the detail's arg-pool span onto its run's base, numbers the slice's
+/// category, assigns the depth the ancestor stack gives, folds the slice into
+/// the lane's time extent, and hands the end-max slot the running end its
+/// slices have reached, feeding [`Profile::end_maxes`].
 ///
 /// Slice, detail, and end max travel as one triple, so the three pools stay
 /// index-parallel by construction.
@@ -538,6 +581,7 @@ fn merge_lane(task: &mut TidTask) {
         dest_detail,
         dest_end_max,
         runs,
+        categories,
         max_depth,
         min_start_us,
         max_occupied_us,
@@ -548,10 +592,21 @@ fn merge_lane(task: &mut TidTask) {
     // End times of the ancestors still open.
     let mut stack: Vec<i64> = Vec::new();
     let mut end_max_us = i64::MIN;
+    // A lane runs many slices of one category in a row, each but the first
+    // numbered without hashing it.
+    let mut numbered: Option<(Str, Option<CategoryId>)> = None;
     let mut emit = |run: &Run, src: &(i64, Slice, SliceDetail)| {
         let mut s = src.1;
         let mut d = src.2;
         d.others = d.others.shifted(run.args_base);
+        s.category = match numbered {
+            Some((category, id)) if category == d.category => id,
+            _ => {
+                let id = categories.ids[&d.category];
+                numbered = Some((d.category, id));
+                id
+            }
+        };
         let end = s.end_us();
         while stack
             .last()
@@ -612,6 +667,7 @@ fn merge_lane(task: &mut TidTask) {
 fn build_parts(
     pools: SlicePools,
     merged: ThreadMerge,
+    categories: Vec<Str>,
     args_pool: Vec<(Str, Str)>,
     phase_markers: Vec<PhaseMarker>,
     thread_meta: BTreeMap<i64, (Option<String>, i64)>,
@@ -631,6 +687,13 @@ fn build_parts(
         let threads = build_thread_tracks(merged, &thread_meta, &mut pool.writer);
         let (series_pool, point_pool, counters) =
             build_counter_lanes(counter_order, counters, pool);
+        let categories = categories
+            .into_iter()
+            .map(|name| {
+                let text = pool.interner.resolve(name);
+                Category::new(name, text, |kind| pool.writer.intern(kind))
+            })
+            .collect();
 
         ProfileParts {
             text: String::new(),
@@ -646,6 +709,7 @@ fn build_parts(
             phase_markers,
             span,
             distinct_strings: 0,
+            categories,
         }
     })
 }

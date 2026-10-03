@@ -37,6 +37,7 @@ bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
+fastrand = "2"
 flate2 = { version = "1", features = ["zlib-rs"] }
 hashbrown = { version = "0.16", default-features = false }
 libmimalloc-sys = "0.1"

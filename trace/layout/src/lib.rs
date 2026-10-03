@@ -8,18 +8,21 @@ mod stats;
 #[cfg(test)]
 mod test_profile;
 mod view;
+mod wall_share;
 
 pub use bviz_trace_profile::{LaneClass, SpanRole, Workload};
 pub use cull::{Cull, Viewport, VisibleSlice, visible_slices};
 pub use flame::{
-    FlameBox, FlameDirection, FlameGraph, FlameLabels, FlameMetrics, FlameMode, FlameNode,
-    FlamePlacement, TrackFlamer, flame_height, lay_out_flame,
+    FlameBox, FlameBoxContent, FlameDirection, FlameFrame, FlameGraph, FlameLabels, FlameMetrics,
+    FlameMode, FlameNode, FlameNodeId, FlamePlacement, FlameRemainder, FlameWeight,
+    RemainderSiblings, TrackFlamer, flame_height, lay_out_flame,
 };
 pub use lanes::{Lane, LaneLayout, LaneMetrics, lay_out_lanes};
 pub use scopes::ScopeAggregate;
 pub use selection::{TimeRegion, TimeSelection, span_between};
 pub use stats::{StatRow, stats_from_flame};
 pub use view::{FlameView, TimeView};
+pub use wall_share::WorkingLanes;
 
 #[cfg(test)]
 mod tests {

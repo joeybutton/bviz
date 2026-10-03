@@ -4,7 +4,7 @@ use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, RULER_HEIGHT, Source, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
+    GUTTER_LABEL_SIZE, RULER_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
     TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
@@ -103,10 +103,7 @@ impl TracksMenu {
         if !self.open {
             return None;
         }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return None,
-        };
+        let profile = self.model.read(cx).profile()?.clone();
         let rows = self.menu_rows(&profile, palette, cx);
         let menu = self.chrome(rows, palette, cx);
         let backdrop = self.backdrop(viewport, cx);

@@ -1,24 +1,26 @@
 use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
     LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    panel_toolbar, profile_status, scroll_request, thumb_offset, time_window_chip,
+    profile_status, scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
-    FlameBox, FlameDirection, FlameLabels, FlameMetrics, FlameMode, FlamePlacement, FlameView,
-    ScopeAggregate, flame_height, lay_out_flame,
+    FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
+    FlamePlacement, FlameRemainder, FlameView, FlameWeight, RemainderSiblings, ScopeAggregate,
+    flame_height, lay_out_flame,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, cached_layer,
-    centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
+    cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
+    track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, point,
-    prelude::*, px, size,
+    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, fill,
+    point, prelude::*, px, quad, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -26,6 +28,23 @@ use std::sync::Arc;
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
 const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
+
+/// Narrowest the toolbar's legend is squeezed beside the controls; with less
+/// than this left on their row it starts the next one.
+const LEGEND_MIN_WIDTH: f32 = 144.0;
+
+/// The weights the toolbar offers, each with its button's id and label, in the
+/// order the buttons stand.
+pub(crate) const WEIGHT_CHOICES: [(&str, &str, FlameWeight); 2] = [
+    ("flame-summed-time", "Summed time", FlameWeight::Duration),
+    ("flame-wall-time", "Wall time", FlameWeight::WallShare),
+];
+
+/// Whether the toolbar's button for `weight` reads as chosen while `mode`
+/// stands, and the mode a click on it asks for.
+pub(crate) fn weight_choice(mode: FlameMode, weight: FlameWeight) -> (bool, FlameMode) {
+    (mode.weight == weight, FlameMode { weight, ..mode })
+}
 
 /// The flame graph's laid-out boxes together with the inputs that determine
 /// them, so a paint reuses them unless one changed. The retained
@@ -87,9 +106,9 @@ impl FlameBoxCache {
             .then_some(&self.boxes)
     }
 
-    /// The box under a window-space `pos`, which maps to a depth row via the
-    /// vertical scroll `scroll_y` and to an x relative to `fl`'s content column.
-    /// `None` when the cursor lies off that rect, the row carries no box there, or
+    /// The box under a window-space `pos`, which maps to a height in the tree
+    /// via the vertical scroll `scroll_y` and to an x relative to `fl`'s content
+    /// column. `None` when the cursor lies off that rect, no box is drawn there, or
     /// a key no longer matches. Every change to the panel's view, scroll, or
     /// bounds rebuilds the canvas scene, whose paint re-memoizes ahead of the
     /// overlay that reads this, so a hit test taken during paint names a box of
@@ -111,11 +130,10 @@ impl FlameBoxCache {
             fl.width,
         )?;
         let content_y = f32::from(pos.y) - fl.top + scroll_y;
-        let depth = (content_y / flame_metrics().row_height) as u32;
         let vx = f32::from(pos.x) - fl.left;
         let boxed = *boxes
             .iter()
-            .find(|b| b.depth == depth && vx >= b.x && vx < b.x + b.w)?;
+            .find(|b| content_y >= b.y && content_y < b.y + b.h && vx >= b.x && vx < b.x + b.w)?;
         Some(HoveredBox {
             aggregates: self.aggregates.clone(),
             boxed,
@@ -123,7 +141,7 @@ impl FlameBoxCache {
     }
 }
 
-/// A hovered flame box paired with the aggregate its name handle resolves
+/// A hovered flame box paired with the aggregate a frame's name handle resolves
 /// through.
 struct HoveredBox {
     aggregates: Arc<ScopeAggregate>,
@@ -231,9 +249,117 @@ fn flame_boxes(
         .clone()
 }
 
-/// Paints a tooltip near `at` with the flame node's name and, below it, its total
-/// and self time, the number of spans whose time it accounts for, and its share
-/// of the view's aggregated total.
+/// Narrowest a remainder is drawn with its outline. Any narrower and the
+/// outline would leave none of the wash showing that tells it from a frame.
+const REMAINDER_OUTLINE_MIN_PX: f32 = 3.0;
+
+const REMAINDER_OUTLINE_PX: f32 = 1.0;
+
+/// Paints a remainder's box: the wash and the outline of
+/// [`Palette::remainder`], labelled with [`remainder_label`].
+fn paint_remainder(
+    rect: Bounds<Pixels>,
+    remainder: &FlameRemainder,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let RemainderPaint {
+        outline,
+        wash,
+        border,
+    } = palette.remainder(remainder.role());
+    if f32::from(rect.size.width) < REMAINDER_OUTLINE_MIN_PX {
+        window.paint_quad(fill(rect, wash));
+        return;
+    }
+    paint_labeled_box(
+        rect,
+        wash,
+        &remainder_label(remainder),
+        bviz_ui_theme::label_on(wash),
+        palette.label_box(),
+        window,
+        cx,
+    );
+    window.paint_quad(quad(
+        rect,
+        px(0.),
+        gpui::transparent_black(),
+        px(REMAINDER_OUTLINE_PX),
+        outline,
+        border,
+    ));
+}
+
+/// How many frames a remainder stands for, as others where its parent holds
+/// frames drawn beside it.
+fn remainder_label(remainder: &FlameRemainder) -> String {
+    let frames = remainder.frames();
+    match remainder.siblings() {
+        RemainderSiblings::None => format!("({frames} frames)"),
+        RemainderSiblings::Wider => format!("({frames} others)"),
+    }
+}
+
+/// The tooltip's lines for `hovered`, its figures labelled with the weight of
+/// the aggregate the box belongs to. A frame gives its name and what the name
+/// leaves open about its spans (see [`FlameGraph::kind_or_category`]) where
+/// that is not the name itself; a remainder, and the depth drawn beneath one,
+/// says what the remainder's label counts.
+fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
+    let HoveredBox { aggregates, boxed } = hovered;
+    let flame = &aggregates.flame;
+    let root_total_us = flame.root_total_us();
+    let pct = |total_us: i64| {
+        if root_total_us > 0 {
+            100.0 * total_us as f64 / root_total_us as f64
+        } else {
+            0.0
+        }
+    };
+    let measure = match aggregates.mode.weight {
+        FlameWeight::Duration => "summed time",
+        FlameWeight::WallShare => "share of wall time",
+    };
+    match boxed.content {
+        FlameBoxContent::Frame(frame) => {
+            let detail = format!(
+                "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
+                format_duration(frame.total_us),
+                format_duration(flame.span_self_us(frame.node)),
+                frame.count,
+                if frame.count == 1 { "" } else { "s" },
+                pct(frame.total_us),
+            );
+            let context = flame
+                .kind_or_category(frame.node)
+                .filter(|&c| c != frame.name);
+            [
+                Some(flame.str(frame.name).to_string()),
+                context.map(|c| flame.str(c).to_string()),
+                Some(detail),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        }
+        FlameBoxContent::Remainder(remainder) | FlameBoxContent::RemainderDepth(remainder) => {
+            let total_us = flame.remainder_total_us(&remainder);
+            vec![
+                remainder_label(&remainder),
+                "frames too narrow to draw apart at this zoom".to_string(),
+                format!(
+                    "{measure}: total {}, {:.1}% of view",
+                    format_duration(total_us),
+                    pct(total_us),
+                ),
+            ]
+        }
+    }
+}
+
+/// Paints `hovered`'s tooltip near `at`.
 fn paint_flame_tooltip(
     hovered: &HoveredBox,
     at: Point<Pixels>,
@@ -242,22 +368,7 @@ fn paint_flame_tooltip(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (graph, boxed) = (&hovered.aggregates.flame, &hovered.boxed);
-    let root_total_us = graph.root_total_us();
-    let pct = if root_total_us > 0 {
-        100.0 * boxed.total_us as f64 / root_total_us as f64
-    } else {
-        0.0
-    };
-    let detail = format!(
-        "total {}, self {}, {} span{}, {:.1}% of view",
-        format_duration(boxed.total_us),
-        format_duration(boxed.self_us),
-        boxed.count,
-        if boxed.count == 1 { "" } else { "s" },
-        pct,
-    );
-    let lines = [graph.str(boxed.name).to_string(), detail];
+    let lines = flame_tooltip_lines(hovered);
     paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
@@ -366,19 +477,22 @@ impl FlamePanel {
     /// The panel's toolbar: the window the graph covers, then the controls that
     /// choose which graph is aggregated and the legend for the colours it is
     /// drawn in.
-    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
-        panel_toolbar(palette)
-            .children(time_window_chip(&self.model, palette, cx))
-            .child(div().flex_1())
-            .child(self.mode_controls(cx))
-            .child(theme::role_legend(&palette, STATS_TEXT_SIZE))
+    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Toolbar {
+        let legend = theme::role_legend(&palette, STATS_TEXT_SIZE)
+            .flex_1()
+            .min_w(px(LEGEND_MIN_WIDTH));
+        time_window_chip(&self.model, palette, cx)
+            .into_iter()
+            .chain(self.mode_controls(palette, cx))
+            .fold(Toolbar::new(), Toolbar::child)
+            .child(legend)
     }
 
-    /// The graph's mode controls: the two directions as an exclusive pair, and
-    /// the labelling as a toggle that holds across both.
-    fn mode_controls(&self, cx: &mut Context<Self>) -> Div {
+    /// The graph's mode controls, one group for each choice they offer, so that
+    /// a toolbar wrapping them keeps the buttons of one choice on one row.
+    fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
-        let mnemonics = mode.labels == FlameLabels::Mnemonic;
+        let kinds = mode.labels == FlameLabels::Kind;
         let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
             let view = cx.entity();
             Button::new(id, move |_, _, cx| {
@@ -389,44 +503,60 @@ impl FlamePanel {
             .selected(on)
             .label(label)
         };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_shrink_0()
-            .gap_1()
-            .text_size(px(STATS_TEXT_SIZE))
-            .child(button(
-                "flame-top-down",
-                "Top-down",
-                mode.direction == FlameDirection::TopDown,
+        let group = || {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_size(px(STATS_TEXT_SIZE))
+        };
+        // The outline holds an exclusive pair together, so two pairs side by
+        // side read as two choices.
+        let pair = || {
+            group()
+                .rounded_md()
+                .border_1()
+                .border_color(palette.divider)
+        };
+        [
+            pair()
+                .child(button(
+                    "flame-top-down",
+                    "Top-down",
+                    mode.direction == FlameDirection::TopDown,
+                    FlameMode {
+                        direction: FlameDirection::TopDown,
+                        ..mode
+                    },
+                ))
+                .child(button(
+                    "flame-bottom-up",
+                    "Bottom-up",
+                    mode.direction == FlameDirection::BottomUp,
+                    FlameMode {
+                        direction: FlameDirection::BottomUp,
+                        ..mode
+                    },
+                )),
+            pair().children(WEIGHT_CHOICES.map(|(id, label, weight)| {
+                let (chosen, to) = weight_choice(mode, weight);
+                button(id, label, chosen, to)
+            })),
+            group().child(button(
+                "flame-kinds",
+                "Kinds",
+                kinds,
                 FlameMode {
-                    direction: FlameDirection::TopDown,
-                    ..mode
-                },
-            ))
-            .child(button(
-                "flame-bottom-up",
-                "Bottom-up",
-                mode.direction == FlameDirection::BottomUp,
-                FlameMode {
-                    direction: FlameDirection::BottomUp,
-                    ..mode
-                },
-            ))
-            .child(button(
-                "flame-mnemonics",
-                "Mnemonics",
-                mnemonics,
-                FlameMode {
-                    labels: if mnemonics {
+                    labels: if kinds {
                         FlameLabels::Name
                     } else {
-                        FlameLabels::Mnemonic
+                        FlameLabels::Kind
                     },
                     ..mode
                 },
-            ))
+            )),
+        ]
     }
 
     /// Applies a mode chosen on the toolbar, leaving the view alone for a click
@@ -842,11 +972,11 @@ impl Render for FlameCanvas {
 }
 
 /// The box layer's paint closure: the aggregated flame graph filling the body
-/// — each box a work-class-colored quad with a truncated label, clipped to the
-/// content rect, scrolled vertically by the panel's scroll and zoomed/panned
-/// horizontally by its view — plus the vertical and horizontal scroll bars for
-/// whichever axis overflows. No time-axis chrome applies, so none is drawn. It
-/// reads the live view state through `parent`.
+/// — each box painted as what it stands for, a frame with a truncated label,
+/// clipped to the content rect, scrolled vertically by the panel's scroll and
+/// zoomed/panned horizontally by its view — plus the vertical and horizontal
+/// scroll bars for whichever axis overflows. No time-axis chrome applies, so
+/// none is drawn. It reads the live view state through `parent`.
 fn flame_paint(
     aggregates: Arc<ScopeAggregate>,
     parent: Entity<FlamePanel>,
@@ -899,16 +1029,26 @@ fn flame_paint(
                     continue;
                 }
                 let rect = Bounds::new(point(px(left + b.x), px(y)), size(px(b.w), px(b.h)));
-                let fill = palette.role_fill(b.role);
-                paint_labeled_box(
-                    rect,
-                    fill,
-                    graph.str(b.name),
-                    bviz_ui_theme::label_on(fill),
-                    palette.label_box(),
-                    window,
-                    cx,
-                );
+                match b.content {
+                    FlameBoxContent::Frame(frame) => {
+                        let role_fill = palette.role_fill(frame.role);
+                        paint_labeled_box(
+                            rect,
+                            role_fill,
+                            graph.str(frame.name),
+                            bviz_ui_theme::label_on(role_fill),
+                            palette.label_box(),
+                            window,
+                            cx,
+                        );
+                    }
+                    FlameBoxContent::Remainder(remainder) => {
+                        paint_remainder(rect, &remainder, &palette, window, cx);
+                    }
+                    FlameBoxContent::RemainderDepth(_) => {
+                        window.paint_quad(fill(rect, palette.remainder_depth_fill()));
+                    }
+                }
             }
         });
 
@@ -921,7 +1061,9 @@ fn flame_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, TimeSelection};
+    use bviz_trace_layout::{
+        FlameDirection, FlameGraph, FlameLabels, FlameMode, FlameWeight, TimeSelection,
+    };
     use bviz_trace_profile::Profile;
 
     /// Width of the content column the fixture layouts are placed for, wide
@@ -944,18 +1086,41 @@ mod tests {
         Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
     }
 
-    /// The aggregate over every track of `profile`, each frame named by its own
-    /// span's name so a box's text identifies which span it stands for.
-    fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
+    /// A profile of two execution lanes, "link" running alongside the first
+    /// half of "compile", so each span's share of the elapsed time differs
+    /// from its duration.
+    fn overlapping_fixture() -> Arc<Profile> {
+        let mut events = Vec::with_capacity(4);
+        for (tid, name, dur) in [(1, "compile", 1000), (2, "link", 500)] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+            ));
+            events.push(format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":0,"dur":{dur},"tid":{tid}}}"#,
+            ));
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// The aggregate over every track of `profile` under `weight`, each frame
+    /// named by its own span's name so a box's text identifies which span it
+    /// stands for.
+    fn aggregate_weighing(profile: &Arc<Profile>, weight: FlameWeight) -> Arc<ScopeAggregate> {
         Arc::new(ScopeAggregate::build_for_tracks(
             profile,
             FlameMode {
                 direction: FlameDirection::TopDown,
                 labels: FlameLabels::Name,
+                weight,
             },
             &TimeSelection::default(),
             |_| true,
         ))
+    }
+
+    fn aggregate(profile: &Arc<Profile>) -> Arc<ScopeAggregate> {
+        aggregate_weighing(profile, FlameWeight::Duration)
     }
 
     /// The layout of `aggregates` fitted to a [`VIEW_W`]-wide column, memoized as
@@ -982,6 +1147,15 @@ mod tests {
         (cache, fl)
     }
 
+    /// The name of the frame `b` stands for, `None` for a box standing for
+    /// none.
+    fn frame_name<'a>(graph: &'a FlameGraph, b: &FlameBox) -> Option<&'a str> {
+        match b.content {
+            FlameBoxContent::Frame(frame) => Some(graph.str(frame.name)),
+            FlameBoxContent::Remainder(_) | FlameBoxContent::RemainderDepth(_) => None,
+        }
+    }
+
     /// Where the unscrolled panel draws `b`'s center, in window space.
     fn center_of(fl: FlameLayout, b: &FlameBox) -> Point<Pixels> {
         point(px(fl.left + b.x + b.w / 2.0), px(fl.top + b.y + b.h / 2.0))
@@ -995,7 +1169,7 @@ mod tests {
         let names: Vec<&str> = cache
             .boxes
             .iter()
-            .map(|b| aggregates.flame.str(b.name))
+            .filter_map(|b| frame_name(&aggregates.flame, b))
             .collect();
         assert!(
             names.contains(&"compile") && names.contains(&"link"),
@@ -1006,6 +1180,369 @@ mod tests {
                 .hit(&aggregates, fl, 0.0, center_of(fl, b))
                 .expect("the box at its own center");
             assert_eq!(&hovered.boxed, b);
+        }
+    }
+
+    #[test]
+    fn the_tooltip_gives_its_figures_in_the_weight_of_the_graph_hovered() {
+        let profile = overlapping_fixture();
+        let lines = |weight| {
+            let aggregates = aggregate_weighing(&profile, weight);
+            let (cache, fl) = laid_out(&aggregates);
+            let compile = cache
+                .boxes
+                .iter()
+                .find(|b| frame_name(&aggregates.flame, b) == Some("compile"))
+                .expect("the compile frame");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, compile))
+                .expect("the box at its own center");
+            flame_tooltip_lines(&hovered)
+        };
+        assert_eq!(
+            lines(FlameWeight::Duration),
+            [
+                "compile",
+                "general information",
+                "summed time: total 1.00ms, self 1.00ms, 1 span, 66.7% of view"
+            ]
+        );
+        assert_eq!(
+            lines(FlameWeight::WallShare),
+            [
+                "compile",
+                "general information",
+                "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
+            ]
+        );
+    }
+
+    /// A profile of two execution lanes. On the first, "build" holds "compile"
+    /// and then forty spans each a small fraction of a [`VIEW_W`]-wide column's
+    /// pixel; on the second, "link" runs alongside those forty, so their share
+    /// of the elapsed time is half their duration.
+    fn thin_tail_fixture() -> Arc<Profile> {
+        const THIN: usize = 40;
+        let mut events = Vec::with_capacity(THIN + 5);
+        for tid in [1, 2] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#,
+            ));
+        }
+        let span = |tid: u32, name: &str, ts: usize, dur: usize| {
+            format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":{tid}}}"#,
+            )
+        };
+        events.push(span(1, "build", 0, 10_000));
+        events.push(span(1, "compile", 0, 8_000));
+        events.extend((0..THIN).map(|i| span(1, &format!("t{i:02}"), 8_000 + 5 * i, 5)));
+        events.push(span(2, "link", 5_000, 5_000));
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    #[test]
+    fn the_tooltip_of_a_remainder_gives_its_count_and_summed_weight() {
+        let profile = thin_tail_fixture();
+        let lines = |weight| {
+            let aggregates = aggregate_weighing(&profile, weight);
+            let (cache, fl) = laid_out(&aggregates);
+            let remainder = cache
+                .boxes
+                .iter()
+                .find(|b| matches!(b.content, FlameBoxContent::Remainder(_)))
+                .expect("the thin spans' remainder");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, remainder))
+                .expect("the box at its own center");
+            assert_eq!(&hovered.boxed, remainder);
+            flame_tooltip_lines(&hovered)
+        };
+        assert_eq!(
+            lines(FlameWeight::Duration),
+            [
+                "(40 others)",
+                "frames too narrow to draw apart at this zoom",
+                "summed time: total 200µs, 1.3% of view"
+            ]
+        );
+        assert_eq!(
+            lines(FlameWeight::WallShare),
+            [
+                "(40 others)",
+                "frames too narrow to draw apart at this zoom",
+                "share of wall time: total 100µs, 1.0% of view"
+            ]
+        );
+    }
+
+    /// A profile of one lane on which "build" holds forty spans and nothing
+    /// else, each a small fraction of a [`VIEW_W`]-wide column's pixel and
+    /// holding one span of its own length.
+    fn thin_children_fixture() -> Arc<Profile> {
+        const THIN: usize = 40;
+        let mut events = vec![
+            r#"{"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}}"#
+                .to_string(),
+        ];
+        let span = |name: &str, ts: usize, dur: usize| {
+            format!(
+                r#"{{"cat":"general information","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":1}}"#,
+            )
+        };
+        events.push(span("build", 0, 10_000));
+        for i in 0..THIN {
+            events.push(span(&format!("t{i:02}"), 5 * i, 5));
+            events.push(span(&format!("n{i:02}"), 5 * i, 5));
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    #[test]
+    fn a_remainder_of_every_child_of_its_parent_counts_frames_and_not_others() {
+        let aggregates = aggregate(&thin_children_fixture());
+        let (cache, fl) = laid_out(&aggregates);
+        let lines_at = |b: &FlameBox| {
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, b))
+                .expect("the box at its own center");
+            assert_eq!(&hovered.boxed, b);
+            flame_tooltip_lines(&hovered)
+        };
+        let of_kind = |wanted: fn(&FlameBoxContent) -> bool| {
+            let mut found = cache.boxes.iter().filter(|b| wanted(&b.content));
+            let boxed = found.next().expect("a box of the kind");
+            assert!(found.next().is_none());
+            boxed
+        };
+        let remainder = of_kind(|c| matches!(c, FlameBoxContent::Remainder(_)));
+        let lines = [
+            "(40 frames)",
+            "frames too narrow to draw apart at this zoom",
+            "summed time: total 200µs, 2.0% of view",
+        ];
+        assert_eq!(lines_at(remainder), lines);
+        // The row the thin spans' own children reach is the remainder's too,
+        // and names none of them.
+        let depth = of_kind(|c| matches!(c, FlameBoxContent::RemainderDepth(_)));
+        assert_eq!(
+            (depth.x, depth.w, depth.depth),
+            (remainder.x, remainder.w, remainder.depth + 1)
+        );
+        assert_eq!(lines_at(depth), lines);
+        let names: Vec<&str> = cache
+            .boxes
+            .iter()
+            .filter_map(|b| frame_name(&aggregates.flame, b))
+            .collect();
+        assert_eq!(names, ["All", "build"]);
+    }
+
+    #[test]
+    fn the_tooltip_of_the_root_gives_the_whole_view() {
+        let aggregates = aggregate(&fixture());
+        let (cache, fl) = laid_out(&aggregates);
+        let root = cache.boxes.first().expect("the root frame");
+        let hovered = cache
+            .hit(&aggregates, fl, 0.0, center_of(fl, root))
+            .expect("the box at its own center");
+        assert_eq!(
+            flame_tooltip_lines(&hovered),
+            [
+                "All",
+                "summed time: total 1.00ms, self 0µs, 0 spans, 100.0% of view"
+            ]
+        );
+    }
+
+    /// A profile of two lanes: a repository fetch holding a download that
+    /// names what it fetches, and a wait recorded under another category than
+    /// the wait beside the fetch.
+    fn kinds_fixture() -> Arc<Profile> {
+        let mut events = Vec::new();
+        for (tid, spans) in [
+            (
+                1,
+                &[
+                    ("Fetching repository", "@@a", 0, 1000),
+                    ("general information", "download", 0, 400),
+                    ("general information", "fetching: archive a", 0, 100),
+                    ("Remote execution setup", "acquiring semaphore", 1000, 500),
+                ][..],
+            ),
+            (
+                2,
+                &[(
+                    "Remote execution upload time",
+                    "acquiring semaphore",
+                    0,
+                    500,
+                )][..],
+            ),
+        ] {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-{tid}"}}}}"#,
+            ));
+            for (cat, name, ts, dur) in spans {
+                events.push(format!(
+                    r#"{{"cat":"{cat}","name":"{name}","ph":"X","ts":{ts},"dur":{dur},"tid":{tid}}}"#,
+                ));
+            }
+        }
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+    }
+
+    /// The tooltip lines ahead of the figures for the box of `profile`'s
+    /// top-down graph under `labels` that is named `name` at `depth`.
+    fn heading(profile: &Arc<Profile>, labels: FlameLabels, name: &str, depth: u32) -> Vec<String> {
+        let aggregates = Arc::new(ScopeAggregate::build_for_tracks(
+            profile,
+            FlameMode {
+                labels,
+                ..FlameMode::default()
+            },
+            &TimeSelection::default(),
+            |_| true,
+        ));
+        let (cache, fl) = laid_out(&aggregates);
+        let boxed = cache
+            .boxes
+            .iter()
+            .find(|b| b.depth == depth && frame_name(&aggregates.flame, b) == Some(name))
+            .unwrap_or_else(|| panic!("no {name} box at depth {depth}"));
+        let hovered = cache
+            .hit(&aggregates, fl, 0.0, center_of(fl, boxed))
+            .expect("the box at its own center");
+        let mut lines = flame_tooltip_lines(&hovered);
+        lines.pop().expect("the figures");
+        lines
+    }
+
+    #[test]
+    fn the_tooltip_gives_a_frame_the_self_time_its_detail_frames_break_out() {
+        // The fetch's own time hangs beneath its frame under the repository's
+        // name, and is still the frame's self time, as its Stats row has it.
+        let profile = kinds_fixture();
+        let figures = |weight| {
+            let aggregates = Arc::new(ScopeAggregate::build_for_tracks(
+                &profile,
+                FlameMode {
+                    weight,
+                    ..FlameMode::default()
+                },
+                &TimeSelection::default(),
+                |_| true,
+            ));
+            let (cache, fl) = laid_out(&aggregates);
+            let flame = &aggregates.flame;
+            let fetching = cache
+                .boxes
+                .iter()
+                .find(|b| frame_name(flame, b) == Some("Fetching repository"))
+                .expect("the fetch's frame");
+            let hovered = cache
+                .hit(&aggregates, fl, 0.0, center_of(fl, fetching))
+                .expect("the box at its own center");
+            let row = aggregates
+                .stats
+                .iter()
+                .find(|row| flame.str(row.key) == "Fetching repository")
+                .expect("the fetch's row");
+            (flame_tooltip_lines(&hovered).pop(), row.self_us)
+        };
+        assert_eq!(
+            figures(FlameWeight::Duration),
+            (
+                Some("summed time: total 1.00ms, self 600µs, 1 span, 50.0% of view".to_string()),
+                600
+            )
+        );
+        // The first half of the fetch shares the elapsed time with the wait
+        // on the other lane.
+        assert_eq!(
+            figures(FlameWeight::WallShare),
+            (
+                Some(
+                    "share of wall time: total 750µs, self 550µs, 1 span, 50.0% of view"
+                        .to_string()
+                ),
+                600
+            )
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_labelled_by_its_category_does_not_repeat_it() {
+        let profile = kinds_fixture();
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Fetching repository", 1),
+            ["Fetching repository"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_detail_frame_names_the_kind_of_its_instance() {
+        let profile = kinds_fixture();
+        // The repository's own time, and the time of the download nested in it.
+        for depth in [2, 3] {
+            assert_eq!(
+                heading(&profile, FlameLabels::Kind, "@@a", depth),
+                ["@@a", "Fetching repository"],
+                "depth {depth}"
+            );
+        }
+        // A kind the instance's name leads with is not its category.
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "fetching: archive a", 4),
+            ["fetching: archive a", "fetching"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_an_actions_detail_frame_names_its_category() {
+        // A mnemonic is told by neither the name nor the category of the
+        // action it labels.
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-1"}},
+            {"cat":"action processing","name":"Compiling a","ph":"X","ts":0,"dur":1000,"tid":1,
+             "args":{"mnemonic":"Rustc"}}
+        ]}"#;
+        let profile = Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"));
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Compiling a", 2),
+            ["Compiling a", "action processing"]
+        );
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "Rustc", 1),
+            ["Rustc", "action processing"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_labelled_by_name_names_its_category() {
+        let profile = kinds_fixture();
+        assert_eq!(
+            heading(&profile, FlameLabels::Kind, "download", 2),
+            ["download", "general information"]
+        );
+        assert_eq!(
+            heading(&profile, FlameLabels::Name, "@@a", 1),
+            ["@@a", "Fetching repository"]
+        );
+    }
+
+    #[test]
+    fn the_tooltip_of_a_frame_merging_two_categories_names_neither() {
+        let profile = kinds_fixture();
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
+            assert_eq!(
+                heading(&profile, labels, "acquiring semaphore", 1),
+                ["acquiring semaphore"],
+                "{labels:?}"
+            );
         }
     }
 

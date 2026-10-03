@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bviz_parallel::{worker_count, workers};
 use bviz_trace_profile::{
-    Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan, Workload, encloses,
-    occupied_span,
+    CategoryId, OptStr, Profile, Slice, SliceDetail, Span32, SpanRole, Str, ThreadTrack, TimeSpan,
+    Workload, encloses, occupied_span,
 };
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
@@ -12,6 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::paint::{Span, painted};
 use crate::selection::TimeSelection;
+use crate::wall_share::{LaneShare, WallShare, WorkingLanes};
 
 /// One key segment of a slice's aggregation path: a frame label — a [`Str`]
 /// handle into the source profile's text — and the work class it carries (for
@@ -22,14 +23,22 @@ struct Segment {
     role: SpanRole,
 }
 
+/// The one category that spans recorded under `a` share with spans recorded
+/// under `b`, each `None` where its own spans share none that an id reaches.
+#[inline]
+fn shared_category(a: Option<CategoryId>, b: Option<CategoryId>) -> Option<CategoryId> {
+    a.filter(|_| a == b)
+}
+
 /// How a span aggregates under a labelling.
 struct SpanLabels {
     segment: Segment,
-    /// The name of the action this span itself resolves, which labels the detail
-    /// frame breaking its self time out by target (see [`emit_lane_rows`]);
-    /// `None` for a span resolving none, which inherits its containment
-    /// parent's.
-    action: Option<Str>,
+    /// The span's own name where its label is the kind it is an instance of,
+    /// which labels the detail frame breaking its self time out by instance
+    /// (see [`emit_lane_rows`]); `None` for a span labelled by its name, or
+    /// whose name says no instance ([`Profile::instance_of`]), which inherits
+    /// its containment parent's.
+    instance: Option<Str>,
 }
 
 /// Lexicographic rank of each distinct scanned label handle: dense `u32`s
@@ -98,7 +107,8 @@ impl<'p> ScanShard<'p> {
 /// and the mnemonic index cover every lane regardless — hashing only the
 /// mnemonic-bearing slices, a small fraction of the profile — because a
 /// mnemonic-less slice's label can resolve to a mnemonic carried on a lane
-/// outside the scan, and that label needs a rank like any other.
+/// outside the scan, and that label needs a rank like any other. So does every
+/// kind of the profile ([`Profile::kinds`]), which labels a span of any lane.
 fn scan(
     profile: &Profile,
     workers: usize,
@@ -141,7 +151,10 @@ fn scan(
         }
     });
 
-    let (by_text, mnemonics) = merge_shards(shards);
+    let (mut by_text, mnemonics) = merge_shards(shards);
+    for kind in profile.kinds() {
+        by_text.insert(profile.str(kind), kind);
+    }
     (build_ranks(&by_text), build_index(&by_text, &mnemonics))
 }
 
@@ -218,7 +231,7 @@ fn build_index(by_text: &FxHashMap<&str, Str>, mnemonics: &FxHashMap<&str, &str>
 /// returns the per-worker shards. Workers steal indexes one at a time through a
 /// shared cursor, since per-index work is heavily skewed (a few big evaluator
 /// lanes). A single worker runs inline.
-fn run_sharded<S: Default + Send>(
+pub(crate) fn run_sharded<S: Default + Send>(
     workers: usize,
     n: usize,
     task: impl Fn(&mut S, usize) + Sync,
@@ -260,9 +273,10 @@ fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
 
 /// One node of the aggregated flame graph: a frame merged across every span that
 /// shares this label at the same place in the time-containment tree. `total_us`
-/// is the summed duration of the spans merged here (each counted once, at its own
-/// node); `self_us` is that minus the children's totals (`max(0, …)`); `count` is
-/// how many spans merged at this node. Under
+/// is the summed weight of the spans merged here (each counted once, at its own
+/// node), a span weighing what the graph's [`FlameWeight`] gives it; `self_us` is
+/// that minus the children's totals (`max(0, …)`); `count` is how many spans
+/// merged at this node. Under
 /// [`BottomUp`](FlameDirection::BottomUp) a node is instead one step of a caller
 /// chain, and `total_us` and `count` are summed over the contributions that
 /// passed through it — the self time and span count of the frames whose chain
@@ -284,11 +298,14 @@ pub struct FlameNode {
     pub self_us: i64,
     pub width_us: i64,
     pub role: SpanRole,
+    /// The category the spans this frame stands for were recorded under — for
+    /// a detail frame, the spans of the instance it names — and absent where
+    /// they share none that an id reaches (see [`Slice::category`]).
+    pub category: OptStr,
     pub count: u32,
     pub depth: u32,
     /// The deepest node depth in this node's subtree (itself included), which
-    /// layout reads to pick the sibling a marker stands for (see
-    /// [`lay_out_flame`]).
+    /// layout reads for how deep the members of a remainder reach.
     pub subtree_max_depth: u32,
     pub children: Span32,
 }
@@ -318,6 +335,7 @@ pub struct FlameGraph {
     self_us: Vec<i64>,
     width_us: Vec<i64>,
     role: Vec<SpanRole>,
+    category: Vec<Option<CategoryId>>,
     detail: Vec<bool>,
     count: Vec<u32>,
     subtree_max_depth: Vec<u32>,
@@ -347,6 +365,7 @@ impl FlameGraph {
             self_us: self.self_us[id],
             width_us: self.width_us[id],
             role: self.role[id],
+            category: self.category(id).into(),
             count: self.count[id],
             depth,
             subtree_max_depth: self.subtree_max_depth[id],
@@ -393,7 +412,7 @@ impl FlameGraph {
         self.name.len()
     }
 
-    /// The root frame's summed duration (node 0's total).
+    /// The root frame's summed weight (node 0's total).
     pub fn root_total_us(&self) -> i64 {
         self.total_us[0]
     }
@@ -410,12 +429,69 @@ impl FlameGraph {
         self.role[i]
     }
 
+    /// Node `i`'s category (see [`FlameNode::category`]).
+    fn category(&self, i: usize) -> Option<Str> {
+        self.category[i].map(|id| self.profile.category(id))
+    }
+
+    /// What the name of the frame `node` leaves open about its spans: the
+    /// category they were recorded under, or for a detail frame the kind its
+    /// instance is one of, wherever the instance's name and category tell that
+    /// kind — as they do of every kind but a mnemonic. `None` where the spans
+    /// share no category that an id reaches.
+    pub fn kind_or_category(&self, node: FlameNodeId) -> Option<Str> {
+        let i = node.0 as usize;
+        let category = self.category[i]?;
+        let kind = self.detail[i]
+            .then(|| self.profile.kind_named(category, self.name[i]))
+            .flatten();
+        Some(kind.unwrap_or_else(|| self.profile.category(category)))
+    }
+
     pub(crate) fn total_us(&self, i: usize) -> i64 {
         self.total_us[i]
     }
 
     pub(crate) fn self_us(&self, i: usize) -> i64 {
         self.self_us[i]
+    }
+
+    /// The [`SpanSelf`] of node `i`, `total_us` giving each node's total.
+    pub(crate) fn span_self_by(&self, i: usize, total_us: &impl Fn(usize) -> i64) -> SpanSelf {
+        let mut spanned = 0i64;
+        let mut largest_detail_us = None;
+        for k in 0..self.child_count(i) {
+            let child = self.child_id(i, k);
+            let child_us = total_us(child);
+            if self.is_detail(child) {
+                largest_detail_us = largest_detail_us.max(Some(child_us));
+            } else {
+                spanned += child_us;
+            }
+        }
+        let self_us = (total_us(i) - spanned).max(0);
+        SpanSelf {
+            self_us,
+            peak_us: largest_detail_us.map_or(self_us, |peak| peak.min(self_us)),
+        }
+    }
+
+    /// The summed [`FlameNode::total_us`] of `remainder`'s members. Summed when
+    /// asked for, since a layout visits every member of every run it lays out
+    /// and a reader wants the sum of the one run under the cursor.
+    pub fn remainder_total_us(&self, remainder: &FlameRemainder) -> i64 {
+        let first = remainder.first as usize;
+        self.children_of(remainder.parent.0 as usize)[first..first + remainder.frames as usize]
+            .iter()
+            .map(|&member| self.total_us[member as usize])
+            .sum()
+    }
+
+    /// The [`SpanSelf::self_us`] of the frame `node`, in the graph's own
+    /// weight.
+    pub fn span_self_us(&self, node: FlameNodeId) -> i64 {
+        self.span_self_by(node.0 as usize, &|i| self.total_us[i])
+            .self_us
     }
 
     pub(crate) fn width_us(&self, i: usize) -> i64 {
@@ -427,10 +503,10 @@ impl FlameGraph {
     }
 
     /// Whether node `i` is a detail frame — part of its parent's self time
-    /// re-labelled with the action's own name (see [`emit_lane_rows`]) — rather
-    /// than a frame of merged spans. A detail frame is always a leaf:
-    /// [`emit_lane_rows`] extends no key that carries one, so no aggregation
-    /// path runs past a detail frame.
+    /// re-labelled with the name of the instance it went to (see
+    /// [`emit_lane_rows`]) — rather than a frame of merged spans. A detail
+    /// frame is always a leaf: [`emit_lane_rows`] extends no key that carries
+    /// one, so no aggregation path runs past a detail frame.
     pub(crate) fn is_detail(&self, i: usize) -> bool {
         self.detail[i]
     }
@@ -449,6 +525,11 @@ impl FlameGraph {
         self.child_pool[self.child_off[i] as usize + k] as usize
     }
 
+    /// The node ids of node `i`'s children, in widest-first order.
+    pub(crate) fn children_of(&self, i: usize) -> &[u32] {
+        &self.child_pool[self.child_off[i] as usize..self.child_off[i + 1] as usize]
+    }
+
     /// Resolves a node name (or a [`StatRow`](crate::StatRow) key) to its text,
     /// through the profile the graph was built from.
     pub fn str(&self, s: Str) -> &str {
@@ -459,27 +540,104 @@ impl FlameGraph {
     }
 }
 
+/// The time the spans a node stands for spent in themselves.
+pub(crate) struct SpanSelf {
+    /// The node's total less its span children's, floored at zero because a
+    /// node's children can sum past it. The detail frames beneath the node are
+    /// this time broken out by instance, so it counts them in where
+    /// [`FlameNode::self_us`] leaves them out.
+    pub(crate) self_us: i64,
+    /// The most of `self_us` that one instance accounts for: the node's
+    /// largest detail frame, and all of `self_us` for a node with none, whose
+    /// spans tell no instance from another. A span floors its own self time
+    /// at zero as the node does its spans' together, so a detail frame can
+    /// exceed `self_us`, which bounds this.
+    pub(crate) peak_us: i64,
+}
+
 /// Vertical sizing of the flame graph, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlameMetrics {
     pub row_height: f32,
 }
 
-/// A flame-graph node laid out for painting. The field copies identify the node
-/// for hit-testing and tooltips; `name` is resolved with the producing
-/// [`FlameGraph`]'s [`str`](FlameGraph::str).
+/// A box of the flame graph laid out for painting, hit-testing and tooltips.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlameBox {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// The row the box's top edge lies on.
     pub depth: u32,
+    pub content: FlameBoxContent,
+}
+
+/// What a [`FlameBox`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlameBoxContent {
+    Frame(FlameFrame),
+    Remainder(FlameRemainder),
+    /// The rows beneath a remainder that the subtrees of its members in the
+    /// box's columns reach down to. It stands for no frame of those subtrees,
+    /// none of which is laid out.
+    RemainderDepth(FlameRemainder),
+}
+
+/// One node of a [`FlameGraph`], as its [`FlameNode`] gives it; `name` is
+/// resolved with that graph's [`str`](FlameGraph::str).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameFrame {
+    pub node: FlameNodeId,
     pub name: Str,
     pub total_us: i64,
-    pub self_us: i64,
     pub role: SpanRole,
     pub count: u32,
+}
+
+/// A node of the [`FlameGraph`] a layout was made from, which alone resolves
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlameNodeId(u32);
+
+/// A run of two or more consecutive siblings, each too narrow to draw on its
+/// own at the zoom the box was laid out for. Only [`lay_out_flame`] makes one,
+/// so a single sibling is always a [`FlameFrame`]. It names its members in the
+/// graph the layout was made from, which alone resolves them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameRemainder {
+    /// The node the members are children of.
+    parent: FlameNodeId,
+    /// The first member's index among that node's children.
+    first: u32,
+    frames: u32,
+    role: Option<SpanRole>,
+    siblings: RemainderSiblings,
+}
+
+/// What a remainder's parent holds beside the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemainderSiblings {
+    /// Nothing: the run is every child of its parent.
+    None,
+    /// Children wide enough for a box of their own.
+    Wider,
+}
+
+impl FlameRemainder {
+    /// How many siblings the run holds.
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// The role the siblings share, `None` where they differ.
+    pub fn role(&self) -> Option<SpanRole> {
+        self.role
+    }
+
+    pub fn siblings(&self) -> RemainderSiblings {
+        self.siblings
+    }
 }
 
 /// The inner of an `action '…'` name, `None` for any other shape. A
@@ -493,9 +651,12 @@ fn action_inner(name: &str) -> Option<&str> {
 /// Which text labels a flame frame, and so which spans merge into one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlameLabels {
-    /// A span's action mnemonic where one resolves, so every span of the same
-    /// action kind merges into one frame ("Rustc").
-    Mnemonic,
+    /// The kind of thing a span is an instance of, where its name says which
+    /// instance: an action's mnemonic where one resolves ("Rustc"), the category
+    /// of a span named after what it works on ("Fetching repository"), and the
+    /// kind a name leads with ("fetching"). Every span of one kind merges into
+    /// one frame.
+    Kind,
     /// Every span's own name, so an action frame names its target ("Compiling
     /// //x/y:z") and the tree is the profile's own nesting.
     Name,
@@ -513,18 +674,35 @@ pub enum FlameDirection {
     BottomUp,
 }
 
+/// What a span weighs in a flame graph, and so what a frame's width measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlameWeight {
+    /// The span's own duration. Lanes run side by side, so the graph totals
+    /// the time spent across all of them, which exceeds the time that elapsed
+    /// wherever two overlap.
+    Duration,
+    /// The span's lane's share of the time that elapsed over the span (see
+    /// [`WallShare`]), so the graph of every sharing lane totals the elapsed
+    /// time any of them had a span open in, and a subset of them its share of
+    /// that, counting twice the time shared by two spans of one lane that
+    /// overlap without nesting.
+    WallShare,
+}
+
 /// How a flame graph presents its spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlameMode {
     pub direction: FlameDirection,
     pub labels: FlameLabels,
+    pub weight: FlameWeight,
 }
 
 impl Default for FlameMode {
     fn default() -> Self {
         FlameMode {
             direction: FlameDirection::TopDown,
-            labels: FlameLabels::Mnemonic,
+            labels: FlameLabels::Kind,
+            weight: FlameWeight::Duration,
         }
     }
 }
@@ -566,23 +744,25 @@ impl Flamer {
     }
 
     /// How a span aggregates under `labels`. A span whose mnemonic resolves is
-    /// labelled by it, so all Rustc collapse together; any other span — and
+    /// labelled by it, so all Rustc collapse together, and one whose name says
+    /// which instance of a kind it is by that kind; any other span — and
     /// every span under [`FlameLabels::Name`] — is labelled by its own name (the
-    /// informative label for non-action slices: "checkOutputs",
-    /// "subprocess.run", a repo target, …). The tree shape comes from
-    /// time-containment, not from these labels; a label only decides which spans
-    /// at the same place merge into one frame.
+    /// informative label for the rest: "checkOutputs", "subprocess.run", …). The
+    /// tree shape comes from time-containment, not from these labels; a label
+    /// only decides which spans at the same place merge into one frame.
     fn span_labels(&self, labels: FlameLabels, slice: &Slice, detail: &SliceDetail) -> SpanLabels {
-        let mnemonic = match labels {
-            FlameLabels::Mnemonic => self.mnemonic_of(slice, detail),
+        let kind = match labels {
+            FlameLabels::Kind => self
+                .mnemonic_of(slice, detail)
+                .or_else(|| self.profile.kind_of(slice)),
             FlameLabels::Name => None,
         };
         SpanLabels {
             segment: Segment {
-                label: mnemonic.unwrap_or(slice.name),
+                label: kind.unwrap_or(slice.name),
                 role: slice.role,
             },
-            action: mnemonic.is_some().then_some(slice.name),
+            instance: kind.and_then(|_| self.profile.instance_of(slice)),
         }
     }
 
@@ -605,57 +785,69 @@ impl Flamer {
 
 /// A whole-profile name scan (rank table + mnemonic index) held so a
 /// track-selection flame graph can be rebuilt for any lane subset without
-/// rescanning. The scan covers every lane, so it ranks and labels any
-/// selection the caller later chooses.
+/// rescanning, and the profile's wall share, held for every reader of it. The
+/// scan covers every lane, so it ranks and labels any selection the caller
+/// later chooses. Each is computed on first use, so a flamer costs nothing to
+/// make until one is asked for.
 pub struct TrackFlamer {
-    flamer: Flamer,
-    /// The path-reduced lane tables ([`LaneTable`], one per
-    /// [`Profile::threads`] entry) covering the whole timeline, filled on first
-    /// use. A lane's spans emit path keys and reduce into per-node totals that
-    /// do not depend on the selection but do key by label.
-    lane_tables: ByLabels<OnceLock<Vec<LaneTable>>>,
-    /// The lane tables last reduced under a restricting window.
+    profile: Arc<Profile>,
+    flamer: OnceLock<Flamer>,
+    /// The lanes reduced over the whole timeline, filled on first use. A lane's
+    /// spans emit path keys and reduce into per-node totals that do not depend
+    /// on the selection but do key by label.
+    lane_tables: ByLabels<OnceLock<Arc<LaneTables>>>,
+    /// The lanes last reduced under a restricting window.
     windowed: ByLabels<WindowMemo>,
-    /// How many times [`windowed_tables`](TrackFlamer::windowed_tables) has
-    /// reduced the lanes afresh, so a test can hold the memo to its reuse.
+    /// Built on first use, so a view weighing by duration alone never pays for
+    /// it.
+    wall_share: OnceLock<WallShare>,
+    /// How many times the lanes have been walked under a restricting window,
+    /// to reduce them or to fill their wall column, so a test can hold the memo
+    /// and the column to their reuse.
     #[cfg(test)]
     reductions: AtomicUsize,
 }
 
-struct WindowedTables {
+/// Every lane's [`LaneTable`], one per [`Profile::threads`] entry, reduced
+/// under one labelling and window. A lane never selected (a critical-path lane)
+/// still has a table, so the lanes index by thread index directly.
+struct LaneTables {
+    labels: FlameLabels,
+    /// Empty for the whole timeline.
     window: TimeSelection,
-    /// Behind an [`Arc`] so a build takes a handle of its own and merges with
-    /// the lock released.
-    tables: Arc<Vec<LaneTable>>,
+    lanes: Vec<LaneTable>,
+    /// Each node's summed wall share, per lane and index-parallel to that
+    /// lane's `nodes`; filled on first use (see [`wall_columns`]) unless the
+    /// reduction carried it.
+    wall_us: OnceLock<Vec<Vec<i64>>>,
 }
 
-/// A memo of the lane tables reduced under one window; the tables admit only
-/// what that window does, so asking under another reduces afresh. Its lock spans
-/// a read or a write alone and never a reduction, so callers that miss together
-/// each reduce and the memo keeps whichever finishes last.
+/// A memo of the lanes reduced under one window; the tables admit only what
+/// that window does, so asking under another reduces afresh. Its lock spans a
+/// read or a write alone and never a reduction, so callers that miss together
+/// each reduce and the memo keeps whichever finishes last. The tables sit
+/// behind an [`Arc`] so a build takes a handle of its own and merges with the
+/// lock released.
 #[derive(Default)]
-struct WindowMemo(Mutex<Option<WindowedTables>>);
+struct WindowMemo(Mutex<Option<Arc<LaneTables>>>);
 
 impl WindowMemo {
     /// The entry, taken up as it stands where a panic elsewhere poisoned the
     /// lock: an entry is only ever replaced wholesale by already-reduced
     /// tables, so no panic can leave one half-written.
-    fn entry(&self) -> MutexGuard<'_, Option<WindowedTables>> {
+    fn entry(&self) -> MutexGuard<'_, Option<Arc<LaneTables>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn get(&self, window: &TimeSelection) -> Option<Arc<Vec<LaneTable>>> {
+    fn get(&self, window: &TimeSelection) -> Option<Arc<LaneTables>> {
         self.entry()
             .as_ref()
             .filter(|held| held.window == *window)
-            .map(|held| Arc::clone(&held.tables))
+            .map(Arc::clone)
     }
 
-    fn put(&self, window: &TimeSelection, tables: &Arc<Vec<LaneTable>>) {
-        *self.entry() = Some(WindowedTables {
-            window: window.clone(),
-            tables: Arc::clone(tables),
-        });
+    fn put(&self, tables: &Arc<LaneTables>) {
+        *self.entry() = Some(Arc::clone(tables));
     }
 }
 
@@ -664,14 +856,14 @@ impl WindowMemo {
 /// cannot be added without one.
 #[derive(Default)]
 struct ByLabels<T> {
-    mnemonic: T,
+    kind: T,
     name: T,
 }
 
 impl<T> ByLabels<T> {
     fn of(&self, labels: FlameLabels) -> &T {
         match labels {
-            FlameLabels::Mnemonic => &self.mnemonic,
+            FlameLabels::Kind => &self.kind,
             FlameLabels::Name => &self.name,
         }
     }
@@ -680,40 +872,116 @@ impl<T> ByLabels<T> {
 impl TrackFlamer {
     pub fn new(profile: &Arc<Profile>) -> TrackFlamer {
         TrackFlamer {
-            flamer: Flamer::new(profile, worker_count()),
+            profile: Arc::clone(profile),
+            flamer: OnceLock::new(),
             lane_tables: ByLabels::default(),
             windowed: ByLabels::default(),
+            wall_share: OnceLock::new(),
             #[cfg(test)]
             reductions: AtomicUsize::new(0),
         }
     }
 
-    fn lane_tables(&self, labels: FlameLabels) -> &[LaneTable] {
-        self.lane_tables.of(labels).get_or_init(|| {
-            build_lane_tables(
-                &self.flamer,
-                labels,
-                &TimeSelection::default(),
-                worker_count(),
-            )
-        })
+    /// A flamer whose scan is done, so that making one times the scan alone.
+    pub fn scanned(profile: &Arc<Profile>) -> TrackFlamer {
+        let scanned = TrackFlamer::new(profile);
+        scanned.flamer();
+        scanned
     }
 
-    fn windowed_tables(&self, labels: FlameLabels, window: &TimeSelection) -> Arc<Vec<LaneTable>> {
+    pub fn profile(&self) -> &Arc<Profile> {
+        &self.profile
+    }
+
+    fn flamer(&self) -> &Flamer {
+        self.flamer
+            .get_or_init(|| Flamer::new(&self.profile, worker_count()))
+    }
+
+    fn wall_share(&self) -> &WallShare {
+        self.wall_share
+            .get_or_init(|| WallShare::new(&self.profile, worker_count()))
+    }
+
+    /// The [`WorkingLanes`] of the wall share this flamer weighs by.
+    pub fn working_lanes(&self) -> WorkingLanes {
+        self.wall_share().working_lanes()
+    }
+
+    #[cfg(test)]
+    fn count_walk(&self, window: &TimeSelection) {
+        if !window.is_empty() {
+            self.reductions.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn reduce_lanes<W: Weigher>(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weigher_of: impl Fn(usize) -> W + Sync,
+    ) -> (Vec<LaneTable>, Vec<Vec<W::Weight>>) {
+        #[cfg(test)]
+        self.count_walk(window);
+        build_lane_tables(self.flamer(), labels, window, worker_count(), weigher_of)
+    }
+
+    fn reduce(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weight: FlameWeight,
+    ) -> LaneTables {
+        let (lanes, wall_us) = match weight {
+            FlameWeight::Duration => {
+                let (lanes, _) = self.reduce_lanes(labels, window, |_| DurationOnly);
+                (lanes, OnceLock::new())
+            }
+            FlameWeight::WallShare => {
+                let share = self.wall_share();
+                let (lanes, wall_us) = self.reduce_lanes(labels, window, |lane| share.lane(lane));
+                (lanes, OnceLock::from(wall_us))
+            }
+        };
+        LaneTables {
+            labels,
+            window: window.clone(),
+            lanes,
+            wall_us,
+        }
+    }
+
+    /// The lanes reduced under `labels` and `window`, reduced on the first ask
+    /// and held: once per labelling for the whole timeline, and for the window
+    /// last asked for.
+    fn tables(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        weight: FlameWeight,
+    ) -> Arc<LaneTables> {
+        if window.is_empty() {
+            let whole = self
+                .lane_tables
+                .of(labels)
+                .get_or_init(|| Arc::new(self.reduce(labels, window, weight)));
+            return Arc::clone(whole);
+        }
         let memo = self.windowed.of(labels);
         if let Some(held) = memo.get(window) {
             return held;
         }
-        #[cfg(test)]
-        self.reductions.fetch_add(1, Ordering::Relaxed);
-        let tables = Arc::new(build_lane_tables(
-            &self.flamer,
-            labels,
-            window,
-            worker_count(),
-        ));
-        memo.put(window, &tables);
+        let tables = Arc::new(self.reduce(labels, window, weight));
+        memo.put(&tables);
         tables
+    }
+
+    fn wall_us<'t>(&self, tables: &'t LaneTables) -> &'t [Vec<i64>] {
+        tables.wall_us.get_or_init(|| {
+            #[cfg(test)]
+            self.count_walk(&tables.window);
+            wall_columns(self.flamer(), tables, self.wall_share(), worker_count())
+        })
     }
 
     #[cfg(test)]
@@ -721,68 +989,111 @@ impl TrackFlamer {
         self.reductions.load(Ordering::Relaxed)
     }
 
-    /// Build the selection's flame graph by merging the selected lanes'
-    /// [`LaneTable`]s: concatenate their reduced nodes, sort the union by path
-    /// key, and reconstruct. The lanes are reduced under `window` (see
-    /// [`emit_lane_rows`]) and the reduction is held, so it is paid once per
-    /// labelling and window asked for, never for one that is not, and a change
-    /// of selection alone pays only the merge.
+    /// Build the selection's flame graph, weighed by duration, by merging the
+    /// selected lanes' [`LaneTable`]s: concatenate their reduced nodes, sort
+    /// the union by path key, and reconstruct. The lanes are reduced under
+    /// `window` (see [`emit_lane_rows`]) and the reduction is held, so it is
+    /// paid once per labelling and window asked for, never for one that is
+    /// not, and a change of selection alone pays only the merge.
     pub(crate) fn build(
         &self,
         labels: FlameLabels,
         window: &TimeSelection,
         selected: impl Fn(usize) -> bool + Sync,
     ) -> FlameGraph {
-        let restricted = (!window.is_empty()).then(|| self.windowed_tables(labels, window));
-        let tables: &[LaneTable] = match &restricted {
-            Some(tables) => tables,
-            None => self.lane_tables(labels),
-        };
-        let union_len: usize = tables
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| selected(i))
-            .map(|(_, t)| t.nodes.len())
-            .sum();
-        let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
-        for (i, table) in tables.iter().enumerate() {
-            if !selected(i) {
-                continue;
-            }
-            for (node_idx, node) in table.nodes.iter().enumerate() {
-                elems.push(KeyRef {
-                    key: &table.key_pool[node.key.range()],
-                    src: Src {
-                        lane: i as u32,
-                        node: node_idx as u32,
-                    },
-                });
-            }
-        }
-        workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
-        let node_of = |src: Src| &tables[src.lane as usize].nodes[src.node as usize];
-        let arena = reconstruct(&elems, |run| {
-            let head = node_of(run[0].src);
+        let tables = self.tables(labels, window, FlameWeight::Duration);
+        let lanes = &tables.lanes;
+        let elems = sorted_nodes(lanes, &selected);
+        let (arena, _) = reconstruct(&elems, |run| {
+            let first = run[0].src.of(lanes);
             let mut total_us = 0i64;
             let mut count = 0u32;
+            let mut category = first.category;
             for e in run {
-                let n = node_of(e.src);
+                let n = e.src.of(lanes);
                 total_us += n.total_us;
                 count += n.count;
+                category = shared_category(category, n.category);
             }
-            ArenaNode {
-                name: head.label,
-                rank: head.rank,
-                role: head.role,
-                detail: head.detail,
-                total_us,
-                count,
-            }
+            (first.arena_node(total_us, count, category), ())
         });
         drop(elems);
         let kids = csr_from_parents(&arena.parents);
-        seal_arena(&self.flamer.profile, arena, kids)
+        seal_arena(&self.profile, arena, kids)
     }
+
+    /// [`build`](Self::build)'s graph weighed by wall share, merged from the
+    /// same held reduction.
+    pub(crate) fn build_wall_share(
+        &self,
+        labels: FlameLabels,
+        window: &TimeSelection,
+        selected: impl Fn(usize) -> bool + Sync,
+    ) -> WallShareFlame {
+        let tables = self.tables(labels, window, FlameWeight::WallShare);
+        let lanes = &tables.lanes;
+        let wall_us = self.wall_us(&tables);
+        let elems = sorted_nodes(lanes, &selected);
+        let (arena, duration_us) = reconstruct(&elems, |run| {
+            let first = run[0].src.of(lanes);
+            let mut total_us = 0i64;
+            let mut duration_us = 0i64;
+            let mut count = 0u32;
+            let mut category = first.category;
+            for e in run {
+                let n = e.src.of(lanes);
+                total_us += wall_us[e.src.lane as usize][e.src.node as usize];
+                duration_us += n.total_us;
+                count += n.count;
+                category = shared_category(category, n.category);
+            }
+            (first.arena_node(total_us, count, category), duration_us)
+        });
+        drop(elems);
+        let kids = csr_from_parents(&arena.parents);
+        WallShareFlame {
+            flame: seal_arena(&self.profile, arena, kids),
+            duration_us,
+        }
+    }
+}
+
+/// A flame graph weighed by [`FlameWeight::WallShare`], with the durations a
+/// duration-weighed graph of the same spans would total.
+pub(crate) struct WallShareFlame {
+    pub(crate) flame: FlameGraph,
+    /// Each node's summed span duration, index-parallel to the graph's nodes.
+    pub(crate) duration_us: Vec<i64>,
+}
+
+/// The nodes of the lanes `selected` admits, sorted by path key.
+fn sorted_nodes<'t>(
+    lanes: &'t [LaneTable],
+    selected: &(impl Fn(usize) -> bool + Sync),
+) -> Vec<KeyRef<'t>> {
+    let union_len: usize = lanes
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| selected(i))
+        .map(|(_, t)| t.nodes.len())
+        .sum();
+    let mut elems: Vec<KeyRef> = Vec::with_capacity(union_len);
+    for (i, table) in lanes.iter().enumerate() {
+        if !selected(i) {
+            continue;
+        }
+        for (node_idx, node) in table.nodes.iter().enumerate() {
+            elems.push(KeyRef {
+                key: &table.key_pool[node.key.range()],
+                src: Src {
+                    lane: i as u32,
+                    node: node_idx as u32,
+                },
+            });
+        }
+    }
+    workers().install(|| elems.par_sort_by(|a, b| a.key.cmp(b.key)));
+    elems
 }
 
 /// One lane's path-reduced node table: every distinct aggregation path in the
@@ -794,6 +1105,31 @@ struct LaneTable {
     nodes: Vec<LaneNode>,
 }
 
+impl LaneTable {
+    /// Each node's summed weight over the `rows` on its path. `rows` ascend by
+    /// key, as the nodes do.
+    fn weights_of(&self, rows: &[Row<i64>]) -> Vec<i64> {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let mut rows = rows.iter().peekable();
+        self.nodes
+            .iter()
+            .map(|node| {
+                let key = &self.key_pool[node.key.range()];
+                let mut weight = 0i64;
+                while let Some(row) = rows.peek() {
+                    match row.key.as_slice().cmp(key) {
+                        Less => {}
+                        Equal => weight += row.weight,
+                        Greater => break,
+                    }
+                    rows.next();
+                }
+                weight
+            })
+            .collect()
+    }
+}
+
 /// One reduced node of a [`LaneTable`]: the frame a lane's spans on one
 /// aggregation path merge into. `key` is the byte range of that path's key in
 /// the owning table's `key_pool`; `total_us`/`count` sum the lane's spans on
@@ -803,60 +1139,174 @@ struct LaneNode {
     label: Str,
     rank: u32,
     role: SpanRole,
+    category: Option<CategoryId>,
     detail: bool,
     total_us: i64,
     count: u32,
 }
 
-/// Build every lane's [`LaneTable`], one per [`Profile::threads`] entry, sharded
-/// across `workers`. A lane never selected (a critical-path lane) still gets a
-/// table so the vector indexes by thread index directly.
-fn build_lane_tables(
+impl LaneNode {
+    /// The arena node merging this node with the others on its path, which
+    /// share everything but what they sum to and the category they were
+    /// recorded under.
+    fn arena_node(&self, total_us: i64, count: u32, category: Option<CategoryId>) -> ArenaNode {
+        ArenaNode {
+            name: self.label,
+            rank: self.rank,
+            role: self.role,
+            category,
+            detail: self.detail,
+            total_us,
+            count,
+        }
+    }
+}
+
+/// A weight summed per node beside the one the node carries: none, or a second
+/// time in microseconds.
+trait Weight: Copy + Default + Send {
+    fn add(&mut self, more: Self);
+
+    /// What is left of a span's weight with its nested spans' taken out,
+    /// floored at zero as its self time is.
+    fn less(self, nested: Self) -> Self;
+}
+
+impl Weight for () {
+    fn add(&mut self, (): ()) {}
+
+    fn less(self, (): ()) {}
+}
+
+impl Weight for i64 {
+    fn add(&mut self, more: i64) {
+        *self += more;
+    }
+
+    fn less(self, nested: i64) -> i64 {
+        (self - nested).max(0)
+    }
+}
+
+/// What a lane's reduction weighs each slice by beside its duration.
+trait Weigher {
+    type Weight: Weight;
+
+    /// The weight of what `window` holds of `slice`.
+    fn weigh(&mut self, window: &TimeSelection, slice: &Slice) -> Self::Weight;
+}
+
+/// Weighs nothing, for a reduction summing durations alone.
+struct DurationOnly;
+
+impl Weigher for DurationOnly {
+    type Weight = ();
+
+    fn weigh(&mut self, _: &TimeSelection, _: &Slice) {}
+}
+
+/// Weighs a slice by its lane's share of each stretch of it the window holds,
+/// clipped in time before it is weighed.
+impl Weigher for LaneShare<'_> {
+    type Weight = i64;
+
+    fn weigh(&mut self, window: &TimeSelection, slice: &Slice) -> i64 {
+        if window.is_empty() {
+            return self.between(slice.start_us, slice.end_us());
+        }
+        window
+            .clipped(slice.start_us, slice.end_us())
+            .map(|held| self.between(held.start_us, held.end_us))
+            .sum()
+    }
+}
+
+/// `of(i)` for each lane index `i`, in lane order, computed across `workers`.
+fn per_lane<T: Send>(flamer: &Flamer, workers: usize, of: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let n = flamer.profile.threads().len();
+    let shards = run_sharded(workers, n, |out: &mut Vec<(usize, T)>, i| {
+        out.push((i, of(i)));
+    });
+    let mut built: Vec<(usize, T)> = Vec::with_capacity(n);
+    built.extend(shards.into_iter().flatten());
+    built.sort_unstable_by_key(|&(i, _)| i);
+    built.into_iter().map(|(_, lane)| lane).collect()
+}
+
+/// Build every lane's [`LaneTable`], each beside its nodes' summed second
+/// weights, index-parallel to them. `weigher_of` gives the lane at an index its
+/// weigher.
+fn build_lane_tables<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     window: &TimeSelection,
     workers: usize,
-) -> Vec<LaneTable> {
-    let n = flamer.profile.threads().len();
-    let shards = run_sharded(workers, n, |out: &mut Vec<(usize, LaneTable)>, i| {
-        out.push((i, build_lane_table(flamer, labels, window, i)));
-    });
-    let mut tables: Vec<Option<LaneTable>> = (0..n).map(|_| None).collect();
-    for shard in shards {
-        for (i, table) in shard {
-            tables[i] = Some(table);
-        }
-    }
-    tables
-        .into_iter()
-        .map(|t| t.expect("every lane built"))
-        .collect()
+    weigher_of: impl Fn(usize) -> W + Sync,
+) -> (Vec<LaneTable>, Vec<Vec<W::Weight>>) {
+    per_lane(flamer, workers, |i| {
+        build_lane_table(flamer, labels, window, i, weigher_of(i))
+    })
+    .into_iter()
+    .unzip()
 }
 
-/// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
-/// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
-/// into the shared `key_pool`.
-fn build_lane_table(
+/// The wall column of `tables`: each lane's rows weighed by `share` and summed
+/// onto the lane's held nodes.
+fn wall_columns(
+    flamer: &Flamer,
+    tables: &LaneTables,
+    share: &WallShare,
+    workers: usize,
+) -> Vec<Vec<i64>> {
+    per_lane(flamer, workers, |i| {
+        let rows = sorted_lane_rows(flamer, tables.labels, &tables.window, i, share.lane(i));
+        tables.lanes[i].weights_of(&rows)
+    })
+}
+
+/// Lane `lane_index`'s rows (see [`emit_lane_rows`]), ascending by key.
+fn sorted_lane_rows<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     window: &TimeSelection,
     lane_index: usize,
-) -> LaneTable {
+    mut weigher: W,
+) -> Vec<Row<W::Weight>> {
     let thread = &flamer.profile.threads()[lane_index];
-    let mut rows: Vec<Row> = Vec::new();
-    emit_lane_rows(flamer, labels, thread, window, &mut rows);
+    let mut rows = Vec::new();
+    emit_lane_rows(flamer, labels, thread, window, &mut weigher, &mut rows);
     rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+    rows
+}
+
+/// Reduce lane `lane_index` to its [`LaneTable`]: emit one keyed row per span,
+/// sort by key, segment-reduce equal keys into nodes, and pack each distinct key
+/// into the shared `key_pool`. The second weights the rows carry reduce beside
+/// the nodes, index-parallel to them.
+fn build_lane_table<W: Weigher>(
+    flamer: &Flamer,
+    labels: FlameLabels,
+    window: &TimeSelection,
+    lane_index: usize,
+    weigher: W,
+) -> (LaneTable, Vec<W::Weight>) {
+    let rows = sorted_lane_rows(flamer, labels, window, lane_index, weigher);
 
     let mut key_pool: Vec<u8> = Vec::new();
     let mut nodes: Vec<LaneNode> = Vec::with_capacity(rows.len());
+    let mut weights: Vec<W::Weight> = Vec::with_capacity(rows.len());
     let mut i = 0;
     while i < rows.len() {
         let mut total = rows[i].dur;
+        let mut weight = rows[i].weight;
         let mut count = 1u32;
+        let mut category = rows[i].category;
         let mut j = i + 1;
         while j < rows.len() && rows[j].key == rows[i].key {
             total += rows[j].dur;
+            weight.add(rows[j].weight);
             count += 1;
+            category = shared_category(category, rows[j].category);
             j += 1;
         }
         let off = key_pool.len() as u32;
@@ -866,13 +1316,15 @@ fn build_lane_table(
             label: rows[i].label,
             rank: rows[i].rank,
             role: rows[i].role,
-            detail: rows[i].detail,
+            category,
+            detail: ends_at_detail(&rows[i].key),
             total_us: total,
             count,
         });
+        weights.push(weight);
         i = j;
     }
-    LaneTable { key_pool, nodes }
+    (LaneTable { key_pool, nodes }, weights)
 }
 
 /// Bytes encoding one aggregation-path segment in a [`Row`] key: the label's
@@ -887,24 +1339,37 @@ const SEGMENT_BYTES: usize = 5;
 /// and `detail` in bit 7 — so a detail frame never merges with a same-named real
 /// child of the same role. Equal segments encode equally.
 fn segment_flags(role: SpanRole, detail: bool) -> u8 {
-    const DETAIL_BIT: u32 = 7;
     ((detail as u8) << DETAIL_BIT) | ((role.workload as u8) << 1) | (role.payload as u8)
+}
+
+/// The bit of [`segment_flags`] that marks a detail frame.
+const DETAIL_BIT: u32 = 7;
+
+/// Whether the frame an aggregation-path key ends at is a detail frame.
+fn ends_at_detail(key: &[u8]) -> bool {
+    key.last().is_some_and(|flags| flags >> DETAIL_BIT != 0)
 }
 
 /// One emitted frame contribution in the path-sort aggregation: its full
 /// aggregation-path key (5 bytes per segment, root-to-frame), the frame it
-/// merges into, and the duration it brings. Rows sharing a key merge into one
-/// node.
-struct Row {
+/// merges into, and the duration and second weight it brings. Rows sharing a
+/// key merge into one node. A row whose key [`ends_at_detail`] is a detail row
+/// — a span's self time broken out under the instance it belongs to — rather
+/// than a span of its own.
+struct Row<X> {
     key: Vec<u8>,
     label: Str,
     rank: u32,
     role: SpanRole,
-    /// Whether this is a detail row — a span's self time broken out under the
-    /// action it belongs to — rather than a span of its own.
-    detail: bool,
+    /// The category of the span the row is for, and in a detail row that of
+    /// the span whose name it carries.
+    category: Option<CategoryId>,
     dur: i64,
+    weight: X,
 }
+
+// A lane's rows are sorted by value, so a row's size is what the sort moves.
+const _: () = assert!(std::mem::size_of::<Row<()>>() == 48);
 
 /// One node's field values as [`Arena::push`] takes them, decomposed into the
 /// arena's parallel vectors on the way in.
@@ -912,6 +1377,7 @@ struct ArenaNode {
     name: Str,
     rank: u32,
     role: SpanRole,
+    category: Option<CategoryId>,
     detail: bool,
     total_us: i64,
     count: u32,
@@ -927,6 +1393,7 @@ struct Arena {
     name: Vec<Str>,
     rank: Vec<u32>,
     role: Vec<SpanRole>,
+    category: Vec<Option<CategoryId>>,
     detail: Vec<bool>,
     total_us: Vec<i64>,
     count: Vec<u32>,
@@ -939,6 +1406,7 @@ impl Arena {
             name: Vec::with_capacity(n),
             rank: Vec::with_capacity(n),
             role: Vec::with_capacity(n),
+            category: Vec::with_capacity(n),
             detail: Vec::with_capacity(n),
             total_us: Vec::with_capacity(n),
             count: Vec::with_capacity(n),
@@ -952,6 +1420,7 @@ impl Arena {
                     workload: Workload::Other,
                     payload: false,
                 },
+                category: None,
                 detail: false,
                 total_us: 0,
                 count: 0,
@@ -966,11 +1435,16 @@ impl Arena {
     }
 
     /// Places `node` under `parent`, returning its index.
+    // A reconstruction loop pushes once per node of the graph, and inlined
+    // there each field goes from its source to its vector without the node
+    // being assembled on the stack for a call.
+    #[inline(always)]
     fn push(&mut self, node: ArenaNode, parent: u32) -> usize {
         let idx = self.len();
         self.name.push(node.name);
         self.rank.push(node.rank);
         self.role.push(node.role);
+        self.category.push(node.category);
         self.detail.push(node.detail);
         self.total_us.push(node.total_us);
         self.count.push(node.count);
@@ -979,10 +1453,13 @@ impl Arena {
     }
 
     /// Adds a finished node's aggregates to its parent's, so a parent totals its
-    /// whole subtree.
+    /// whole subtree. A detail frame's spans are its parent's own, which the
+    /// parent counts itself.
     fn fold_up(&mut self, node: usize, parent: usize) {
         self.total_us[parent] += self.total_us[node];
-        self.count[parent] += self.count[node];
+        if !self.detail[node] {
+            self.count[parent] += self.count[node];
+        }
     }
 }
 
@@ -1075,21 +1552,25 @@ fn windowed_dur_us(window: &TimeSelection, slice: &Slice) -> Option<i64> {
 /// path. Slices are in lane order, so a slice's containment parent precedes it
 /// and its key is the parent's key extended by this slice's segment.
 ///
-/// A slice that belongs to a resolved action — its own or the nearest enclosing
-/// one — also emits a detail row: an extra child frame labelled with that
-/// action's name and carrying the slice's self time, so mnemonic grouping still
-/// shows which target the time went to. Under [`FlameLabels::Name`] no action
-/// resolves and no detail row is emitted.
+/// A slice that belongs to an instance of a kind — itself, where its label is
+/// its kind, or else the nearest enclosing such slice — also emits a detail
+/// row: an extra child frame labelled with that instance's name and carrying
+/// the slice's self time, so grouping by kind still shows which target,
+/// repository or path the time went to. Under [`FlameLabels::Name`] no slice is
+/// labelled by a kind and no detail row is emitted.
 ///
 /// Durations are what `window` holds of them (see [`windowed_dur_us`]), and a
 /// slice it holds none of emits no row at all, so a frame's total, self time and
-/// span count all read as of the window.
-fn emit_lane_rows(
+/// span count all read as of the window. Which rows there are goes by duration
+/// alone, whatever `weigher` weighs them by beside it, so every reduction of a
+/// lane under one labelling and window emits the same keys.
+fn emit_lane_rows<W: Weigher>(
     flamer: &Flamer,
     labels: FlameLabels,
     thread: &ThreadTrack,
     window: &TimeSelection,
-    out: &mut Vec<Row>,
+    weigher: &mut W,
+    out: &mut Vec<Row<W::Weight>>,
 ) {
     // Regions spread far apart bracket to nearly the whole lane; only a narrow
     // selection shrinks the walk.
@@ -1104,32 +1585,35 @@ fn emit_lane_rows(
     // What each slice brings, `None` for one left out. A slice whose containment
     // parent is left out is left out with it, so whatever a slice keys onto is
     // itself keyed; one forward pass carries that down the chain.
-    let mut dur_us: Vec<Option<i64>> = Vec::with_capacity(slices.len());
+    let mut brought: Vec<Option<(i64, W::Weight)>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
-        dur_us.push(match parents[i] {
-            Some(p) if dur_us[p].is_none() => None,
+        let dur_us = match parents[i] {
+            Some(p) if brought[p].is_none() => None,
             _ => windowed_dur_us(window, &slices[i]),
-        });
+        };
+        brought.push(dur_us.map(|dur| (dur, weigher.weigh(window, &slices[i]))));
     }
     // Each slice's direct containment children's summed duration; its own
     // duration less this is its self time. Each child is clipped before it is
     // summed, so the window's figure is built from the same terms as the whole
     // timeline's.
-    let mut nested_us = vec![0i64; slices.len()];
+    let mut nested: Vec<(i64, W::Weight)> = vec![Default::default(); slices.len()];
     for i in 0..slices.len() {
-        if let (Some(p), Some(dur)) = (parents[i], dur_us[i]) {
-            nested_us[p] += dur;
+        if let (Some(p), Some((dur, weight))) = (parents[i], brought[i]) {
+            nested[p].0 += dur;
+            nested[p].1.add(weight);
         }
     }
     // At most one detail row per slice.
     out.reserve(2 * slices.len());
     let mut keys: Vec<Vec<u8>> = Vec::with_capacity(slices.len());
-    let mut actions: Vec<Option<Str>> = Vec::with_capacity(slices.len());
+    // Each slice's instance, with the category it was recorded under.
+    let mut instances: Vec<Option<(Str, Option<CategoryId>)>> = Vec::with_capacity(slices.len());
     for i in 0..slices.len() {
-        let Some(dur) = dur_us[i] else {
+        let Some((dur, weight)) = brought[i] else {
             // Placeholders, so both vectors stay indexed by slice.
             keys.push(Vec::new());
-            actions.push(None);
+            instances.push(None);
             continue;
         };
         let span = flamer.span_labels(labels, &slices[i], &details[i]);
@@ -1148,29 +1632,34 @@ fn emit_lane_rows(
             label: seg.label,
             rank,
             role: seg.role,
-            detail: false,
+            category: slices[i].category,
             dur,
+            weight,
         });
 
-        let action = span.action.or_else(|| parents[i].and_then(|p| actions[p]));
-        let self_us = (dur - nested_us[i]).max(0);
-        if let Some(action) = action.filter(|_| self_us > 0) {
-            let rank = flamer.ranks.rank_of(action);
+        let instance = span
+            .instance
+            .map(|name| (name, slices[i].category))
+            .or_else(|| parents[i].and_then(|p| instances[p]));
+        let self_us = (dur - nested[i].0).max(0);
+        if let Some((instance, category)) = instance.filter(|_| self_us > 0) {
+            let rank = flamer.ranks.rank_of(instance);
             let mut detail_key = Vec::with_capacity(key.len() + SEGMENT_BYTES);
             detail_key.extend_from_slice(&key);
             detail_key.extend_from_slice(&rank.to_be_bytes());
             detail_key.push(segment_flags(seg.role, true));
             out.push(Row {
                 key: detail_key,
-                label: action,
+                label: instance,
                 rank,
                 role: seg.role,
-                detail: true,
+                category,
                 dur: self_us,
+                weight: weight.less(nested[i].1),
             });
         }
         keys.push(key);
-        actions.push(action);
+        instances.push(instance);
     }
 }
 
@@ -1275,6 +1764,7 @@ fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> 
         name,
         rank,
         role,
+        category,
         detail,
         total_us,
         count,
@@ -1315,6 +1805,7 @@ fn seal_arena(profile: &Arc<Profile>, arena: Arena, mut kids: ArenaChildren) -> 
         self_us,
         width_us,
         role,
+        category,
         detail,
         count,
         subtree_max_depth,
@@ -1343,12 +1834,23 @@ struct Src {
     node: u32,
 }
 
+impl Src {
+    fn of(self, lanes: &[LaneTable]) -> &LaneNode {
+        &lanes[self.lane as usize].nodes[self.node as usize]
+    }
+}
+
 /// Rebuild the aggregation tree from key-sorted elements, returning the arena
 /// for [`seal_arena`]. Ascending key order lists every parent before its
 /// descendants, so a stack indexed by depth locates each node's parent; each
-/// maximal run of equal keys is one node, built by `node_of` from the run. The
-/// root's total is the summed total of the depth-1 nodes.
-fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Arena {
+/// maximal run of equal keys is one node, built by `node_of` from the run
+/// together with a second weight for it. Those come back index-parallel to the
+/// arena's nodes. The root's total, and its second weight, is the sum over the
+/// depth-1 nodes.
+fn reconstruct<X: Weight>(
+    elems: &[KeyRef],
+    node_of: impl Fn(&[KeyRef]) -> (ArenaNode, X),
+) -> (Arena, Vec<X>) {
     let run_breaks = workers().install(|| {
         elems
             .par_windows(2)
@@ -1358,6 +1860,8 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
     // One node per maximal run of equal keys, and the root.
     let nodes = 1 + usize::from(!elems.is_empty()) + run_breaks;
     let mut arena = Arena::with_capacity(nodes);
+    let mut weights: Vec<X> = Vec::with_capacity(nodes);
+    weights.push(X::default());
     // `stack[d]` holds the arena index of the current path's depth-`d` node; the
     // root seeds depth 0. A node at depth `d` finds its parent at `stack[d - 1]`,
     // still in place from when that parent was reduced.
@@ -1369,19 +1873,21 @@ fn reconstruct(elems: &[KeyRef], node_of: impl Fn(&[KeyRef]) -> ArenaNode) -> Ar
         while j < elems.len() && elems[j].key == elems[i].key {
             j += 1;
         }
-        let node = node_of(&elems[i..j]);
+        let (node, weight) = node_of(&elems[i..j]);
         let depth = elems[i].key.len() / SEGMENT_BYTES;
         if depth == 1 {
             root_total += node.total_us;
+            weights[0].add(weight);
         }
         let idx = arena.push(node, stack[depth - 1] as u32);
+        weights.push(weight);
         stack.truncate(depth);
         stack.push(idx);
         i = j;
     }
     arena.total_us[0] = root_total;
     debug_assert_eq!(arena.len(), nodes, "the run count must be exact");
-    arena
+    (arena, weights)
 }
 
 /// The CSR child edges of an arena described by its parent array. `off[p]`
@@ -1516,8 +2022,10 @@ fn common_segments(a: &[u8], b: &[u8]) -> usize {
 /// before it past the `lcp[k]` segments they share: the nodes deeper than that
 /// are complete and fold into their parents, and the chain's remaining segments
 /// open fresh nodes labelled from the graph node each was encoded from. The
-/// frame then charges its self time and span count to the node its chain ends
-/// at, which every ancestor picks up as it is folded. `nodes` sizes the arena.
+/// frame then charges its self time to the node its chain ends at, which every
+/// ancestor picks up as it is folded. Span counts fold the same way, each
+/// frame's charged once to the node its own chain ends at, by the first chain to
+/// end there or on a detail frame beneath. `nodes` sizes the arena.
 fn reconstruct_chains(
     graph: &FlameGraph,
     chain: &ChainSegments,
@@ -1527,6 +2035,9 @@ fn reconstruct_chains(
 ) -> Arena {
     let mut arena = Arena::with_capacity(nodes);
     let mut stack: Vec<usize> = vec![0];
+    // Parallel to `stack`: whether the frame whose chain ends at that node has
+    // charged its span count there. No frame's chain ends at the root.
+    let mut counted: Vec<bool> = vec![true];
     let mut depth = 0usize;
     for (k, &src) in srcs.iter().enumerate() {
         let src = src as usize;
@@ -1536,25 +2047,46 @@ fn reconstruct_chains(
             depth -= 1;
         }
         stack.truncate(shared + 1);
+        counted.truncate(shared + 1);
         let base = chain.at[src] as usize;
         let end = chain.at[src + 1] as usize - base;
+        // A node shared with the chain before stands for this chain's frame at
+        // that step too, which equal key segments leave free to be of another
+        // category.
+        for (&node, &owner) in stack[1..=shared].iter().zip(&chain.owner[base..]) {
+            let held = &mut arena.category[node];
+            *held = shared_category(*held, graph.category[owner as usize]);
+        }
         for d in shared + 1..=end {
             let owner = chain.owner[base + d - 1] as usize;
             let node = ArenaNode {
                 name: graph.name(owner),
                 rank: graph.rank(owner),
                 role: graph.role(owner),
+                category: graph.category[owner],
                 detail: graph.is_detail(owner),
                 total_us: 0,
                 count: 0,
             };
             let idx = arena.push(node, stack[d - 1] as u32);
             stack.push(idx);
+            counted.push(false);
         }
         depth = end;
         let leaf = stack[depth];
         arena.total_us[leaf] += graph.self_us(src);
-        arena.count[leaf] += graph.count(src);
+        // The frame a detail frame breaks out leads the detail's chain, and its
+        // node is the step before the detail's.
+        let (frame, at) = if graph.is_detail(src) {
+            arena.count[leaf] = graph.count(src);
+            (chain.owner[base] as usize, depth - 1)
+        } else {
+            (src, depth)
+        };
+        if !counted[at] {
+            counted[at] = true;
+            arena.count[stack[at]] += graph.count(frame);
+        }
     }
     while depth > 0 {
         arena.fold_up(stack[depth], stack[depth - 1]);
@@ -1575,9 +2107,9 @@ fn reconstruct_chains(
 /// it passes, so a node's total is the summed self time of the frames whose
 /// caller chain runs through it.
 ///
-/// Under mnemonic labelling a frame's per-target detail sits at the deep end of
-/// the path it hangs on, so the graph reads from a frame outward through its
-/// callers to the target that spent the time.
+/// A frame's per-instance detail sits at the deep end of the path it hangs on,
+/// so the graph reads from a frame outward through its callers to the instance
+/// that spent the time.
 ///
 /// The root's total is that whole summed self time, which meets the top-down
 /// root's total only where no frame's children overrun it: enclosed spans may
@@ -1645,42 +2177,34 @@ pub(crate) fn invert(graph: FlameGraph) -> FlameGraph {
 /// and only boxes overlapping the viewport are laid out — an off-screen subtree
 /// is pruned — so the layout is local to what is on screen, not the whole graph.
 ///
-/// Each box is placed against the boxes already painted at its depth by
-/// `paint::painted`. Where a marker's slot stands for a run of sub-pixel
-/// siblings, the one reaching the **deepest** is the one drawn and recursed into
-/// (the rest dropped): keeping the leftmost instead would let its shallow subtree
-/// hide a deeper sibling's, so the depth drawn at a slot would jump as the zoom
-/// shifted which sibling was leftmost. Keeping the deepest makes a slot's depth
-/// stable. That sibling keeps its own content span for dividing its children, so
-/// only the painted rect follows the slot. Coordinates are carried in `f64` so
-/// the proportional division holds precision at deep zoom, and each box is
-/// clamped to a viewport-sized margin so no huge value reaches its `f32` fields.
-/// Boxes come back in paint order, parents before children.
+/// A run of consecutive siblings each narrower than the minimum box width is
+/// one [`FlameRemainder`] box, and no member's subtree is laid out beneath it.
+///
+/// Coordinates are carried in `f64` so the proportional division holds
+/// precision at deep zoom, and each box is clamped to a viewport-sized margin so
+/// no huge value reaches its `f32` fields. Boxes come back in paint order,
+/// parents before children.
 pub fn lay_out_flame(
     graph: &FlameGraph,
     content_w: f64,
     placement: FlamePlacement,
 ) -> Vec<FlameBox> {
-    let mut out = Vec::new();
-    let mut covered = vec![f64::NEG_INFINITY; graph.max_depth as usize + 1];
+    let mut layout = Layout {
+        graph,
+        placement,
+        covered: vec![f64::NEG_INFINITY; graph.max_depth as usize + 1],
+        reach: Vec::new(),
+        out: Vec::new(),
+    };
     let content = Span {
         x: 0.0,
         w: content_w,
     };
     let root = in_view(content, placement.scroll_x);
-    if let Some(paint) = painted(root, covered[0], placement.min_px as f64) {
-        place(
-            graph,
-            0,
-            0,
-            content,
-            paint,
-            placement,
-            &mut covered,
-            &mut out,
-        );
+    if let Some(paint) = painted(root, layout.covered[0], placement.min_px as f64) {
+        layout.place(0, 0, content, paint);
     }
-    out
+    layout.out
 }
 
 /// Horizontal scroll offset, viewport width, row sizing, and minimum box width
@@ -1701,158 +2225,288 @@ fn in_view(content: Span, scroll_x: f64) -> Span {
     }
 }
 
-/// Emit `idx`'s box at `paint`, the viewport span it is drawn at — for a marker,
-/// the slot standing for a run of siblings (see [`deepest_in_slot`]) — and lay
-/// its children out across `content`, its own span in content pixels. `covered`
-/// carries the painted right edge per depth row across the recursion.
-#[allow(clippy::too_many_arguments)]
-fn place(
-    graph: &FlameGraph,
-    idx: usize,
-    depth: u32,
-    content: Span,
-    paint: Span,
-    placement: FlamePlacement,
-    covered: &mut [f64],
-    out: &mut Vec<FlameBox>,
-) {
-    let FlamePlacement {
-        scroll_x,
-        view_w,
-        metrics,
-        min_px,
-    } = placement;
-    let (min, view_w) = (min_px as f64, view_w as f64);
-    if paint.end() <= 0.0 || paint.x >= view_w {
-        return;
-    }
-    covered[depth as usize] = paint.end();
-    // Clamp to a viewport-sized margin so a wide box spanning far off-screen
-    // never stores a huge coordinate; a visible marker's left edge is already
-    // small.
-    let px = paint.x.max(-view_w);
-    let pr = paint.end().min(2.0 * view_w);
-    out.push(box_of(
-        graph,
-        idx,
-        depth,
-        px as f32,
-        (pr - px) as f32,
-        metrics,
-    ));
-    let width = graph.width_us(idx);
-    if width == 0 {
-        return;
-    }
-    let child_w = |c: usize| content.w * graph.width_us(c) as f64 / width as f64;
-    let row = depth as usize + 1;
-    let mut cursor = content.x;
-    let mut i = 0;
-    while i < graph.child_count(idx) {
-        let child = graph.child_id(idx, i);
-        let cc = Span {
-            x: cursor,
-            w: child_w(child),
-        };
-        let Some(slot) = painted(in_view(cc, scroll_x), covered[row], min) else {
-            cursor = cc.end();
-            i += 1;
-            continue;
-        };
-        if cc.w >= min {
-            place(graph, child, depth + 1, cc, slot, placement, covered, out);
-            cursor = cc.end();
-            i += 1;
-            continue;
-        }
-        let run = deepest_in_slot(graph, idx, i, cc, slot, scroll_x, min, &child_w);
-        place(
-            graph,
-            run.best,
-            depth + 1,
-            run.content,
-            slot,
-            placement,
-            covered,
-            out,
-        );
-        cursor = run.cursor;
-        i = run.next;
-    }
+/// A layout in progress.
+struct Layout<'a> {
+    graph: &'a FlameGraph,
+    placement: FlamePlacement<'a>,
+    /// The painted right edge per depth row.
+    covered: Vec<f64>,
+    /// The deepest row the subtrees of the last scanned run's members reach,
+    /// per column of its [`ThinRun::shown`], left to right.
+    reach: Vec<u32>,
+    out: Vec<FlameBox>,
 }
 
-/// The sibling a marker's slot is placed for, and where the run it stands for
-/// ends.
-struct Run {
-    /// The node id of the sibling placed for the run.
-    best: usize,
-    /// `best`'s own span in content pixels, which its children divide.
-    content: Span,
+/// The consecutive siblings, from one narrower than the minimum box on, up to
+/// the next at least that wide.
+struct ThinRun {
     /// The content x past the whole run.
-    cursor: f64,
+    end: f64,
     /// The index of the first sibling beyond the run.
     next: usize,
+    /// What stands for the run where it holds more than the one sibling, whose
+    /// own frame stands for it otherwise.
+    remainder: Option<FlameRemainder>,
+    /// The run's columns — each as wide as the minimum box, counted from the
+    /// run's left edge — that a member on the viewport starts in.
+    shown: std::ops::Range<usize>,
 }
 
-/// The run of consecutive siblings a marker's `slot` stands for: the one at
-/// `start`, spanning `first`, plus every following sibling the slot leaves
-/// nothing to paint. Among them the one whose subtree reaches deepest is placed —
-/// see [`lay_out_flame`] for why the deepest, not the leftmost, must win.
-#[allow(clippy::too_many_arguments)]
-fn deepest_in_slot(
-    graph: &FlameGraph,
-    parent: usize,
-    start: usize,
-    first: Span,
-    slot: Span,
-    scroll_x: f64,
-    min: f64,
-    child_w: &impl Fn(usize) -> f64,
-) -> Run {
-    let mut best = graph.child_id(parent, start);
-    let mut content = first;
-    let mut cursor = first.end();
-    let mut next = start + 1;
-    while next < graph.child_count(parent) {
-        let child = graph.child_id(parent, next);
-        let cc = Span {
-            x: cursor,
-            w: child_w(child),
+impl Layout<'_> {
+    fn min(&self) -> f64 {
+        self.placement.min_px as f64
+    }
+
+    /// Emit a box of `content` at `paint`, the viewport span it is drawn at,
+    /// from row `depth` down `rows` rows, recording it in `covered`. `false`
+    /// where `paint` lies off the viewport, which emits nothing.
+    fn push_box(&mut self, content: FlameBoxContent, depth: u32, rows: u32, paint: Span) -> bool {
+        let view_w = self.placement.view_w as f64;
+        if paint.end() <= 0.0 || paint.x >= view_w {
+            return false;
+        }
+        for covered in &mut self.covered[depth as usize..(depth + rows) as usize] {
+            *covered = covered.max(paint.end());
+        }
+        // Clamp to a viewport-sized margin so a wide box spanning far off-screen
+        // never stores a huge coordinate; a visible marker's left edge is already
+        // small.
+        let px = paint.x.max(-view_w);
+        let pr = paint.end().min(2.0 * view_w);
+        let row_height = self.placement.metrics.row_height;
+        self.out.push(FlameBox {
+            x: px as f32,
+            y: depth as f32 * row_height,
+            w: (pr - px) as f32,
+            h: rows as f32 * row_height,
+            depth,
+            content,
+        });
+        true
+    }
+
+    /// Emit `idx`'s box at `paint` and lay its children out across `content`,
+    /// its own span in content pixels.
+    fn place(&mut self, idx: usize, depth: u32, content: Span, paint: Span) {
+        let frame = FlameBoxContent::Frame(frame_of(self.graph, idx));
+        if self.push_box(frame, depth, 1, paint) {
+            self.place_children(idx, depth, content);
+        }
+    }
+
+    /// Lay the children of `idx`, a node at `depth`, out across `content`, its
+    /// own span in content pixels.
+    fn place_children(&mut self, idx: usize, depth: u32, content: Span) {
+        let graph = self.graph;
+        let width = graph.width_us(idx);
+        if width == 0 {
+            return;
+        }
+        let (scroll_x, min) = (self.placement.scroll_x, self.min());
+        let child_w = |c: usize| content.w * graph.width_us(c) as f64 / width as f64;
+        let row = depth + 1;
+        let children = graph.children_of(idx);
+        let mut cursor = content.x;
+        let mut i = 0;
+        while let Some(&child) = children.get(i) {
+            let child = child as usize;
+            let cc = Span {
+                x: cursor,
+                w: child_w(child),
+            };
+            if cc.w >= min {
+                self.place(child, row, cc, in_view(cc, scroll_x));
+                cursor = cc.end();
+                i += 1;
+                continue;
+            }
+            let run = self.thin_run(idx, i, cc, &child_w);
+            let covered = self.covered[row as usize];
+            match run.remainder {
+                None => {
+                    if let Some(paint) = painted(in_view(cc, scroll_x), covered, min) {
+                        self.place(child, row, cc, paint);
+                    }
+                }
+                Some(remainder) => {
+                    let span = Span {
+                        x: cc.x,
+                        w: run.end - cc.x,
+                    };
+                    if let Some(paint) = painted(in_view(span, scroll_x), covered, min)
+                        && self.push_box(FlameBoxContent::Remainder(remainder), row, 1, paint)
+                    {
+                        let left = in_view(cc, scroll_x).x;
+                        self.place_reach(remainder, row, run.shown, left, paint);
+                    }
+                }
+            }
+            cursor = run.end;
+            i = run.next;
+        }
+    }
+
+    /// The [`ThinRun`] opening at `parent`'s `start`-th child, which spans
+    /// `first`, leaving in `reach` how deep its members go.
+    fn thin_run(
+        &mut self,
+        parent: usize,
+        start: usize,
+        first: Span,
+        child_w: &impl Fn(usize) -> f64,
+    ) -> ThinRun {
+        let graph = self.graph;
+        let min = self.min();
+        let (scroll_x, view_w) = (self.placement.scroll_x, self.placement.view_w as f64);
+        // The first column to reach into the viewport, the content x it starts
+        // at, and the content x the viewport ends at.
+        let first_shown = ((scroll_x - first.x) / min).floor().max(0.0);
+        let shown_from = first.x + first_shown * min;
+        let shown_until = scroll_x + view_w;
+        // The viewport cuts a column at either edge of those it holds whole.
+        let most_shown = (view_w / min) as usize + 2;
+        if self.reach.len() < most_shown {
+            self.reach.resize(most_shown, 0);
+        }
+        let children = graph.children_of(parent);
+        let mut scan = RunScan {
+            graph,
+            children,
+            child_w,
+            min,
+            next: start,
+            end: first.x,
+            w: Some(first.w),
+            role: Some(graph.role(children[start] as usize)),
         };
-        if painted(in_view(cc, scroll_x), slot.end(), min).is_some() {
-            break;
+        while scan.take_before(shown_from).is_some() {}
+        // Each column holds a member's start: a member is narrower than a
+        // column, so the one after the last to start in a column starts in the
+        // next.
+        let mut shown = 0;
+        while scan.starts_before(shown_until) {
+            let column_end = shown_from + (shown + 1) as f64 * min;
+            let mut deepest = 0;
+            while let Some(member) = scan.take_before(column_end) {
+                deepest = deepest.max(graph.subtree_max_depth(member));
+            }
+            self.reach[shown] = deepest;
+            shown += 1;
         }
-        if graph.subtree_max_depth(child) > graph.subtree_max_depth(best) {
-            (best, content) = (child, cc);
+        while scan.take_before(f64::INFINITY).is_some() {}
+        let frames = scan.next - start;
+        let siblings = match frames == children.len() {
+            true => RemainderSiblings::None,
+            false => RemainderSiblings::Wider,
+        };
+        let remainder = (frames > 1).then_some(FlameRemainder {
+            parent: FlameNodeId(parent as u32),
+            first: start as u32,
+            frames: frames as u32,
+            role: scan.role,
+            siblings,
+        });
+        let first_shown = first_shown as usize;
+        ThinRun {
+            end: scan.end,
+            next: scan.next,
+            remainder,
+            shown: first_shown..first_shown + shown,
         }
-        cursor = cc.end();
-        next += 1;
     }
-    Run {
-        best,
-        content,
-        cursor,
-        next,
+
+    /// Emit, beneath `remainder`'s box on `row` at `paint`, how deep its
+    /// members reach: one box per stretch of its `shown` columns that `reach`
+    /// has reaching the same row. `left` is the viewport x the run's own span
+    /// starts at, which its columns are counted from.
+    fn place_reach(
+        &mut self,
+        remainder: FlameRemainder,
+        row: u32,
+        shown: std::ops::Range<usize>,
+        left: f64,
+        paint: Span,
+    ) {
+        let min = self.min();
+        let content = FlameBoxContent::RemainderDepth(remainder);
+        // A run narrower than one column is painted as wide as a column, from
+        // where `painted` put it.
+        let edge = |column: usize| match column {
+            0 => paint.x,
+            _ => (left + column as f64 * min).min(paint.end()),
+        };
+        let columns = shown.len();
+        let mut i = 0;
+        while i < columns {
+            let deepest = self.reach[i];
+            let mut j = i + 1;
+            while j < columns && self.reach[j] == deepest {
+                j += 1;
+            }
+            let x = edge(shown.start + i);
+            let end = match j < columns {
+                true => edge(shown.start + j),
+                false => paint.end(),
+            };
+            if deepest > row && end > x {
+                self.push_box(content, row + 1, deepest - row, Span { x, w: end - x });
+            }
+            i = j;
+        }
     }
 }
 
-fn box_of(
-    graph: &FlameGraph,
-    idx: usize,
-    depth: u32,
-    x: f32,
-    w: f32,
-    metrics: &FlameMetrics,
-) -> FlameBox {
-    FlameBox {
-        x,
-        y: depth as f32 * metrics.row_height,
-        w,
-        h: metrics.row_height,
-        depth,
+/// A walk along the siblings of a [`ThinRun`].
+struct RunScan<'a, W> {
+    graph: &'a FlameGraph,
+    /// Every child of the run's parent.
+    children: &'a [u32],
+    child_w: &'a W,
+    min: f64,
+    /// The index of the sibling to take next.
+    next: usize,
+    /// The content x that sibling starts at.
+    end: f64,
+    /// That sibling's width where it is of the run, and `None` past the run's
+    /// last.
+    w: Option<f64>,
+    /// The role the siblings taken share.
+    role: Option<SpanRole>,
+}
+
+impl<W: Fn(usize) -> f64> RunScan<'_, W> {
+    /// Whether the run holds a sibling yet to take that starts before `x`.
+    fn starts_before(&self, x: f64) -> bool {
+        self.w.is_some() && self.end < x
+    }
+
+    /// Take the next sibling into the run where it starts before `x`,
+    /// returning its node.
+    fn take_before(&mut self, x: f64) -> Option<usize> {
+        let w = self.w.filter(|_| self.end < x)?;
+        let member = self.children[self.next] as usize;
+        if self
+            .role
+            .is_some_and(|shared| shared != self.graph.role(member))
+        {
+            self.role = None;
+        }
+        self.end += w;
+        self.next += 1;
+        self.w = self
+            .children
+            .get(self.next)
+            .map(|&sibling| (self.child_w)(sibling as usize))
+            .filter(|&w| w < self.min);
+        Some(member)
+    }
+}
+
+fn frame_of(graph: &FlameGraph, idx: usize) -> FlameFrame {
+    FlameFrame {
+        node: FlameNodeId(idx as u32),
         name: graph.name(idx),
         total_us: graph.total_us(idx),
-        self_us: graph.self_us(idx),
         role: graph.role(idx),
         count: graph.count(idx),
     }
@@ -1867,9 +2521,12 @@ pub fn flame_height(graph: &FlameGraph, metrics: &FlameMetrics) -> f32 {
 mod tests {
     use super::*;
     use crate::selection::span_between;
-    use crate::test_profile::{action, action_named, profile, slice, track};
+    use crate::test_profile::{
+        TestSlice, action, action_named, profile, random_profile, slice, track,
+    };
     use crate::tests::assert_gapless;
     use bviz_trace_profile::LaneClass;
+    use fastrand::Rng;
 
     fn child(graph: &FlameGraph, node: &FlameNode, name: &str) -> FlameNode {
         graph
@@ -1894,7 +2551,7 @@ mod tests {
     }
 
     fn flame(p: &Arc<Profile>) -> FlameGraph {
-        flame_as(p, FlameLabels::Mnemonic)
+        flame_as(p, FlameLabels::Kind)
     }
 
     /// A selection of the given regions, each inserted in turn.
@@ -2070,7 +2727,7 @@ mod tests {
     #[test]
     fn name_labels_keep_one_mnemonics_targets_apart() {
         // Two actions of the same mnemonic on different targets: under `Name`
-        // each keeps its own frame reading its action name, under `Mnemonic`
+        // each keeps its own frame reading its action name, under `Kind`
         // the two merge into one.
         let p = profile(vec![track(
             1,
@@ -2087,7 +2744,7 @@ mod tests {
             100
         );
         assert_eq!(child(&named, &named.root(), "Compiling //b:b").total_us, 40);
-        let merged = flame_as(&p, FlameLabels::Mnemonic);
+        let merged = flame_as(&p, FlameLabels::Kind);
         assert_eq!(merged.children(&merged.root()).len(), 1);
         let rustc = child(&merged, &merged.root(), "Rustc");
         assert_eq!(rustc.total_us, 140);
@@ -2172,6 +2829,566 @@ mod tests {
         assert_eq!(child(&g, &g.root(), "checkOutputs").total_us, 30);
     }
 
+    /// A repository fetch: a span named after the repository alone.
+    fn fetch(repository: &str, start_us: i64, dur_us: i64) -> TestSlice {
+        slice(repository, "Fetching repository", start_us, dur_us)
+    }
+
+    #[test]
+    fn a_span_named_per_instance_is_labelled_by_its_category_and_detailed_by_its_name() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                fetch("@@b", 100, 40),
+                slice("buildTargets", "general information", 200, 30),
+            ],
+        )]);
+        let g = flame(&p);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("Fetching repository".to_owned(), 140),
+                ("buildTargets".to_owned(), 30)
+            ]
+        );
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!(fetching.count, 2);
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 100), ("@@b".to_owned(), 40)]
+        );
+        assert_eq!(
+            (1..g.len()).filter(|&i| g.is_detail(i)).count(),
+            2,
+            "each repository is a detail frame, and the span named for what it does has none"
+        );
+        // Labelled by name, each span is a frame of its own with nothing broken
+        // out beneath it.
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            resolved(&named),
+            [
+                ("All".to_owned(), 170, 0, 170, 0, 0),
+                ("@@a".to_owned(), 100, 100, 100, 1, 1),
+                ("@@b".to_owned(), 40, 40, 40, 1, 1),
+                ("buildTargets".to_owned(), 30, 30, 30, 1, 1),
+            ]
+        );
+        assert!((0..named.len()).all(|i| !named.is_detail(i)));
+    }
+
+    #[test]
+    fn a_span_named_kind_then_instance_is_labelled_by_the_kind_and_detailed_by_its_name() {
+        let info = |name, start, dur| slice(name, "general information", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                info("fetching: repository @@a", 0, 100),
+                info("fetching: repository @@b: c", 100, 40),
+                info("extracting: repository @@a", 200, 30),
+                // No kind leads these: one lacks the separator, the other
+                // carries it after a kind that is not this category's.
+                info("fetching", 300, 20),
+                info("local: sh", 400, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        // The span named by the kind alone is no instance of it: it keeps the
+        // role of a span named for what it does, and so a frame of its own.
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("extracting".to_owned(), 30),
+                ("fetching".to_owned(), 20),
+                ("fetching".to_owned(), 140),
+                ("local: sh".to_owned(), 10),
+            ]
+        );
+        let fetching = g
+            .children(&g.root())
+            .into_iter()
+            .find(|c| g.str(c.name) == "fetching" && c.role.workload == Workload::RemoteCache)
+            .expect("the kind's frame");
+        assert_eq!((fetching.total_us, fetching.count), (140, 2));
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [
+                ("fetching: repository @@a".to_owned(), 100),
+                ("fetching: repository @@b: c".to_owned(), 40),
+            ]
+        );
+        let extracting = child(&g, &g.root(), "extracting");
+        assert_eq!(
+            child_totals(&g, &extracting),
+            [("extracting: repository @@a".to_owned(), 30)]
+        );
+        assert!(g.children(&child(&g, &g.root(), "local: sh")).is_empty());
+    }
+
+    #[test]
+    fn a_command_of_a_repository_rule_is_a_kind_apart_from_the_rule_that_runs_it() {
+        let rule = |name, start, dur| slice(name, "Starlark repository function call", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::RepoFetch,
+            vec![
+                rule("rules_cc+", 0, 100),
+                rule("local: /bin/sh -c a: b", 10, 60),
+                rule("rules_go+", 100, 50),
+                rule("local: /bin/true", 110, 20),
+            ],
+        )]);
+        let g = flame(&p);
+        let rules = child(&g, &g.root(), "Starlark repository function call");
+        assert_eq!(g.children(&g.root()).len(), 1);
+        assert_eq!((rules.total_us, rules.count), (150, 2));
+        assert_eq!(
+            child_totals(&g, &rules),
+            [
+                ("local".to_owned(), 80),
+                ("rules_cc+".to_owned(), 40),
+                ("rules_go+".to_owned(), 30),
+            ]
+        );
+        let local = child(&g, &rules, "local");
+        assert_eq!(local.role.workload, Workload::Subprocess);
+        assert_eq!(rules.role.workload, Workload::Starlark);
+        assert_eq!(
+            child_totals(&g, &local),
+            [
+                ("local: /bin/sh -c a: b".to_owned(), 60),
+                ("local: /bin/true".to_owned(), 20),
+            ]
+        );
+        // Bottom-up the commands are one root and the rules another.
+        let inverted = inverted_as(&p, FlameLabels::Kind);
+        assert_eq!(
+            child_totals(&inverted, &inverted.root()),
+            [
+                ("Starlark repository function call".to_owned(), 70),
+                ("local".to_owned(), 80),
+            ]
+        );
+        // Labelled by name every span is a frame of its own.
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            child_totals(&named, &named.root()),
+            [("rules_cc+".to_owned(), 100), ("rules_go+".to_owned(), 50)]
+        );
+        assert!((0..named.len()).all(|i| !named.is_detail(i)));
+    }
+
+    #[test]
+    fn a_kind_no_span_of_the_lanes_built_carries_still_builds() {
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Analysis,
+                vec![slice("buildTargets", "general information", 0, 10)],
+            ),
+            track(
+                2,
+                LaneClass::RepoFetch,
+                vec![slice(
+                    "fetching: repository @@a",
+                    "general information",
+                    0,
+                    10,
+                )],
+            ),
+        ]);
+        let t = p.threads();
+        let analysis = |i: usize| t[i].lane_class == LaneClass::Analysis;
+        let scoped = Flamer::scoped(&p, 1, analysis);
+        assert!(p.kinds().all(|kind| scoped.ranks.rank.contains_key(&kind)));
+        let g = TrackFlamer::new(&p).build(FlameLabels::Kind, &TimeSelection::default(), |i| {
+            !analysis(i)
+        });
+        assert_eq!(child_totals(&g, &g.root()), [("fetching".to_owned(), 10)]);
+    }
+
+    #[test]
+    fn a_mnemonic_labels_a_span_ahead_of_its_category() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![TestSlice {
+                mnemonic: Some("Fetch".to_owned()),
+                ..fetch("@@a", 0, 100)
+            }],
+        )]);
+        let g = flame(&p);
+        assert_eq!(child_totals(&g, &g.root()), [("Fetch".to_owned(), 100)]);
+        let labelled = child(&g, &g.root(), "Fetch");
+        assert_eq!(child_totals(&g, &labelled), [("@@a".to_owned(), 100)]);
+    }
+
+    #[test]
+    fn a_span_inherits_the_nearest_enclosing_instance() {
+        // The fetch holds a span named for what it does, which holds a span that
+        // is an instance of its own: the first is detailed by the repository
+        // around it, the second by itself.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                slice("download", "generic", 10, 60),
+                slice("/tmp/a.tar", "VFS write", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let download = child(&g, &fetching, "download");
+        let write = child(&g, &download, "VFS write");
+        assert_eq!(child(&g, &fetching, "@@a").total_us, 40);
+        assert_eq!(child(&g, &download, "@@a").total_us, 50);
+        assert_eq!(child_totals(&g, &write), [("/tmp/a.tar".to_owned(), 10)]);
+        assert_eq!(g.root().total_us, 100);
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn an_instance_nested_in_an_action_is_detailed_by_its_own_name() {
+        // The read is an instance of its own, so the action's target details
+        // the action's time and the step between them, and stops at the read.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                action_named("Compiling //x:y", "Rustc", 0, 100),
+                slice("stage inputs", "generic", 10, 60),
+                slice("/work/x.rs", "VFS read", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let rustc = child(&g, &g.root(), "Rustc");
+        let stage = child(&g, &rustc, "stage inputs");
+        let read = child(&g, &stage, "VFS read");
+        assert_eq!(child(&g, &rustc, "Compiling //x:y").total_us, 40);
+        assert_eq!(child(&g, &stage, "Compiling //x:y").total_us, 50);
+        assert_eq!(child_totals(&g, &read), [("/work/x.rs".to_owned(), 10)]);
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn an_action_nested_in_an_instance_is_detailed_by_its_own_name() {
+        // The action is an instance of its own, so the repository details the
+        // fetch's time and stops at the action, whose target details it and the
+        // step nested in it.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                action_named("Unpacking //x:y", "Untar", 10, 60),
+                slice("write outputs", "generic", 20, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let untar = child(&g, &fetching, "Untar");
+        let write = child(&g, &untar, "write outputs");
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 40), ("Untar".to_owned(), 60)]
+        );
+        assert_eq!(child(&g, &untar, "Unpacking //x:y").total_us, 50);
+        assert_eq!(
+            child_totals(&g, &write),
+            [("Unpacking //x:y".to_owned(), 10)]
+        );
+        assert_eq!(g.nodes().iter().map(|n| n.self_us).sum::<i64>(), 100);
+    }
+
+    #[test]
+    fn a_span_of_a_kind_that_has_no_name_takes_the_instance_around_it() {
+        // The main repository's root package is written as the empty string:
+        // its own time stays on the kind's frame where nothing around it is an
+        // instance, and goes to the instance that is.
+        let creation = |name, start, dur| slice(name, "package creation", start, dur);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                creation("", 0, 100),
+                slice("load", "generic", 10, 60),
+                fetch("@@a", 200, 100),
+                creation("", 210, 30),
+            ],
+        )]);
+        let g = flame(&p);
+        let top = child(&g, &g.root(), "package creation");
+        assert_eq!((top.total_us, top.self_us), (100, 40));
+        let load = child(&g, &top, "load");
+        assert_eq!(child_totals(&g, &top), [("load".to_owned(), 60)]);
+        assert!(g.children(&load).is_empty());
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        let nested = child(&g, &fetching, "package creation");
+        assert_eq!(child_totals(&g, &nested), [("@@a".to_owned(), 30)]);
+        assert!(g.nodes().iter().all(|n| !g.str(n.name).is_empty()));
+    }
+
+    #[test]
+    fn a_span_named_by_its_categorys_fixed_name_takes_the_instance_around_it() {
+        // A rule initializer's thread says nothing of the package it runs for:
+        // its time and the calls it makes go to the package loading around it,
+        // and its own time stays on the kind's frame where nothing is.
+        let context = |start, dur| slice("an initializer", "Starlark thread context", start, dur);
+        let call = |start| slice("rust_crate", "Starlark user function call", start, 30);
+        let creation = |package, start| slice(package, "package creation", start, 100);
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                creation("a", 0),
+                context(10, 50),
+                call(20),
+                creation("b", 100),
+                context(110, 50),
+                call(120),
+                context(300, 10),
+            ],
+        )]);
+        let g = flame(&p);
+        let loading = child(&g, &g.root(), "package creation");
+        let nested = child(&g, &loading, "Starlark thread context");
+        assert_eq!(
+            child_totals(&g, &nested),
+            [
+                ("a".to_owned(), 20),
+                ("b".to_owned(), 20),
+                ("rust_crate".to_owned(), 60)
+            ]
+        );
+        assert_eq!(
+            child_totals(&g, &child(&g, &nested, "rust_crate")),
+            [("a".to_owned(), 30), ("b".to_owned(), 30)]
+        );
+        let alone = child(&g, &g.root(), "Starlark thread context");
+        assert_eq!((alone.total_us, alone.self_us), (10, 10));
+        assert!(g.children(&alone).is_empty());
+        assert!(g.nodes().iter().all(|n| g.str(n.name) != "an initializer"));
+    }
+
+    #[test]
+    fn a_kind_is_one_bottom_up_root_whose_paths_end_on_its_instances() {
+        let lane = |repository, start| {
+            vec![
+                fetch(repository, start, 100),
+                slice("download", "generic", start, 70),
+            ]
+        };
+        let p = profile(vec![
+            track(1, LaneClass::Analysis, lane("@@a", 0)),
+            track(2, LaneClass::Analysis, lane("@@b", 0)),
+        ]);
+        let g = inverted_as(&p, FlameLabels::Kind);
+        assert_eq!(
+            child_totals(&g, &g.root()),
+            [
+                ("Fetching repository".to_owned(), 60),
+                ("download".to_owned(), 140)
+            ]
+        );
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 30), ("@@b".to_owned(), 30)]
+        );
+        let download = child(&g, &g.root(), "download");
+        let caller = child(&g, &download, "Fetching repository");
+        assert_eq!(
+            child_totals(&g, &caller),
+            [("@@a".to_owned(), 70), ("@@b".to_owned(), 70)]
+        );
+        // Labelled by name each repository roots a path of its own.
+        let named = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(
+            child_totals(&named, &named.root()),
+            [
+                ("@@a".to_owned(), 30),
+                ("@@b".to_owned(), 30),
+                ("download".to_owned(), 140)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_clips_a_kind_frame_and_each_instance_beneath_it() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                fetch("@@b", 100, 100),
+                fetch("@@c", 200, 100),
+            ],
+        )]);
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(50, 130)]));
+        let fetching = child(&g, &g.root(), "Fetching repository");
+        assert_eq!((fetching.total_us, fetching.count), (80, 2));
+        assert_eq!(
+            child_totals(&g, &fetching),
+            [("@@a".to_owned(), 50), ("@@b".to_owned(), 30)]
+        );
+    }
+
+    /// The category of the one node named `name` at `depth`, as text.
+    fn category_at(g: &FlameGraph, name: &str, depth: u32) -> Option<String> {
+        let nodes = g.nodes();
+        let mut found = nodes
+            .iter()
+            .filter(|n| n.depth == depth && g.str(n.name) == name);
+        let node = found
+            .next()
+            .unwrap_or_else(|| panic!("no {name} at depth {depth}"));
+        assert!(found.next().is_none(), "several {name} at depth {depth}");
+        node.category.get().map(|c| g.str(c).to_owned())
+    }
+
+    #[test]
+    fn a_frame_carries_the_category_its_spans_were_recorded_under() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Analysis,
+            vec![
+                fetch("@@a", 0, 100),
+                slice("download", "generic", 10, 60),
+                slice("/tmp/a.tar", "VFS write", 20, 10),
+                action_named("Compiling //x:y", "Rustc", 200, 50),
+            ],
+        )]);
+        let general = Some("generic".to_owned());
+        let fetching = Some("Fetching repository".to_owned());
+        let writing = Some("VFS write".to_owned());
+        let g = flame(&p);
+        assert_eq!(g.root().category.get(), None);
+        assert_eq!(category_at(&g, "Fetching repository", 1), fetching);
+        assert_eq!(category_at(&g, "download", 2), general);
+        assert_eq!(category_at(&g, "VFS write", 3), writing);
+        assert_eq!(
+            category_at(&g, "Rustc", 1),
+            Some("action processing".to_owned())
+        );
+        // A detail frame carries the category of the instance it names, which
+        // is not that of the frame it hangs under where the instance was
+        // inherited.
+        assert_eq!(category_at(&g, "@@a", 2), fetching);
+        assert_eq!(category_at(&g, "@@a", 3), fetching);
+        assert_eq!(category_at(&g, "/tmp/a.tar", 4), writing);
+        assert_eq!(
+            category_at(&g, "Compiling //x:y", 2),
+            Some("action processing".to_owned())
+        );
+        let named = flame_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&named, "@@a", 1), fetching);
+        assert_eq!(category_at(&named, "download", 2), general);
+        // Bottom-up, a frame roots its path and its callers and instance follow.
+        let inverted = inverted_as(&p, FlameLabels::Kind);
+        assert_eq!(category_at(&inverted, "download", 1), general);
+        assert_eq!(category_at(&inverted, "Fetching repository", 2), fetching);
+        assert_eq!(category_at(&inverted, "@@a", 3), fetching);
+        assert_eq!(category_at(&inverted, "VFS write", 1), writing);
+        assert_eq!(category_at(&inverted, "/tmp/a.tar", 4), writing);
+    }
+
+    #[test]
+    fn a_frame_merging_spans_of_two_categories_carries_neither() {
+        // The two lanes' waits merge into one top-level frame, while each
+        // nested one stays under a parent of its own.
+        let wait = |category, start, dur| slice("acquiring semaphore", category, start, dur);
+        let p = profile(vec![
+            track(
+                1,
+                LaneClass::Execution,
+                vec![
+                    wait("Remote execution setup", 0, 10),
+                    slice("upload", "generic", 20, 30),
+                    wait("Remote execution upload time", 20, 10),
+                ],
+            ),
+            track(
+                2,
+                LaneClass::Execution,
+                vec![
+                    wait("Remote execution upload time", 0, 10),
+                    slice("setup", "generic", 20, 30),
+                    wait("Remote execution setup", 20, 10),
+                ],
+            ),
+        ]);
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
+            let g = flame_as(&p, labels);
+            assert_eq!(
+                category_at(&g, "acquiring semaphore", 1),
+                None,
+                "{labels:?}"
+            );
+            let nested = |parent| {
+                let parent = child(&g, &g.root(), parent);
+                let wait = child(&g, &parent, "acquiring semaphore");
+                wait.category.get().map(|c| g.str(c).to_owned())
+            };
+            assert_eq!(
+                nested("upload"),
+                Some("Remote execution upload time".to_owned()),
+                "{labels:?}"
+            );
+            assert_eq!(
+                nested("setup"),
+                Some("Remote execution setup".to_owned()),
+                "{labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caller_reached_from_spans_of_two_categories_carries_neither_bottom_up() {
+        // "step" is recorded under one category on the first lane and another
+        // on the second, where it has a caller of its own. Bottom-up both
+        // chains from "leaf" run through one "step" node.
+        let lane = |category, start| {
+            vec![
+                slice("step", category, start, 100),
+                slice("leaf", "generic", start, 60),
+            ]
+        };
+        let mut second = vec![slice("outer", "generic", 0, 200)];
+        second.extend(lane("second", 0));
+        let p = profile(vec![
+            track(1, LaneClass::Execution, lane("first", 0)),
+            track(2, LaneClass::Execution, second),
+        ]);
+        let top_down = flame_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&top_down, "step", 1), Some("first".to_owned()));
+        assert_eq!(category_at(&top_down, "step", 2), Some("second".to_owned()));
+        let g = inverted_as(&p, FlameLabels::Name);
+        assert_eq!(category_at(&g, "leaf", 1), Some("generic".to_owned()));
+        assert_eq!(category_at(&g, "step", 1), None);
+        assert_eq!(category_at(&g, "step", 2), None);
+        assert_eq!(category_at(&g, "outer", 3), Some("generic".to_owned()));
+    }
+
+    #[test]
+    fn a_category_past_the_last_an_id_reaches_is_carried_by_no_frame() {
+        // Categories are numbered in text order, so each filler takes an id
+        // ahead of the one sorting after them all.
+        let fillers = i64::from(u16::MAX);
+        let mut slices: Vec<TestSlice> = (0..fillers)
+            .map(|i| slice(&format!("s{i:05}"), &format!("c{i:05}"), i * 10, 5))
+            .collect();
+        slices.push(slice("last", "d", fillers * 10, 5));
+        let p = profile(vec![track(1, LaneClass::Analysis, slices)]);
+        let g = flame(&p);
+        assert_eq!(category_at(&g, "s00000", 1), Some("c00000".to_owned()));
+        assert_eq!(category_at(&g, "s65534", 1), Some("c65534".to_owned()));
+        assert_eq!(category_at(&g, "last", 1), None);
+    }
+
     #[test]
     fn selection_draws_only_the_chosen_lane_class() {
         let p = profile(vec![
@@ -2181,7 +3398,7 @@ mod tests {
         ]);
         let t = p.threads();
         let class = |c: LaneClass| {
-            TrackFlamer::new(&p).build(FlameLabels::Mnemonic, &TimeSelection::default(), move |i| {
+            TrackFlamer::new(&p).build(FlameLabels::Kind, &TimeSelection::default(), move |i| {
                 t[i].lane_class == c
             })
         };
@@ -2226,7 +3443,7 @@ mod tests {
     #[test]
     fn a_window_spanning_the_profile_matches_the_unrestricted_graph() {
         let p = clipping_profile();
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(0, 250)]));
             assert_eq!(
                 resolved(&whole),
@@ -2249,7 +3466,7 @@ mod tests {
             ],
         )]);
         let span = p.span();
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let whole = flame_within(&p, labels, &window(&[(span.start_us, span.end_us)]));
             assert_eq!(
                 resolved(&whole),
@@ -2377,7 +3594,7 @@ mod tests {
                 slice("checkOutputs", "check outputs", 85, 5),
             ],
         )]);
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let tail = flame_within(&p, labels, &window(&[(80, 100)]));
             let reaching_back = flame_within(&p, labels, &window(&[(0, 5), (80, 100)]));
             assert_eq!(resolved(&tail), resolved(&reaching_back), "{labels:?}");
@@ -2526,7 +3743,7 @@ mod tests {
             track(1, LaneClass::Execution, vec![action("Rustc", 0, 50)]),
             track(2, LaneClass::Execution, vec![action("Javac", 200, 50)]),
         ]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(200, 250)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(200, 250)]));
         assert_eq!(child_totals(&g, &g.root()), [("Javac".to_owned(), 50)]);
     }
 
@@ -2537,7 +3754,7 @@ mod tests {
             LaneClass::Execution,
             vec![action("Rustc", 0, 10), action("Javac", 990, 10)],
         )]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(0, 10), (990, 1000)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(0, 10), (990, 1000)]));
         assert_eq!(
             child_totals(&g, &g.root()),
             [("Javac".to_owned(), 10), ("Rustc".to_owned(), 10)]
@@ -2556,7 +3773,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 60, 20),
             ],
         )]);
-        let g = flame_within(&p, FlameLabels::Mnemonic, &window(&[(50, 100)]));
+        let g = flame_within(&p, FlameLabels::Kind, &window(&[(50, 100)]));
         let rustc = child(&g, &g.root(), "Rustc");
         assert_eq!(rustc.total_us, 50);
         let sub = child(&g, &rustc, "subprocess.run");
@@ -2589,7 +3806,7 @@ mod tests {
         let narrower = window(&[(0, 40)]);
         scan.build(FlameLabels::Name, &narrower, |_| true);
         assert_eq!(scan.reductions(), 2);
-        scan.build(FlameLabels::Mnemonic, &narrower, |_| true);
+        scan.build(FlameLabels::Kind, &narrower, |_| true);
         assert_eq!(scan.reductions(), 3);
     }
 
@@ -2598,14 +3815,61 @@ mod tests {
         let p = clipping_profile();
         let win = window(&[(0, 90)]);
         let scan = TrackFlamer::new(&p);
-        let mnemonic = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let mnemonic = scan.build(FlameLabels::Kind, &win, |_| true);
         let name = scan.build(FlameLabels::Name, &win, |_| true);
         assert_eq!(scan.reductions(), 2, "one reduction per labelling");
-        let mnemonic_again = scan.build(FlameLabels::Mnemonic, &win, |_| true);
+        let mnemonic_again = scan.build(FlameLabels::Kind, &win, |_| true);
         let name_again = scan.build(FlameLabels::Name, &win, |_| true);
         assert_eq!(scan.reductions(), 2, "a revisited labelling is a memo hit");
         assert_eq!(resolved(&mnemonic), resolved(&mnemonic_again));
         assert_eq!(resolved(&name), resolved(&name_again));
+    }
+
+    #[test]
+    fn a_window_reduces_once_for_durations_and_once_more_for_its_wall_column() {
+        let p = clipping_profile();
+        let win = window(&[(0, 90)]);
+        let scan = TrackFlamer::new(&p);
+        scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 1);
+        let filled = scan.build_wall_share(FlameLabels::Name, &win, |_| true);
+        assert_eq!(scan.reductions(), 2, "the held lanes gain a wall column");
+        scan.build_wall_share(FlameLabels::Name, &win, |i| i == 0);
+        scan.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(
+            scan.reductions(),
+            2,
+            "either weight then merges what is held"
+        );
+
+        // Asked for wall share first, one reduction serves both weights, and
+        // reads as the two reductions do.
+        let fresh = TrackFlamer::new(&p);
+        let at_once = fresh.build_wall_share(FlameLabels::Name, &win, |_| true);
+        let by_duration = fresh.build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(fresh.reductions(), 1);
+        assert_eq!(resolved(&at_once.flame), resolved(&filled.flame));
+        assert_eq!(at_once.duration_us, filled.duration_us);
+        let totals: Vec<i64> = (0..by_duration.len())
+            .map(|i| by_duration.total_us(i))
+            .collect();
+        assert_eq!(at_once.duration_us, totals);
+        // Carrying a wall column leaves the duration graph as a scan that
+        // never weighed by wall share builds it.
+        let untouched = TrackFlamer::new(&p).build(FlameLabels::Name, &win, |_| true);
+        assert_eq!(by_duration.nodes(), untouched.nodes());
+    }
+
+    #[test]
+    fn a_flamer_scans_and_splits_its_profile_only_once_a_build_needs_it() {
+        let p = clipping_profile();
+        let whole = TimeSelection::default();
+        let scan = TrackFlamer::new(&p);
+        assert!(scan.flamer.get().is_none() && scan.wall_share.get().is_none());
+        scan.build(FlameLabels::Name, &whole, |_| true);
+        assert!(scan.flamer.get().is_some() && scan.wall_share.get().is_none());
+        scan.build_wall_share(FlameLabels::Name, &whole, |_| true);
+        assert!(scan.wall_share.get().is_some());
     }
 
     #[test]
@@ -2776,6 +4040,7 @@ mod tests {
                 workload: Workload::Other,
                 payload: false,
             },
+            category: None,
             detail: false,
             total_us,
             count: 0,
@@ -2921,11 +4186,8 @@ mod tests {
         let root_box = &boxes[0];
         assert_eq!(root_box.w, 300.0);
         assert_eq!(root_box.y, 0.0);
-        let a = boxes
-            .iter()
-            .find(|b| g.str(b.name) == "CppCompile")
-            .unwrap();
-        let b = boxes.iter().find(|b| g.str(b.name) == "Rustc").unwrap();
+        let a = frame_box(&g, &boxes, "CppCompile").unwrap();
+        let b = frame_box(&g, &boxes, "Rustc").unwrap();
         assert_eq!(a.w, 200.0);
         assert_eq!(b.w, 100.0);
         assert_eq!(a.x, 0.0);
@@ -2935,74 +4197,436 @@ mod tests {
         assert!(a.w + b.w <= root_box.w + f32::EPSILON);
     }
 
-    #[test]
-    fn sub_pixel_boxes_widen_to_markers_and_coalesce() {
-        // Over 100px: "wide" fills most of the row; "aaa" and "bbb" are each
-        // sub-pixel and land in the same trailing column.
-        let p = profile(vec![track(
-            1,
-            LaneClass::Execution,
-            vec![
-                action("wide", 0, 500),
-                action("aaa", 500, 1),
-                action("bbb", 501, 1),
-            ],
-        )]);
-        let g = flame(&p);
-        // Fully visible: 100px wide graph, no scroll, 100px viewport.
-        let boxes = lay_out_flame(
-            &g,
-            100.0,
+    /// `g` laid out over `content_w` pixels, unscrolled, in a viewport that
+    /// shows all of it, with a one-pixel minimum box width.
+    fn lay_out(g: &FlameGraph, content_w: f64) -> Vec<FlameBox> {
+        lay_out_flame(
+            g,
+            content_w,
             FlamePlacement {
                 scroll_x: 0.0,
-                view_w: 100.0,
+                view_w: content_w.ceil() as f32,
                 metrics: &METRICS,
                 min_px: 1.0,
             },
-        );
-        let wide = boxes.iter().find(|b| g.str(b.name) == "wide").unwrap();
-        // Wide keeps its proportional slot at the left.
-        assert_eq!(wide.x, 0.0);
-        assert!(wide.w > 1.0);
-        // The first sub-pixel box widens to a one-pixel marker rather than
-        // vanishing; the second coalesces into its column and is dropped.
-        let aaa = boxes.iter().find(|b| g.str(b.name) == "aaa").unwrap();
-        assert_eq!(aaa.w, 1.0);
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "bbb"));
+        )
+    }
+
+    /// The name of the frame `b` stands for, `None` for a box standing for
+    /// none.
+    fn frame_name<'a>(g: &'a FlameGraph, b: &FlameBox) -> Option<&'a str> {
+        match b.content {
+            FlameBoxContent::Frame(frame) => Some(g.str(frame.name)),
+            FlameBoxContent::Remainder(_) | FlameBoxContent::RemainderDepth(_) => None,
+        }
+    }
+
+    /// The box of the frame named `name`, if one was laid out.
+    fn frame_box<'a>(g: &FlameGraph, boxes: &'a [FlameBox], name: &str) -> Option<&'a FlameBox> {
+        boxes.iter().find(|b| frame_name(g, b) == Some(name))
+    }
+
+    /// The remainder a box at `depth` stands for.
+    fn remainder_at(
+        boxes: &[FlameBox],
+        depth: u32,
+    ) -> impl Iterator<Item = (&FlameBox, FlameRemainder)> {
+        boxes
+            .iter()
+            .filter(move |b| b.depth == depth)
+            .filter_map(|b| match b.content {
+                FlameBoxContent::Remainder(r) => Some((b, r)),
+                FlameBoxContent::Frame(_) | FlameBoxContent::RemainderDepth(_) => None,
+            })
+    }
+
+    /// Every remainder box of `g`'s layout at `depth` as `(x, w, frames,
+    /// total_us)`, in paint order.
+    fn remainders(g: &FlameGraph, boxes: &[FlameBox], depth: u32) -> Vec<(f32, f32, u32, i64)> {
+        remainder_at(boxes, depth)
+            .map(|(b, r)| (b.x, b.w, r.frames(), g.remainder_total_us(&r)))
+            .collect()
+    }
+
+    /// Every box of a remainder's depth as `(x, w, first row, rows)`, in paint
+    /// order.
+    fn remainder_depths(boxes: &[FlameBox]) -> Vec<(f32, f32, u32, f32)> {
+        boxes
+            .iter()
+            .filter(|b| matches!(b.content, FlameBoxContent::RemainderDepth(_)))
+            .map(|b| (b.x, b.w, b.depth, b.h / METRICS.row_height))
+            .collect()
     }
 
     #[test]
-    fn deepest_sub_pixel_sibling_wins_its_column() {
-        // Two sub-pixel siblings in one column: "shallow" is a leaf and sorts
-        // first (wider), "deep" is narrower but nests "deepchild". The column
-        // must show "deep"'s spike, not the leftmost "shallow"'s, so its depth
-        // stays put as the zoom shifts which sibling leads.
+    fn a_run_of_sub_pixel_siblings_is_one_remainder_of_their_count_and_total() {
+        // At 0.125px per microsecond "wide" takes 127.5px; "aaa", "bbb" and
+        // "ccc" are each sub-pixel, and half a pixel together.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
             vec![
-                slice("pad", "general information", 0, 990),
-                slice("shallow", "general information", 990, 6),
-                slice("deep", "general information", 996, 4),
-                slice("deepchild", "general information", 996, 1),
+                action("wide", 0, 1020),
+                action("aaa", 1020, 2),
+                action("bbb", 1022, 1),
+                action("ccc", 1023, 1),
             ],
         )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 128.0);
+        let wide = frame_box(&g, &boxes, "wide").unwrap();
+        assert_eq!((wide.x, wide.w), (0.0, 127.5));
+        // Half a pixel wide, the run is drawn as a marker of one.
+        assert_eq!(remainders(&g, &boxes, 1), [(127.5, 1.0, 3, 4)]);
+        for name in ["aaa", "bbb", "ccc"] {
+            assert!(frame_box(&g, &boxes, name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_single_sub_pixel_sibling_stays_itself() {
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![action("wide", 0, 500), action("aaa", 500, 1)],
+        )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 100.0);
+        assert_eq!(frame_box(&g, &boxes, "aaa").unwrap().w, 1.0);
+        assert_eq!(remainders(&g, &boxes, 1), []);
+    }
+
+    #[test]
+    fn a_remainder_is_as_wide_as_its_members_together() {
+        // "pad" takes 5.5px of the 13.75px content; the eleven 3us siblings
+        // after it are 0.75px each.
+        let mut slices = vec![slice("pad", "general information", 0, 22)];
+        slices.extend(
+            (0..11).map(|i: i64| slice(&format!("r{i:02}"), "general information", 22 + 3 * i, 3)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
         let g = flame(&p);
+        let boxes = lay_out(&g, 13.75);
+        assert_eq!(remainders(&g, &boxes, 1), [(5.5, 8.25, 11, 33)]);
+        assert_eq!(painted_row(&boxes, 1), [(0.0, 5.5), (5.5, 8.25)]);
+    }
+
+    /// Three parents side by side at 0.5px per microsecond: "p" holding sixteen
+    /// 1us children, "q" one 12us child, and "r" eight 1us children.
+    fn runs_around_a_wide_box() -> FlameGraph {
+        let mut slices = vec![slice("p", "general information", 0, 16)];
+        slices
+            .extend((0..16).map(|i: i64| slice(&format!("p{i:02}"), "general information", i, 1)));
+        slices.push(slice("q", "general information", 16, 12));
+        slices.push(slice("q00", "general information", 16, 12));
+        slices.push(slice("r", "general information", 28, 8));
+        slices.extend(
+            (0..8).map(|i: i64| slice(&format!("r{i:02}"), "general information", 28 + i, 1)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        flame_as(&p, FlameLabels::Name)
+    }
+
+    #[test]
+    fn a_wide_box_between_two_runs_keeps_them_two_remainders() {
+        let g = runs_around_a_wide_box();
+        let boxes = lay_out(&g, 18.0);
+        assert_eq!(
+            remainders(&g, &boxes, 2),
+            [(0.0, 8.0, 16, 16), (14.0, 4.0, 8, 8)]
+        );
+        let wide = frame_box(&g, &boxes, "q00").unwrap();
+        assert_eq!((wide.x, wide.w), (8.0, 6.0));
+    }
+
+    #[test]
+    fn runs_under_adjoining_parents_are_a_remainder_each() {
+        // "p" and "q" each hold eight 1us children, 0.5px apiece.
+        let mut slices = Vec::with_capacity(18);
+        for (parent, start) in [("p", 0), ("q", 8)] {
+            slices.push(slice(parent, "general information", start, 8));
+            slices.extend(
+                (0..8).map(|i: i64| {
+                    slice(&format!("{parent}{i}"), "general information", start + i, 1)
+                }),
+            );
+        }
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let g = flame_as(&p, FlameLabels::Name);
+        assert_eq!(
+            remainders(&g, &lay_out(&g, 8.0), 2),
+            [(0.0, 4.0, 8, 8), (4.0, 4.0, 8, 8)]
+        );
+    }
+
+    #[test]
+    fn widening_the_view_resolves_a_remainder_into_its_members() {
+        let g = runs_around_a_wide_box();
+        // At 2px per microsecond every member clears the minimum width.
+        let boxes = lay_out(&g, 72.0);
+        assert_eq!(remainders(&g, &boxes, 2), []);
+        for i in 0..16 {
+            let member = frame_box(&g, &boxes, &format!("p{i:02}")).unwrap();
+            assert_eq!((member.x, member.w), (2.0 * i as f32, 2.0), "p{i:02}");
+        }
+        for i in 0..8 {
+            let member = frame_box(&g, &boxes, &format!("r{i:02}")).unwrap();
+            assert_eq!(
+                (member.x, member.w),
+                (56.0 + 2.0 * i as f32, 2.0),
+                "r{i:02}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remainder_partly_off_the_viewport_stands_for_its_whole_run() {
+        let g = runs_around_a_wide_box();
+        // The viewport shows content pixels 3 to 7 of 18: half of the first
+        // run's eight, and none of the second run.
         let boxes = lay_out_flame(
             &g,
-            100.0,
+            18.0,
             FlamePlacement {
-                scroll_x: 0.0,
-                view_w: 100.0,
+                scroll_x: 3.0,
+                view_w: 4.0,
                 metrics: &METRICS,
                 min_px: 1.0,
             },
         );
-        assert!(boxes.iter().any(|b| g.str(b.name) == "pad"));
-        assert!(boxes.iter().any(|b| g.str(b.name) == "deep"));
-        assert!(boxes.iter().any(|b| g.str(b.name) == "deepchild"));
-        // The shallower leftmost sibling is dropped in favour of the deeper one.
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "shallow"));
+        assert_eq!(remainders(&g, &boxes, 2), [(-3.0, 8.0, 16, 16)]);
+    }
+
+    #[test]
+    fn a_remainder_says_whether_its_parent_holds_wider_children_beside_it() {
+        let siblings = |g: &FlameGraph, content_w, depth| -> Vec<RemainderSiblings> {
+            remainder_at(&lay_out(g, content_w), depth)
+                .map(|(_, r)| r.siblings())
+                .collect()
+        };
+        // Every child of "p" and of "r" is in its run.
+        let all = runs_around_a_wide_box();
+        assert_eq!(
+            siblings(&all, 18.0, 2),
+            [RemainderSiblings::None, RemainderSiblings::None]
+        );
+        // "pad" is a box of its own beside the run.
+        let mut slices = vec![slice("pad", "general information", 0, 22)];
+        slices.extend(
+            (0..11).map(|i: i64| slice(&format!("r{i:02}"), "general information", 22 + 3 * i, 3)),
+        );
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        let beside = flame_as(&p, FlameLabels::Name);
+        assert_eq!(siblings(&beside, 13.75, 1), [RemainderSiblings::Wider]);
+    }
+
+    #[test]
+    fn a_remainder_carries_the_role_its_members_share() {
+        let role = |last_category| {
+            let mut slices = vec![slice("pad", "general information", 0, 990)];
+            slices
+                .extend((0..4).map(|i: i64| slice(&format!("/f{i}"), "VFS stat", 990 + 2 * i, 2)));
+            slices.push(slice("/last", last_category, 998, 2));
+            let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+            let g = flame_as(&p, FlameLabels::Name);
+            let boxes = lay_out(&g, 100.0);
+            assert_eq!(remainders(&g, &boxes, 1), [(99.0, 1.0, 5, 10)]);
+            let (_, remainder) = remainder_at(&boxes, 1).next().unwrap();
+            remainder.role().map(|role| role.workload)
+        };
+        assert_eq!(role("VFS stat"), Some(Workload::Filesystem));
+        assert_eq!(role("gc notification"), None);
+    }
+
+    /// "pad" beside eight 4us members named in the order of their boxes. The
+    /// first three are leaves, the next two wrap one child apiece, the two
+    /// after those a child and a grandchild, and the last is a leaf.
+    fn members_of_three_depths() -> FlameGraph {
+        const NESTING: [usize; 8] = [0, 0, 0, 1, 1, 2, 2, 0];
+        let mut slices = vec![slice("pad", "general information", 0, 80)];
+        for (i, nested) in NESTING.into_iter().enumerate() {
+            let start = 80 + 4 * i as i64;
+            slices.push(slice(&format!("m{i}"), "general information", start, 4));
+            for level in 0..nested {
+                let name = format!("m{i}-{level}");
+                slices.push(slice(&name, "general information", start, 4));
+            }
+        }
+        let p = profile(vec![track(1, LaneClass::Execution, slices)]);
+        flame_as(&p, FlameLabels::Name)
+    }
+
+    #[test]
+    fn beneath_a_remainder_each_column_shows_how_deep_its_members_reach() {
+        let g = members_of_three_depths();
+        // 0.125px per microsecond: a member is half a pixel, two to a column,
+        // and the run four columns from 10px on.
+        let boxes = lay_out(&g, 14.0);
+        assert_eq!(remainders(&g, &boxes, 1), [(10.0, 4.0, 8, 32)]);
+        // The first column holds leaves alone and shows nothing. The second
+        // reaches one row down for its deeper member, and the last two reach
+        // two rows as one box.
+        assert_eq!(
+            remainder_depths(&boxes),
+            [(11.0, 1.0, 2, 1.0), (12.0, 2.0, 2, 2.0)]
+        );
+        // No member is a box of its own, nor is anything nested in one.
+        let frames: Vec<&str> = boxes.iter().filter_map(|b| frame_name(&g, b)).collect();
+        assert_eq!(frames, ["All", "pad"]);
+        let (_, remainder) = remainder_at(&boxes, 1).next().unwrap();
+        for b in &boxes {
+            if let FlameBoxContent::RemainderDepth(of) = b.content {
+                assert_eq!(of, remainder);
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_narrower_than_a_box_shows_its_depth_under_the_marker_it_is_drawn_as() {
+        // "shallow" and "deep" are a tenth of a pixel together, from 99.9px on,
+        // and "deep" nests one span.
+        let p = profile(vec![track(
+            1,
+            LaneClass::Execution,
+            vec![
+                slice("pad", "general information", 0, 9990),
+                slice("shallow", "general information", 9990, 6),
+                slice("deep", "general information", 9996, 4),
+                slice("deepchild", "general information", 9996, 1),
+            ],
+        )]);
+        let g = flame_as(&p, FlameLabels::Name);
+        let boxes = lay_out(&g, 100.0);
+        assert_eq!(remainders(&g, &boxes, 1), [(99.9, 1.0, 2, 10)]);
+        assert_eq!(remainder_depths(&boxes), [(99.9, 1.0, 2, 1.0)]);
+        assert!(frame_box(&g, &boxes, "deepchild").is_none());
+    }
+
+    /// The node each node of `g` is a child of; the root's entry is its own.
+    fn parents(g: &FlameGraph) -> Vec<usize> {
+        let mut parents = vec![0; g.len()];
+        for i in 0..g.len() {
+            for k in 0..g.child_count(i) {
+                parents[g.child_id(i, k)] = i;
+            }
+        }
+        parents
+    }
+
+    #[test]
+    fn a_painted_box_strays_from_its_row_and_its_parent_by_less_than_a_box() {
+        /// How many random profiles are laid out.
+        const PROFILES: usize = 48;
+        /// Every random span begins before this.
+        const HORIZON_US: i64 = 80;
+        /// What f32 box edges may differ by from the f64 ones they round.
+        const ROUNDING: f32 = 1e-3;
+        const MIN_PX: f32 = 1.0;
+        // Content widths around and far above the minimum box width, each with
+        // the scroll offsets it is laid out at as a fraction of itself.
+        const VIEWS: [(f64, [f64; 3]); 5] = [
+            (3.0, [0.0, 0.37, 0.9]),
+            (7.3, [0.0, 0.37, 0.9]),
+            (20.0, [0.0, 0.11, 0.5]),
+            (333.3, [0.0, 0.25, 0.6]),
+            (5000.0, [0.0, 0.31, 0.83]),
+        ];
+        const VIEW_W: f32 = 40.0;
+        const SEED: u64 = 0x1234_5678_9ABC_DEF1;
+
+        let mut rng = Rng::with_seed(SEED);
+        for case in 0..PROFILES {
+            let p = random_profile(&mut rng, HORIZON_US);
+            for labels in [FlameLabels::Kind, FlameLabels::Name] {
+                let top_down = flame_as(&p, labels);
+                for g in [invert(top_down.clone()), top_down] {
+                    let parents = parents(&g);
+                    for (content_w, scrolls) in VIEWS {
+                        for scroll in scrolls {
+                            let boxes = lay_out_flame(
+                                &g,
+                                content_w,
+                                FlamePlacement {
+                                    scroll_x: scroll * content_w,
+                                    view_w: VIEW_W,
+                                    metrics: &METRICS,
+                                    min_px: MIN_PX,
+                                },
+                            );
+                            let at = format!("profile {case} {labels:?} {content_w}px at {scroll}");
+                            assert_boxes_keep_to_their_places(
+                                &parents, &boxes, MIN_PX, ROUNDING, &at,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Holds a layout to what [`painted`] leaves true of it. A box is drawn at
+    /// its own span, or as a marker moved and widened by less than `min_px`, so
+    /// two boxes sharing a row overlap by less than that, a frame's box starts
+    /// before its parent's ends and ends less than a pixel short of where its
+    /// parent's starts, and every frame drawn hangs under one that is drawn.
+    fn assert_boxes_keep_to_their_places(
+        parents: &[usize],
+        boxes: &[FlameBox],
+        min_px: f32,
+        rounding: f32,
+        at: &str,
+    ) {
+        let rows = |b: &FlameBox| b.depth..b.depth + (b.h / METRICS.row_height).round() as u32;
+        let frame_of = |node: usize| {
+            boxes.iter().find(|b| match b.content {
+                FlameBoxContent::Frame(frame) => frame.node.0 as usize == node,
+                _ => false,
+            })
+        };
+        for (i, b) in boxes.iter().enumerate() {
+            assert!(b.w > 0.0 && b.h > 0.0, "{b:?} {at}");
+            for o in &boxes[i + 1..] {
+                if rows(b).end <= rows(o).start || rows(o).end <= rows(b).start {
+                    continue;
+                }
+                let overlap = (b.x + b.w).min(o.x + o.w) - b.x.max(o.x);
+                assert!(overlap < min_px + rounding, "{b:?} over {o:?} {at}");
+            }
+            match b.content {
+                FlameBoxContent::Frame(frame) if b.depth > 0 => {
+                    let parent = frame_of(parents[frame.node.0 as usize])
+                        .unwrap_or_else(|| panic!("no parent drawn for {b:?} {at}"));
+                    assert_eq!(parent.depth + 1, b.depth, "{b:?} {at}");
+                    assert!(
+                        b.x < parent.x + parent.w + rounding,
+                        "{b:?} under {parent:?} {at}"
+                    );
+                    assert!(
+                        b.x + b.w > parent.x - 1.0 - rounding,
+                        "{b:?} under {parent:?} {at}"
+                    );
+                }
+                FlameBoxContent::Frame(_) => {}
+                FlameBoxContent::Remainder(_) => {
+                    let covered = boxes.iter().any(|o| {
+                        o.depth + 1 == b.depth
+                            && matches!(o.content, FlameBoxContent::Frame(_))
+                            && b.x < o.x + o.w + rounding
+                            && b.x + b.w > o.x - 1.0 - rounding
+                    });
+                    assert!(covered, "nothing above {b:?} {at}");
+                }
+                FlameBoxContent::RemainderDepth(of) => {
+                    let remainder = boxes.iter().find(|o| {
+                        o.depth + 1 == b.depth
+                            && o.content == FlameBoxContent::Remainder(of)
+                            && o.x - rounding <= b.x
+                            && b.x + b.w <= o.x + o.w + rounding
+                    });
+                    assert!(remainder.is_some(), "no remainder above {b:?} {at}");
+                }
+            }
+        }
     }
 
     /// The painted `(x, w)` of every box at `depth`, in paint order.
@@ -3098,8 +4722,8 @@ mod tests {
                 min_px: 1.0,
             },
         );
-        assert!(!boxes.iter().any(|b| g.str(b.name) == "left"));
-        let right = boxes.iter().find(|b| g.str(b.name) == "right").unwrap();
+        assert!(frame_box(&g, &boxes, "left").is_none());
+        let right = frame_box(&g, &boxes, "right").unwrap();
         // Its content x is 500; viewport-relative that is 500 - 600 = -100 (still
         // within the -view_w margin, so unclamped).
         assert_eq!(right.x, -100.0);
@@ -3265,7 +4889,7 @@ mod tests {
                 ],
             ),
         ]);
-        for labels in [FlameLabels::Mnemonic, FlameLabels::Name] {
+        for labels in [FlameLabels::Kind, FlameLabels::Name] {
             let top_down = flame_as(&p, labels);
             let root_total = top_down.root().total_us;
             let self_sum: i64 = top_down.nodes().iter().map(|n| n.self_us).sum();
@@ -3286,8 +4910,8 @@ mod tests {
 
     #[test]
     fn inverted_target_details_end_the_path_rather_than_starting_it() {
-        // A Rustc action on //x:y containing subprocess.run: under mnemonic
-        // labelling both frames break their self time out under the target.
+        // A Rustc action on //x:y containing subprocess.run: labelled by kind,
+        // both frames break their self time out under the target.
         let p = profile(vec![track(
             1,
             LaneClass::Execution,
@@ -3296,7 +4920,7 @@ mod tests {
                 slice("subprocess.run", "subprocess run", 0, 80),
             ],
         )]);
-        let g = inverted_as(&p, FlameLabels::Mnemonic);
+        let g = inverted_as(&p, FlameLabels::Kind);
         assert_eq!(
             child_totals(&g, &g.root()),
             [("Rustc".to_owned(), 20), ("subprocess.run".to_owned(), 80)]
@@ -3344,7 +4968,7 @@ mod tests {
                 ],
             ),
         ]);
-        let g = flame_as(&p, FlameLabels::Mnemonic);
+        let g = flame_as(&p, FlameLabels::Kind);
         assert!(
             (0..g.len()).filter(|&i| g.is_detail(i)).count() >= 2,
             "the profile must produce detail frames for the claim to bite"

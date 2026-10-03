@@ -1,16 +1,15 @@
 use crate::chart::fit_px_per_us;
-use crate::counters::paint_crosshair;
+use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_count};
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
-use crate::model::TraceModel;
+use crate::model::{TraceModel, WorkingLanesDerived};
 use crate::regions::{CountersStrip, Regions, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, Source, TIMELINE_KEY_CONTEXT, TimelineBars,
-    TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers,
-    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
-    thumb_offset,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, TIMELINE_KEY_CONTEXT, TimelineBars, TracePanel,
+    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler,
+    paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip, thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -375,6 +374,8 @@ pub(crate) struct Timeline {
     /// Repaints the overlay when the session learns something of the
     /// invocation, which the hover tooltip names a slice's configuration by.
     _session_observer: Option<Subscription>,
+    /// Redraws the counter plots once the working lanes are there to plot.
+    _working_lanes_derived: Subscription,
 }
 
 impl Timeline {
@@ -389,6 +390,10 @@ impl Timeline {
         let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
         let session = model.read(cx).session().cloned();
         let session_observer = session.map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
+        let working_lanes_derived = cx
+            .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
+                timeline.invalidate_canvas(cx)
+            });
         Self {
             content_focus,
             model,
@@ -409,6 +414,7 @@ impl Timeline {
             canvas,
             _model_observer: model_observer,
             _session_observer: session_observer,
+            _working_lanes_derived: working_lanes_derived,
         }
     }
 
@@ -450,14 +456,11 @@ impl Timeline {
     }
 
     /// [`Regions`] for the current viewport, strip and gutter sizes, the loaded
-    /// profile's counter count, and the flame lanes' total height.
+    /// profile's counter track count, and the flame lanes' total height.
     fn regions(&self, cx: &App) -> Regions {
         let (n_counters, flame_total) = {
             let model = self.model.read(cx);
-            let n_counters = match model.source() {
-                Source::Loaded(p) => p.counters().len(),
-                _ => 0,
-            };
+            let n_counters = model.profile().map_or(0, |p| track_count(p));
             let flame_total = model.lane_layout().map(|l| l.total_height).unwrap_or(0.0);
             (n_counters, flame_total)
         };
@@ -476,8 +479,7 @@ impl Timeline {
     fn scroll_bars(&self, cx: &App) -> TimelineBars {
         let (span, flame_total) = {
             let model = self.model.read(cx);
-            let (Source::Loaded(profile), Some(lanes)) = (model.source(), model.lane_layout())
-            else {
+            let (Some(profile), Some(lanes)) = (model.profile(), model.lane_layout()) else {
                 return TimelineBars::default();
             };
             (profile.span(), lanes.total_height)
@@ -667,9 +669,7 @@ impl Timeline {
     /// The instant a window-space cursor points at; `None` while no profile is
     /// loaded.
     fn time_at(&self, pos: Point<Pixels>, cx: &App) -> Option<i64> {
-        let Source::Loaded(profile) = self.model.read(cx).source() else {
-            return None;
-        };
+        let profile = self.model.read(cx).profile()?;
         let x_px = f32::from(pos.x) - self.regions(cx).content_left;
         Some(time_at_x(self.view, profile.span(), x_px))
     }
@@ -684,7 +684,7 @@ impl Timeline {
         if !(in_ruler || (e.modifiers.shift && regions.in_flame(e.position))) {
             return false;
         }
-        let Source::Loaded(profile) = self.model.read(cx).source() else {
+        let Some(profile) = self.model.read(cx).profile() else {
             return false;
         };
         let bounds = profile.span();
@@ -775,9 +775,8 @@ impl Timeline {
         if self.model.read(cx).lane_layout().is_none() {
             return;
         }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Some(profile) = self.model.read(cx).profile().cloned() else {
+            return;
         };
         let span = profile.span();
         let regions = self.regions(cx);
@@ -795,9 +794,8 @@ impl Timeline {
         if self.model.read(cx).lane_layout().is_none() {
             return;
         }
-        let profile = match self.model.read(cx).source() {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Some(profile) = self.model.read(cx).profile().cloned() else {
+            return;
         };
         let span = profile.span();
         let regions = self.regions(cx);
@@ -924,7 +922,7 @@ impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (profile, lanes) = {
             let model = self.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
+            let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
             let Some(lanes) = model.lane_layout() else {
@@ -963,9 +961,8 @@ fn timeline_on_drag(
             if timeline.model.read(cx).lane_layout().is_none() {
                 return;
             }
-            let profile = match timeline.model.read(cx).source() {
-                Source::Loaded(p) => p.clone(),
-                _ => return,
+            let Some(profile) = timeline.model.read(cx).profile().cloned() else {
+                return;
             };
             let span = profile.span();
             let regions = timeline.regions(cx);
@@ -1024,7 +1021,7 @@ impl Render for SliceCanvas {
         let (profile, lanes, chrome, counters, gutter_width) = {
             let timeline = parent.read(cx);
             let model = timeline.model.read(cx);
-            let Source::Loaded(profile) = model.source() else {
+            let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
             let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
@@ -1067,7 +1064,7 @@ fn fit_prepaint(
         let regions_of = |b| {
             Regions::new(
                 b,
-                profile.counters().len(),
+                track_count(&profile),
                 counters,
                 gutter_width,
                 flame_total,
@@ -1138,7 +1135,7 @@ fn slice_paint(
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
         let layout = &*lanes;
-        let n_counters = profile.counters().len();
+        let n_counters = track_count(&profile);
         let flame_total = layout.total_height;
         let (
             tv,
@@ -1244,7 +1241,21 @@ fn slice_paint(
         });
 
         if show_counters {
-            crate::counters::paint_graph(&profile, tv, regions, counter_scroll, &palette, window);
+            let working_lanes_pending = {
+                let working_lanes = parent.read(cx).model.read(cx).working_lanes();
+                let strip = StripCounters::new(&profile, working_lanes);
+                crate::counters::paint_graph(strip, tv, regions, counter_scroll, &palette, window);
+                working_lanes.is_none()
+            };
+            if working_lanes_pending {
+                crate::counters::paint_working_lanes_pending(
+                    regions,
+                    counter_scroll,
+                    &palette,
+                    window,
+                    cx,
+                );
+            }
         }
         paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
         scrollbar_geom(
@@ -1525,7 +1536,7 @@ fn overlay_paint(
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
-        let n_counters = profile.counters().len();
+        let n_counters = track_count(&profile);
         let (tv, counters, counter_scroll, gutter_width, selection, crosshair, hovered, dragging) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
@@ -1555,13 +1566,20 @@ fn overlay_paint(
         if let Some(at) = crosshair
             && f32::from(at.x) >= regions.content_left
         {
+            let readouts = match show_counters {
+                true => {
+                    let working_lanes = parent.read(cx).model.read(cx).working_lanes();
+                    let strip = StripCounters::new(&profile, working_lanes);
+                    counter_readouts(strip, tv, regions, at, counter_scroll)
+                }
+                false => Vec::new(),
+            };
             paint_crosshair(
-                &profile,
+                &readouts,
                 tv,
                 regions,
                 at,
                 show_counters,
-                counter_scroll,
                 &palette,
                 window,
                 cx,

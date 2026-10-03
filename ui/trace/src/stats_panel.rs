@@ -4,11 +4,11 @@ use crate::rebuild::Rebuild;
 use crate::theme::Palette;
 use crate::{
     STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE,
-    panel_toolbar, profile_status, set_list_thumb, thumb_offset, time_window_chip,
+    profile_status, set_list_thumb, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, centered_spinner,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar, centered_spinner,
     load_in_background, overlay_canvas, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -76,7 +76,7 @@ const STATS_COLUMNS: [StatsColumnSpec; 6] = [
 fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
     match column {
         StatsColumn::Key => match labels {
-            FlameLabels::Mnemonic => "Mnemonic",
+            FlameLabels::Kind => "Kind",
             FlameLabels::Name => "Name",
         },
         StatsColumn::Count => "Count",
@@ -592,8 +592,8 @@ impl Render for StatsPanel {
         // ~2M rows on the paint thread would freeze it.
         self.ensure_stats_order(cx);
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let toolbar = time_window_chip(&self.model, palette, cx)
-            .map(|chip| panel_toolbar(palette).child(chip));
+        let toolbar =
+            time_window_chip(&self.model, palette, cx).map(|chip| Toolbar::new().child(chip));
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)

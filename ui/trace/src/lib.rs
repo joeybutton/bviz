@@ -52,7 +52,6 @@ use gpui::{
     fill, point, prelude::*, px, relative, size,
 };
 use std::borrow::Cow;
-use std::sync::Arc;
 
 gpui::actions!(bviz_trace, [SelectAllTracks, ClearTimeSelection]);
 
@@ -169,10 +168,6 @@ const COUNTERS_COLLAPSED_HEIGHT: f32 = 14.0;
 /// unsteady hand.
 const COUNTERS_SNAP_SLOP: f32 = 16.0;
 
-/// Height of a panel's toolbar band, giving its chips and controls a line to sit
-/// on with room around them.
-const PANEL_TOOLBAR_HEIGHT: f32 = 28.0;
-
 /// Width of the open tracks visibility menu and the tallest its track list grows
 /// before it scrolls.
 const TRACKS_MENU_WIDTH: f32 = 280.0;
@@ -224,7 +219,7 @@ const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
-pub(crate) type Source = bviz_ui_components::Source<Arc<Profile>>;
+pub(crate) type Source = bviz_ui_components::Source<model::LoadedProfile>;
 
 /// The trace document's timeline: the flame chart with its gutter, ruler and
 /// counters strip, the divider that resizes the strip, and the tracks menu over
@@ -351,15 +346,12 @@ impl TracePanel {
     }
 
     /// [`Regions`] for the current viewport (captured by the timeline), strip and
-    /// gutter sizes, the loaded profile's counter count, and the flame lanes'
+    /// gutter sizes, the loaded profile's counter track count, and the flame lanes'
     /// total height.
     fn region_inputs(&self, cx: &App) -> RegionInputs {
         let model = self.model.read(cx);
         RegionInputs {
-            n_counters: match model.source() {
-                Source::Loaded(p) => p.counters().len(),
-                _ => 0,
-            },
+            n_counters: model.profile().map_or(0, |p| counters::track_count(p)),
             counters: self.counters,
             gutter_width: self.gutter_width,
             flame_total: model.lane_layout().map(|l| l.total_height).unwrap_or(0.0),
@@ -453,9 +445,7 @@ pub(crate) fn time_window_chip(
 ) -> Option<Div> {
     let summary = {
         let m = model.read(cx);
-        let Source::Loaded(profile) = m.source() else {
-            return None;
-        };
+        let profile = m.profile()?;
         let span = profile.span();
         let shown = m.aggregates();
         time_window_summary(
@@ -470,7 +460,6 @@ pub(crate) fn time_window_chip(
             .flex_row()
             .items_center()
             .gap_1()
-            .my_1()
             .pl_2()
             .flex_shrink_0()
             .rounded_md()
@@ -493,29 +482,14 @@ pub(crate) fn time_window_chip(
     )
 }
 
-/// The bar a panel of the trace document carries its chips and controls on.
-pub(crate) fn panel_toolbar(palette: Palette) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .flex_shrink_0()
-        .gap_4()
-        .px_2()
-        .h(px(PANEL_TOOLBAR_HEIGHT))
-        .overflow_hidden()
-        .bg(palette.header_band)
-        .border_b_1()
-        .border_color(palette.divider)
-}
-
 /// What the window chrome says about the loaded document, the same from whichever
 /// of its panels is on show.
 pub(crate) fn profile_status(model: &Entity<TraceModel>, cx: &App) -> SharedString {
     model
         .read(cx)
         .source()
-        .status("No profile", |p| {
+        .status("No profile", |loaded| {
+            let p = loaded.profile();
             let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
             format!(
                 "{} threads · {} slices · {:.3}s",
@@ -1448,13 +1422,7 @@ fn paint_counter_labels(
     for gl in regions.counter_lanes(counter_scroll) {
         let lane_bottom = gl.top + METRICS.header_height + gl.chart_h;
         let ty = lane_bottom - GUTTER_LABEL_SIZE - SLICE_TEXT_PAD;
-        paint_gutter_label(
-            g,
-            profile.str(profile.counters()[gl.lane].name),
-            ty,
-            window,
-            cx,
-        );
+        paint_gutter_label(g, counters::track_name(profile, gl.lane), ty, window, cx);
     }
 }
 

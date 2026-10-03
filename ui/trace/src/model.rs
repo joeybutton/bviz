@@ -7,7 +7,7 @@ use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_invocation::Session;
 use bviz_trace_layout::{
-    FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, lay_out_lanes,
+    FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
@@ -30,6 +30,72 @@ pub(crate) struct AggregateBuildStarted;
 /// order over its rows — and a panel must drop it exactly once, on the swap,
 /// rather than on every notification the model sends.
 pub(crate) struct SourceReplaced;
+
+/// The loaded profile's working lanes are derived. Carried as an event because
+/// only the timeline's cached scene draws them, which a notification replays
+/// rather than rebuilds.
+pub(crate) struct WorkingLanesDerived;
+
+/// A loaded profile with what is derived from it once for every reader of it.
+pub(crate) struct LoadedProfile {
+    flamer: Arc<TrackFlamer>,
+    working_lanes: DerivedLanes,
+}
+
+/// A profile's [`WorkingLanes`], which are derived off the UI thread.
+enum DerivedLanes {
+    Deriving {
+        /// Held with the profile it reads, so that it ends once another is
+        /// loaded.
+        _derivation: Task<()>,
+    },
+    Derived(WorkingLanes),
+}
+
+impl LoadedProfile {
+    /// `profile` as loaded, its working lanes on their way to the model of
+    /// `cx`.
+    fn new(profile: Profile, cx: &mut Context<TraceModel>) -> LoadedProfile {
+        let flamer = Arc::new(TrackFlamer::new(&Arc::new(profile)));
+        let derived_from = flamer.clone();
+        let deriving = cx.spawn(async move |model, cx| {
+            let derive = async move {
+                let lanes = derived_from.working_lanes();
+                (derived_from, lanes)
+            };
+            let (derived_from, lanes) = cx.background_executor().spawn(derive).await;
+            model
+                .update(cx, |model, cx| {
+                    if model.adopt_working_lanes(&derived_from, lanes) {
+                        cx.emit(WorkingLanesDerived);
+                    }
+                })
+                .ok();
+        });
+        LoadedProfile::deriving(flamer, deriving)
+    }
+
+    fn deriving(flamer: Arc<TrackFlamer>, _derivation: Task<()>) -> LoadedProfile {
+        LoadedProfile {
+            flamer,
+            working_lanes: DerivedLanes::Deriving { _derivation },
+        }
+    }
+
+    pub(crate) fn profile(&self) -> &Arc<Profile> {
+        self.flamer.profile()
+    }
+
+    /// Takes `lanes` as its own if they were derived from its own `flamer`,
+    /// and says whether it did.
+    fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
+        let own = Arc::ptr_eq(&self.flamer, flamer);
+        if own {
+            self.working_lanes = DerivedLanes::Derived(lanes);
+        }
+        own
+    }
+}
 
 /// The shared trace document and the selection and visibility state derived from
 /// it, plus the layouts and aggregates cached from those. Shared as an entity by
@@ -95,10 +161,6 @@ pub(crate) struct TraceModel {
     /// value stays shown while a rebuild runs, so a selection change doesn't
     /// blank the view.
     aggregates: Option<Arc<ScopeAggregate>>,
-    /// The loaded profile's whole-profile flame name scan, reused across track
-    /// selections; `None` until the first aggregate build scans it. Valid for any
-    /// selection, so it is dropped only when a new profile loads.
-    flame_scan: Option<Arc<TrackFlamer>>,
     /// Background-build bookkeeping for `aggregates`, keyed on
     /// `aggregate_key`.
     agg: Rebuild<u64>,
@@ -108,6 +170,7 @@ pub(crate) struct TraceModel {
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
+impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded once the read finishes
@@ -124,7 +187,7 @@ impl TraceModel {
                 move || profile.join(),
                 |model, result, cx| {
                     let source = match result {
-                        Ok(profile) => Source::Loaded(Arc::new(profile)),
+                        Ok(profile) => Source::Loaded(LoadedProfile::new(profile, cx)),
                         Err(err) => Source::Failed(err),
                     };
                     model.set_source(source, cx);
@@ -151,7 +214,6 @@ impl TraceModel {
             visible_lanes: RefCell::new(None),
             group_chrome: RefCell::new(None),
             aggregates: None,
-            flame_scan: None,
             agg: Rebuild::new(),
             _load: load,
         }
@@ -163,6 +225,31 @@ impl TraceModel {
 
     pub(crate) fn session(&self) -> Option<&Entity<Session>> {
         self.session.as_ref()
+    }
+
+    pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(loaded.profile()),
+            _ => None,
+        }
+    }
+
+    /// The loaded profile's working lanes, once derived.
+    pub(crate) fn working_lanes(&self) -> Option<&WorkingLanes> {
+        match &self.source {
+            Source::Loaded(LoadedProfile {
+                working_lanes: DerivedLanes::Derived(lanes),
+                ..
+            }) => Some(lanes),
+            _ => None,
+        }
+    }
+
+    fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
+        match &mut self.source {
+            Source::Loaded(loaded) => loaded.adopt_working_lanes(flamer, lanes),
+            _ => false,
+        }
     }
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
@@ -213,8 +300,7 @@ impl TraceModel {
         self.time_selection.clear();
         self.source = source;
         cx.emit(SourceReplaced);
-        if let Source::Loaded(profile) = &self.source {
-            let profile = profile.clone();
+        if let Some(profile) = self.profile().cloned() {
             self.init_tracks(&profile, cx);
         }
     }
@@ -242,9 +328,7 @@ impl TraceModel {
     /// The full lane layout for the loaded profile, built on first use and reused
     /// across paints and mouse handlers. `None` until a profile is loaded.
     fn full_lane_layout(&self) -> Option<Rc<LaneLayout>> {
-        let Source::Loaded(profile) = &self.source else {
-            return None;
-        };
+        let profile = self.profile()?;
         if self.lanes.borrow().is_none() {
             let t = std::time::Instant::now();
             let layout = lay_out_lanes(profile, &METRICS);
@@ -280,7 +364,7 @@ impl TraceModel {
         let Some(full) = self.full_lane_layout() else {
             return;
         };
-        let Source::Loaded(profile) = &self.source else {
+        let Some(profile) = self.profile() else {
             return;
         };
         let (layout, chrome) = build_grouped_layout(
@@ -362,7 +446,7 @@ impl TraceModel {
     pub(crate) fn set_group_visible(&mut self, group: usize, visible: bool) {
         let class = GROUP_ORDER[group];
         let targets: Vec<usize> = {
-            let Source::Loaded(profile) = &self.source else {
+            let Some(profile) = self.profile() else {
                 return;
             };
             profile
@@ -527,10 +611,10 @@ impl TraceModel {
     /// panel holding state derived from the aggregate each hear only their own
     /// step, exactly once per build.
     pub(crate) fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
-        let profile = match &self.source {
-            Source::Loaded(p) => p.clone(),
-            _ => return,
+        let Source::Loaded(loaded) = &self.source else {
+            return;
         };
+        let scan = loaded.flamer.clone();
         let key = self.aggregate_key;
         if self.agg.is_ready(key) {
             // The shown value is already current; cancel a build for a key the
@@ -546,13 +630,11 @@ impl TraceModel {
         let selected = self.selected_tracks.clone();
         let time_window = self.time_selection.clone();
         let mode = self.flame_mode;
-        let cached_scan = self.flame_scan.clone();
         let task = cx.spawn(async move |model, cx| {
-            let (scan, aggregate) = cx
+            let aggregate = cx
                 .background_executor()
                 .spawn(async move {
                     let t = std::time::Instant::now();
-                    let scan = cached_scan.unwrap_or_else(|| Arc::new(TrackFlamer::new(&profile)));
                     let aggregate =
                         ScopeAggregate::build_for_tracks_reusing(&scan, mode, &time_window, |i| {
                             selected.get(i).copied().unwrap_or(false)
@@ -563,7 +645,7 @@ impl TraceModel {
                             t.elapsed().as_secs_f64()
                         );
                     }
-                    (scan, aggregate)
+                    aggregate
                 })
                 .await;
             model
@@ -572,7 +654,6 @@ impl TraceModel {
                     if !m.agg.accept(generation, key) {
                         return;
                     }
-                    m.flame_scan = Some(scan);
                     m.aggregates = Some(Arc::new(aggregate));
                     cx.notify();
                 })
@@ -586,7 +667,6 @@ impl TraceModel {
     /// change, a replaced document leaves the old graph nothing to describe.
     fn invalidate_aggregates(&mut self) {
         self.aggregates = None;
-        self.flame_scan = None;
         self.agg.invalidate();
     }
 
@@ -603,15 +683,45 @@ impl TraceModel {
 
 #[cfg(test)]
 mod tests {
-    use super::TraceModel;
+    use super::{LoadedProfile, TraceModel};
+    use crate::Source;
+    use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode};
+    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer};
+    use bviz_trace_profile::Profile;
     use gpui::Task;
+    use std::sync::Arc;
 
     /// A document whose read has not finished, for exercising the state a panel
     /// drives it through.
     fn model() -> TraceModel {
         TraceModel::new(None, Task::ready(()))
+    }
+
+    /// The flamer of a profile of one lane working over `[0, 100)`.
+    fn flamer() -> Arc<TrackFlamer> {
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}},
+            {"cat":"general information","name":"a","ph":"X","ts":0,"dur":100,"tid":1}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        Arc::new(TrackFlamer::new(&Arc::new(profile)))
+    }
+
+    #[test]
+    fn working_lanes_are_adopted_only_by_the_loaded_profile_they_were_derived_from() {
+        let mut model = model();
+        let replaced = flamer();
+        assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
+
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), Task::ready(())));
+        assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
+        assert!(model.working_lanes().is_none());
+
+        assert!(model.adopt_working_lanes(&loaded, loaded.working_lanes()));
+        let adopted = model.working_lanes().expect("the loaded profile's lanes");
+        assert_eq!(*adopted, loaded.working_lanes());
     }
 
     #[test]
@@ -621,6 +731,39 @@ mod tests {
         let standing = model.flame_mode();
         assert!(!model.adopt_flame_mode(standing));
         assert_eq!(model.aggregate_key, key);
+    }
+
+    /// The weights whose toolbar buttons read as chosen while `mode` stands.
+    fn chosen_weights(mode: FlameMode) -> Vec<FlameWeight> {
+        WEIGHT_CHOICES
+            .into_iter()
+            .map(|(_, _, weight)| weight)
+            .filter(|&weight| weight_choice(mode, weight).0)
+            .collect()
+    }
+
+    #[test]
+    fn a_weight_chosen_on_the_toolbar_keys_a_rebuild_and_reads_as_chosen() {
+        let mut model = model();
+        let key = model.aggregate_key;
+        let standing = model.flame_mode();
+        assert_eq!(chosen_weights(standing), [FlameWeight::Duration]);
+
+        let (_, asked) = weight_choice(standing, FlameWeight::WallShare);
+        assert_eq!(
+            asked,
+            FlameMode {
+                weight: FlameWeight::WallShare,
+                ..standing
+            }
+        );
+        assert!(model.adopt_flame_mode(asked));
+        assert_eq!(model.aggregate_key, key + 1);
+        assert_eq!(chosen_weights(model.flame_mode()), [FlameWeight::WallShare]);
+
+        let (_, again) = weight_choice(model.flame_mode(), FlameWeight::WallShare);
+        assert!(!model.adopt_flame_mode(again));
+        assert_eq!(model.aggregate_key, key + 1);
     }
 
     #[test]
@@ -633,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn each_half_of_the_flame_mode_keys_a_rebuild_of_its_own() {
+    fn each_part_of_the_flame_mode_keys_a_rebuild_of_its_own() {
         let mut model = model();
         let key = model.aggregate_key;
 
@@ -654,5 +797,13 @@ mod tests {
         assert!(model.adopt_flame_mode(renamed));
         assert_eq!(model.flame_mode(), renamed);
         assert_eq!(model.aggregate_key, key + 2);
+
+        let reweighed = FlameMode {
+            weight: FlameWeight::WallShare,
+            ..renamed
+        };
+        assert!(model.adopt_flame_mode(reweighed));
+        assert_eq!(model.flame_mode(), reweighed);
+        assert_eq!(model.aggregate_key, key + 3);
     }
 }
