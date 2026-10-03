@@ -108,7 +108,7 @@ impl Statuses {
         let outcomes = nodes.outcomes;
         let mut reported = Reported {
             nodes,
-            own: vec![None; nodes.configured.len()],
+            own: vec![None; nodes.landings.ids()],
         };
         for (primary_output, _) in outcomes.failed_actions() {
             if let Some(action) = nodes.of_action(primary_output) {
@@ -170,48 +170,33 @@ impl Landing {
     }
 }
 
-/// The nodes of a graph a build's outcomes name. Each is found once, however
-/// many readers ask for it.
-pub(crate) struct Nodes<'a> {
+/// Where reports naming configured targets land in one graph. Each target is
+/// found once, however many readers ask for it.
+pub(crate) struct Landings<'a> {
     resolver: Resolver<'a>,
-    outcomes: &'a Outcomes,
     /// By node id, whether the node holds a configured target.
     configured: Vec<bool>,
     targets: RefCell<FxHashMap<ConfiguredTarget<&'a str>, Landing>>,
-    /// By primary output, the node the failure of the action writing it
-    /// lands on.
-    actions: RefCell<FxHashMap<&'a str, Option<Id>>>,
 }
 
-impl<'a> Nodes<'a> {
-    /// The nodes `outcomes` names among those of `graph`, which `names`
-    /// names.
-    pub(crate) fn new(graph: &Graph, names: &'a Names, outcomes: &'a Outcomes) -> Self {
+impl<'a> Landings<'a> {
+    /// The landings in `graph`, which `names` names, sized for reports naming
+    /// `targets` configured targets.
+    pub(crate) fn new(graph: &Graph, names: &'a Names, targets: usize) -> Self {
         let mut configured = vec![false; names.len()];
         for node in &graph.nodes {
             if let (Kind::ConfiguredTarget, Some(target)) = (node.kind, node.parent) {
                 configured[target.0 as usize] = true;
             }
         }
-        let targets = outcomes.builds().count() + outcomes.tests().count();
-        let actions = outcomes.failed_actions().count();
         Self {
             resolver: Resolver::new(names),
-            outcomes,
             configured,
             targets: RefCell::new(FxHashMap::with_capacity_and_hasher(
                 targets,
                 Default::default(),
             )),
-            actions: RefCell::new(FxHashMap::with_capacity_and_hasher(
-                actions,
-                Default::default(),
-            )),
         }
-    }
-
-    pub(crate) fn outcomes(&self) -> &'a Outcomes {
-        self.outcomes
     }
 
     pub(crate) fn landing(&self, target: ConfiguredTarget<&'a str>) -> Landing {
@@ -238,20 +223,74 @@ impl<'a> Nodes<'a> {
         landing
     }
 
+    /// The node a report on the action writing `primary_output` lands on: the
+    /// action, or where the graph holds no node for it, its `owner`.
+    pub(crate) fn action(
+        &self,
+        primary_output: &str,
+        owner: Option<ConfiguredTarget<&'a str>>,
+    ) -> Option<Id> {
+        self.resolver
+            .action(primary_output)
+            .or_else(|| self.landing(owner?).node())
+    }
+
+    /// The number of node ids of the graph, past which an id is none of its
+    /// nodes'.
+    pub(crate) fn ids(&self) -> usize {
+        self.configured.len()
+    }
+}
+
+/// The nodes of a graph a build's outcomes name. Each is found once, however
+/// many readers ask for it.
+pub(crate) struct Nodes<'a> {
+    landings: Landings<'a>,
+    outcomes: &'a Outcomes,
+    /// By primary output, the node the failure of the action writing it
+    /// lands on.
+    actions: RefCell<FxHashMap<&'a str, Option<Id>>>,
+}
+
+impl<'a> Nodes<'a> {
+    /// The nodes `outcomes` names among those of `graph`, which `names`
+    /// names.
+    pub(crate) fn new(graph: &Graph, names: &'a Names, outcomes: &'a Outcomes) -> Self {
+        let targets = outcomes.builds().count() + outcomes.tests().count();
+        let actions = outcomes.failed_actions().count();
+        Self {
+            landings: Landings::new(graph, names, targets),
+            outcomes,
+            actions: RefCell::new(FxHashMap::with_capacity_and_hasher(
+                actions,
+                Default::default(),
+            )),
+        }
+    }
+
+    pub(crate) fn outcomes(&self) -> &'a Outcomes {
+        self.outcomes
+    }
+
+    pub(crate) fn landing(&self, target: ConfiguredTarget<&'a str>) -> Landing {
+        self.landings.landing(target)
+    }
+
     pub(crate) fn of_target(&self, target: ConfiguredTarget<&'a str>) -> Option<Id> {
         self.landing(target).node()
     }
 
-    /// The node the failure of the action writing `primary_output` lands on:
-    /// the action, or the target owning it where the graph holds no actions.
+    /// The node the failure of the action writing `primary_output` lands on.
     pub(crate) fn of_action(&self, primary_output: &'a str) -> Option<Id> {
         if let Some(node) = self.actions.borrow().get(primary_output) {
             return *node;
         }
-        let node = self.resolver.action(primary_output).or_else(|| {
-            let failed = self.outcomes.failed_action(primary_output)?;
-            self.of_target(failed.owner.as_ref()?.borrowed())
-        });
+        let owner = self
+            .outcomes
+            .failed_action(primary_output)
+            .and_then(|failed| failed.owner.as_ref())
+            .map(ConfiguredTarget::borrowed);
+        let node = self.landings.action(primary_output, owner);
         self.actions.borrow_mut().insert(primary_output, node);
         node
     }
