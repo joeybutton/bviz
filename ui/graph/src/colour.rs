@@ -51,14 +51,14 @@ pub(crate) const PRIMARY_OUTPUT_FLAG: &str = "--experimental_profile_include_pri
 /// The profile flag naming each action's owning target.
 const TARGET_LABEL_FLAG: &str = "--experimental_profile_include_target_label";
 
-/// What the picker says of the times it colours by: how much of the profile
-/// the graph places, or why it places none.
-fn note(times: Result<&NodeTimes, Untimed>) -> SharedString {
+/// What a control reading the graph's action times says of them: how much of
+/// the profile the graph places, or why it places none, and where no profile
+/// is open, that one opened with the graph lets it `read` them.
+pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedString {
     match times {
         Ok(times) => times.coverage().line(),
         Err(Untimed::NoProfile) => {
-            "Open the build's profile with the graph to colour its boxes by their actions"
-                .to_owned()
+            format!("Open the build's profile with the graph to {read}")
         }
         Err(Untimed::NoActions) => "The build's profile records no actions".to_owned(),
         Err(Untimed::Unnamed) => format!(
@@ -122,7 +122,7 @@ pub(crate) fn control(
         .id("colour-picker")
         .flex_none()
         .tooltip(TextTooltip::builder(
-            note(times),
+            note(times, "colour its boxes by their actions"),
             TooltipColors::from_colors(colors),
         ))
         .child(view.colour_picker.clone())
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn a_profile_naming_no_action_says_which_flags_name_them() {
-        let said = note(Err(Untimed::Unnamed));
+        let said = note(Err(Untimed::Unnamed), "read them");
         assert!(said.contains(PRIMARY_OUTPUT_FLAG), "{said}");
         assert!(said.contains(TARGET_LABEL_FLAG), "{said}");
     }

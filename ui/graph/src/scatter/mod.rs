@@ -9,17 +9,20 @@ mod placed;
 mod plot;
 
 use crate::Palette;
+use crate::colour;
 use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
+use crate::timing::{NodeTimes, Untimed};
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
-use axis::{Axes, Axis};
+use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::Tri;
-use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
+use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
+use bviz_invocation::Revision;
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
     Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
@@ -36,7 +39,7 @@ use hue::{Colouring, Hue};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
 use pick::{Extents, PickList, PickRow};
 use placed::Placed;
-use plot::{MIN_RADIUS, Picked, Plotted, Spot, Zoom};
+use plot::{MIN_RADIUS, Mark, Picked, Plotted, Spot, Zoom};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -53,11 +56,32 @@ gpui::actions!(
     [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
 );
 
-/// What the plot places its points by.
-const AXES: Axes = Axes {
-    x: Axis::Closure,
-    y: Axis::BlastRadius,
-};
+/// What the picker offers to place points across the plot by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Across {
+    Closure,
+    ActionTime,
+}
+
+impl Across {
+    /// In the picker's order, which is the order they are declared in.
+    const ALL: [Across; 2] = [Across::Closure, Across::ActionTime];
+
+    fn axis(self) -> Axis {
+        match self {
+            Across::Closure => Axis::Closure,
+            Across::ActionTime => Axis::ActionTime,
+        }
+    }
+
+    /// Where the picker offers it.
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// What the plot places its points up the plot by.
+const UP: Axis = Axis::BlastRadius;
 
 /// What the panel reads while the graph is being measured.
 const MEASURING: &str = "Computing metrics…";
@@ -105,7 +129,10 @@ pub struct ScatterPanel {
 
 impl ScatterPanel {
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
-        let changed = cx.observe(&model, |_, _, cx| cx.notify());
+        let changed = cx.observe(&model, |view, _, cx| {
+            view.replot(cx);
+            cx.notify();
+        });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
             view.plotting = None;
@@ -176,6 +203,32 @@ impl ScatterPanel {
         cx.notify();
     }
 
+    /// Places the points across the plot by `across`.
+    fn choose_across(&mut self, across: Across, cx: &mut Context<Self>) {
+        let Some(choice) = &mut self.choice else {
+            return;
+        };
+        if choice.across == across {
+            return;
+        }
+        choice.across = across;
+        self.close_pick(cx);
+        self.replot(cx);
+        cx.notify();
+    }
+
+    /// Offers the choices reading action time only where the unit plotted is
+    /// `timed`, taking down a list of points drawn by one it falls back from.
+    fn offer_times(&mut self, timed: bool, cx: &mut Context<Self>) {
+        let Some(choice) = &mut self.choice else {
+            return;
+        };
+        if choice.offer_times(timed, cx) {
+            self.close_pick(cx);
+            cx.notify();
+        }
+    }
+
     /// Enables `input` where it is disabled and disables it where it is
     /// enabled, unless that leaves no input describing the unit plotted.
     fn toggle_input(&mut self, input: Input, cx: &mut Context<Self>) {
@@ -196,34 +249,51 @@ impl ScatterPanel {
     }
 
     /// Plots the measured points through the filter the graph's other views
-    /// draw through, where the plot drawn is not of the chosen scope or not
-    /// drawn through that filter. A hidden panel waits until it is shown, and a
-    /// plotting running replots once it lands. The filter is evaluated over
-    /// every node of the graph, so this runs off the UI thread, and the plot
-    /// drawn stays until the new one lands.
+    /// draw through, where the plot drawn is not of the chosen scope and axes,
+    /// not drawn through that filter, or not of the action times the graph
+    /// holds, once the choices reading action time are offered as the unit's
+    /// measure has any. A hidden panel waits until it is shown, and a plotting
+    /// running replots once it lands. The filter is evaluated over every node
+    /// of the graph, so this runs off the UI thread, and the plot drawn stays
+    /// until the new one lands.
     fn replot(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.plotting.is_some() {
             return;
         }
-        let Some((scope, reference)) = self.scopes() else {
+        let Some((_, reference)) = self.scopes() else {
             return;
         };
+        let model = self.model.read(cx);
+        let timed = model
+            .loaded()
+            .zip(model.metrics(reference))
+            .map(|(loaded, reference)| any_timed(loaded.times(), reference));
+        if let Some(timed) = timed {
+            self.offer_times(timed, cx);
+        }
+        let Some(((scope, reference), choice)) = self.scopes().zip(self.choice.as_ref()) else {
+            return;
+        };
+        let axes = choice.axes();
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
         };
+        let timed = loaded.timed();
         let (Some(metrics), Some(reference)) = (model.metrics(scope), model.metrics(reference))
         else {
             return;
         };
         let filter = model.filter().cloned().unwrap_or_default();
-        if self
-            .plot
-            .as_ref()
-            .is_some_and(|plot| plot.filter == filter && plot.scope == scope)
-        {
+        if self.plot.as_ref().is_some_and(|plot| {
+            plot.filter == filter
+                && plot.scope == scope
+                && plot.plotted.axes == axes
+                && plot.timed == timed
+        }) {
             return;
         }
+        let clocks = Clocks::of(loaded.times(), &reference.points);
         let (metrics, reference) = (Arc::clone(metrics), Arc::clone(reference));
         let shared = loaded.shared.clone();
         self.plotting = Some(load_in_background(
@@ -234,18 +304,22 @@ impl ScatterPanel {
                 let colouring = Colouring::of(scope.unit(), &reference, &shared.facets);
                 let hue = |point: &Metrics| colouring.hue(point, &shared.facets);
                 let verdict = |id| verdicts.get(id);
-                let plotted = Plotted::of(&metrics, &reference, AXES, plots, verdict, hue);
-                let points = metrics.points.iter().filter(|point| plots(point));
+                let time = |id| clocks.time(id);
+                let plotted = Plotted::of(&metrics, &reference, axes, time, plots, verdict, hue);
+                let points = metrics
+                    .points
+                    .iter()
+                    .filter(|point| plots(point) && axes.place(point, time(point.id)).is_some());
                 let legend = colouring.legend(points, &shared.facets);
                 (plotted, legend, filter)
             },
             move |view, (plotted, legend, filter), cx| {
                 view.plotting = None;
-                if view
-                    .plot
-                    .as_ref()
-                    .is_none_or(|plot| plot.scope.unit() != scope.unit())
-                {
+                if view.plot.as_ref().is_none_or(|plot| {
+                    plot.scope.unit() != scope.unit()
+                        || plot.plotted.axes != axes
+                        || (plot.timed != timed && axes.reads_time())
+                }) {
                     view.zoom = Zoom::WHOLE;
                 }
                 view.plot = Some(Plot {
@@ -254,6 +328,7 @@ impl ScatterPanel {
                     pointer: Pointer::Away,
                     filter,
                     scope,
+                    timed,
                 });
                 view.invalidate_canvas(cx);
                 view.replot(cx);
@@ -350,8 +425,8 @@ impl ScatterPanel {
         }
         let unit = plot.scope.unit();
         let hover = picked.and_then(|picked| {
-            let point = &plot.plotted.marks[picked.mark].target;
-            let lines = describe(point, unit, &plot.plotted, picked.others(), model.loaded()?);
+            let mark = &plot.plotted.marks[picked.mark];
+            let lines = describe(mark, unit, &plot.plotted, picked.others(), model.loaded()?);
             Some(Hover {
                 mark: picked.mark,
                 others: picked.others(),
@@ -467,10 +542,10 @@ impl ScatterPanel {
                     package: package.to_owned().into(),
                     name: name.to_owned().into(),
                     hint: hint.map(SharedString::from),
-                    measures: plot.plotted.axes.values(point).into(),
+                    measures: plot.plotted.axes.values(point, drawn.time).into(),
                     x: drawn.x,
                     y: drawn.y,
-                    tooltip: describe(point, unit, &plot.plotted, 0, loaded),
+                    tooltip: describe(drawn, unit, &plot.plotted, 0, loaded),
                 }
             })
             .collect();
@@ -559,13 +634,23 @@ struct Choice {
     units: Vec<Unit>,
     picker: Entity<Dropdown>,
     _picked: Subscription,
+    across: Across,
+    /// Whether any point of the unit plotted has an action time, which the
+    /// choices reading it are offered by.
+    timed: bool,
+    across_picker: Entity<Dropdown>,
+    _across_picked: Subscription,
 }
 
 impl Choice {
     /// The finest unit the graph `model` has read is measured in, over every
     /// input describing it; absent until the graph is read.
     fn of(model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) -> Option<Self> {
-        let inputs = model.read(cx).loaded()?.shared.inputs;
+        let loaded = model.read(cx).loaded()?;
+        let inputs = loaded.shared.inputs;
+        // Until the unit is measured, whether any of its points is timed is
+        // taken from whether any node of the graph is.
+        let timed = loaded.times().is_ok();
         let mut scopes = Unit::ALL
             .into_iter()
             .filter_map(|unit| Scope::new(unit, inputs));
@@ -587,14 +672,55 @@ impl Choice {
                 view.choose_unit(unit, cx);
             }
         });
-        Some(Self {
+        let names = Across::ALL.map(|across| across.axis().name());
+        let across_picker = cx.new(|cx| Dropdown::new("scatter-across", names, 0, cx));
+        let across_picked = cx.subscribe(&across_picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            if let Some(&across) = Across::ALL.get(*index) {
+                view.choose_across(across, cx);
+            }
+        });
+        let mut choice = Self {
             scope,
             others,
             loaded: inputs,
             units,
             picker,
             _picked: picked,
-        })
+            across: Across::ALL[0],
+            across_picker,
+            _across_picked: across_picked,
+            timed,
+        };
+        choice.offer_times(timed, cx);
+        Some(choice)
+    }
+
+    fn axes(&self) -> Axes {
+        Axes {
+            x: self.across.axis(),
+            y: UP,
+        }
+    }
+
+    /// Offers the choices reading action time only where the unit plotted is
+    /// `timed`, falling back from any of them chosen where it is not, and
+    /// shows what is chosen as chosen. Whether a choice fell back.
+    fn offer_times(&mut self, timed: bool, cx: &mut Context<ScatterPanel>) -> bool {
+        self.timed = timed;
+        let across_falls = !timed && self.across == Across::ActionTime;
+        if across_falls {
+            self.across = Across::Closure;
+        }
+        let across = self.across;
+        self.across_picker.update(cx, |picker, cx| {
+            for offered in Across::ALL {
+                let available = timed || !offered.axis().reads_time();
+                picker.set_available(offered.index(), available, cx);
+            }
+            picker.set_selected(across.index(), cx);
+        });
+        across_falls
     }
 
     /// The scope's unit over every loaded input describing it, whose measure
@@ -658,6 +784,8 @@ struct Plot {
     filter: Filter,
     /// What `plotted` measures.
     scope: Scope,
+    /// Which of its session's timings `plotted` was drawn with.
+    timed: Revision,
 }
 
 /// A press over the plot, which is a click until it is dragged past
@@ -716,16 +844,17 @@ fn unit_names(unit: Unit) -> KindNames {
     KindNames { one, many }
 }
 
-/// What the tooltip over `point`, a point of `unit` drawn in `plotted`, reads,
+/// What the tooltip over `mark`, a point of `unit` drawn in `plotted`, reads,
 /// where a pick naming it covers `others` points besides: what the point is,
 /// then its measures.
 fn describe(
-    point: &Metrics,
+    mark: &Mark,
     unit: Unit,
     plotted: &Plotted,
     others: usize,
     loaded: &Loaded,
 ) -> Vec<String> {
+    let (point, time) = (&mark.target, mark.time);
     let shared = &loaded.shared;
     let facets = &shared.facets;
     let label = point_label(point.id, loaded);
@@ -757,10 +886,12 @@ fn describe(
             lines.extend([label, format!("{} in {repo}", kind_names(point.kind).one)]);
         }
     }
-    lines.extend([
-        plotted.axes.readings(point),
-        format!("fan-in {} · fan-out {}", point.fan_in, point.fan_out),
-    ]);
+    lines.push(plotted.axes.readings(point, time));
+    lines.extend(plotted.axes.unplaced(point, time));
+    lines.push(format!(
+        "fan-in {} · fan-out {}",
+        point.fan_in, point.fan_out
+    ));
     if plotted.sizing == Sizing::Actions {
         let names = unit_names(Unit::Action);
         let actions = match point.actions {
@@ -848,7 +979,7 @@ fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
 }
 
 /// The most lines a tooltip reads.
-const TOOLTIP_LINES: usize = 8;
+const TOOLTIP_LINES: usize = 9;
 
 const MAIN_REPO: &str = "the main repository";
 const UNKNOWN_REPO: &str = "an unnamed repository";
@@ -930,11 +1061,13 @@ impl Render for ScatterPanel {
             return root.child(placeholder);
         }
         let root = root.children(self.choice.as_ref().map(|choice| {
-            let measuring = self
-                .plot
-                .as_ref()
-                .is_some_and(|plot| plot.scope != choice.scope);
-            strip(choice, measuring, &palette, cx)
+            let measuring = self.plot.as_ref().is_some_and(|plot| {
+                plot.scope != choice.scope || plot.plotted.axes != choice.axes()
+            });
+            let times = model
+                .loaded()
+                .map_or(Err(Untimed::NoProfile), Loaded::times);
+            strip(choice, times, measuring, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = self.choice.as_ref().zip(capabilities);
@@ -1397,6 +1530,7 @@ const ZOOMED: &str = "double-click empty space or press 0 to show all";
 /// new choice is measured over the plot drawn for the last.
 fn strip(
     choice: &Choice,
+    times: Result<&NodeTimes, Untimed>,
     measuring: bool,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
@@ -1411,6 +1545,15 @@ fn strip(
             .child(name)
     };
     let unit = group("points").child(choice.picker.clone());
+    let tip = TooltipColors::from_colors(&palette.colors);
+    let read = "place points by their action time";
+    let note = times_note(times, choice.timed, choice.scope.unit(), read);
+    let across = group("across").child(
+        div()
+            .id("scatter-across-why")
+            .tooltip(TextTooltip::builder(note, tip))
+            .child(choice.across_picker.clone()),
+    );
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
@@ -1419,6 +1562,7 @@ fn strip(
     let inputs = group("inputs").children(toggles);
     Toolbar::new()
         .child(unit)
+        .child(across)
         .child(inputs)
         .when(measuring, |bar| {
             bar.trailing(
@@ -1503,6 +1647,53 @@ fn input_toggle(
         })
 }
 
+/// What the legend says of the points of `plot` left unplotted, where any are.
+fn unplaced(plot: &Plot) -> Option<String> {
+    let unplaced = plot.plotted.unplaced;
+    if unplaced == 0 {
+        return None;
+    }
+    let names = unit_names(plot.scope.unit());
+    let many = match unplaced {
+        1 => names.one,
+        _ => names.many,
+    };
+    let axes = plot.plotted.axes;
+    let lacked: Vec<&str> = [axes.x, axes.y]
+        .into_iter()
+        .filter(|axis| axis.reads_time())
+        .map(Axis::name)
+        .collect();
+    let lacked = lacked.join(" or ");
+    Some(format!("{unplaced} {many} without {lacked} left out"))
+}
+
+/// Whether `times` places action time on any point `reference` measures.
+fn any_timed(times: Result<&NodeTimes, Untimed>, reference: &Measurement) -> bool {
+    times.is_ok_and(|times| {
+        let mut points = reference.points.iter();
+        points.any(|point| times.get(point.id).is_some())
+    })
+}
+
+/// What a picker offering to `read` action time says of it: as the graph's
+/// colour picker does, but where the graph places time on none of the points
+/// of `unit`, that it places none there.
+fn times_note(
+    times: Result<&NodeTimes, Untimed>,
+    timed: bool,
+    unit: Unit,
+    read: &str,
+) -> SharedString {
+    match times {
+        Ok(times) if !timed => {
+            let many = unit_names(unit).many;
+            format!("{}, none of them on {many}", times.coverage().line()).into()
+        }
+        _ => colour::note(times, read),
+    }
+}
+
 /// How the legend names what a mark's size stands for.
 fn sizing_name(sizing: Sizing) -> &'static str {
     match sizing {
@@ -1573,6 +1764,7 @@ fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
                 .gap_x_4()
                 .text_color(palette.colors.text_muted)
                 .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
+                .children(unplaced(plot))
                 .child(sizing_name(plot.plotted.sizing)),
         )
 }
