@@ -6,11 +6,12 @@ use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::status::{Status, Statuses};
-use crate::timing::NodeTimes;
+use crate::timing::{NodeTimes, Ran};
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
+use bviz_invocation::Runner;
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
@@ -186,6 +187,27 @@ const RAMP_MOST: f32 = 0.45;
 /// How far an open container's fill is tinted toward the reading it wears
 /// closed.
 const OPEN_TINT: f32 = 0.5;
+
+/// How far a runner's fill is carried toward the canvas in perceptual
+/// lightness, past the blend toward it, which parts the warm slots that
+/// otherwise crowd one another.
+const RUNNER_DIM: f32 = 0.08;
+
+const REMOTE_EXECUTION_BLEND: f32 = 0.575;
+const WORKER_BLEND: f32 = 0.425;
+const SANDBOXED_BLEND: f32 = 0.65;
+const LOCAL_BLEND: f32 = 0.45;
+const REMOTE_CACHE_HIT_BLEND: f32 = 0.375;
+const DISK_CACHE_HIT_BLEND: f32 = 0.575;
+const NO_SPAWN_RECORDED_BLEND: f32 = 0.525;
+
+/// How far the neutral slot is carried toward the canvas to fill a box whose
+/// actions ran on a mix of runners.
+const MIXED_BLEND: f32 = 0.4;
+
+/// How far the mixed fill is then carried away from the canvas in perceptual
+/// lightness.
+const MIXED_LIFT: f32 = 0.04;
 
 /// How far a group's fill is tinted toward the accent of the files it holds: far
 /// enough to be told from a plain container fill, and not so far that the group
@@ -532,6 +554,37 @@ impl Palette {
         }
     }
 
+    /// Fill for a box whose actions ran as `ran` says: the runner's slot
+    /// carried toward the canvas, and for a mix of runners the neutral slot
+    /// carried toward the canvas and then away from it, so the mix reads as a
+    /// fill of its own beside an untimed box and beside every runner.
+    fn ran_fill(&self, ran: Ran) -> Rgba {
+        let Ran::On(runner) = ran else {
+            let mixed = bviz_ui_theme::mix(self.data.neutral, self.background, MIXED_BLEND);
+            return bviz_ui_theme::lighten(mixed, MIXED_LIFT.copysign(self.mark_lift()));
+        };
+        let (slot, blend) = self.runner_accent(runner);
+        let carried = bviz_ui_theme::mix(slot, self.background, blend);
+        bviz_ui_theme::lighten(carried, -RUNNER_DIM.copysign(self.mark_lift()))
+    }
+
+    /// The slot each runner is coloured from, every runner its own, and how
+    /// far that slot is carried toward the canvas to fill a box. The slots
+    /// crowd one another unevenly around the wheel, so each is carried as far
+    /// as sets it apart from its neighbours within the bounds every fill is
+    /// held to.
+    fn runner_accent(&self, runner: Runner) -> (Hsla, f32) {
+        match runner {
+            Runner::RemoteExecution => (self.data.blue, REMOTE_EXECUTION_BLEND),
+            Runner::Worker => (self.data.purple, WORKER_BLEND),
+            Runner::Sandboxed => (self.data.orange, SANDBOXED_BLEND),
+            Runner::Local => (self.data.red, LOCAL_BLEND),
+            Runner::RemoteCacheHit => (self.data.cyan, REMOTE_CACHE_HIT_BLEND),
+            Runner::DiskCacheHit => (self.data.green, DISK_CACHE_HIT_BLEND),
+            Runner::NoSpawnRecorded => (self.data.yellow, NO_SPAWN_RECORDED_BLEND),
+        }
+    }
+
     /// Fill for a box no time lands on: a container keeps the fill it wears
     /// by kind, and a leaf takes the neutral slot.
     fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
@@ -619,6 +672,7 @@ impl Palette {
 enum Fills<'a> {
     Kind,
     Time(&'a NodeTimes),
+    Runner(&'a NodeTimes),
 }
 
 impl<'a> Fills<'a> {
@@ -627,6 +681,7 @@ impl<'a> Fills<'a> {
     fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
         match (colouring, times) {
             (Colouring::Time, Some(times)) => Fills::Time(times),
+            (Colouring::Runner, Some(times)) => Fills::Runner(times),
             _ => Fills::Kind,
         }
     }
@@ -637,6 +692,13 @@ impl<'a> Fills<'a> {
             Fills::Time(times) => match times.get(b.id).zip(times.extent(b.kind)) {
                 Some((timed, extent)) => {
                     let fill = palette.time_fill(extent.place(timed.held.total().wall));
+                    palette.held_fill(b.kind, b.compound, fill)
+                }
+                None => palette.untimed_fill(b.kind, b.compound),
+            },
+            Fills::Runner(times) => match times.get(b.id) {
+                Some(timed) => {
+                    let fill = palette.ran_fill(Ran::of(&timed.held));
                     palette.held_fill(b.kind, b.compound, fill)
                 }
                 None => palette.untimed_fill(b.kind, b.compound),
@@ -2569,9 +2631,23 @@ mod colors {
             .collect()
     }
 
-    /// Every fill a closed box coloured by time wears.
+    /// Every fill a box coloured by runner wears.
+    fn ran_fills(p: &Palette) -> Vec<Rgba> {
+        Runner::ALL
+            .map(Ran::On)
+            .into_iter()
+            .chain([Ran::Mixed])
+            .map(|ran| p.ran_fill(ran))
+            .collect()
+    }
+
+    /// Every fill a closed box coloured by time or by runner wears.
     fn readings(p: &Palette) -> Vec<Rgba> {
-        RAMP_PLACES.map(|place| p.time_fill(place)).into()
+        RAMP_PLACES
+            .map(|place| p.time_fill(place))
+            .into_iter()
+            .chain(ran_fills(p))
+            .collect()
     }
 
     /// Every ground a connector is drawn over, each once. A marked connector runs
@@ -2664,6 +2740,30 @@ mod colors {
                         let held = contrast_ratio(label_on(open), ground);
                         assert!(held >= MIN_TEXT_CONTRAST, "{theme} {kind:?}: {held}");
                     }
+                }
+            }
+        }
+    }
+
+    /// A box's runner is read off its fill, so no two runners, nor a mix of
+    /// them, may be taken for each other or for a box no action lands on.
+    #[test]
+    fn every_runner_is_told_from_the_others_and_from_an_untimed_box() {
+        for (theme, p) in palettes() {
+            let fills = ran_fills(&p);
+            for (i, fill) in fills.iter().enumerate() {
+                for untimed in [
+                    p.untimed_fill(Kind::Action, false),
+                    p.untimed_fill(Kind::Target, true),
+                    p.untimed_fill(Kind::Package, true),
+                    p.background,
+                ] {
+                    let apart = distance(*fill, untimed);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}: {apart}");
+                }
+                for (j, other) in fills.iter().enumerate().skip(i + 1) {
+                    let apart = distance(*fill, *other);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}/{j}: {apart}");
                 }
             }
         }

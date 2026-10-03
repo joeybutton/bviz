@@ -3,7 +3,7 @@
 
 use crate::status::Landings;
 use bviz_graph_layout::{Graph, Id, Kind, Names};
-use bviz_invocation::{Spent, Timings};
+use bviz_invocation::{Runner, Share, Spent, Timings};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -75,6 +75,42 @@ impl Extent {
             return 1.0;
         }
         ((log(wall) - log(self.least)) / span).clamp(0.0, 1.0) as f32
+    }
+}
+
+/// The share of a box's action time one runner has to hold for the box to
+/// count as that runner's: well over half, so a box shown as one runner's
+/// spent most of its time there.
+const LEADING_SHARE: f64 = 0.6;
+
+/// Where the actions of one node ran, taken together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ran {
+    /// One runner holds at least [`LEADING_SHARE`] of their time.
+    On(Runner),
+    /// No runner holds that much.
+    Mixed,
+}
+
+impl Ran {
+    /// Where the actions `spent` counts ran, by time. Actions that took no
+    /// time at all are weighed by their count instead.
+    pub(crate) fn of(spent: &Spent) -> Self {
+        let total = spent.total();
+        let weight = |share: Share| match total.wall.is_zero() {
+            true => f64::from(share.actions),
+            false => share.wall.as_secs_f64(),
+        };
+        let whole = weight(total);
+        // A tie goes to the runner `runners` lists first, which `min_by`
+        // keeps.
+        let leading = spent
+            .runners()
+            .min_by(|(_, a), (_, b)| weight(*b).total_cmp(&weight(*a)));
+        match leading {
+            Some((runner, share)) if weight(share) >= LEADING_SHARE * whole => Ran::On(runner),
+            _ => Ran::Mixed,
+        }
     }
 }
 
@@ -274,7 +310,7 @@ mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{Kind, Names};
-    use bviz_invocation::{ConfiguredTarget, Profiled, Runner, Share, Spawns, Timing};
+    use bviz_invocation::{ConfiguredTarget, Profiled, Spawns, Timing};
     use std::time::Duration;
 
     const CONFIG: &str = "a7a71f";
@@ -536,6 +572,39 @@ mod tests {
             (instant.place(Duration::from_millis(31)) - 0.5).abs() < 0.01,
             "a time of none is placed as the shortest placed"
         );
+    }
+
+    #[test]
+    fn a_node_ran_on_the_runner_holding_most_of_its_time_or_on_a_mix() {
+        let spent = |actions: &[Timing]| {
+            let mut spent = Spent::default();
+            for action in actions {
+                spent.add_action(*action);
+            }
+            spent
+        };
+        let remote = timing(70, Runner::RemoteExecution);
+        let cached = timing(30, Runner::RemoteCacheHit);
+        assert_eq!(Ran::of(&spent(&[remote])), Ran::On(Runner::RemoteExecution));
+        assert_eq!(
+            Ran::of(&spent(&[remote, cached])),
+            Ran::On(Runner::RemoteExecution)
+        );
+        assert_eq!(
+            Ran::of(&spent(&[remote, timing(70, Runner::Local)])),
+            Ran::Mixed
+        );
+        let instant = |runner| timing(0, runner);
+        assert_eq!(
+            Ran::of(&spent(&[
+                instant(Runner::NoSpawnRecorded),
+                instant(Runner::NoSpawnRecorded),
+                instant(Runner::Local)
+            ])),
+            Ran::On(Runner::NoSpawnRecorded),
+            "weighed by count where no time was taken"
+        );
+        assert_eq!(Ran::of(&Spent::default()), Ran::Mixed);
     }
 
     /// The ids are handed out so that one container precedes what it holds

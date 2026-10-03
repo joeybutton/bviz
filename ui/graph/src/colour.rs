@@ -14,16 +14,19 @@ pub(crate) enum Colouring {
     Kind,
     /// How long the actions landing on the box and on all it contains took.
     Time,
+    /// Where those actions ran.
+    Runner,
 }
 
 impl Colouring {
     /// Every colouring, in the order the picker offers them.
-    pub(crate) const ALL: [Self; 2] = [Self::Kind, Self::Time];
+    pub(crate) const ALL: [Self; 3] = [Self::Kind, Self::Time, Self::Runner];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Kind => "colour: kind",
             Self::Time => "colour: time",
+            Self::Runner => "colour: runner",
         }
     }
 
@@ -37,7 +40,7 @@ impl Colouring {
         Self::ALL.get(index).copied()
     }
 
-    /// Whether the colouring reads the time placed on the graph's nodes.
+    /// Whether the colouring reads the actions placed on the graph's nodes.
     fn timed(self) -> bool {
         !matches!(self, Self::Kind)
     }
