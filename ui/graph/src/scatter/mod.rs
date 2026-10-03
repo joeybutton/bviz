@@ -1,6 +1,7 @@
 //! A scatter plot of a graph's actions, configured targets or targets by how
 //! much of the build each pulls in against how much of it depends on it.
 
+mod axis;
 mod hue;
 mod paint;
 mod pick;
@@ -12,12 +13,13 @@ use crate::drag::CLICK_SLOP;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
+use axis::{Axes, Axis};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::Tri;
 use bviz_graph_layout::metrics::{Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Axis, Capabilities, Id, Input, InputSet, Kind, Support};
+use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
     Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
@@ -50,6 +52,12 @@ gpui::actions!(
     bviz_graph,
     [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
 );
+
+/// What the plot places its points by.
+const AXES: Axes = Axes {
+    x: Axis::Closure,
+    y: Axis::BlastRadius,
+};
 
 /// What the panel reads while the graph is being measured.
 const MEASURING: &str = "Computing metrics…";
@@ -225,7 +233,8 @@ impl ScatterPanel {
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
                 let colouring = Colouring::of(scope.unit(), &reference, &shared.facets);
                 let hue = |point: &Metrics| colouring.hue(point, &shared.facets);
-                let plotted = Plotted::of(&metrics, &reference, plots, |id| verdicts.get(id), hue);
+                let verdict = |id| verdicts.get(id);
+                let plotted = Plotted::of(&metrics, &reference, AXES, plots, verdict, hue);
                 let points = metrics.points.iter().filter(|point| plots(point));
                 let legend = colouring.legend(points, &shared.facets);
                 (plotted, legend, filter)
@@ -259,7 +268,7 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Where the plot places counts, where it is drawn.
+    /// Where the plot places values, where it is drawn.
     fn area(&self) -> Option<plot::DataArea> {
         paint::data_area(&self.plot.as_ref()?.plotted, self.zoom, self.bounds?)
     }
@@ -339,10 +348,10 @@ impl ScatterPanel {
         if named == picked.as_ref().map(|picked| (picked.mark, picked.others())) {
             return;
         }
-        let (unit, sizing) = (plot.scope.unit(), plot.plotted.sizing);
+        let unit = plot.scope.unit();
         let hover = picked.and_then(|picked| {
             let point = &plot.plotted.marks[picked.mark].target;
-            let lines = describe(point, unit, sizing, picked.others(), model.loaded()?);
+            let lines = describe(point, unit, &plot.plotted, picked.others(), model.loaded()?);
             Some(Hover {
                 mark: picked.mark,
                 others: picked.others(),
@@ -431,7 +440,7 @@ impl ScatterPanel {
         let (Some(plot), Some(loaded)) = (&mut self.plot, model.loaded()) else {
             return;
         };
-        let (unit, sizing, covered) = (plot.scope.unit(), plot.plotted.sizing, picked.covered());
+        let (unit, covered) = (plot.scope.unit(), picked.covered());
         let mut named = Vec::with_capacity(covered.len());
         let mut readings = Vec::with_capacity(covered.len());
         for &mark in covered {
@@ -449,7 +458,8 @@ impl ScatterPanel {
             .iter()
             .zip(hints)
             .map(|((mark, mnemonic, label), hint)| {
-                let point = &plot.plotted.marks[*mark].target;
+                let drawn = &plot.plotted.marks[*mark];
+                let point = &drawn.target;
                 let (package, name) = pick::split_label(label);
                 PickRow {
                     mark: *mark,
@@ -457,10 +467,10 @@ impl ScatterPanel {
                     package: package.to_owned().into(),
                     name: name.to_owned().into(),
                     hint: hint.map(SharedString::from),
-                    counts: format!("{} · {}", point.closure, point.blast_radius).into(),
-                    closure: point.closure,
-                    blast_radius: point.blast_radius,
-                    tooltip: describe(point, unit, sizing, 0, loaded),
+                    measures: plot.plotted.axes.values(point).into(),
+                    x: drawn.x,
+                    y: drawn.y,
+                    tooltip: describe(point, unit, &plot.plotted, 0, loaded),
                 }
             })
             .collect();
@@ -706,13 +716,13 @@ fn unit_names(unit: Unit) -> KindNames {
     KindNames { one, many }
 }
 
-/// What the tooltip over `point`, a point of `unit` sized by `sizing`, reads,
+/// What the tooltip over `point`, a point of `unit` drawn in `plotted`, reads,
 /// where a pick naming it covers `others` points besides: what the point is,
-/// then its counts.
+/// then its measures.
 fn describe(
     point: &Metrics,
     unit: Unit,
-    sizing: Sizing,
+    plotted: &Plotted,
     others: usize,
     loaded: &Loaded,
 ) -> Vec<String> {
@@ -748,13 +758,10 @@ fn describe(
         }
     }
     lines.extend([
-        format!(
-            "closure {} · blast radius {}",
-            point.closure, point.blast_radius
-        ),
+        plotted.axes.readings(point),
         format!("fan-in {} · fan-out {}", point.fan_in, point.fan_out),
     ]);
-    if sizing == Sizing::Actions {
+    if plotted.sizing == Sizing::Actions {
         let names = unit_names(Unit::Action);
         let actions = match point.actions {
             1 => names.one,
@@ -939,12 +946,12 @@ impl Render for ScatterPanel {
         let extents = match self
             .plot
             .as_mut()
-            .map(|plot| (plot.scope.unit(), &mut plot.pointer))
+            .map(|plot| (plot.scope.unit(), plot.plotted.axes, &mut plot.pointer))
         {
-            Some((unit, Pointer::Picking(pick))) => Some(
+            Some((unit, axes, Pointer::Picking(pick))) => Some(
                 *pick
                     .extents
-                    .get_or_insert_with(|| pick_extents(&pick.rows, unit, window)),
+                    .get_or_insert_with(|| pick_extents(&pick.rows, unit, axes, window)),
             ),
             _ => None,
         };
@@ -1119,36 +1126,38 @@ const PICK_GAP: Pixels = px(8.);
 /// short from its start; with less, the row leaves the package out.
 const PACKAGE_MIN_WIDTH: Rems = rems(2.5);
 
-/// What the header of the list of points under a click reads over the counts.
-const PICK_COUNTS: &str = "closure · blast radius";
-
 /// What the header of a list of `rows` points of `unit` reads over the points.
 fn pick_heading(rows: usize, unit: Unit) -> String {
     format!("{rows} {} here", unit_names(unit).many)
 }
 
-/// How large the list of points listing `rows` of `unit` and the tooltips of
-/// its rows stand, under the window's inherited text style.
-fn pick_extents(rows: &[PickRow], unit: Unit, window: &mut Window) -> Extents {
+/// How large the list of points listing `rows` of `unit` placed by `axes` and
+/// the tooltips of its rows stand, under the window's inherited text style.
+fn pick_extents(rows: &[PickRow], unit: Unit, axes: Axes, window: &mut Window) -> Extents {
     let tooltip = rows.iter().fold(Size::default(), |largest, row| {
         largest.max(&tooltip_extent(&row.tooltip, window))
     });
     Extents {
-        list_width: pick_width(rows, unit, window),
+        list_width: pick_width(rows, unit, axes, window),
         tooltip,
     }
 }
 
-/// How wide the list of points listing `rows` of `unit` stands to read each
-/// row and its header whole, under the window's inherited text style.
-fn pick_width(rows: &[PickRow], unit: Unit, window: &mut Window) -> Pixels {
+/// How wide the list of points listing `rows` of `unit` placed by `axes` stands
+/// to read each row and its header whole, under the window's inherited text
+/// style.
+fn pick_width(rows: &[PickRow], unit: Unit, axes: Axes, window: &mut Window) -> Pixels {
     let mut measure =
         |text: &SharedString| menu_chrome::widest(window, std::iter::once(text.clone()));
     let heading =
-        measure(&pick_heading(rows.len(), unit).into()) + PICK_GAP + measure(&PICK_COUNTS.into());
+        measure(&pick_heading(rows.len(), unit).into()) + PICK_GAP + measure(&axes.names().into());
     let widest = rows.iter().fold(heading, |widest, row| {
         let label = measure(&row.package) + measure(&row.name);
-        let parts = [row.mnemonic.as_ref(), row.hint.as_ref(), Some(&row.counts)];
+        let parts = [
+            row.mnemonic.as_ref(),
+            row.hint.as_ref(),
+            Some(&row.measures),
+        ];
         let rest = parts
             .into_iter()
             .flatten()
@@ -1204,7 +1213,11 @@ fn pick_list(
         .gap(PICK_GAP)
         .text_color(colors.text_muted)
         .child(pick_heading(pick.rows.len(), unit))
-        .child(div().mr(px(SCROLLBAR_THICKNESS)).child(PICK_COUNTS));
+        .child(
+            div()
+                .mr(px(SCROLLBAR_THICKNESS))
+                .child(plot.plotted.axes.names()),
+        );
     let sheet = div()
         .size_full()
         .occlude()
@@ -1296,7 +1309,7 @@ fn pick_label(listed: &PickRow, muted: Hsla, line: Pixels) -> Div {
 
 /// The row `index` of a list of points, reading `listed`: the colour its mark
 /// is drawn in, what its point is, what tells it apart from the rows reading
-/// alike, and its counts.
+/// alike, and its measures.
 fn pick_row(
     index: usize,
     listed: &PickRow,
@@ -1345,7 +1358,7 @@ fn pick_row(
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(colors.text_muted)
-                .child(listed.counts.clone()),
+                .child(listed.measures.clone()),
         )
 }
 
@@ -1445,7 +1458,7 @@ fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String>
     if scope.unit() != Unit::ConfiguredTarget || !scope.inputs().contains(Input::Cquery) {
         return None;
     }
-    let dropped = match capabilities.support(Axis::ExecConfiguration) {
+    let dropped = match capabilities.support(bviz_graph_layout::Axis::ExecConfiguration) {
         Support::Available => return None,
         Support::Partial { .. } => "some cquery edges left out",
         Support::Unavailable { .. } => "cquery edges left out",

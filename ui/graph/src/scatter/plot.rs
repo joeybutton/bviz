@@ -1,18 +1,19 @@
-//! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
-//! and a mark's size by the count its measurement sizes points by.
+//! Where the scatter plot's marks and ticks fall: measures on logarithmic
+//! axes, and a mark's size by the count its measurement sizes points by.
 
+use super::axis::Axes;
 use super::hue::Hue;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Sizing};
 use bviz_graph_layout::select::Verdict;
 use gpui::{Bounds, Pixels, Point, point, px};
 
-/// A count axis scaled by `log10(1 + n)`, so a count of zero sits at the origin
-/// and every decade past it spans the same length.
+/// An axis scaled by `log10(1 + n)`, so a value of zero sits at the origin and
+/// every decade past it spans the same length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LogScale {
-    /// The count at the far end of the axis: the first step of the 1-2-5
-    /// sequence at or past every count plotted on it.
+    /// The value at the far end of the axis: the first step of the 1-2-5
+    /// sequence at or past every value plotted on it.
     top: u32,
 }
 
@@ -94,10 +95,13 @@ pub(crate) const MIN_RADIUS: f32 = 2.5;
 /// The radius of the mark for the largest point.
 pub(crate) const MAX_RADIUS: f32 = 8.0;
 
-/// One point as the plot draws it.
+/// One point as the plot draws it, at `x` along the horizontal axis's scale
+/// and `y` along the vertical one's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mark {
     pub(crate) target: Metrics,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
     pub(crate) radius: f32,
     /// Whether the filter draws the point as no part of what it selects.
     pub(crate) faded: bool,
@@ -120,19 +124,20 @@ pub(crate) struct Plotted {
     pub(crate) estimated: bool,
     /// What a mark's size stands for.
     pub(crate) sizing: Sizing,
-    /// Closure along the horizontal axis.
+    pub(crate) axes: Axes,
     pub(crate) x: LogScale,
-    /// Blast radius along the vertical axis.
     pub(crate) y: LogScale,
 }
 
 impl Plotted {
-    /// The marks of those points `measured` that `plots` takes, as the filter
-    /// whose verdict on a node `verdict` gives draws them, in the hue `hue`
-    /// gives, scaled to `measured` and `reference` alike.
+    /// The marks of those points `measured` that `plots` takes, placed by
+    /// `axes`, as the filter whose verdict on a node `verdict` gives draws
+    /// them, in the hue `hue` gives, scaled to `measured` and `reference`
+    /// alike.
     pub(crate) fn of(
         measured: &Measurement,
         reference: &Measurement,
+        axes: Axes,
         plots: impl Fn(&Metrics) -> bool,
         verdict: impl Fn(Id) -> Verdict,
         hue: impl Fn(&Metrics) -> Hue,
@@ -154,6 +159,8 @@ impl Plotted {
             };
             Some(Mark {
                 target,
+                x: axes.x.position(&target),
+                y: axes.y.position(&target),
                 radius: radius(sizing.of(&target), largest),
                 faded,
                 hue: hue(&target),
@@ -165,8 +172,9 @@ impl Plotted {
             plotted,
             estimated: measured.estimated(),
             sizing,
-            x: LogScale::covering(max(&|t| t.closure.value()).unwrap_or(0)),
-            y: LogScale::covering(max(&|t| t.blast_radius.value()).unwrap_or(0)),
+            axes,
+            x: LogScale::covering(max(&|t| axes.x.position(t)).unwrap_or(0)),
+            y: LogScale::covering(max(&|t| axes.y.position(t)).unwrap_or(0)),
         }
     }
 }
@@ -246,7 +254,7 @@ impl Zoom {
     };
 }
 
-/// The region counts are placed in, inset from the axes by the largest mark's
+/// The region values are placed in, inset from the axes by the largest mark's
 /// radius so that, at the whole of each axis, no mark crosses them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DataArea {
@@ -280,19 +288,21 @@ impl DataArea {
         self.frame
     }
 
-    /// The horizontal position of a closure of `n`.
+    /// The horizontal position of `n` along the horizontal axis.
     pub(crate) fn x_of(&self, n: u32) -> Pixels {
         let across = self.zoom.x.across(self.x.fraction(n));
         self.bounds.left() + self.bounds.size.width * across
     }
 
-    /// The vertical position of a blast radius of `n`, rising up the plot.
+    /// The vertical position of `n` along the vertical axis, rising up the
+    /// plot.
     pub(crate) fn y_of(&self, n: u32) -> Pixels {
         let across = self.zoom.y.across(self.y.fraction(n));
         self.bounds.bottom() - self.bounds.size.height * across
     }
 
-    /// Where a closure of `n` falls, where that is within the frame.
+    /// Where `n` falls along the horizontal axis, where that is within the
+    /// frame.
     pub(crate) fn visible_x(&self, n: u32) -> Option<Pixels> {
         let x = self.x_of(n);
         (self.frame.left()..=self.frame.right())
@@ -300,7 +310,8 @@ impl DataArea {
             .then_some(x)
     }
 
-    /// Where a blast radius of `n` falls, where that is within the frame.
+    /// Where `n` falls along the vertical axis, where that is within the
+    /// frame.
     pub(crate) fn visible_y(&self, n: u32) -> Option<Pixels> {
         let y = self.y_of(n);
         (self.frame.top()..=self.frame.bottom())
@@ -319,7 +330,7 @@ impl DataArea {
         }
     }
 
-    /// The zoom carried along with a drag by `by`, so the counts under the
+    /// The zoom carried along with a drag by `by`, so the values under the
     /// pointer follow it.
     pub(crate) fn panned(&self, by: Point<Pixels>) -> Zoom {
         Zoom {
@@ -346,11 +357,14 @@ impl DataArea {
         )
     }
 
-    pub(crate) fn place(&self, target: &Metrics) -> Point<Pixels> {
-        point(
-            self.x_of(target.closure.value()),
-            self.y_of(target.blast_radius.value()),
-        )
+    /// Where a point at `x` along the horizontal axis and `y` along the
+    /// vertical one is drawn.
+    pub(crate) fn point_at(&self, x: u32, y: u32) -> Point<Pixels> {
+        point(self.x_of(x), self.y_of(y))
+    }
+
+    pub(crate) fn place(&self, mark: &Mark) -> Point<Pixels> {
+        self.point_at(mark.x, mark.y)
     }
 
     /// What a pointer at `at` over `marks` picks: every mark whose rim lies
@@ -361,7 +375,7 @@ impl DataArea {
         let mut covered = Vec::with_capacity(COVERED_RESERVE);
         let mut nearest: Option<(usize, f32)> = None;
         for (index, mark) in marks.iter().enumerate() {
-            let center = self.place(&mark.target);
+            let center = self.place(mark);
             let distance = f32::from(center.x - at.x).hypot(f32::from(center.y - at.y));
             if distance > mark.radius + PICK_SLOP || !self.frame.contains(&center) {
                 continue;
@@ -416,6 +430,7 @@ impl Picked {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scatter::axis::Axis;
     use bviz_graph_layout::metrics::{Count, Scope, Unit};
     use bviz_graph_layout::{InputSet, Kind};
     use gpui::size;
@@ -430,6 +445,17 @@ mod tests {
             fan_out: 0,
             actions: 0,
         }
+    }
+
+    /// Closure across, blast radius up.
+    const AXES: Axes = Axes {
+        x: Axis::Closure,
+        y: Axis::BlastRadius,
+    };
+
+    /// Where `target` is drawn through `area`.
+    fn drawn_at(area: &DataArea, target: &Metrics) -> Point<Pixels> {
+        area.point_at(target.closure.value(), target.blast_radius.value())
     }
 
     fn no_hue(_: &Metrics) -> Hue {
@@ -448,7 +474,14 @@ mod tests {
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
         let measured = measured(targets);
-        Plotted::of(&measured, &measured, |_| true, |_| Verdict::Shown, no_hue)
+        Plotted::of(
+            &measured,
+            &measured,
+            AXES,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        )
     }
 
     #[test]
@@ -526,7 +559,7 @@ mod tests {
         let axes = Bounds::new(point(px(40.), px(10.)), size(px(300.), px(200.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         for mark in &plotted.marks {
-            let at = area.place(&mark.target);
+            let at = area.place(mark);
             let r = px(mark.radius);
             assert!(
                 at.x - r >= axes.left() && at.x + r <= axes.right(),
@@ -545,13 +578,13 @@ mod tests {
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let origin = area.place(&targets[0]);
+        let origin = drawn_at(&area, &targets[0]);
         let picked = area.pick(&plotted.marks, origin + point(px(1.), px(-1.)));
         let origin_mark = plotted.marks.iter().position(|m| m.target == targets[0]);
         assert_eq!(picked.as_ref().map(|p| p.mark), origin_mark);
         assert_eq!(picked.map(|p| p.others()), Some(0));
 
-        let shared = area.pick(&plotted.marks, area.place(&targets[1]));
+        let shared = area.pick(&plotted.marks, drawn_at(&area, &targets[1]));
         // The mark drawn last is the one on top.
         let top = plotted
             .marks
@@ -585,10 +618,12 @@ mod tests {
             true => Verdict::Hidden,
             false => Verdict::Shown,
         };
-        let plotted = Plotted::of(&measured, &measured, |_| true, verdict, no_hue);
+        let plotted = Plotted::of(&measured, &measured, AXES, |_| true, verdict, no_hue);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let picked = area.pick(&plotted.marks, area.place(&targets[0])).unwrap();
+        let picked = area
+            .pick(&plotted.marks, drawn_at(&area, &targets[0]))
+            .unwrap();
         let mut covered: Vec<Id> = picked
             .covered
             .iter()
@@ -608,6 +643,7 @@ mod tests {
         let plotted = Plotted::of(
             &measured,
             &measured,
+            AXES,
             |_| true,
             |id| match id {
                 id if id == hidden => Verdict::Hidden,
@@ -643,6 +679,7 @@ mod tests {
         let plotted = Plotted::of(
             &measured,
             &measured,
+            AXES,
             |t| t.id != unplotted,
             |_| Verdict::Shown,
             no_hue,
@@ -660,8 +697,15 @@ mod tests {
     fn a_narrower_measure_is_drawn_on_the_scale_of_its_reference() {
         let whole = measured(&[target(3, 1, 1), target(400, 90, 9)]);
         let narrower = measured(&[target(3, 1, 1), target(40, 2, 3)]);
-        let plotted = Plotted::of(&narrower, &whole, |_| true, |_| Verdict::Shown, no_hue);
-        let reference = Plotted::of(&whole, &whole, |_| true, |_| Verdict::Shown, no_hue);
+        let plotted = Plotted::of(
+            &narrower,
+            &whole,
+            AXES,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        );
+        let reference = Plotted::of(&whole, &whole, AXES, |_| true, |_| Verdict::Shown, no_hue);
         assert_eq!((plotted.x, plotted.y), (reference.x, reference.y));
         let largest =
             |plotted: &Plotted| plotted.marks.iter().map(|m| m.radius).fold(0.0, f32::max);
@@ -710,12 +754,12 @@ mod tests {
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let whole = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let at = whole.place(&targets[2]);
+        let at = drawn_at(&whole, &targets[2]);
         let zoom = whole.zoomed(at, 3.0);
         let zoomed = DataArea::within(axes, plotted.x, plotted.y, zoom);
-        let moved = zoomed.place(&targets[2]) - at;
+        let moved = drawn_at(&zoomed, &targets[2]) - at;
         assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
-        let corner = zoomed.place(&targets[1]);
+        let corner = drawn_at(&zoomed, &targets[1]);
         assert!(!axes.contains(&corner));
         assert_eq!(zoomed.pick(&plotted.marks, corner), None);
     }
@@ -739,10 +783,10 @@ mod tests {
         let zoom = DataArea::within(wide, plotted.x, plotted.y, Zoom::WHOLE)
             .zoomed(point(px(300.), px(200.)), 2.0);
         let before = DataArea::within(wide, plotted.x, plotted.y, zoom);
-        let spot = before.spot(before.place(&targets[2]));
+        let spot = before.spot(drawn_at(&before, &targets[2]));
         let narrow = Bounds::new(point(px(40.), px(60.)), size(px(320.), px(700.)));
         let after = DataArea::within(narrow, plotted.x, plotted.y, zoom);
-        let moved = after.at_spot(spot) - after.place(&targets[2]);
+        let moved = after.at_spot(spot) - drawn_at(&after, &targets[2]);
         assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
     }
 }
