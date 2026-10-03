@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use bviz_invocation::{Runner, Spawns};
+use bviz_invocation::{ConfiguredTarget, Profiled, Runner, Spawns, Timings};
 
 use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice};
 
@@ -140,6 +140,24 @@ impl Profile {
         started.into_iter().map(|(_, action)| action).collect()
     }
 
+    /// The time each of [its actions](Self::actions) took and where it ran.
+    pub fn timings(&self) -> Timings {
+        let actions = self.actions();
+        let mut timings = Timings::with_capacity(actions.len());
+        for action in &actions {
+            let owner = self
+                .opt_str(action.target)
+                .map(|label| ConfiguredTarget::new(label, self.opt_str(action.configuration)));
+            timings.record(Profiled {
+                primary_output: self.opt_str(action.out),
+                owner,
+                wall: action.wall,
+                spawns: action.spawns,
+            });
+        }
+        timings
+    }
+
     /// The runner of an action answered by a cache lookup. Bazel records a
     /// lookup in the disk cache and in a remote one as the same span:
     /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/remote/RemoteSpawnCache.java#L144-L147>
@@ -165,6 +183,7 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_invocation::Timing;
 
     const ACTION_TIDS: [i64; 2] = [2, 3];
     const MAIN_TID: i64 = 1;
@@ -359,6 +378,52 @@ mod tests {
         assert_eq!(
             (p.opt_str(a.target), p.opt_str(a.configuration), a.wall),
             (Some("//p:t"), Some("c"), Duration::from_micros(100))
+        );
+    }
+
+    #[test]
+    fn timings_know_an_action_by_its_output_and_otherwise_by_its_target() {
+        let hit: &[Span] = &[CACHE_CHECK];
+        let p = profile(
+            false,
+            &[(Some("bazel-out/o"), hit), (None, hit), (None, hit)],
+        );
+        let timings = p.timings();
+        let hit = Timing {
+            wall: Duration::from_micros(100),
+            runner: Runner::DiskCacheHit,
+        };
+        assert_eq!(timings.action("bazel-out/o"), Some(hit));
+        let owned = timings
+            .owned_by(ConfiguredTarget::new("//p:t", Some("c")))
+            .expect("owned");
+        assert_eq!(owned.of(Runner::DiskCacheHit).actions, 2);
+        assert_eq!(owned.total().wall, Duration::from_micros(200));
+        assert!(timings.names_primary_outputs() && timings.names_owners());
+    }
+
+    #[test]
+    fn spans_sharing_a_primary_output_are_one_timing_run_where_their_executions_held_longest() {
+        let mostly_sandboxed: &[Span] = &[
+            ("general information", "subprocess.run", 10, 40),
+            ("remote action execution", "execute remotely", 60, 10),
+        ];
+        let remote: &[Span] = &[("remote action execution", "execute remotely", 10, 35)];
+        let p = profile(
+            true,
+            &[
+                (Some("bazel-out/o"), mostly_sandboxed),
+                (Some("bazel-out/o"), remote),
+            ],
+        );
+        let runners: Vec<_> = p.actions().iter().map(|a| a.spawns.runner()).collect();
+        assert_eq!(runners, [Runner::Sandboxed, Runner::RemoteExecution]);
+        assert_eq!(
+            p.timings().action("bazel-out/o"),
+            Some(Timing {
+                wall: Duration::from_micros(200),
+                runner: Runner::RemoteExecution,
+            })
         );
     }
 
