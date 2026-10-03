@@ -77,6 +77,23 @@ impl Dropdown {
         }
     }
 
+    /// Names the option at `index` `label`, for an option whose meaning
+    /// follows a choice made elsewhere.
+    pub fn set_label(
+        &mut self,
+        index: usize,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let label = label.into();
+        if let Some(choice) = self.options.get_mut(index)
+            && choice.label != label
+        {
+            choice.label = label;
+            cx.notify();
+        }
+    }
+
     /// Set the chosen index if in range and different, reporting whether it changed.
     fn select(&mut self, index: usize) -> bool {
         let changed = index < self.options.len() && index != self.selected;
