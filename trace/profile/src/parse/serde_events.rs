@@ -107,6 +107,8 @@ pub(crate) struct RawEvent<'a> {
     pub(crate) ts: Option<f64>,
     pub(crate) dur: Option<f64>,
     pub(crate) tid: Option<i64>,
+    /// The action's primary output path, a top-level key beside `args`.
+    pub(crate) out: Option<Cow<'a, str>>,
     /// Whether the event carried an `args` object (even an empty one — a
     /// counter keeps an empty lane for it); the entries themselves live in the
     /// caller's scratch buffer.
@@ -194,6 +196,7 @@ impl<'de: 'a, 'a> Visitor<'de> for RawEventVisitor<'_, 'a> {
                 "ts" => ev.ts = map.next_value::<MaybeF64>()?.0,
                 "dur" => ev.dur = map.next_value::<MaybeF64>()?.0,
                 "tid" => ev.tid = map.next_value::<MaybeI64>()?.0,
+                "out" => ev.out = map.next_value::<LenientStr>()?.0,
                 "args" => {
                     self.0.clear();
                     ev.has_args = map.next_value_seed(ArgsSeed(&mut *self.0))?;
@@ -278,6 +281,69 @@ impl<'de: 'a, 'a> Visitor<'de> for MaybeCowStrVisitor<'a> {
 
     fn visit_unit<E>(self) -> Result<MaybeCowStr<'a>, E> {
         Ok(MaybeCowStr(None))
+    }
+}
+
+/// A string field whose any other value reads as absent, so a malformed one
+/// costs only that field rather than failing the chunk; mirrored by the
+/// scanner's `scan_lenient_str`.
+struct LenientStr<'a>(Option<Cow<'a, str>>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for LenientStr<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(LenientStrVisitor(PhantomData))
+    }
+}
+
+struct LenientStrVisitor<'a>(PhantomData<&'a ()>);
+
+impl<'de: 'a, 'a> Visitor<'de> for LenientStrVisitor<'a> {
+    type Value = LenientStr<'a>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(Some(Cow::Borrowed(v))))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(Some(Cow::Owned(v.to_owned()))))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(Some(Cow::Owned(v))))
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(None))
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(None))
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(None))
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(None))
+    }
+
+    fn visit_unit<E>(self) -> Result<LenientStr<'a>, E> {
+        Ok(LenientStr(None))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<LenientStr<'a>, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(LenientStr(None))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<LenientStr<'a>, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(LenientStr(None))
     }
 }
 

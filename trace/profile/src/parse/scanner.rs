@@ -51,6 +51,7 @@ pub(crate) fn scan_event<'a>(
             "ts" => ev.ts = s.scan_opt_number(IntTok::to_f64)?,
             "dur" => ev.dur = s.scan_opt_number(IntTok::to_f64)?,
             "tid" => ev.tid = s.scan_opt_number(IntTok::to_i64)?,
+            "out" => ev.out = s.scan_lenient_str()?,
             "args" => {
                 scratch.clear();
                 ev.has_args = s.scan_args(scratch)?;
@@ -201,6 +202,16 @@ impl<'a> EventScanner<'a> {
             }
             _ => None,
         }
+    }
+
+    /// A string field value, any other value reading as `None`, mirroring
+    /// `LenientStr`.
+    fn scan_lenient_str(&mut self) -> Option<Option<Cow<'a, str>>> {
+        if *self.bytes.get(self.pos)? == b'"' {
+            return Some(Some(self.scan_string()?));
+        }
+        self.skip_value()?;
+        Some(None)
     }
 
     /// An integer-or-null field value, converted by `conv`; an out-of-range

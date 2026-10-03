@@ -278,12 +278,15 @@ pub struct SliceDetail {
     pub target: OptStr,
     pub mnemonic: OptStr,
     pub configuration: OptStr,
+    /// The primary output path of an action's span, which Bazel writes under
+    /// `--experimental_profile_include_primary_output`.
+    pub out: OptStr,
     /// Range into the profile's args pool of the key/value pairs beyond the
     /// typed args; resolve with [`Profile::slice_others`].
     pub others: Span32,
 }
 
-const _: () = assert!(std::mem::size_of::<SliceDetail>() == 40);
+const _: () = assert!(std::mem::size_of::<SliceDetail>() == 48);
 
 /// The kind of work a span represents, giving the base hue in the flame views.
 /// Derived from the Bazel `cat` plus the span name ([`span_role`]) because a
