@@ -248,7 +248,8 @@ fn merge(graphs: Vec<(Input, Graph)>, ids: usize) -> Merged {
 mod tests {
     use super::*;
     use crate::capability::{Axis, Support};
-    use crate::graph::EdgeKind;
+    use crate::graph::{EdgeKind, Kind};
+    use crate::label::Resolver;
     use crate::test_support::find;
     use bazel_query_proto::analysis::{
         Action, Artifact, Configuration, ConfiguredTarget, DepSetOfFiles, PathFragment,
@@ -619,6 +620,149 @@ mod tests {
 
         assert_eq!(node_count(&graph, &names, "target:@somerepo//foo:lib"), 1);
         assert_eq!(node_count(&graph, &names, "target:@@somerepo+//foo:lib"), 1);
+    }
+
+    /// An aquery container whose one target is `label` under target id 9,
+    /// built under the configuration `checksum` names by one action writing
+    /// `bazel-out/bin/{output}`.
+    fn aquery_generating(label: &str, checksum: &str, output: &str) -> ActionGraphContainer {
+        ActionGraphContainer {
+            artifacts: vec![Artifact {
+                id: 1,
+                path_fragment_id: 102,
+                is_tree_artifact: false,
+            }],
+            path_fragments: vec![
+                PathFragment {
+                    id: 100,
+                    label: "bazel-out".into(),
+                    parent_id: 0,
+                },
+                PathFragment {
+                    id: 101,
+                    label: "bin".into(),
+                    parent_id: 100,
+                },
+                PathFragment {
+                    id: 102,
+                    label: output.into(),
+                    parent_id: 101,
+                },
+            ],
+            targets: vec![ActionTarget {
+                id: 9,
+                label: label.into(),
+                ..Default::default()
+            }],
+            configuration: vec![Configuration {
+                id: 1,
+                mnemonic: "k8".into(),
+                checksum: checksum.into(),
+                ..Default::default()
+            }],
+            actions: vec![Action {
+                target_id: 9,
+                mnemonic: "Genrule".into(),
+                configuration_id: 1,
+                output_ids: vec![1],
+                primary_output_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_main_repository_label_resolves_in_either_form_bazel_prints() {
+        let Joint { names, .. } = build_joint(
+            Some(&[aquery_generating("//pkg:gen", "ck1", "pkg/gen.out")]),
+            None,
+            Some(&[rule("@@//pkg:gen", &[])]),
+            false,
+        );
+        let resolver = Resolver::new(&names);
+
+        let target = names.get("target://pkg:gen");
+        assert!(target.is_some());
+        assert_eq!(resolver.target("//pkg:gen"), target);
+        assert_eq!(resolver.target("@@//pkg:gen"), target);
+        assert_eq!(resolver.target("//pkg:other"), None);
+
+        let configured = names.get("ct://pkg:gen#ck1");
+        assert!(configured.is_some());
+        assert_eq!(resolver.configured_target("//pkg:gen", "ck1"), configured);
+        assert_eq!(resolver.configured_target("@@//pkg:gen", "ck1"), configured);
+        assert_eq!(resolver.configured_target("//pkg:gen", "ck2"), None);
+    }
+
+    #[test]
+    fn an_external_repository_label_resolves_by_its_canonical_form() {
+        let Joint { names, .. } = build_joint(
+            Some(&[aquery_generating(
+                "@@somerepo+//pkg:gen",
+                "ck1",
+                "external/somerepo+/pkg/gen.out",
+            )]),
+            None,
+            None,
+            false,
+        );
+        let resolver = Resolver::new(&names);
+
+        let target = names.get("target:@@somerepo+//pkg:gen");
+        assert!(target.is_some());
+        assert_eq!(resolver.target("@@somerepo+//pkg:gen"), target);
+        // The module's name is some module's own word for a repository, which
+        // need not be this one.
+        assert_eq!(resolver.target("@somerepo//pkg:gen"), None);
+        assert_eq!(
+            resolver.configured_target("@@somerepo+//pkg:gen", "ck1"),
+            names.get("ct:@@somerepo+//pkg:gen#ck1")
+        );
+    }
+
+    #[test]
+    fn an_action_resolves_by_the_exec_path_of_its_primary_output() {
+        let Joint { graph, names, .. } = build_joint(
+            Some(&[aquery_generating("//pkg:gen", "ck1", "pkg/gen.out")]),
+            None,
+            None,
+            false,
+        );
+        let resolver = Resolver::new(&names);
+
+        let action = resolver
+            .action("bazel-out/bin/pkg/gen.out")
+            .expect("the action writing the output");
+        assert_eq!(graph.nodes[action.0 as usize].kind, Kind::Action);
+        assert_eq!(resolver.action("bazel-out/bin/pkg/other.out"), None);
+    }
+
+    #[test]
+    fn an_apparent_label_resolves_to_whichever_spelling_the_graph_took() {
+        // The first repository bears the apparent name as its canonical one,
+        // which the aquery states, so its node is canonical; nothing names the
+        // second canonically, so its node keeps the name as written.
+        let Joint { names, .. } = build_joint(
+            Some(&[aquery_target(1, "@@somerepo//foo:lib")]),
+            None,
+            Some(&[
+                rule("@somerepo//foo:lib", &[]),
+                rule("@other//bar:lib", &[]),
+            ]),
+            false,
+        );
+        let resolver = Resolver::new(&names);
+
+        let canonical = names.get("target:@@somerepo//foo:lib");
+        assert!(canonical.is_some());
+        assert_eq!(resolver.target("@somerepo//foo:lib"), canonical);
+        assert_eq!(resolver.target("@@somerepo//foo:lib"), canonical);
+
+        let apparent = names.get("target:@other//bar:lib");
+        assert!(apparent.is_some());
+        assert_eq!(resolver.target("@other//bar:lib"), apparent);
+        assert_eq!(resolver.target("@@other//bar:lib"), None);
     }
 
     #[test]

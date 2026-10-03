@@ -5,6 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod outcomes;
+
+pub use outcomes::{
+    BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
+};
+
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 
@@ -49,8 +55,8 @@ impl InvocationId {
     }
 }
 
-/// Leading characters of a configuration checksum that [`Configurations::name`]
-/// tells apart configurations sharing a mnemonic by.
+/// Leading characters of a configuration checksum a reader is shown: what
+/// [`Configurations::name`] tells apart configurations sharing a mnemonic by.
 const CHECKSUM_SHOWN: usize = 6;
 
 /// The mnemonic of each configuration known of an invocation, keyed by the
@@ -90,20 +96,34 @@ impl Configurations {
             .iter()
             .any(|(other, described)| other != checksum && described == mnemonic);
         Some(match shared {
-            true => {
-                let short: String = checksum.chars().take(CHECKSUM_SHOWN).collect();
-                format!("{mnemonic} {short}")
-            }
+            true => format!("{mnemonic} {}", short(checksum)),
             false => mnemonic.clone(),
         })
     }
+
+    /// [`name`](Self::name), and for an unknown checksum its start.
+    pub fn name_or_checksum(&self, checksum: &str) -> String {
+        self.name(checksum).unwrap_or_else(|| short(checksum))
+    }
 }
+
+fn short(checksum: &str) -> String {
+    checksum.chars().take(CHECKSUM_SHOWN).collect()
+}
+
+/// Which of the reports of outcomes a [`Session`] has taken its outcomes are
+/// of. A reader that keeps the one its reading was taken at can tell whether
+/// the outcomes are still those it read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Revision(u64);
 
 /// What the views of one invocation's outputs share. Each output's reader adds
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
     configurations: Configurations,
+    outcomes: Outcomes,
+    reported: Revision,
 }
 
 impl Session {
@@ -114,6 +134,25 @@ impl Session {
     /// Adds the configurations one of the invocation's outputs describes.
     pub fn add_configurations(&mut self, described: Configurations) {
         self.configurations.extend(described);
+    }
+
+    /// What the invocation's build reported.
+    pub fn outcomes(&self) -> &Outcomes {
+        &self.outcomes
+    }
+
+    /// The same for as long as [`outcomes`](Self::outcomes) are those of one
+    /// report, whatever else the session learns meanwhile.
+    pub fn outcomes_revision(&self) -> Revision {
+        self.reported
+    }
+
+    /// Takes `reported` for what the invocation's build reported. A build
+    /// writes one build event stream, so these stand in place of any reported
+    /// before.
+    pub fn report_outcomes(&mut self, reported: Outcomes) {
+        self.outcomes = reported;
+        self.reported.0 += 1;
     }
 }
 
@@ -160,6 +199,8 @@ mod tests {
         assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
         assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
         assert_eq!(name("ffffffffffff"), None);
+        assert_eq!(known.name_or_checksum("0c3d9a7714be"), "k8-opt-exec");
+        assert_eq!(known.name_or_checksum("ffffffffffff"), "ffffff");
     }
 
     fn configurations(described: &[(&str, &str)]) -> Configurations {
@@ -193,6 +234,45 @@ mod tests {
         let name = |checksum| session.configurations().name(checksum);
         assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild 55817e"));
         assert_eq!(name("91e24984663c").as_deref(), Some("k8-fastbuild 91e249"));
+    }
+
+    #[test]
+    fn a_session_holds_the_outcomes_last_reported_to_it() {
+        let app = ConfiguredTarget::new("//app".to_owned(), Some("55817e2200e2".to_owned()));
+        let mut session = Session::default();
+        assert!(session.outcomes().is_empty());
+
+        let mut first = Outcomes::default();
+        first.report_build(app.clone(), BuildOutcome::NotBuilt);
+        session.report_outcomes(first);
+        let mut second = Outcomes::default();
+        second.report_build(app.clone(), BuildOutcome::Built);
+        session.report_outcomes(second);
+
+        assert_eq!(
+            session.outcomes().build(app.borrowed()),
+            Some(&BuildOutcome::Built)
+        );
+    }
+
+    #[test]
+    fn a_sessions_outcomes_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let unreported = session.outcomes_revision();
+        assert_eq!(unreported, Revision::default());
+
+        session.add_configurations(configurations(&[("55817e2200e2", "k8-fastbuild")]));
+        assert_eq!(session.outcomes_revision(), unreported);
+
+        session.report_outcomes(Outcomes::default());
+        let first = session.outcomes_revision();
+        assert_ne!(first, unreported);
+        session.add_configurations(configurations(&[("0c3d9a7714be", "k8-opt-exec")]));
+        assert_eq!(session.outcomes_revision(), first);
+
+        session.report_outcomes(Outcomes::default());
+        assert_ne!(session.outcomes_revision(), first);
+        assert_ne!(session.outcomes_revision(), unreported);
     }
 
     #[test]

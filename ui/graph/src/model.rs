@@ -1,16 +1,18 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
+use crate::report::Report;
+use crate::status::{Nodes, Statuses};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{Configurations, Session};
+use bviz_invocation::{Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
-use gpui::{Context, Entity, EntityId, EventEmitter, Subscription, Task};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -96,6 +98,15 @@ pub(crate) struct Loaded {
     /// Goes with the graph it measures, so a measuring still in flight when the
     /// graph is replaced never lands.
     measures: HashMap<Scope, Measure>,
+    /// What the build of the graph's invocation reports of its nodes.
+    statuses: Statuses,
+    /// What the build of the graph's invocation reported, as the card over
+    /// the graph lists it.
+    reported: Report,
+    /// Which of its session's outcomes `statuses` and `reported` are read
+    /// from: those of a session no build has reported to, until a report is
+    /// taken up.
+    taken_up: Revision,
 }
 
 impl Loaded {
@@ -104,7 +115,49 @@ impl Loaded {
             shared,
             opening,
             measures: HashMap::new(),
+            statuses: Statuses::default(),
+            reported: Report::default(),
+            taken_up: Revision::default(),
         }
+    }
+
+    pub(crate) fn statuses(&self) -> &Statuses {
+        &self.statuses
+    }
+
+    pub(crate) fn reported(&self) -> &Report {
+        &self.reported
+    }
+
+    /// Which of its session's outcomes the [statuses](Self::statuses) say
+    /// that of, so that a reader keeping it can tell whether they are still
+    /// those it read.
+    pub(crate) fn taken_up(&self) -> Revision {
+        self.taken_up
+    }
+
+    /// Takes up what the build of `session` reports of the graph's nodes, and
+    /// says whether that changed anything a view of the graph shows. Outcomes
+    /// already taken up are not read again.
+    fn report(&mut self, session: &Session) -> bool {
+        let revision = session.outcomes_revision();
+        if self.taken_up == revision {
+            return false;
+        }
+        self.taken_up = revision;
+        let outcomes = session.outcomes();
+        let (statuses, reported) = match outcomes.is_empty() {
+            true => Default::default(),
+            false => {
+                let base = &self.shared.base;
+                let nodes = Nodes::new(base, &self.shared.names, outcomes);
+                (Statuses::resolve(&nodes, base), Report::of(&nodes, base))
+            }
+        };
+        let changed = self.statuses != statuses || self.reported != reported;
+        self.statuses = statuses;
+        self.reported = reported;
+        changed
     }
 }
 
@@ -254,6 +307,16 @@ pub(crate) struct GraphModel {
     /// The graph panel opened, shown or filtered last, for as long as it is
     /// open.
     deferred: Option<Deferred>,
+    joined: Option<Joined>,
+}
+
+/// The invocation a graph is opened as part of.
+struct Joined {
+    /// Held for as long as the graph is: a session nothing holds is released,
+    /// and tells its observers nothing further.
+    session: Entity<Session>,
+    /// Takes up what the build reports whenever the session changes.
+    _changed: Subscription,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
@@ -270,7 +333,14 @@ impl GraphModel {
         session: Option<Entity<Session>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(load_in_background(
+        // The build's outcomes can land on either side of the graph, so they
+        // are taken up as the graph lands and again whenever the session
+        // changes.
+        let joined = session.map(|session| Joined {
+            _changed: cx.observe(&session, |model, _, cx| model.take_up(cx)),
+            session,
+        });
+        let work = load_in_background(
             cx,
             move || {
                 let read = load.join()?;
@@ -280,8 +350,8 @@ impl GraphModel {
             move |model, result: Result<(Read, Configurations), String>, cx| {
                 model.source = match result {
                     Ok((read, described)) => {
-                        if let Some(session) = session {
-                            session.update(cx, |session, cx| {
+                        if let Some(joined) = &model.joined {
+                            joined.session.update(cx, |session, cx| {
                                 session.add_configurations(described);
                                 cx.notify();
                             });
@@ -291,9 +361,23 @@ impl GraphModel {
                     }
                     Err(err) => Source::Failed(err),
                 };
+                model.take_up(cx);
                 cx.emit(SourceReplaced);
             },
-        ))
+        );
+        Self {
+            joined,
+            ..Self::new(work)
+        }
+    }
+
+    /// Takes up what the session's build reports of the loaded graph.
+    fn take_up(&mut self, cx: &mut Context<Self>) {
+        if let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source)
+            && loaded.report(joined.session.read(cx))
+        {
+            cx.notify();
+        }
     }
 
     /// Waits on `placing` and lands the map it places through `landing`.
@@ -341,6 +425,7 @@ impl GraphModel {
             _work: work,
             _placing: Task::ready(()),
             deferred: None,
+            joined: None,
         }
     }
 
@@ -445,6 +530,13 @@ impl GraphModel {
         &self.source
     }
 
+    /// The configurations known of the invocation the graph is opened as part
+    /// of; `None` for a graph opened as part of none.
+    pub(crate) fn configurations<'a>(&self, cx: &'a App) -> Option<&'a Configurations> {
+        let joined = self.joined.as_ref()?;
+        Some(joined.session.read(cx).configurations())
+    }
+
     pub(crate) fn loaded(&self) -> Option<&Loaded> {
         match &self.source {
             Source::Loaded(loaded) => Some(loaded),
@@ -462,9 +554,11 @@ fn forget_unwanted(measures: &mut HashMap<Scope, Measure>, wanted: &[Scope]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::Input;
     use bviz_graph_layout::facets::Tri;
+    use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::metrics::{Sizing, Unit};
+    use bviz_graph_layout::{Input, Kind};
+    use bviz_invocation::{BuildOutcome, ConfiguredTarget, Outcomes};
 
     #[test]
     fn a_graph_describes_its_configurations_by_checksum() {
@@ -478,6 +572,76 @@ mod tests {
         assert_eq!(name("55817e2200e2").as_deref(), Some("k8-fastbuild"));
         assert_eq!(name("0c3d9a7714be").as_deref(), Some("k8-opt-exec"));
         assert_eq!(name("91e24984663c"), None);
+    }
+
+    /// The graph of the one target `//app:bin`, as a read lands it.
+    fn loaded() -> Loaded {
+        let mut names = Names::default();
+        let mut base = Graph::new();
+        let bin = names.intern("target://app:bin");
+        base.add_node(Node::new(bin, "bin", Kind::Target, None));
+        let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
+        let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
+        let (base, reduced_base) = (Arc::new(base), Arc::new(reduced_base));
+        let facets = Arc::new(Facets::default());
+        let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
+        Loaded::new(
+            Shared {
+                base,
+                reduced_base,
+                map: Placement::pending().0,
+                names: Arc::new(names),
+                facets,
+                labels,
+                containers,
+                capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
+                provenance: Arc::default(),
+                inputs: Input::Query.into(),
+            },
+            Opening {
+                expanded: HashSet::new(),
+                over_budget: None,
+            },
+        )
+    }
+
+    fn reporting(outcome: BuildOutcome) -> Outcomes {
+        let mut outcomes = Outcomes::default();
+        outcomes.report_build(ConfiguredTarget::new("//app:bin".to_owned(), None), outcome);
+        outcomes
+    }
+
+    /// A session changes for more than its outcomes, and outcomes can be
+    /// reported that say what the last ones did.
+    #[test]
+    fn a_graph_takes_up_the_outcomes_its_session_holds_once_per_report_of_them() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        assert!(!loaded.report(&session));
+        assert_eq!(loaded.statuses, Statuses::default());
+
+        session.report_outcomes(reporting(BuildOutcome::NotBuilt));
+        assert!(loaded.report(&session));
+        assert_ne!(loaded.statuses, Statuses::default());
+        assert!(!loaded.report(&session));
+
+        session.add_configurations(Configurations::default());
+        assert!(!loaded.report(&session));
+
+        session.report_outcomes(reporting(BuildOutcome::NotBuilt));
+        assert!(!loaded.report(&session));
+        session.report_outcomes(reporting(BuildOutcome::Built));
+        assert!(loaded.report(&session));
+    }
+
+    /// Outcomes reported before the graph is read are the first it takes up.
+    #[test]
+    fn a_graph_takes_up_outcomes_reported_before_it_landed() {
+        let mut session = Session::default();
+        session.report_outcomes(reporting(BuildOutcome::Built));
+        let mut loaded = loaded();
+        assert!(loaded.report(&session));
+        assert_ne!(loaded.statuses, Statuses::default());
     }
 
     /// Placing runs apart from the read it belongs to, so a panic there fails

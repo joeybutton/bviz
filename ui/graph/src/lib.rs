@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 mod build;
 mod camera;
 mod checklist;
+mod column;
 mod derive;
 mod drag;
 mod emphasis;
@@ -42,11 +43,13 @@ mod paint;
 mod pins;
 mod preset;
 mod relation;
+mod report;
 mod rules;
 mod scatter;
 mod scroll;
 mod search;
 mod selection;
+mod status;
 mod toolbar;
 mod why;
 
@@ -243,6 +246,7 @@ pub struct GraphPanel {
     missing_open: bool,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
+    report: report::Card,
     /// The dependency paths asked for, which the panel draws in place of its
     /// filter.
     why: why::Why,
@@ -252,7 +256,7 @@ pub struct GraphPanel {
     /// The layer drawing the graph; notified through
     /// [`GraphPanel::invalidate_canvas`].
     canvas: Entity<GraphCanvas>,
-    edge_legend: Legend,
+    legend: Legend,
 }
 
 impl GraphPanel {
@@ -406,10 +410,11 @@ impl GraphPanel {
             neighborhood_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
+            report: report::Card::new(),
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
-            edge_legend: Legend::default(),
+            legend: Legend::default(),
         }
     }
 
@@ -455,7 +460,11 @@ impl GraphPanel {
         };
         let zoom = self.view_zoom(&drawn);
         let underived = zoom.is_some_and(|zoom| drawn.view(zoom).is_none());
-        let edge_legend = zoom.and_then(|zoom| self.edge_legend.card(&drawn, zoom, &palette));
+        let loaded = self.model.read(cx).loaded();
+        let legend = zoom.zip(loaded).and_then(|(zoom, loaded)| {
+            let (statuses, resolved) = (loaded.statuses(), loaded.taken_up());
+            self.legend.card(&drawn, zoom, statuses, resolved, &palette)
+        });
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -476,11 +485,15 @@ impl GraphPanel {
                     .items_start()
                     .gap_2()
                     .children(missing::card(self, &palette, cx))
-                    .children(edge_legend),
+                    .children(legend),
+            )
+            .child(
+                column::Column::new()
+                    .held(pins::panel(self, &palette, cx))
+                    .folding(report::card(self, &palette, cx))
+                    .foot(why::card(self, &palette, cx)),
             )
             .children(search::card(self, &palette, cx))
-            .children(pins::panel(self, &palette, cx))
-            .children(why::card(self, &palette, cx))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -714,6 +727,7 @@ impl Render for GraphPanel {
                     relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
                     pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
                     why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
+                    report_control: report::control(self, cx).map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
@@ -792,6 +806,9 @@ struct Controls {
     pin_control: Option<AnyElement>,
     /// The questions asked of the selected box, which stand beside the pin.
     why_controls: Option<AnyElement>,
+    /// Puts the card reading what the build reported up and away, offered
+    /// where the build reported anything.
+    report_control: Option<AnyElement>,
     neighborhood_enabled: bool,
     /// `None` where the drawing offers no choice of edge set.
     reduced: Option<bool>,

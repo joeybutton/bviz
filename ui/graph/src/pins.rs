@@ -6,7 +6,7 @@
 //! be taken back, or an override would be a state a reader could reach and not
 //! leave.
 
-use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist};
+use crate::{GraphPanel, Palette, checklist};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
@@ -20,9 +20,9 @@ use std::collections::HashMap;
 /// Width the list of pins is drawn at, over the drawing it names boxes of.
 const PANEL_WIDTH: Pixels = px(320.);
 
-/// The share of the canvas height the card runs to before its rows scroll, so
-/// that however many overrides are in force the card stays clear of the canvas's
-/// foot and every row it lists can be reached.
+/// The share of the height it is placed in the card runs to before its rows
+/// scroll, so that however many overrides are in force the card stays clear of
+/// the canvas's foot and every row it lists can be reached.
 const MAX_HEIGHT_SHARE: f32 = 0.6;
 
 /// Side of the mark a pinned row carries, and of the space a row without one
@@ -143,8 +143,8 @@ pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option
     )
 }
 
-/// The overrides in force, floating over the drawing at the corner opposite the
-/// search results; `None` while there are none.
+/// The overrides in force, for the caller to place over the drawing; `None`
+/// while there are none.
 pub(crate) fn panel(
     view: &GraphPanel,
     palette: &Palette,
@@ -161,11 +161,8 @@ pub(crate) fn panel(
     }
     Some(
         div()
-            .absolute()
-            .right_2()
-            .top_2()
             .w(PANEL_WIDTH)
-            .max_w(relative(CARD_MAX_SHARE))
+            .max_w_full()
             .max_h(relative(MAX_HEIGHT_SHARE))
             .occlude()
             .on_mouse_down(

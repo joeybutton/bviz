@@ -1,4 +1,4 @@
-use bviz_invocation::{Configurations, Session};
+use bviz_invocation::{Configurations, Outcomes, Session};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
 use gpui::{Context, Entity, EventEmitter, Task};
@@ -14,6 +14,7 @@ pub(crate) struct SourceReplaced;
 pub(crate) struct Stream {
     replay: Replay,
     configurations: Configurations,
+    outcomes: Outcomes,
 }
 
 impl Stream {
@@ -21,14 +22,17 @@ impl Stream {
         let mut output = bviz_terminal::parse(stream)
             .map_err(|e| format!("cannot parse build event stream: {e}"))?;
         let configurations = std::mem::take(&mut output.configurations);
+        let outcomes = std::mem::take(&mut output.outcomes);
         Ok(Self {
             replay: Replay::from_output(output),
             configurations,
+            outcomes,
         })
     }
 
     fn replay_telling(self, session: &mut Session) -> Replay {
         session.add_configurations(self.configurations);
+        session.report_outcomes(self.outcomes);
         self.replay
     }
 }
@@ -95,6 +99,7 @@ impl ConsoleModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_invocation::{BuildOutcome, ConfiguredTarget};
 
     /// A build whose read has not finished, for exercising what a view reads
     /// off it before one has.
@@ -190,6 +195,45 @@ mod tests {
             session.configurations().name(CONFIGURATION).as_deref(),
             Some("k8-fastbuild")
         );
+    }
+
+    /// One `BuildEvent` reporting that `label`, in the configuration
+    /// `checksum` names, was built.
+    fn built_event(label: &str, checksum: &str) -> Vec<u8> {
+        use bviz_terminal::bep::build_event_stream::{
+            BuildEvent, BuildEventId, TargetComplete,
+            build_event::Payload,
+            build_event_id::{ConfigurationId, Id, TargetCompletedId},
+        };
+        use prost::Message;
+
+        BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::TargetCompleted(TargetCompletedId {
+                    label: label.into(),
+                    configuration: Some(ConfigurationId {
+                        id: checksum.into(),
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            payload: Some(Payload::Completed(TargetComplete {
+                success: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn a_stream_read_in_a_session_reports_its_outcomes_there() {
+        let stream = built_event("//app", CONFIGURATION);
+        let stream = Stream::parse(&stream).expect("the stream parses");
+        let mut session = Session::default();
+        stream.replay_telling(&mut session);
+        let app = ConfiguredTarget::new("//app", Some(CONFIGURATION));
+        assert_eq!(session.outcomes().build(app), Some(&BuildOutcome::Built));
     }
 
     /// A stream describing no configuration leaves a session knowing what it

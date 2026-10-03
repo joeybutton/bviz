@@ -12,6 +12,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 
 mod display;
+mod outcomes;
 mod output;
 mod replay;
 mod screen;
