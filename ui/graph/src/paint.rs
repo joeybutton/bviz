@@ -209,6 +209,10 @@ const MIXED_BLEND: f32 = 0.4;
 /// lightness.
 const MIXED_LIFT: f32 = 0.04;
 
+/// How far a mark standing for a mix of runners is carried from the neutral
+/// slot toward the label ink, away from the canvas.
+const MIXED_MARK_TINT: f32 = 0.5;
+
 /// How far a group's fill is tinted toward the accent of the files it holds: far
 /// enough to be told from a plain container fill, and not so far that the group
 /// passes for one of the files.
@@ -554,18 +558,41 @@ impl Palette {
         }
     }
 
-    /// Fill for a box whose actions ran as `ran` says: the runner's slot
-    /// carried toward the canvas, and for a mix of runners the neutral slot
-    /// carried toward the canvas and then away from it, so the mix reads as a
-    /// fill of its own beside an untimed box and beside every runner.
+    /// Fill for a box whose actions ran as `ran` says: its
+    /// [slot](Self::ran_slot) carried toward the canvas, and for a mix of
+    /// runners then away from it, so the mix reads as a fill of its own beside
+    /// an untimed box and beside every runner.
     pub(crate) fn ran_fill(&self, ran: Ran) -> Rgba {
         let Ran::On(runner) = ran else {
-            let mixed = bviz_ui_theme::mix(self.data.neutral, self.background, MIXED_BLEND);
+            let mixed = bviz_ui_theme::mix(self.ran_slot(Some(ran)), self.background, MIXED_BLEND);
             return bviz_ui_theme::lighten(mixed, MIXED_LIFT.copysign(self.mark_lift()));
         };
         let (slot, blend) = self.runner_accent(runner);
         let carried = bviz_ui_theme::mix(slot, self.background, blend);
         bviz_ui_theme::lighten(carried, -RUNNER_DIM.copysign(self.mark_lift()))
+    }
+
+    /// The colour a point whose actions ran as `ran`, `None` where no time
+    /// lands on it, is drawn in where it is a mark rather than ground: its
+    /// slot, and for a mix of runners that slot carried away from the canvas,
+    /// as a mixed box's fill is, so it stands apart from an untimed point.
+    pub(crate) fn ran_mark(&self, ran: Option<Ran>) -> Rgba {
+        let slot = self.ran_slot(ran);
+        match ran {
+            Some(Ran::Mixed) => bviz_ui_theme::mix(slot, self.label, MIXED_MARK_TINT),
+            Some(Ran::On(_)) | None => slot.into(),
+        }
+    }
+
+    /// The slot the actions of a box that ran as `ran`, `None` where no time
+    /// lands on it, are coloured from: [each runner's](Self::runner_accent),
+    /// and for a mix of runners or no time at all, which no runner stands for,
+    /// the neutral slot.
+    fn ran_slot(&self, ran: Option<Ran>) -> Hsla {
+        match ran {
+            Some(Ran::On(runner)) => self.runner_accent(runner).0,
+            Some(Ran::Mixed) | None => self.data.neutral,
+        }
     }
 
     /// The slot each runner is coloured from, every runner its own, and how
@@ -586,11 +613,11 @@ impl Palette {
     }
 
     /// Fill for a box no time lands on: a container keeps the fill it wears
-    /// by kind, and a leaf takes the neutral slot.
+    /// by kind, and a leaf takes the [slot](Self::ran_slot) of no time at all.
     pub(crate) fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
         match compound {
             true => self.container_fill(kind),
-            false => bviz_ui_theme::mix(self.data.neutral, self.background, KIND_BLEND),
+            false => bviz_ui_theme::mix(self.ran_slot(None), self.background, KIND_BLEND),
         }
     }
 
@@ -2764,6 +2791,24 @@ mod colors {
                 for (j, other) in fills.iter().enumerate().skip(i + 1) {
                     let apart = distance(*fill, *other);
                     assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}/{j}: {apart}");
+                }
+            }
+        }
+    }
+
+    /// A point's runner is read off its mark, so neither a mix of runners nor
+    /// no time at all may be taken for each other or for any runner.
+    #[test]
+    fn a_mixed_and_an_untimed_mark_are_told_from_each_other_and_every_runner() {
+        for (theme, p) in palettes() {
+            let runners = Runner::ALL.map(|runner| p.ran_mark(Some(Ran::On(runner))));
+            let (mixed, untimed) = (p.ran_mark(Some(Ran::Mixed)), p.ran_mark(None));
+            let apart = distance(mixed, untimed);
+            assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
+            for (runner, mark) in Runner::ALL.iter().zip(runners) {
+                for other in [mixed, untimed] {
+                    let apart = distance(mark, other);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {runner:?}: {apart}");
                 }
             }
         }

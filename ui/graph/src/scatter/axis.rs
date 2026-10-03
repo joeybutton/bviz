@@ -2,7 +2,7 @@
 
 use super::plot::{HOUR_MS, Ladder, MINUTE_MS, SECOND_MS, tick_label};
 use crate::duration::lasted;
-use crate::timing::{NodeTimes, Untimed};
+use crate::timing::{NodeTimes, Ran, Untimed};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::metrics::Metrics;
 use rustc_hash::FxHashMap;
@@ -156,14 +156,22 @@ impl Axes {
     }
 }
 
-/// How long the actions each point of a measure stands for took, of the
-/// points any action time lands on, held apart from the graph so that a plot
-/// can be drawn off the UI thread.
+/// How long the actions each point of a measure stands for took and where
+/// they ran, of the points any action time lands on, held apart from the
+/// graph so that a plot can be drawn off the UI thread.
 #[derive(Debug, Default)]
-pub(crate) struct Clocks(FxHashMap<Id, Duration>);
+pub(crate) struct Clocks(FxHashMap<Id, Clock>);
+
+/// How long the actions of one point took, and where they ran.
+#[derive(Clone, Copy, Debug)]
+struct Clock {
+    wall: Duration,
+    ran: Ran,
+}
 
 impl Clocks {
-    /// The action time `times` places on each of `points`.
+    /// The action time `times` places on each of `points`, and where those
+    /// actions ran.
     pub(crate) fn of(times: Result<&NodeTimes, Untimed>, points: &[Metrics]) -> Self {
         let Ok(times) = times else {
             return Clocks::default();
@@ -171,13 +179,30 @@ impl Clocks {
         let mut clocks = FxHashMap::with_capacity_and_hasher(points.len(), Default::default());
         clocks.extend(points.iter().filter_map(|point| {
             let timed = times.get(point.id)?;
-            Some((point.id, timed.held.total().wall))
+            let clock = Clock {
+                wall: timed.held.total().wall,
+                ran: Ran::of(&timed.held),
+            };
+            Some((point.id, clock))
         }));
         Clocks(clocks)
     }
 
     pub(crate) fn time(&self, id: Id) -> Option<Duration> {
-        self.0.get(&id).copied()
+        Some(self.0.get(&id)?.wall)
+    }
+
+    pub(crate) fn ran(&self, id: Id) -> Option<Ran> {
+        Some(self.0.get(&id)?.ran)
+    }
+
+    /// The clocks of the points `runs` names, by id, time and runner.
+    #[cfg(test)]
+    pub(crate) fn of_runs(runs: &[(Id, Duration, Ran)]) -> Self {
+        let clocks = runs
+            .iter()
+            .map(|&(id, wall, ran)| (id, Clock { wall, ran }));
+        Clocks(clocks.collect())
     }
 }
 

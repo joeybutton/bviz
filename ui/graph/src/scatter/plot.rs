@@ -166,9 +166,9 @@ pub(crate) struct Mark {
 /// axis measures moves the scale a mark is read on. A point is plotted only
 /// where it has a measure on both axes.
 pub(crate) struct Plotted {
-    /// The faded before the rest, so none hides a mark the filter selects, and
-    /// largest first within each, so a small mark is drawn over any large one
-    /// it overlaps.
+    /// The faded before the rest, so none hides a mark the filter selects,
+    /// within each those whose hue recedes before the rest, and largest first
+    /// within those, so a small mark is drawn over any large one it overlaps.
     pub(crate) marks: Vec<Mark>,
     /// How many points are plotted, of which `marks` draws those the filter
     /// does not hide.
@@ -237,7 +237,10 @@ impl Plotted {
                 hue: hue(&target),
             })
         }));
-        marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(sizing.of(&mark.target))));
+        marks.sort_by_key(|mark| {
+            let size = std::cmp::Reverse(sizing.of(&mark.target));
+            (!mark.faded, !mark.hue.recedes(), size)
+        });
         Self {
             marks,
             plotted,
@@ -981,5 +984,26 @@ mod tests {
         assert_eq!(plotted.y, by_closure.y);
         assert_eq!(plotted.marks[0].radius, by_closure.marks[1].radius);
         assert!(plotted.marks[0].radius < MAX_RADIUS);
+    }
+
+    #[test]
+    fn an_untimed_mark_is_drawn_beneath_a_timed_one_of_any_size() {
+        let targets = [target(1, 1, 0), target(2, 2, 9)];
+        let measured = measured(&targets);
+        let hue = |t: &Metrics| match t.fan_in {
+            0 => Hue::Untimed,
+            _ => Hue::Other,
+        };
+        let plotted = Plotted::of(
+            &measured,
+            &measured,
+            AXES,
+            untimed,
+            |_| true,
+            |_| Verdict::Shown,
+            hue,
+        );
+        let hues: Vec<Hue> = plotted.marks.iter().map(|m| m.hue).collect();
+        assert_eq!(hues, [Hue::Untimed, Hue::Other]);
     }
 }

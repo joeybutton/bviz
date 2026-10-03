@@ -35,7 +35,7 @@ use gpui::{
     Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
     Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
 };
-use hue::{Colouring, Hue};
+use hue::{ColourBy, Colouring, Hue};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
 use pick::{Extents, PickList, PickRow};
 use placed::Placed;
@@ -199,7 +199,22 @@ impl ScatterPanel {
             return;
         };
         choice.choose(unit);
+        choice.name_colourings(cx);
         self.measure(cx);
+        cx.notify();
+    }
+
+    /// Colours the marks `by` what the picker offers.
+    fn choose_colour(&mut self, by: ColourBy, cx: &mut Context<Self>) {
+        let Some(choice) = &mut self.choice else {
+            return;
+        };
+        if choice.colour == by {
+            return;
+        }
+        choice.colour = by;
+        self.close_pick(cx);
+        self.replot(cx);
         cx.notify();
     }
 
@@ -249,13 +264,13 @@ impl ScatterPanel {
     }
 
     /// Plots the measured points through the filter the graph's other views
-    /// draw through, where the plot drawn is not of the chosen scope and axes,
-    /// not drawn through that filter, or not of the action times the graph
-    /// holds, once the choices reading action time are offered as the unit's
-    /// measure has any. A hidden panel waits until it is shown, and a plotting
-    /// running replots once it lands. The filter is evaluated over every node
-    /// of the graph, so this runs off the UI thread, and the plot drawn stays
-    /// until the new one lands.
+    /// draw through, where the plot drawn is not of the chosen scope, axes and
+    /// colouring, not drawn through that filter, or not of the action times
+    /// the graph holds, once the choices reading action time are offered as
+    /// the unit's measure has any. A hidden panel waits until it is shown, and
+    /// a plotting running replots once it lands. The filter is evaluated over
+    /// every node of the graph, so this runs off the UI thread, and the plot
+    /// drawn stays until the new one lands.
     fn replot(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.plotting.is_some() {
             return;
@@ -274,7 +289,7 @@ impl ScatterPanel {
         let Some(((scope, reference), choice)) = self.scopes().zip(self.choice.as_ref()) else {
             return;
         };
-        let axes = choice.axes();
+        let (axes, colour) = (choice.axes(), choice.colour);
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
@@ -289,6 +304,7 @@ impl ScatterPanel {
             plot.filter == filter
                 && plot.scope == scope
                 && plot.plotted.axes == axes
+                && plot.colour == colour
                 && plot.timed == timed
         }) {
             return;
@@ -301,8 +317,8 @@ impl ScatterPanel {
             move || {
                 let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
-                let colouring = Colouring::of(scope.unit(), &reference, &shared.facets);
-                let hue = |point: &Metrics| colouring.hue(point, &shared.facets);
+                let colouring = Colouring::of(colour, scope.unit(), &reference, &shared.facets);
+                let hue = |point: &Metrics| colouring.hue(point, &shared.facets, &clocks);
                 let verdict = |id| verdicts.get(id);
                 let time = |id| clocks.time(id);
                 let plotted = Plotted::of(&metrics, &reference, axes, time, plots, verdict, hue);
@@ -310,7 +326,7 @@ impl ScatterPanel {
                     .points
                     .iter()
                     .filter(|point| plots(point) && axes.place(point, time(point.id)).is_some());
-                let legend = colouring.legend(points, &shared.facets);
+                let legend = colouring.legend(points, &shared.facets, &clocks);
                 (plotted, legend, filter)
             },
             move |view, (plotted, legend, filter), cx| {
@@ -328,6 +344,7 @@ impl ScatterPanel {
                     pointer: Pointer::Away,
                     filter,
                     scope,
+                    colour,
                     timed,
                 });
                 view.invalidate_canvas(cx);
@@ -640,6 +657,9 @@ struct Choice {
     timed: bool,
     across_picker: Entity<Dropdown>,
     _across_picked: Subscription,
+    colour: ColourBy,
+    colour_picker: Entity<Dropdown>,
+    _colour_picked: Subscription,
 }
 
 impl Choice {
@@ -680,6 +700,14 @@ impl Choice {
                 view.choose_across(across, cx);
             }
         });
+        let names = ColourBy::ALL.map(|by| by.label(scope.unit()));
+        let colour_picker = cx.new(|cx| Dropdown::new("scatter-colour", names, 0, cx));
+        let colour_picked = cx.subscribe(&colour_picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            if let Some(&by) = ColourBy::ALL.get(*index) {
+                view.choose_colour(by, cx);
+            }
+        });
         let mut choice = Self {
             scope,
             others,
@@ -691,9 +719,23 @@ impl Choice {
             across_picker,
             _across_picked: across_picked,
             timed,
+            colour: ColourBy::ALL[0],
+            colour_picker,
+            _colour_picked: colour_picked,
         };
         choice.offer_times(timed, cx);
         Some(choice)
+    }
+
+    /// Names each colouring the picker offers as it reads for the unit
+    /// plotted.
+    fn name_colourings(&self, cx: &mut Context<ScatterPanel>) {
+        let unit = self.scope.unit();
+        self.colour_picker.update(cx, |picker, cx| {
+            for by in ColourBy::ALL {
+                picker.set_label(by.index(), by.label(unit), cx);
+            }
+        });
     }
 
     fn axes(&self) -> Axes {
@@ -712,6 +754,10 @@ impl Choice {
         if across_falls {
             self.across = Across::Closure;
         }
+        let colour_falls = !timed && self.colour == ColourBy::Runner;
+        if colour_falls {
+            self.colour = ColourBy::Identity;
+        }
         let across = self.across;
         self.across_picker.update(cx, |picker, cx| {
             for offered in Across::ALL {
@@ -720,7 +766,15 @@ impl Choice {
             }
             picker.set_selected(across.index(), cx);
         });
-        across_falls
+        let colour = self.colour;
+        self.colour_picker.update(cx, |picker, cx| {
+            for offered in ColourBy::ALL {
+                let available = timed || offered != ColourBy::Runner;
+                picker.set_available(offered.index(), available, cx);
+            }
+            picker.set_selected(colour.index(), cx);
+        });
+        across_falls || colour_falls
     }
 
     /// The scope's unit over every loaded input describing it, whose measure
@@ -784,6 +838,8 @@ struct Plot {
     filter: Filter,
     /// What `plotted` measures.
     scope: Scope,
+    /// What the marks of `plotted` are coloured by.
+    colour: ColourBy,
     /// Which of its session's timings `plotted` was drawn with.
     timed: Revision,
 }
@@ -888,6 +944,9 @@ fn describe(
     }
     lines.push(plotted.axes.readings(point, time));
     lines.extend(plotted.axes.unplaced(point, time));
+    if let Hue::Ran(ran) = mark.hue {
+        lines.push(format!("runner: {}", ran.label()));
+    }
     lines.push(format!(
         "fan-in {} · fan-out {}",
         point.fan_in, point.fan_out
@@ -979,7 +1038,7 @@ fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
 }
 
 /// The most lines a tooltip reads.
-const TOOLTIP_LINES: usize = 9;
+const TOOLTIP_LINES: usize = 10;
 
 const MAIN_REPO: &str = "the main repository";
 const UNKNOWN_REPO: &str = "an unnamed repository";
@@ -1546,14 +1605,23 @@ fn strip(
     };
     let unit = group("points").child(choice.picker.clone());
     let tip = TooltipColors::from_colors(&palette.colors);
-    let read = "place points by their action time";
-    let note = times_note(times, choice.timed, choice.scope.unit(), read);
-    let across = group("across").child(
+    let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
+        let note = times_note(times, choice.timed, choice.scope.unit(), read);
         div()
-            .id("scatter-across-why")
+            .id(id)
             .tooltip(TextTooltip::builder(note, tip))
-            .child(choice.across_picker.clone()),
-    );
+            .child(picker.clone())
+    };
+    let across = group("across").child(timed_picker(
+        "scatter-across-why",
+        &choice.across_picker,
+        "place points by their action time",
+    ));
+    let colour = group("colour").child(timed_picker(
+        "scatter-colour-why",
+        &choice.colour_picker,
+        "colour points by where their actions ran",
+    ));
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
@@ -1563,6 +1631,7 @@ fn strip(
     Toolbar::new()
         .child(unit)
         .child(across)
+        .child(colour)
         .child(inputs)
         .when(measuring, |bar| {
             bar.trailing(
