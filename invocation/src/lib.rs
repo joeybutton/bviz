@@ -129,15 +129,29 @@ fn short(checksum: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision(u64);
 
+/// What a [`Session`] holds of one kind of report. An invocation writes one of
+/// each output a kind is reported from, so a report stands in place of any
+/// taken before, and the revision moves with each report and nothing else.
+#[derive(Default)]
+struct Reported<T> {
+    value: T,
+    revision: Revision,
+}
+
+impl<T> Reported<T> {
+    fn replace(&mut self, value: T) {
+        self.value = value;
+        self.revision.0 += 1;
+    }
+}
+
 /// What the views of one invocation's outputs share. Each output's reader adds
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
     configurations: Configurations,
-    outcomes: Outcomes,
-    reported: Revision,
-    timings: Timings,
-    timed: Revision,
+    outcomes: Reported<Outcomes>,
+    timings: Reported<Timings>,
 }
 
 impl Session {
@@ -152,40 +166,28 @@ impl Session {
 
     /// What the invocation's build reported.
     pub fn outcomes(&self) -> &Outcomes {
-        &self.outcomes
+        &self.outcomes.value
     }
 
-    /// The same for as long as [`outcomes`](Self::outcomes) are those of one
-    /// report, whatever else the session learns meanwhile.
     pub fn outcomes_revision(&self) -> Revision {
-        self.reported
+        self.outcomes.revision
     }
 
-    /// Takes `reported` for what the invocation's build reported. A build
-    /// writes one build event stream, so these stand in place of any reported
-    /// before.
     pub fn report_outcomes(&mut self, reported: Outcomes) {
-        self.outcomes = reported;
-        self.reported.0 += 1;
+        self.outcomes.replace(reported);
     }
 
     /// What the invocation's profile recorded of its actions.
     pub fn timings(&self) -> &Timings {
-        &self.timings
+        &self.timings.value
     }
 
-    /// The same for as long as [`timings`](Self::timings) are those of one
-    /// report, whatever else the session learns meanwhile.
     pub fn timings_revision(&self) -> Revision {
-        self.timed
+        self.timings.revision
     }
 
-    /// Takes `reported` for what the invocation's profile recorded of its
-    /// actions. An invocation writes one profile, so these stand in place of
-    /// any reported before.
     pub fn report_timings(&mut self, reported: Timings) {
-        self.timings = reported;
-        self.timed.0 += 1;
+        self.timings.replace(reported);
     }
 }
 
