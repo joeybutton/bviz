@@ -8,6 +8,7 @@ rust_library(
     visibility = ["//bviz:__pkg__"],
     deps = [
         "//ui/console/args",
+        "//ui/execlog/args",
         "//ui/graph/args",
         "//ui/trace/args",
         "@crates//:clap",

@@ -9,6 +9,7 @@ rust_library(
         "//execlog:__pkg__",
         "//trace/layout:__pkg__",
         "//trace/profile:__pkg__",
+        "//ui/execlog:__pkg__",
         "//ui/trace:__pkg__",
     ],
     deps = [

@@ -25,6 +25,7 @@ enum Load {
     Graph(bviz_ui_graph::Load),
     Trace(bviz_ui_trace::Load),
     Console(bviz_ui_console::Load),
+    ExecLog(bviz_ui_execlog::Load),
 }
 
 impl Load {
@@ -41,6 +42,11 @@ impl Load {
                 kind: Kind::Bep,
                 invocation: bviz_ui_console::invocation_id(&source),
                 file: Self::Console(source.into()),
+            },
+            Source::ExecLog(source) => File {
+                kind: Kind::ExecLog,
+                invocation: bviz_ui_execlog::invocation_id(&source),
+                file: Self::ExecLog(source.into()),
             },
         }
     }
@@ -67,6 +73,7 @@ impl Load {
             Self::Graph(load) => bviz_ui_graph::open(load, session, window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, session, window, cx),
             Self::Console(load) => bviz_ui_console::open(load, session, window, cx),
+            Self::ExecLog(load) => bviz_ui_execlog::open(load, window, cx),
         }
     }
 }
@@ -131,6 +138,7 @@ mod tests {
             view_kind::<bviz_ui_trace::FlamePanel>(),
             view_kind::<bviz_ui_trace::StatsPanel>(),
             view_kind::<bviz_ui_console::ConsolePanel>(),
+            view_kind::<bviz_ui_execlog::SpawnTimePanel>(),
         ];
         let mut claimed: HashMap<ViewKind, &'static str> = HashMap::new();
         for (panel, view) in panels {

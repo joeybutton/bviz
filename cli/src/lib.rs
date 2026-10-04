@@ -1,32 +1,33 @@
 //! The command line of the window that shows every kind of Bazel build
-//! document: the three viewers' flag fragments joined into one parser, and what
+//! document: the viewers' flag fragments joined into one parser, and what
 //! a command line names for each viewer to read. It names no window and draws
 //! nothing, so a parse can be exercised without a display.
 
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
+use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
-/// console replay.
+/// console replay, the spawn time by phase.
 ///
-/// The graph and each profile and build event stream named on the command line
-/// take a region of the one window each, the regions stacked one above another.
+/// The graph and each profile, build event stream and execution log named on
+/// the command line take a region of the one window each, the regions stacked
+/// one above another.
 ///
 /// Files written by one Bazel invocation open as one document, which stands
-/// where the first of them does. A profile and a build event stream each carry
-/// the id of the invocation that wrote them, and one profile and one build
-/// event stream carrying the same id are that invocation's document. A further
-/// profile or stream of the invocation is a document of its own, and so is a
-/// file carrying no id.
+/// where the first of them does. A profile, a build event stream and an
+/// execution log each carry the id of the invocation that wrote them, and one
+/// file of each kind carrying the same id are that invocation's document. A
+/// further file of a kind the invocation holds is a document of its own, and so
+/// is a file carrying no id.
 ///
 /// The query, cquery and aquery files carry no id, so bviz cannot check which
 /// build a graph describes. It takes the graph for the invocation's when every
-/// id the profiles and build event streams carry is the same one, be that a
-/// single file's, and opens the graph as a document of its own when they carry
-/// several ids or none.
+/// id the other files carry is the same one, be that a single file's, and opens
+/// the graph as a document of its own when they carry several ids or none.
 #[derive(Parser, Debug)]
 #[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {
@@ -36,10 +37,12 @@ pub struct Cli {
     pub trace: TraceArgs,
     #[command(flatten)]
     pub console: ConsoleArgs,
+    #[command(flatten)]
+    pub exec_log: ExecLogArgs,
 }
 
 /// The flags of [`Cli`] that name a file, for the command line that gives none.
-const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile or --bep";
+const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile, --bep or --exec_log";
 
 impl Cli {
     /// What this command line names to open.
@@ -48,9 +51,12 @@ impl Cli {
     /// than left to a clap argument group, because these fragments are shared
     /// with the per-viewer binaries, where a different flag is the required one.
     pub fn sources(self) -> Result<Sources, clap::Error> {
-        let mut files = Vec::with_capacity(self.trace.profile.len() + self.console.bep.len());
+        let mut files = Vec::with_capacity(
+            self.trace.profile.len() + self.console.bep.len() + self.exec_log.exec_log.len(),
+        );
         files.extend(self.trace.sources().map(Source::Trace));
         files.extend(self.console.sources().map(Source::Console));
+        files.extend(self.exec_log.sources().map(Source::ExecLog));
         if let Some(graph) = self.graph.source() {
             return Ok(Sources::Graph { graph, files });
         }
@@ -68,11 +74,13 @@ impl Cli {
     }
 }
 
-/// A file a viewer reads on its own: a profile or a build event stream.
+/// A file a viewer reads on its own: a profile, a build event stream or an
+/// execution log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Trace(TraceSource),
     Console(ConsoleSource),
+    ExecLog(ExecLogSource),
 }
 
 /// What a command line names to open: the one graph its graph flags describe,
@@ -126,6 +134,10 @@ mod tests {
         Source::Console(ConsoleSource { path: path.into() })
     }
 
+    fn exec_log(path: &str) -> Source {
+        Source::ExecLog(ExecLogSource { path: path.into() })
+    }
+
     /// A window with nothing to show is refused, in the terms clap refuses a
     /// missing required argument — which is what fixes the exit code the shell
     /// sees.
@@ -162,6 +174,10 @@ mod tests {
             files(console("b.bep"), Vec::new())
         );
         assert_eq!(
+            sources(&["--exec_log", "e.zst"]).unwrap(),
+            files(exec_log("e.zst"), Vec::new())
+        );
+        assert_eq!(
             sources(&["--profile", "one.gz", "--profile", "two.gz"]).unwrap(),
             files(trace("one.gz"), vec![trace("two.gz")])
         );
@@ -170,13 +186,23 @@ mod tests {
     /// Files of every kind open together, the graph ahead of the rest wherever
     /// its flags stand.
     #[test]
-    fn a_graph_a_profile_and_a_bep_are_three_sources() {
-        let named = sources(&["--profile", "p.gz", "--bep", "b.bep", "--aquery", "a.pb"]).unwrap();
+    fn a_graph_and_one_file_of_each_kind_are_four_sources() {
+        let named = sources(&[
+            "--exec_log",
+            "e.zst",
+            "--profile",
+            "p.gz",
+            "--bep",
+            "b.bep",
+            "--aquery",
+            "a.pb",
+        ])
+        .unwrap();
         assert_eq!(
             named,
             graph(
                 &[(InputKind::Aquery, "a.pb")],
-                vec![trace("p.gz"), console("b.bep")]
+                vec![trace("p.gz"), console("b.bep"), exec_log("e.zst")]
             )
         );
     }
@@ -186,7 +212,14 @@ mod tests {
     #[test]
     fn the_flags_keep_their_names() {
         let help = Cli::command().render_long_help().to_string();
-        for flag in ["--aquery", "--cquery", "--query", "--profile", "--bep"] {
+        for flag in [
+            "--aquery",
+            "--cquery",
+            "--query",
+            "--profile",
+            "--bep",
+            "--exec_log",
+        ] {
             assert!(
                 help.contains(&format!("{flag} <FILE>")),
                 "no {flag}: {help}"

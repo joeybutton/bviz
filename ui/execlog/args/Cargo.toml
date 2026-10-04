@@ -1,0 +1,13 @@
+[package]
+name = "bviz_ui_execlog_args"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_ui_execlog_args"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }

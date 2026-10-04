@@ -16,6 +16,8 @@ members = [
     "ui/components",
     "ui/console",
     "ui/console/args",
+    "ui/execlog",
+    "ui/execlog/args",
     "ui/graph",
     "ui/graph/args",
     "ui/shell",

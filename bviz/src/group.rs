@@ -10,9 +10,10 @@ use std::iter;
 pub(crate) enum Kind {
     Profile,
     Bep,
+    ExecLog,
 }
 
-/// A profile or a build event stream.
+/// A file of one of the [`Kind`]s.
 pub(crate) struct File<T> {
     pub(crate) file: T,
     pub(crate) kind: Kind,
@@ -193,6 +194,14 @@ mod tests {
         }
     }
 
+    fn exec_log(name: &'static str, of: Option<&str>) -> File<&'static str> {
+        File {
+            file: name,
+            kind: Kind::ExecLog,
+            invocation: of.map(id),
+        }
+    }
+
     /// The documents `given` opens as, each written as its files' names: a
     /// invocation's as the label it opens under, then its files.
     fn grouped(given: Given<&'static str>) -> Vec<Vec<String>> {
@@ -231,6 +240,19 @@ mod tests {
         assert_eq!(
             files(vec![profile("p", Some(A)), bep("b", Some(A))]),
             [["Invocation a5f7f3e6", "p", "b"]]
+        );
+    }
+
+    #[test]
+    fn an_execution_log_joins_its_invocation() {
+        assert_eq!(
+            files(vec![
+                exec_log("e", Some(A)),
+                profile("p", Some(A)),
+                bep("b", Some(A)),
+                exec_log("e2", Some(A)),
+            ]),
+            [vec!["Invocation a5f7f3e6", "e", "p", "b"], vec!["e2"]]
         );
     }
 

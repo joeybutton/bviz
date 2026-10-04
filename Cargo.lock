@@ -864,6 +864,7 @@ dependencies = [
  "bviz_cli",
  "bviz_invocation",
  "bviz_ui_console",
+ "bviz_ui_execlog",
  "bviz_ui_graph",
  "bviz_ui_trace",
  "bviz_ui_workspace",
@@ -884,6 +885,7 @@ name = "bviz_cli"
 version = "0.1.0"
 dependencies = [
  "bviz_ui_console_args",
+ "bviz_ui_execlog_args",
  "bviz_ui_graph_args",
  "bviz_ui_trace_args",
  "clap",
@@ -1027,6 +1029,28 @@ dependencies = [
 
 [[package]]
 name = "bviz_ui_console_args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "bviz_ui_execlog"
+version = "0.1.0"
+dependencies = [
+ "bviz_alloc",
+ "bviz_execlog",
+ "bviz_invocation",
+ "bviz_ui_components",
+ "bviz_ui_execlog_args",
+ "bviz_ui_theme",
+ "bviz_ui_workspace",
+ "clap",
+ "gpui",
+]
+
+[[package]]
+name = "bviz_ui_execlog_args"
 version = "0.1.0"
 dependencies = [
  "clap",

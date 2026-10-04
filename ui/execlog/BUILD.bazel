@@ -1,0 +1,38 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "execlog_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_name = "bviz_ui_execlog",
+    visibility = ["//bviz:__pkg__"],
+    deps = [
+        "//execlog",
+        "//invocation",
+        "//ui/components",
+        "//ui/execlog/args",
+        "//ui/theme",
+        "//ui/workspace",
+        "@crates//:clap",
+        "@crates//:gpui",
+    ],
+)
+
+rust_binary(
+    name = "execlog",
+    srcs = ["src/main.rs"],
+    crate_name = "bviz_ui_execlog_bin",
+    deps = [
+        ":execlog_lib",
+        "//alloc",
+    ],
+)
+
+rust_test(
+    name = "execlog_test",
+    crate = ":execlog_lib",
+)

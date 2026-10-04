@@ -9,6 +9,7 @@ rust_library(
     visibility = [
         "//ui/components:__pkg__",
         "//ui/console:__pkg__",
+        "//ui/execlog:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/shell:__pkg__",
         "//ui/trace:__pkg__",

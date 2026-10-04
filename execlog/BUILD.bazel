@@ -19,6 +19,7 @@ rust_library(
     name = "execlog",
     srcs = glob(["src/**/*.rs"]) + [":spawn_fields"],
     crate_name = "bviz_execlog",
+    visibility = ["//ui/execlog:__pkg__"],
     deps = [
         "//invocation",
         "//util/parallel",
