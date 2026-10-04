@@ -21,20 +21,39 @@ impl From<Group<'_>> for GroupRow {
     }
 }
 
+/// One runner's spawns, in sum and by mnemonic.
+#[derive(Clone)]
+pub(crate) struct Runner {
+    pub(crate) sum: GroupRow,
+    pub(crate) mnemonics: Vec<GroupRow>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Summary {
     pub(crate) spawns: usize,
     pub(crate) timing: Timing,
     /// Longest first.
-    pub(crate) runners: Vec<GroupRow>,
+    pub(crate) runners: Vec<Runner>,
 }
 
 impl Summary {
     pub(crate) fn of(log: &ExecLog) -> Self {
+        let runners = log
+            .by_runner()
+            .into_iter()
+            .map(|group| Runner {
+                mnemonics: log
+                    .by_mnemonic(group.name)
+                    .into_iter()
+                    .map(GroupRow::from)
+                    .collect(),
+                sum: GroupRow::from(group),
+            })
+            .collect();
         Self {
             spawns: log.spawn_count(),
             timing: log.timing(),
-            runners: log.by_runner().into_iter().map(GroupRow::from).collect(),
+            runners,
         }
     }
 }

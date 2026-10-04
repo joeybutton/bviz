@@ -2,15 +2,18 @@ use crate::format::{duration, exact_duration, phase_name, share};
 use crate::model::ExecLogModel;
 use crate::model::Source;
 use crate::palette::Palette;
-use crate::summary::{GroupRow, Summary};
+use crate::summary::{GroupRow, Runner, Summary};
 use bviz_execlog::{Phase, Timing};
-use bviz_ui_components::{ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar};
+use bviz_ui_components::{
+    Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar,
+};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
-    App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Subscription, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Subscription,
+    Window, div, prelude::*, px, relative,
 };
+use std::cmp::Ordering;
 use std::time::Duration;
 
 const ROW_HEIGHT: Pixels = px(24.);
@@ -23,16 +26,93 @@ const SEGMENT_GAP: Pixels = px(2.);
 const MIN_SEGMENT_WIDTH: Pixels = px(4.);
 const CELL_PAD: Pixels = px(6.);
 const SWATCH: Pixels = px(10.);
+const CARET: Pixels = px(12.);
 const NAME_WIDTH: Pixels = px(220.);
 const NUMBER_WIDTH: Pixels = px(110.);
 const NOTE_WIDTH: Pixels = px(110.);
 
-/// The spawn time of an execution log by phase, summed per runner.
+/// What a table of groups is ordered by.
+#[derive(Clone, Copy, PartialEq)]
+enum SortBy {
+    Name,
+    Spawns,
+    Time,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct Sort {
+    by: SortBy,
+    descending: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort {
+            by: SortBy::Time,
+            descending: true,
+        }
+    }
+}
+
+impl Sort {
+    /// The sort a click on `by`'s title asks for: the other direction where
+    /// the table is sorted by it, and otherwise names from the start of the
+    /// alphabet and counts from the largest.
+    fn clicked(self, by: SortBy) -> Sort {
+        if self.by == by {
+            Sort {
+                by,
+                descending: !self.descending,
+            }
+        } else {
+            Sort {
+                by,
+                descending: by != SortBy::Name,
+            }
+        }
+    }
+
+    /// Rows equal in what the sort is by go in order of name.
+    fn cmp(self, a: &GroupRow, b: &GroupRow) -> Ordering {
+        let by = match self.by {
+            SortBy::Name => a.name.cmp(&b.name),
+            SortBy::Spawns => a.spawns.cmp(&b.spawns),
+            SortBy::Time => a.timing.total().cmp(&b.timing.total()),
+        };
+        let by = if self.descending { by.reverse() } else { by };
+        by.then_with(|| a.name.cmp(&b.name))
+    }
+
+    fn apply(self, rows: &mut [GroupRow]) {
+        rows.sort_by(|a, b| self.cmp(a, b));
+    }
+}
+
+/// What the panel shows of a loaded log.
+struct Shown {
+    summary: Summary,
+    /// Picks the runner, of the summary's, whose spawns the mnemonic table
+    /// sums: one runner's spawns report one set of phases, where several
+    /// runners' might mix sets.
+    runner_picker: Entity<Dropdown>,
+    _runner_picked: Subscription,
+    sort: Sort,
+}
+
+impl Shown {
+    /// The runner the mnemonic table sums the spawns of.
+    fn runner(&self, cx: &App) -> &Runner {
+        &self.summary.runners[self.runner_picker.read(cx).selected()]
+    }
+}
+
+/// The spawn time of an execution log by phase, summed per runner and per
+/// mnemonic.
 pub struct SpawnTimePanel {
     focus: FocusHandle,
     model: Entity<ExecLogModel>,
     /// `None` until the log is loaded, the model's placeholder showing instead.
-    shown: Option<Summary>,
+    shown: Option<Shown>,
     scroll: ListScroll,
     _model_observer: Subscription,
 }
@@ -58,12 +138,43 @@ impl SpawnTimePanel {
         if self.shown.is_some() {
             return;
         }
-        if let Source::Loaded(summary) = self.model.read(cx).source() {
-            self.shown = Some(summary.clone());
+        let Source::Loaded(summary) = self.model.read(cx).source() else {
+            return;
+        };
+        let mut summary = summary.clone();
+        let sort = Sort::default();
+        for runner in &mut summary.runners {
+            sort.apply(&mut runner.mnemonics);
+        }
+        let names: Vec<SharedString> = summary
+            .runners
+            .iter()
+            .map(|runner| runner.sum.name.clone())
+            .collect();
+        let runner_picker = cx.new(|cx| Dropdown::new("mnemonic-runner", names, 0, cx));
+        let runner_picked = cx.subscribe(&runner_picker, |_, _, _: &DropdownEvent, cx| {
+            cx.notify();
+        });
+        self.shown = Some(Shown {
+            summary,
+            runner_picker,
+            _runner_picked: runner_picked,
+            sort,
+        });
+    }
+
+    fn sort_mnemonics(&mut self, by: SortBy, cx: &mut Context<Self>) {
+        if let Some(shown) = &mut self.shown {
+            shown.sort = shown.sort.clicked(by);
+            for runner in &mut shown.summary.runners {
+                shown.sort.apply(&mut runner.mnemonics);
+            }
+            cx.notify();
         }
     }
 
-    fn body(&self, summary: &Summary, palette: &Palette, cx: &mut Context<Self>) -> Div {
+    fn body(&self, shown: &Shown, palette: &Palette, cx: &mut Context<Self>) -> Div {
+        let summary = &shown.summary;
         let content = div()
             .id("spawn-time")
             .flex()
@@ -83,11 +194,26 @@ impl SpawnTimePanel {
                             .child("The log holds no spawn."),
                     );
                 }
-                content.child(section(
-                    "By runner",
-                    group_table("runner", "Runner", &summary.runners, palette),
-                    palette,
-                ))
+                let runners: Vec<GroupRow> =
+                    summary.runners.iter().map(|r| r.sum.clone()).collect();
+                content
+                    .child(section(
+                        "By runner",
+                        None,
+                        group_table("runner", plain_header("Runner", palette), &runners, palette),
+                        palette,
+                    ))
+                    .child(section(
+                        "By mnemonic",
+                        Some(labelled("Runner", shown.runner_picker.clone())),
+                        group_table(
+                            "mnemonic",
+                            sorting_header(shown.sort, palette, cx),
+                            &shown.runner(cx).mnemonics,
+                            palette,
+                        ),
+                        palette,
+                    ))
             });
         div()
             .relative()
@@ -150,8 +276,24 @@ fn header(summary: &Summary, palette: &Palette) -> Div {
         )
 }
 
-/// A titled part of the panel.
-fn section(title: &'static str, content: impl IntoElement, palette: &Palette) -> Div {
+/// `control` behind a label naming what it picks.
+fn labelled(label: &'static str, control: impl IntoElement) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(label)
+        .child(control)
+        .into_any_element()
+}
+
+/// A titled part of the panel, with the controls acting on it beside the title.
+fn section(
+    title: &'static str,
+    controls: Option<AnyElement>,
+    content: impl IntoElement,
+    palette: &Palette,
+) -> Div {
     div()
         .flex()
         .flex_col()
@@ -164,7 +306,8 @@ fn section(title: &'static str, content: impl IntoElement, palette: &Palette) ->
                 .pb_1()
                 .border_b_1()
                 .border_color(palette.colors.border)
-                .child(div().text_base().child(title)),
+                .child(div().text_base().child(title))
+                .children(controls),
         )
         .child(content)
 }
@@ -237,29 +380,79 @@ fn row(id: impl Into<ElementId>, cells: impl IntoIterator<Item = Div>) -> Statef
         .children(cells)
 }
 
-fn header_row(titles: [&'static str; GROUP_COLUMNS.len()], palette: &Palette) -> Div {
+/// The titles of [`GROUP_COLUMNS`] after the first, which names what the
+/// table groups by.
+const GROUP_TITLES: [&str; GROUP_COLUMNS.len() - 1] = ["Spawns", "Spawn time", "By phase", ""];
+
+fn header_row(cells: impl IntoIterator<Item = impl IntoElement>, palette: &Palette) -> Div {
     div()
         .flex()
         .flex_row()
         .w_full()
         .h(ROW_HEIGHT)
         .text_color(palette.colors.text_muted)
-        .children(
-            GROUP_COLUMNS
-                .into_iter()
-                .zip(titles)
-                .map(|(column, title)| cell(column, title)),
-        )
+        .children(cells)
 }
 
-/// One row per group of `rows`, each bar as long against the longest as its
-/// spawn time is.
-fn group_table(
-    id: &'static str,
-    name_title: &'static str,
-    rows: &[GroupRow],
-    palette: &Palette,
-) -> Div {
+/// The header of a table no title of which sorts it.
+fn plain_header(name_title: &'static str, palette: &Palette) -> Div {
+    let titles = std::iter::once(name_title).chain(GROUP_TITLES);
+    header_row(
+        GROUP_COLUMNS
+            .into_iter()
+            .zip(titles)
+            .map(|(column, title)| cell(column, title)),
+        palette,
+    )
+}
+
+/// The header of a table of mnemonics, whose titles but the bar's and the
+/// note's sort it.
+fn sorting_header(sort: Sort, palette: &Palette, cx: &mut Context<SpawnTimePanel>) -> Div {
+    let [name, spawns, time, bar, note] = GROUP_COLUMNS;
+    let [spawns_title, time_title, bar_title, note_title] = GROUP_TITLES;
+    let sorting = |column: Column, title: &'static str, by: SortBy| {
+        let caret = (sort.by == by).then(|| {
+            let icon = if sort.descending {
+                "caret-down"
+            } else {
+                "caret-up"
+            };
+            bviz_ui_assets::icon(icon)
+                .size(CARET)
+                .flex_shrink_0()
+                .text_color(palette.colors.text_muted)
+        });
+        let content = div().flex().items_center().gap_1();
+        // The caret stands on the side away from the title's alignment, so
+        // the title holds still as the sort moves between columns.
+        let content = if column.numeric {
+            content.children(caret).child(title)
+        } else {
+            content.child(title).children(caret)
+        };
+        cell(column, content)
+            .id(title)
+            .cursor_pointer()
+            .hover(|style| style.bg(palette.colors.element_hover))
+            .on_click(cx.listener(move |panel, _, _, cx| panel.sort_mnemonics(by, cx)))
+            .into_any_element()
+    };
+    header_row(
+        [
+            sorting(name, "Mnemonic", SortBy::Name),
+            sorting(spawns, spawns_title, SortBy::Spawns),
+            sorting(time, time_title, SortBy::Time),
+            cell(bar, bar_title).into_any_element(),
+            cell(note, note_title).into_any_element(),
+        ],
+        palette,
+    )
+}
+
+/// One row per group of `rows` under `header`, each bar as long against the
+/// longest as its spawn time is.
+fn group_table(id: &'static str, header: Div, rows: &[GroupRow], palette: &Palette) -> Div {
     let longest = rows
         .iter()
         .map(|row| row.timing.total())
@@ -284,14 +477,7 @@ fn group_table(
             ],
         )
     });
-    div()
-        .flex()
-        .flex_col()
-        .child(header_row(
-            [name_title, "Spawns", "Spawn time", "By phase", ""],
-            palette,
-        ))
-        .children(body)
+    div().flex().flex_col().child(header).children(body)
 }
 
 /// `timing` as a bar of its phases, as long against the bar for `longest` as
@@ -417,5 +603,60 @@ impl Render for SpawnTimePanel {
             Some(shown) => panel.child(self.body(shown, &palette, cx)),
             None => panel.children(self.model.read(cx).source().placeholder(&palette.colors)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(named: &[(&str, usize)]) -> Vec<GroupRow> {
+        named
+            .iter()
+            .map(|&(name, spawns)| GroupRow {
+                name: name.to_owned().into(),
+                spawns,
+                timing: Timing::default(),
+            })
+            .collect()
+    }
+
+    fn names(rows: &[GroupRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.name.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_click_on_a_new_title_sorts_names_up_and_counts_down() {
+        let by_name = Sort::default().clicked(SortBy::Name);
+        assert!(!by_name.descending);
+        assert!(by_name.clicked(SortBy::Spawns).descending);
+    }
+
+    #[test]
+    fn a_click_on_the_sorting_title_turns_the_order_round() {
+        let by_spawns = Sort::default().clicked(SortBy::Spawns);
+        assert!(!by_spawns.clicked(SortBy::Spawns).descending);
+        assert!(!Sort::default().clicked(SortBy::Time).descending);
+    }
+
+    #[test]
+    fn rows_take_the_order_of_their_sort() {
+        let mut table = rows(&[("CppLink", 2), ("CppCompile", 9), ("Genrule", 4)]);
+        Sort::default().clicked(SortBy::Name).apply(&mut table);
+        assert_eq!(names(&table), ["CppCompile", "CppLink", "Genrule"]);
+        Sort::default().clicked(SortBy::Spawns).apply(&mut table);
+        assert_eq!(names(&table), ["CppCompile", "Genrule", "CppLink"]);
+    }
+
+    #[test]
+    fn ties_go_in_order_of_name_either_way() {
+        let mut table = rows(&[("b", 1), ("c", 2), ("a", 1)]);
+        let ascending = Sort::default()
+            .clicked(SortBy::Spawns)
+            .clicked(SortBy::Spawns);
+        ascending.apply(&mut table);
+        assert_eq!(names(&table), ["a", "b", "c"]);
+        ascending.clicked(SortBy::Spawns).apply(&mut table);
+        assert_eq!(names(&table), ["c", "a", "b"]);
     }
 }

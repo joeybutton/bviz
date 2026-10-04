@@ -1,6 +1,7 @@
 //! Shows where the spawns of a Bazel build spent their time, read from a
 //! compact execution log (`--execution_log_compact_file`): the time Bazel's
-//! spawn metrics report for each phase of a spawn's run, summed by runner.
+//! spawn metrics report for each phase of a spawn's run, summed by runner and
+//! by mnemonic.
 
 mod format;
 mod model;

@@ -1041,6 +1041,7 @@ dependencies = [
  "bviz_alloc",
  "bviz_execlog",
  "bviz_invocation",
+ "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_execlog_args",
  "bviz_ui_theme",

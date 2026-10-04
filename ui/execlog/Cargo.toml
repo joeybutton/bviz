@@ -19,6 +19,7 @@ gpui = { workspace = true }
 bviz_alloc = { path = "../../alloc" }
 bviz_execlog = { path = "../../execlog" }
 bviz_invocation = { workspace = true }
+bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
 bviz_ui_execlog_args = { path = "args" }
 bviz_ui_theme = { path = "../theme" }
