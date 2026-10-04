@@ -24,6 +24,7 @@ type Chosen = Rc<dyn Fn(&mut Window, &mut App)>;
 pub struct MenuItem {
     label: SharedString,
     opens: Opens,
+    keys: Option<SharedString>,
 }
 
 enum Opens {
@@ -42,6 +43,7 @@ impl MenuItem {
         Self {
             label: label.into(),
             opens: Opens::Nothing(Rc::new(chosen)),
+            keys: None,
         }
     }
 
@@ -50,6 +52,7 @@ impl MenuItem {
         Self {
             label: label.into(),
             opens: Opens::Disabled,
+            keys: None,
         }
     }
 
@@ -58,7 +61,14 @@ impl MenuItem {
         Self {
             label: label.into(),
             opens: Opens::Submenu(items),
+            keys: None,
         }
+    }
+
+    /// The row naming `keys` as what its choice answers to outside the menu.
+    pub fn keys(mut self, keys: impl Into<SharedString>) -> Self {
+        self.keys = Some(keys.into());
+        self
     }
 }
 
@@ -362,13 +372,24 @@ impl Menu {
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.take(aim, window, cx)))
             .child(div().whitespace_nowrap().child(laid.label.clone()))
-            .child(menu_chrome::submenu_mark(colors, laid.opens_submenu))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(LABEL_GAP)
+                    .children(laid.keys.map(|keys| {
+                        let keys = div().whitespace_nowrap().child(keys.clone());
+                        keys.text_color(colors.text_muted)
+                    }))
+                    .child(menu_chrome::submenu_mark(colors, laid.opens_submenu)),
+            )
     }
 }
 
 /// One row of a list as a frame lays it out.
 struct Laid<'a> {
     label: &'a SharedString,
+    keys: Option<&'a SharedString>,
     opens_submenu: bool,
     disabled: bool,
     aim: Aim,
@@ -544,17 +565,22 @@ fn within(at: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels
     sides.iter().all(|side| *side >= 0.0) || sides.iter().all(|side| *side <= 0.0)
 }
 
-/// How wide the rows reading `labels` are laid out: room for the widest of
-/// them in the menu's own face, for what a row keeps at its ends, and for the
-/// mark a row opening a submenu carries.
+/// How wide the rows reading `labels` and naming `keys` are laid out: room
+/// for the widest of either in the menu's own face, for what a row keeps at
+/// its ends, and for the mark a row opening a submenu carries.
 fn list_width<'a>(
     labels: impl IntoIterator<Item = &'a SharedString>,
+    keys: impl IntoIterator<Item = &'a SharedString>,
     window: &mut Window,
 ) -> Pixels {
-    let widest = in_face(window, |window| {
-        menu_chrome::widest(window, labels.into_iter().cloned())
+    let mut keys = keys.into_iter().cloned().peekable();
+    let (label, keys) = in_face(window, |window| {
+        let label = menu_chrome::widest(window, labels.into_iter().cloned());
+        let named = keys.peek().is_some();
+        let keys = named.then(|| menu_chrome::widest(window, keys) + LABEL_GAP);
+        (label, keys.unwrap_or_default())
     });
-    widest + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
+    label + keys + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
 }
 
 /// How tall a list of `rows` rows each `row` tall is laid out in a window of
@@ -631,14 +657,18 @@ impl Render for Menu {
         let viewport = window.viewport_size();
         let row_height = in_face(window, |window| menu_chrome::row_height(window));
         let extent = size(
-            list_width(self.items.iter().map(|item| &item.label), window),
+            list_width(
+                self.items.iter().map(|item| &item.label),
+                self.items.iter().filter_map(|item| item.keys.as_ref()),
+                window,
+            ),
             list_height(self.items.len(), row_height, viewport),
         );
         let frame = opened(self.at, self.at, extent, viewport);
         let open = self.aim.on_menu().and_then(|under| {
             let items = self.submenu(under)?;
             let extent = size(
-                list_width(items.iter().map(|item| &item.label), window),
+                list_width(items.iter().map(|item| &item.label), [], window),
                 list_height(items.len(), row_height, viewport),
             );
             let scrolled = self.list_scroll.offset().y;
@@ -654,6 +684,7 @@ impl Render for Menu {
             .enumerate()
             .map(|(row, item)| Laid {
                 label: &item.label,
+                keys: item.keys.as_ref(),
                 opens_submenu: matches!(item.opens, Opens::Submenu(_)),
                 disabled: matches!(item.opens, Opens::Disabled),
                 aim: Aim::Row(row),
@@ -666,6 +697,7 @@ impl Render for Menu {
                 .enumerate()
                 .map(|(row, item)| Laid {
                     label: &item.label,
+                    keys: None,
                     opens_submenu: false,
                     disabled: false,
                     aim: Aim::Under { under, row },
