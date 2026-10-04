@@ -28,6 +28,8 @@ pub struct MenuItem {
 
 enum Opens {
     Nothing(Chosen),
+    /// Nothing, the row being disabled.
+    Disabled,
     Submenu(Vec<SubmenuItem>),
 }
 
@@ -40,6 +42,14 @@ impl MenuItem {
         Self {
             label: label.into(),
             opens: Opens::Nothing(Rc::new(chosen)),
+        }
+    }
+
+    /// A row reading `label` in the muted ink, which taking does nothing.
+    pub fn disabled(label: impl Into<SharedString>) -> Self {
+        Self {
+            label: label.into(),
+            opens: Opens::Disabled,
         }
     }
 
@@ -252,14 +262,14 @@ impl Menu {
         }
     }
 
-    /// How many rows each row of the menu opens beside itself, `None` where it
-    /// opens none.
-    fn shape(&self) -> Vec<Option<usize>> {
+    /// What each row of the menu is to the keys and the clicks taking it.
+    fn shape(&self) -> Vec<Shape> {
         self.items
             .iter()
             .map(|item| match &item.opens {
-                Opens::Nothing(_) => None,
-                Opens::Submenu(items) => Some(items.len()),
+                Opens::Nothing(_) => Shape::Choice,
+                Opens::Disabled => Shape::Disabled,
+                Opens::Submenu(items) => Shape::Opens(items.len()),
             })
             .collect()
     }
@@ -271,7 +281,7 @@ impl Menu {
             Aim::Away => None,
             Aim::Row(row) => match &self.items.get(row)?.opens {
                 Opens::Nothing(chosen) => Some(chosen.clone()),
-                Opens::Submenu(_) => None,
+                Opens::Disabled | Opens::Submenu(_) => None,
             },
             Aim::Under { under, row } => Some(self.submenu(under)?.get(row)?.chosen.clone()),
         }
@@ -281,7 +291,7 @@ impl Menu {
     fn submenu(&self, under: usize) -> Option<&Vec<SubmenuItem>> {
         match &self.items.get(under)?.opens {
             Opens::Submenu(items) => Some(items),
-            Opens::Nothing(_) => None,
+            Opens::Nothing(_) | Opens::Disabled => None,
         }
     }
 
@@ -338,12 +348,17 @@ impl Menu {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let aim = laid.aim;
+        // A disabled row is never aimed at, so a cursor over it aims at none.
+        let hovered = if laid.disabled { Aim::Away } else { aim };
         menu_chrome::aimed_row(("menu-row", row).into(), colors, aimed)
+            .when(laid.disabled, |row| {
+                row.text_color(colors.text_muted).cursor_default()
+            })
             .justify_between()
             .flex_none()
             .gap(LABEL_GAP)
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                this.aim_at_cursor(aim, event.position, cx);
+                this.aim_at_cursor(hovered, event.position, cx);
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.take(aim, window, cx)))
             .child(div().whitespace_nowrap().child(laid.label.clone()))
@@ -351,11 +366,11 @@ impl Menu {
     }
 }
 
-/// One row of a list as a frame lays it out: how it reads, whether it opens a
-/// submenu, and the aim that names it.
+/// One row of a list as a frame lays it out.
 struct Laid<'a> {
     label: &'a SharedString,
     opens_submenu: bool,
+    disabled: bool,
     aim: Aim,
 }
 
@@ -395,10 +410,21 @@ enum Asked {
     Close,
 }
 
-/// What taking the row `aim` names comes to, `shape` giving how many rows each
-/// row of the menu opens beside itself: a row opening a submenu opens it at its
-/// first row, and any other runs what it stands for.
-fn taken(aim: Aim, shape: &[Option<usize>]) -> Asked {
+/// What a row of a menu is to the keys and the clicks taking it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shape {
+    /// A row running what it stands for.
+    Choice,
+    /// A row that cannot be taken, which the keys walk past.
+    Disabled,
+    /// A row opening a submenu of that many rows.
+    Opens(usize),
+}
+
+/// What taking the row `aim` names comes to, out of a menu of `shape`: a row
+/// opening a submenu opens it at its first row, and any other runs what it
+/// stands for.
+fn taken(aim: Aim, shape: &[Shape]) -> Asked {
     match aim {
         Aim::Away => Asked::At(aim),
         Aim::Row(under) if opens(shape, under).is_some() => Asked::At(Aim::Under { under, row: 0 }),
@@ -408,7 +434,7 @@ fn taken(aim: Aim, shape: &[Option<usize>]) -> Asked {
 
 /// What `key` asks of a menu aimed at `aim`, out of a menu of `shape`. `None`
 /// for a key a menu makes nothing of.
-fn asked_by(key: &str, aim: Aim, shape: &[Option<usize>]) -> Option<Asked> {
+fn asked_by(key: &str, aim: Aim, shape: &[Shape]) -> Option<Asked> {
     Some(match key {
         "down" => Asked::At(walked(aim, 1, shape)),
         "up" => Asked::At(walked(aim, -1, shape)),
@@ -436,21 +462,39 @@ fn asked_by(key: &str, aim: Aim, shape: &[Option<usize>]) -> Option<Asked> {
 
 /// How many rows the row at `under` opens beside itself, where it opens any at
 /// all. A row opening an empty list opens nothing to aim at.
-fn opens(shape: &[Option<usize>], under: usize) -> Option<usize> {
-    shape.get(under).copied().flatten().filter(|rows| *rows > 0)
+fn opens(shape: &[Shape], under: usize) -> Option<usize> {
+    match shape.get(under) {
+        Some(&Shape::Opens(rows)) if rows > 0 => Some(rows),
+        _ => None,
+    }
 }
 
 /// The aim `by` steps from `aim` through the list it stands in, out of a menu
-/// of `shape`. An aim with nowhere to step stays where it is.
-fn walked(aim: Aim, by: isize, shape: &[Option<usize>]) -> Aim {
+/// of `shape`, past any disabled row. An aim with nowhere to step stays where
+/// it is.
+fn walked(aim: Aim, by: isize, shape: &[Shape]) -> Aim {
     match aim {
         Aim::Under { under, row } => {
             let rows = opens(shape, under).unwrap_or(0);
             stepped(Some(row), by, rows).map_or(aim, |row| Aim::Under { under, row })
         }
-        Aim::Row(row) => stepped(Some(row), by, shape.len()).map_or(aim, Aim::Row),
-        Aim::Away => stepped(None, by, shape.len()).map_or(aim, Aim::Row),
+        Aim::Row(row) => stepped_live(Some(row), by, shape).map_or(aim, Aim::Row),
+        Aim::Away => stepped_live(None, by, shape).map_or(aim, Aim::Row),
     }
+}
+
+/// The first row of the menu of `shape` that is not disabled, stepping `by`
+/// from `row` as [`stepped`] does; `None` where every row is disabled.
+fn stepped_live(row: Option<usize>, by: isize, shape: &[Shape]) -> Option<usize> {
+    let mut at = row;
+    for _ in 0..shape.len() {
+        let next = stepped(at, by, shape.len())?;
+        if shape[next] != Shape::Disabled {
+            return Some(next);
+        }
+        at = Some(next);
+    }
+    None
 }
 
 /// The row `by` steps from `row` of a list of `rows` rows, wrapping at either
@@ -611,6 +655,7 @@ impl Render for Menu {
             .map(|(row, item)| Laid {
                 label: &item.label,
                 opens_submenu: matches!(item.opens, Opens::Submenu(_)),
+                disabled: matches!(item.opens, Opens::Disabled),
                 aim: Aim::Row(row),
             })
             .collect();
@@ -622,6 +667,7 @@ impl Render for Menu {
                 .map(|(row, item)| Laid {
                     label: &item.label,
                     opens_submenu: false,
+                    disabled: false,
                     aim: Aim::Under { under, row },
                 })
                 .collect();
@@ -663,7 +709,7 @@ mod tests {
     };
 
     /// A menu of three rows, the second of which opens a submenu of two.
-    const SHAPE: [Option<usize>; 3] = [None, Some(2), None];
+    const SHAPE: [Shape; 3] = [Shape::Choice, Shape::Opens(2), Shape::Choice];
 
     /// Where a menu asked for at (`x`, `y`) of `WINDOW` opens a `LIST`.
     fn at(x: f32, y: f32) -> Bounds<Pixels> {
@@ -880,11 +926,30 @@ mod tests {
         assert_eq!(asked_by("tab", Aim::Away, &SHAPE), None);
     }
 
+    /// The keys walk past a disabled row, and leave the aim where it is in a
+    /// menu of disabled rows alone.
+    #[test]
+    fn walking_a_list_passes_over_its_disabled_rows() {
+        let shape = [
+            Shape::Choice,
+            Shape::Disabled,
+            Shape::Disabled,
+            Shape::Choice,
+        ];
+        assert_eq!(walked(Aim::Row(0), 1, &shape), Aim::Row(3));
+        assert_eq!(walked(Aim::Row(3), -1, &shape), Aim::Row(0));
+        assert_eq!(walked(Aim::Row(3), 1, &shape), Aim::Row(0));
+        let starts_disabled = [Shape::Disabled, Shape::Choice];
+        assert_eq!(walked(Aim::Away, 1, &starts_disabled), Aim::Row(1));
+        let none_live = [Shape::Disabled, Shape::Disabled];
+        assert_eq!(walked(Aim::Away, 1, &none_live), Aim::Away);
+    }
+
     /// A row opening an empty list opens nothing to aim at, so taking it is
     /// neither a choice nor a list to walk.
     #[test]
     fn a_row_opening_an_empty_list_opens_nothing() {
-        let shape = [Some(0)];
+        let shape = [Shape::Opens(0)];
         assert_eq!(
             asked_by("right", Aim::Row(0), &shape),
             Some(Asked::At(Aim::Row(0)))
