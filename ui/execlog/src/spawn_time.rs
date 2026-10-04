@@ -2,7 +2,7 @@ use crate::format::{duration, exact_duration, phase_name, share};
 use crate::model::ExecLogModel;
 use crate::model::Source;
 use crate::palette::Palette;
-use crate::summary::{GroupRow, Runner, Summary};
+use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, Timing};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar,
@@ -17,6 +17,7 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 const ROW_HEIGHT: Pixels = px(24.);
+const TWO_LINE_ROW_HEIGHT: Pixels = px(44.);
 const BAR_HEIGHT: Pixels = px(14.);
 /// The canvas showing between two segments of a bar, so neighbouring phases
 /// part by more than their colours.
@@ -97,6 +98,9 @@ struct Shown {
     runner_picker: Entity<Dropdown>,
     _runner_picked: Subscription,
     sort: Sort,
+    /// Picks the phase the list of spawns longest in a phase ranks by.
+    phase_picker: Entity<Dropdown>,
+    _phase_picked: Subscription,
 }
 
 impl Shown {
@@ -104,10 +108,14 @@ impl Shown {
     fn runner(&self, cx: &App) -> &Runner {
         &self.summary.runners[self.runner_picker.read(cx).selected()]
     }
+
+    fn phase(&self, cx: &App) -> Phase {
+        Phase::ALL[self.phase_picker.read(cx).selected()]
+    }
 }
 
-/// The spawn time of an execution log by phase, summed per runner and per
-/// mnemonic.
+/// The spawn time of an execution log by phase: summed per runner and per
+/// mnemonic, and the spawns that spent longest in one phase.
 pub struct SpawnTimePanel {
     focus: FocusHandle,
     model: Entity<ExecLogModel>,
@@ -155,11 +163,19 @@ impl SpawnTimePanel {
         let runner_picked = cx.subscribe(&runner_picker, |_, _, _: &DropdownEvent, cx| {
             cx.notify();
         });
+        let phase = summary.longest_phase();
+        let phase_picker =
+            cx.new(|cx| Dropdown::new("top-phase", Phase::ALL.map(phase_name), phase.index(), cx));
+        let phase_picked = cx.subscribe(&phase_picker, |_, _, _: &DropdownEvent, cx| {
+            cx.notify();
+        });
         self.shown = Some(Shown {
             summary,
             runner_picker,
             _runner_picked: runner_picked,
             sort,
+            phase_picker,
+            _phase_picked: phase_picked,
         });
     }
 
@@ -196,6 +212,7 @@ impl SpawnTimePanel {
                 }
                 let runners: Vec<GroupRow> =
                     summary.runners.iter().map(|r| r.sum.clone()).collect();
+                let phase = shown.phase(cx);
                 content
                     .child(section(
                         "By runner",
@@ -212,6 +229,12 @@ impl SpawnTimePanel {
                             &shown.runner(cx).mnemonics,
                             palette,
                         ),
+                        palette,
+                    ))
+                    .child(section(
+                        "Longest in a phase",
+                        Some(labelled("Phase", shown.phase_picker.clone())),
+                        top_table(phase, &summary.top[phase.index()], palette),
                         palette,
                     ))
             });
@@ -476,6 +499,67 @@ fn group_table(id: &'static str, header: Div, rows: &[GroupRow], palette: &Palet
                 ),
             ],
         )
+    });
+    div().flex().flex_col().child(header).children(body)
+}
+
+/// The columns of the list of spawns longest in a phase: its time in the
+/// phase, its mnemonic, its runner, and what the spawn made.
+const TOP_COLUMNS: [Column; 4] = [
+    number(Width::Fixed(NUMBER_WIDTH)),
+    text(Width::Fixed(NAME_WIDTH)),
+    text(Width::Fixed(NAME_WIDTH)),
+    text(Width::Rest),
+];
+
+/// A line of a cell, cut short where the cell runs out of room for it.
+fn line(text: SharedString) -> Div {
+    div().min_w_0().text_ellipsis().child(text)
+}
+
+/// `spawns`, longest in `phase` first, each named by its target and output.
+fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
+    if spawns.is_empty() {
+        return div()
+            .text_color(palette.colors.text_muted)
+            .child(format!("No spawn spent time in {}.", phase_name(phase)));
+    }
+    let [time, mnemonic, runner, made] = TOP_COLUMNS;
+    let titles = ["Time in phase", "Mnemonic", "Runner", "Target and output"];
+    let header = header_row(
+        TOP_COLUMNS
+            .into_iter()
+            .zip(titles)
+            .map(|(column, title)| cell(column, title)),
+        palette,
+    );
+    let body = spawns.iter().enumerate().map(|(index, spawn)| {
+        let (first, second) = match (&spawn.target_label, &spawn.primary_output) {
+            (Some(label), output) => (label.clone(), output.clone()),
+            (None, Some(output)) => (output.clone(), None),
+            (None, None) => ("no target or output".into(), None),
+        };
+        row(
+            ("top", index),
+            [
+                cell(time, duration(spawn.time)),
+                cell(mnemonic, line(spawn.mnemonic.clone())),
+                cell(runner, line(spawn.runner.clone())),
+                cell(
+                    made,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(line(first))
+                        .children(second.map(|output| {
+                            line(output).text_xs().text_color(palette.colors.text_muted)
+                        })),
+                ),
+            ],
+        )
+        .h(TWO_LINE_ROW_HEIGHT)
     });
     div().flex().flex_col().child(header).children(body)
 }
