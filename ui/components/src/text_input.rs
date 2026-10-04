@@ -35,7 +35,7 @@ gpui::actions!(
 
 /// The key context scoping the text field's own bindings, so a key pressed
 /// while it has focus edits the text rather than reaching an enclosing panel.
-const KEY_CONTEXT: &str = "TextInput";
+pub const KEY_CONTEXT: &str = "TextInput";
 
 /// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {

@@ -57,7 +57,8 @@ pub(crate) fn laid_out_width(measured: Pixels) -> Pixels {
     px(f32::from(measured).ceil()) + TEXT_SLACK
 }
 
-/// Register the key bindings the components rely on (currently the text field's).
+/// Register the key bindings the components rely on.
 pub fn register_keys(cx: &mut App) {
     text_input::bind_keys(cx);
+    multi_select::bind_keys(cx);
 }

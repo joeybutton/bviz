@@ -8,12 +8,28 @@ use crate::scrollbar::{SCROLLBAR_THICKNESS, ScrollbarColors};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyDownEvent,
+    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
 use std::collections::HashSet;
 use std::ops::Range;
+
+gpui::actions!(bviz_multi_select, [Toggle, Dismiss]);
+
+/// The key context scoping the control's own bindings, so a key pressed while
+/// it has focus works the control rather than an enclosing binding.
+const KEY_CONTEXT: &str = "MultiSelect";
+
+/// Register the multi-select's key bindings.
+pub(crate) fn bind_keys(cx: &mut App) {
+    let ctx = Some(KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("enter", Toggle, ctx),
+        KeyBinding::new("space", Toggle, ctx),
+        KeyBinding::new("escape", Dismiss, ctx),
+    ]);
+}
 
 /// How tall the menu's row list grows before it scrolls. A facet can carry
 /// hundreds of values, so the list is bounded and the rest reached by scrolling.
@@ -320,11 +336,15 @@ impl MultiSelect {
         cx.notify();
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" if self.rows.open => self.set_open(false, window, cx),
-            "enter" | "space" => self.set_open(!self.rows.open, window, cx),
-            _ => {}
+    fn toggle(&mut self, _: &Toggle, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_open(!self.rows.open, window, cx);
+    }
+
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rows.open {
+            self.set_open(false, window, cx);
+        } else {
+            cx.propagate();
         }
     }
 
@@ -586,8 +606,10 @@ impl Render for MultiSelect {
 
         div()
             .relative()
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(Self::toggle))
+            .on_action(cx.listener(Self::dismiss))
             .child(trigger)
             .children(menu)
     }

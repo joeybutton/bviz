@@ -8,8 +8,10 @@ use crate::{
     PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, documents, drag_icon,
     drop, panel_menu,
 };
-use bviz_ui_components::{Divider, DragEnd, Menu, MenuEvent, overlay_canvas, track_drag};
-use bviz_ui_playback::PlaybackBar;
+use bviz_ui_components::{
+    Divider, DragEnd, Menu, MenuEvent, overlay_canvas, text_input, track_drag,
+};
+use bviz_ui_playback::{Clock, PlaybackBar};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -45,6 +47,19 @@ actions!(
         SplitDown,
         EvenSplit,
         ResetArrangement
+    ]
+);
+
+actions!(
+    bviz_playback,
+    [
+        PlayPause,
+        StepBack,
+        StepForward,
+        SeekStart,
+        SeekEnd,
+        SpeedUp,
+        SpeedDown
     ]
 );
 
@@ -108,6 +123,9 @@ const MARK_FILL: f32 = 0.3;
 const MENU_LAYER: usize = 1;
 
 pub(crate) fn register_keys(cx: &mut App) {
+    // Typed into a text field, the playback keys edit the text.
+    let playback = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let playback = Some(playback.as_str());
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
@@ -129,6 +147,13 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("secondary-k alt-right", SplitRight, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k alt-up", SplitUp, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-k alt-down", SplitDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("space", PlayPause, playback),
+        KeyBinding::new("left", StepBack, playback),
+        KeyBinding::new("right", StepForward, playback),
+        KeyBinding::new("home", SeekStart, playback),
+        KeyBinding::new("end", SeekEnd, playback),
+        KeyBinding::new("]", SpeedUp, playback),
+        KeyBinding::new("[", SpeedDown, playback),
     ]);
 }
 
@@ -1073,6 +1098,22 @@ impl Workspace {
         self.active.read(cx).active_panel().clone()
     }
 
+    /// Applies `gesture` to the clock the active panel's document plays back
+    /// on; where that document has nothing to play, the keystroke goes on to
+    /// the focused element.
+    fn drive_clock(
+        &self,
+        cx: &mut Context<Self>,
+        gesture: impl FnOnce(&mut Clock, &mut Context<Clock>),
+    ) {
+        let document = self.active_panel(cx).document();
+        let documents = Documents::global(cx);
+        match documents.read(cx).playback(document) {
+            Some((_, clock)) if clock.read(cx).timeline().is_some() => clock.update(cx, gesture),
+            _ => cx.propagate(),
+        }
+    }
+
     /// The bar driving the clock `panel`'s document plays back on, kept while
     /// the active panel's document stays the same one, and `None` for a
     /// document that does not play back.
@@ -1973,6 +2014,27 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &ResetArrangement, window, cx| {
                 workspace.reset_arrangement(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &PlayPause, _, cx| {
+                workspace.drive_clock(cx, Clock::play_pause);
+            }))
+            .on_action(cx.listener(|workspace, _: &StepBack, _, cx| {
+                workspace.drive_clock(cx, |clock, cx| clock.step(false, cx));
+            }))
+            .on_action(cx.listener(|workspace, _: &StepForward, _, cx| {
+                workspace.drive_clock(cx, |clock, cx| clock.step(true, cx));
+            }))
+            .on_action(cx.listener(|workspace, _: &SeekStart, _, cx| {
+                workspace.drive_clock(cx, Clock::seek_start);
+            }))
+            .on_action(cx.listener(|workspace, _: &SeekEnd, _, cx| {
+                workspace.drive_clock(cx, Clock::seek_end);
+            }))
+            .on_action(cx.listener(|workspace, _: &SpeedUp, _, cx| {
+                workspace.drive_clock(cx, |clock, cx| clock.shift_speed(1, cx));
+            }))
+            .on_action(cx.listener(|workspace, _: &SpeedDown, _, cx| {
+                workspace.drive_clock(cx, |clock, cx| clock.shift_speed(-1, cx));
             }))
             // Not a listener: `toggle` reads this workspace.
             .on_action({
