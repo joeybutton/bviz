@@ -129,8 +129,6 @@ pub(crate) struct Loaded {
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
-    /// Which of its session's attempts `states` is read from, as
-    /// [`taken_up`](Self::taken_up) is for outcomes.
     attempted: Revision,
 }
 
@@ -186,6 +184,12 @@ impl Loaded {
 
     pub(crate) fn timecard(&self) -> &Timecard {
         &self.timecard
+    }
+
+    /// Which of its session's attempts the [states](Self::states) are read
+    /// from, as [`taken_up`](Self::taken_up) is for outcomes.
+    pub(crate) fn attempted(&self) -> Revision {
+        self.attempted
     }
 
     pub(crate) fn states(&self) -> Option<&NodeStates> {

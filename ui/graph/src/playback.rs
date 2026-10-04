@@ -20,9 +20,11 @@ pub(crate) enum NodeState {
 }
 
 impl NodeState {
-    /// Every state.
-    #[cfg(test)]
-    pub(crate) const ALL: [NodeState; 9] = [
+    const FIRST_IN: usize = 1;
+    const FIRST_DONE: usize = Self::FIRST_IN + Stage::COUNT;
+
+    /// Every state, at its [`index`](Self::index).
+    pub(crate) const ALL: [NodeState; Self::FIRST_DONE + 2] = [
         NodeState::Pending,
         NodeState::In(Stage::Preparing),
         NodeState::In(Stage::CheckingCache),
@@ -33,6 +35,58 @@ impl NodeState {
         NodeState::Done(Done::Executed),
         NodeState::Done(Done::Cached),
     ];
+
+    const fn index(self) -> usize {
+        match self {
+            NodeState::Pending => 0,
+            NodeState::In(stage) => Self::FIRST_IN + stage.index(),
+            NodeState::Done(Done::Executed) => Self::FIRST_DONE,
+            NodeState::Done(Done::Cached) => Self::FIRST_DONE + 1,
+        }
+    }
+
+    /// The name a reader is shown the state by.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            NodeState::Pending => "pending",
+            NodeState::In(Stage::Preparing) => "preparing",
+            NodeState::In(Stage::CheckingCache) => "checking cache",
+            NodeState::In(Stage::Scheduling) => "scheduling",
+            NodeState::In(Stage::Running(Running::Container)) => "running",
+            NodeState::In(Stage::Running(Running::Action(Venue::Local))) => "running locally",
+            NodeState::In(Stage::Running(Running::Action(Venue::Remote))) => "running remotely",
+            NodeState::Done(Done::Executed) => "done, executed",
+            NodeState::Done(Done::Cached) => "done, cached",
+        }
+    }
+}
+
+const _: () = {
+    let mut index = 0;
+    while index < NodeState::ALL.len() {
+        assert!(NodeState::ALL[index].index() == index);
+        index += 1;
+    }
+};
+
+/// A set of [`NodeState`]s, a bit per [`NodeState::index`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct States(u16);
+
+const _: () = assert!(NodeState::ALL.len() <= u16::BITS as usize);
+
+impl States {
+    fn with(self, state: NodeState) -> Self {
+        States(self.0 | 1 << state.index())
+    }
+
+    pub(crate) fn union(self, other: States) -> Self {
+        States(self.0 | other.0)
+    }
+
+    pub(crate) fn contains(self, state: NodeState) -> bool {
+        self.0 & 1 << state.index() != 0
+    }
 }
 
 /// The [`Phase`] a node's attempts have come to, running read as the node's
@@ -43,6 +97,21 @@ pub(crate) enum Stage {
     CheckingCache,
     Scheduling,
     Running(Running),
+}
+
+impl Stage {
+    const COUNT: usize = 6;
+
+    const fn index(self) -> usize {
+        match self {
+            Stage::Preparing => 0,
+            Stage::CheckingCache => 1,
+            Stage::Scheduling => 2,
+            Stage::Running(Running::Container) => 3,
+            Stage::Running(Running::Action(Venue::Local)) => 4,
+            Stage::Running(Running::Action(Venue::Remote)) => 5,
+        }
+    }
 }
 
 /// How a node's box runs.
@@ -176,7 +245,7 @@ impl Held {
     }
 
     /// Each stage the node enters, with when it does, furthest last.
-    fn stages(&self) -> impl Iterator<Item = (EpochMicros, Stage)> {
+    fn stages(&self) -> impl DoubleEndedIterator<Item = (EpochMicros, Stage)> {
         [
             Some((self.start, Stage::Preparing)),
             self.checking_cache.map(|at| (at, Stage::CheckingCache)),
@@ -200,6 +269,22 @@ impl Held {
             .filter(|&(entered, _)| entered <= at)
             .fold(Stage::Preparing, |_, (_, stage)| stage);
         NodeState::In(furthest)
+    }
+
+    /// Every state the node stands at for some time: pending, done, and each
+    /// phase it enters before both its end and a further phase.
+    fn reached(&self) -> States {
+        let mut reached = States::default()
+            .with(NodeState::Pending)
+            .with(NodeState::Done(self.done));
+        let mut until = self.end;
+        for (entered, stage) in self.stages().rev() {
+            if entered < until {
+                reached = reached.with(NodeState::In(stage));
+            }
+            until = until.min(entered);
+        }
+        reached
     }
 }
 
@@ -298,6 +383,12 @@ impl NodeStates {
     /// group's is, reads as such a node.
     pub(crate) fn at(&self, id: Id, at: EpochMicros) -> Option<NodeState> {
         Some(self.held(id)?.at(at))
+    }
+
+    /// Every state the node `id` names may stand at, none where no attempt
+    /// lands on it or on anything it contains.
+    pub(crate) fn reached(&self, id: Id) -> States {
+        self.held(id).map_or(States::default(), Held::reached)
     }
 }
 
@@ -446,6 +537,12 @@ pub(crate) mod tests {
                 Some(NodeState::Done(Done::Executed)),
                 "cached only where every attempt was"
             );
+            assert!(
+                !states
+                    .reached(container)
+                    .contains(NodeState::In(Stage::CheckingCache)),
+                "a phase entered after a further one is never stood in"
+            );
         }
     }
 
@@ -484,6 +581,10 @@ pub(crate) mod tests {
             assert_eq!(state(45), Some(NodeState::In(RUNNING)));
             assert_eq!(state(49), Some(NodeState::In(RUNNING)));
             assert_eq!(state(50), Some(NodeState::Done(Done::Executed)));
+            let seen = swept
+                .iter()
+                .fold(States::default(), |seen, &state| seen.with(state));
+            assert_eq!(states.reached(container), seen);
         }
     }
 
@@ -506,6 +607,10 @@ pub(crate) mod tests {
         let states = built.states();
         for container in [built.target, built.package] {
             assert_eq!(states.at(container, at(50)), Some(NodeState::In(RUNNING)));
+            let reached = states.reached(container);
+            for venue in [RUNNING_LOCALLY, RUNNING_REMOTELY] {
+                assert!(!reached.contains(NodeState::In(venue)), "{venue:?}");
+            }
         }
         let [local, remote] = [built.actions[0], built.actions[1]];
         assert_eq!(
@@ -534,6 +639,8 @@ pub(crate) mod tests {
                 "at {t}"
             );
         }
+        let reached = states.reached(action);
+        assert!(!reached.contains(NodeState::In(RUNNING_LOCALLY)));
 
         let tied = [
             attempt(0, 50, &[(LOCAL, 10)]),
@@ -576,6 +683,16 @@ pub(crate) mod tests {
         assert_eq!(state(52), Some(NodeState::In(Stage::CheckingCache)));
         assert_eq!(state(56), Some(NodeState::In(RUNNING_REMOTELY)));
         assert_eq!(state(60), Some(NodeState::Done(Done::Executed)));
+        let reached = states.reached(action);
+        for state in NodeState::ALL {
+            let expected = matches!(
+                state,
+                NodeState::Pending
+                    | NodeState::In(Stage::Preparing | Stage::CheckingCache | RUNNING_REMOTELY)
+                    | NodeState::Done(Done::Executed)
+            );
+            assert_eq!(reached.contains(state), expected, "{state:?}");
+        }
     }
 
     #[test]
@@ -590,6 +707,7 @@ pub(crate) mod tests {
         ));
         let states = built.states();
         assert_eq!(states.at(unattempted, at(5)), None);
+        assert_eq!(states.reached(unattempted), States::default());
         let group = Id(built.names.len() as u32);
         assert_eq!(states.at(group, at(5)), None);
         assert!(states.at(built.package, at(5)).is_some());

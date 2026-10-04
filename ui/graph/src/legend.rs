@@ -3,7 +3,7 @@ use crate::colour::Colouring;
 use crate::derive::{Drawn, ViewKey};
 use crate::duration::lasted;
 use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
-use crate::playback::NodeStates;
+use crate::playback::{NodeState, NodeStates, States};
 use crate::status::{Status, Statuses};
 use crate::timing::{Extent, NodeTimes, Ran};
 use bviz_graph_layout::transition::Transition;
@@ -119,14 +119,16 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// How a view's boxes are filled, and what they are filled from. `timed` is
-/// the revision of the session's timings `times` was read from.
+/// How a view's boxes are filled, and what they are filled from. `timed` and
+/// `attempted` are the revisions of the session's timings and attempts
+/// `times` and `states` were read from.
 #[derive(Clone, Copy)]
 pub(crate) struct Coloured<'a> {
     pub(crate) colouring: Colouring,
     pub(crate) times: Option<&'a NodeTimes>,
     pub(crate) timed: Revision,
     pub(crate) states: Option<&'a NodeStates>,
+    pub(crate) attempted: Revision,
 }
 
 /// What the fills of a view's boxes say beyond each box's kind.
@@ -150,6 +152,15 @@ enum Reading {
         /// Whether some box of the view wears the untimed fill.
         untimed: bool,
     },
+    /// Where the execution attempts landing on each box stand at the
+    /// playback's time.
+    States {
+        /// Each state some box of the view may stand at over the playback, in
+        /// the order of [`NodeState::ALL`].
+        reached: Vec<NodeState>,
+        /// Whether some box of the view wears the untimed fill.
+        untimed: bool,
+    },
 }
 
 impl Reading {
@@ -161,7 +172,22 @@ impl Reading {
                 .any(|b| !b.compound && times.get(b.id).is_none())
         };
         match Fills::of(coloured.colouring, coloured.times, coloured.states) {
-            Fills::Kind | Fills::Playback(_) => Reading::Kinds,
+            Fills::Kind => Reading::Kinds,
+            Fills::Playback(states) => {
+                let reached = g.boxes.iter().fold(States::default(), |reached, b| {
+                    reached.union(states.reached(b.id))
+                });
+                Reading::States {
+                    reached: NodeState::ALL
+                        .into_iter()
+                        .filter(|&state| reached.contains(state))
+                        .collect(),
+                    untimed: g
+                        .boxes
+                        .iter()
+                        .any(|b| !b.compound && states.reached(b.id) == States::default()),
+                }
+            }
             Fills::Time(times) => {
                 let mut kinds: Vec<Kind> = g
                     .boxes
@@ -217,6 +243,8 @@ struct Found {
     resolved: Revision,
     /// Which of a session's timings the reading was found from.
     timed: Revision,
+    /// Which of a session's attempts the reading was found from.
+    attempted: Revision,
     colouring: Colouring,
     kinds: Vec<EdgeKind>,
     transitions: Vec<Transition>,
@@ -261,6 +289,7 @@ impl Legend {
                 if found.view == view
                     && found.resolved == resolved
                     && found.timed == coloured.timed
+                    && found.attempted == coloured.attempted
                     && found.colouring == coloured.colouring =>
             {
                 found
@@ -271,6 +300,7 @@ impl Legend {
                     view,
                     resolved,
                     timed: coloured.timed,
+                    attempted: coloured.attempted,
                     colouring: coloured.colouring,
                     kinds: present(g),
                     transitions: crossed(g),
@@ -334,9 +364,9 @@ fn note(text: String, palette: &Palette) -> Div {
 /// The rows explaining what the fills read as `reading` says, and how much of
 /// the profile `times` places; empty for fills by kind.
 fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> Vec<Div> {
-    let untimed_row = |width| {
+    let untimed_row = |width, said: &'static str| {
         let fill = palette.untimed_fill(Kind::Action, false);
-        row(fill_swatch(fill, width, palette), "no action time", palette)
+        row(fill_swatch(fill, width, palette), said, palette)
     };
     let mut rows = match reading {
         Reading::Kinds => return Vec::new(),
@@ -351,7 +381,7 @@ fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> V
                 let said = format!("{}: {least} to {most}", kind_name(kind));
                 row(ramp_swatch(palette), said, palette)
             }));
-            rows.extend(untimed.then(|| untimed_row(RAMP_WIDTH)));
+            rows.extend(untimed.then(|| untimed_row(RAMP_WIDTH, "no action time")));
             rows
         }
         Reading::Runners { ran, untimed } => {
@@ -360,7 +390,16 @@ fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> V
                 ran.iter()
                     .map(|&ran| row(ran_swatch(ran, palette), ran.label(), palette)),
             );
-            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH)));
+            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH, "no action time")));
+            rows
+        }
+        Reading::States { reached, untimed } => {
+            let mut rows = Vec::with_capacity(reached.len() + 2);
+            rows.extend(reached.iter().map(|&state| {
+                let fill = fill_swatch(palette.state_fill(state), SWATCH_WIDTH, palette);
+                row(fill, state.label(), palette)
+            }));
+            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH, "no record")));
             rows
         }
     };
@@ -409,13 +448,16 @@ fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::tests::attempt;
+    use crate::playback::{Running, Stage};
     use crate::status::Nodes;
     use crate::timing::landings;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::reduce::transitive_reduction;
     use bviz_graph_layout::{Connector, Graph, Id, Kind, Names, map_layout};
     use bviz_invocation::{
-        BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Session, Spawns, Timings,
+        Attempts, BuildOutcome, ConfiguredTarget, Done, Outcomes, Phase, Profiled, Session, Spawns,
+        Timings, Venue,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -427,6 +469,7 @@ mod tests {
             times: None,
             timed: Revision::default(),
             states: None,
+            attempted: Revision::default(),
         }
     }
 
@@ -545,8 +588,8 @@ mod tests {
     /// A package holding a target that holds a fast remotely executed action
     /// and a slow remote cache hit, beside a target no action lands on, laid
     /// out each as a box of one layered drawing; with the times its profile
-    /// places on them.
-    fn timed() -> (Drawn, NodeTimes) {
+    /// places on them and the states their attempts stand at.
+    fn timed() -> (Drawn, NodeTimes, NodeStates) {
         let mut graph = Graph::new();
         let mut names = Names::default();
         let mut add = |name: &str, kind, parent| {
@@ -573,6 +616,15 @@ mod tests {
         }
         let landings = landings(&graph, &names, &timings);
         let times = NodeTimes::resolve(&landings, &graph, &timings).expect("timed");
+        let mut attempts = Attempts::default();
+        for (primary_output, millis, phase) in [
+            ("fast", 10, Phase::Running(Venue::Remote)),
+            ("slow", 1_000, Phase::CheckingCache),
+        ] {
+            let tried = attempt(0, millis * 1_000, &[(phase, 1)]);
+            attempts.record(Some(primary_output), None, tried);
+        }
+        let states = NodeStates::resolve(&landings, &graph, &attempts).expect("landed");
         let laid = |id: Id, kind, compound| bviz_graph_layout::Box {
             id,
             label: String::new(),
@@ -598,7 +650,7 @@ mod tests {
             view: Arc::new(view),
             drawing: 1,
         };
-        (drawn, times)
+        (drawn, times, states)
     }
 
     fn reading_of(
@@ -613,6 +665,7 @@ mod tests {
             times: Some(times),
             timed,
             states: None,
+            attempted: Revision::default(),
         };
         let found = legend.found(
             drawn,
@@ -626,7 +679,7 @@ mod tests {
 
     #[test]
     fn the_fills_of_a_view_are_explained_as_its_colouring_reads_them() {
-        let (drawn, times) = timed();
+        let (drawn, times, _) = timed();
         let mut legend = Legend::default();
         let timed = Revision::default();
         let extent = |kind| times.extent(kind).expect("a timed kind");
@@ -668,7 +721,7 @@ mod tests {
     /// alone does not say the legend is still right.
     #[test]
     fn a_view_is_scanned_again_once_its_times_are_read_from_other_timings() {
-        let (drawn, times) = timed();
+        let (drawn, times, _) = timed();
         let mut session = Session::default();
         let untimed = session.timings_revision();
         session.report_timings(Timings::default());
@@ -679,6 +732,7 @@ mod tests {
             times: None,
             timed: untimed,
             states: None,
+            attempted: Revision::default(),
         };
         let found = legend.found(
             &drawn,
@@ -691,6 +745,74 @@ mod tests {
 
         let read = reading_of(&mut legend, &drawn, Colouring::Runner, &times, timed);
         assert!(matches!(read, Reading::Runners { .. }), "{read:?}");
+    }
+
+    /// What the legend reads off a view coloured by playback, the states its
+    /// nodes stand at read from the session's attempts at `attempted`.
+    fn played(
+        legend: &mut Legend,
+        drawn: &Drawn,
+        states: Option<&NodeStates>,
+        attempted: Revision,
+    ) -> Reading {
+        let coloured = Coloured {
+            colouring: Colouring::Playback,
+            times: None,
+            timed: Revision::default(),
+            states,
+            attempted,
+        };
+        let found = legend.found(
+            drawn,
+            1.0,
+            &Statuses::default(),
+            Revision::default(),
+            coloured,
+        );
+        found.expect("a derived view").reading.clone()
+    }
+
+    #[test]
+    fn a_view_coloured_by_playback_lists_every_state_its_boxes_may_stand_at() {
+        let (drawn, _, states) = timed();
+        let mut legend = Legend::default();
+        assert_eq!(
+            played(&mut legend, &drawn, Some(&states), Revision::default()),
+            Reading::States {
+                reached: vec![
+                    NodeState::Pending,
+                    NodeState::In(Stage::Preparing),
+                    NodeState::In(Stage::CheckingCache),
+                    NodeState::In(Stage::Running(Running::Container)),
+                    NodeState::In(Stage::Running(Running::Action(Venue::Remote))),
+                    NodeState::Done(Done::Executed),
+                    NodeState::Done(Done::Cached),
+                ],
+                untimed: true,
+            }
+        );
+    }
+
+    /// A profile's attempts land without the view changing, so the view's
+    /// key alone does not say the legend is still right; the playback's time
+    /// plays no part in it.
+    #[test]
+    fn a_view_coloured_by_playback_is_scanned_again_once_other_attempts_land() {
+        let (drawn, _, states) = timed();
+        let mut session = Session::default();
+        let unattempted = session.attempts_revision();
+        session.report_attempts(Attempts::default());
+        let attempted = session.attempts_revision();
+        let mut legend = Legend::default();
+        let mut reading = |states, attempted| played(&mut legend, &drawn, states, attempted);
+        assert_eq!(reading(None, unattempted), Reading::Kinds);
+        assert_eq!(
+            reading(Some(&states), unattempted),
+            Reading::Kinds,
+            "a view under an unchanged key and unchanged attempts was scanned again"
+        );
+        let read = reading(Some(&states), attempted);
+        assert!(matches!(read, Reading::States { .. }), "{read:?}");
     }
 
     /// A layered drawing numbered `drawing`, of one connector carrying `kinds`.

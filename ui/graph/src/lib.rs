@@ -540,6 +540,7 @@ impl GraphPanel {
                 times: loaded.times().ok(),
                 timed: loaded.timed(),
                 states: loaded.states(),
+                attempted: loaded.attempted(),
             };
             self.legend
                 .card(&drawn, zoom, statuses, resolved, coloured, &palette)
