@@ -2,7 +2,7 @@
 
 use bviz_execlog::Phase;
 use bviz_ui_components::{ScrollbarColors, TooltipColors};
-use bviz_ui_theme::{Appearance, DataColors, Theme, ThemeColors};
+use bviz_ui_theme::{DataColors, DataFill, Shade, Theme, ThemeColors};
 use gpui::Hsla;
 
 #[derive(Clone, Copy)]
@@ -33,46 +33,6 @@ impl Palette {
     }
 }
 
-/// How a fill departs from a data colour in one appearance.
-#[derive(Clone, Copy)]
-struct Step {
-    /// Added to the HSL lightness.
-    lightness: f32,
-    /// Multiplies the HSL saturation.
-    saturation: f32,
-}
-
-const fn step(lightness: f32, saturation: f32) -> Step {
-    Step {
-        lightness,
-        saturation,
-    }
-}
-
-const AS_IS: Step = step(0.0, 1.0);
-
-/// A phase's fill: a data colour of the theme, stepped per appearance.
-struct Fill {
-    data: fn(&DataColors) -> Hsla,
-    light: Step,
-    dark: Step,
-}
-
-impl Fill {
-    fn resolve(&self, theme: &Theme) -> Hsla {
-        let step = match theme.appearance {
-            Appearance::Light => self.light,
-            Appearance::Dark => self.dark,
-        };
-        let base = (self.data)(&theme.data);
-        Hsla {
-            l: (base.l + step.lightness).clamp(0.0, 1.0),
-            s: (base.s * step.saturation).clamp(0.0, 1.0),
-            ..base
-        }
-    }
-}
-
 /// A phase's fill by its role in a spawn's run: execution, which the spawn
 /// exists for, is green; waiting in the queue is yellow; moving inputs to the
 /// executor and outputs back share blue; a retry is an alarm; the unaccounted
@@ -80,19 +40,28 @@ impl Fill {
 /// step is set so that phases drawn side by side in a bar stay apart for
 /// normal and colour-deficient vision alike, in the One themes' light and
 /// dark data colours, as the dataviz palette validator measures it.
-fn phase_fill(phase: Phase) -> Fill {
-    let fill = |data: fn(&DataColors) -> Hsla, light: Step, dark: Step| Fill { data, light, dark };
+fn phase_fill(phase: Phase) -> DataFill {
+    let fill =
+        |data: fn(&DataColors) -> Hsla, light: Shade, dark: Shade| DataFill { data, light, dark };
     match phase {
-        Phase::Parse => fill(|d| d.cyan, AS_IS, step(-0.15, 1.5)),
-        Phase::Upload => fill(|d| d.blue, step(-0.075, 1.25), step(-0.2, 1.5)),
-        Phase::Network => fill(|d| d.purple, step(0.075, 1.0), AS_IS),
-        Phase::Queue => fill(|d| d.yellow, AS_IS, step(-0.25, 1.0)),
-        Phase::Setup => fill(|d| d.purple, step(-0.05, 1.0), step(-0.075, 1.25)),
-        Phase::Execute => fill(|d| d.green, AS_IS, step(-0.175, 1.25)),
-        Phase::ProcessOutputs => fill(|d| d.orange, step(-0.05, 1.0), step(-0.175, 1.5)),
-        Phase::Fetch => fill(|d| d.blue, AS_IS, step(-0.1, 1.0)),
-        Phase::Retry => fill(|d| d.red, step(-0.025, 1.0), step(-0.075, 1.0)),
-        Phase::Other => fill(|d| d.neutral, step(-0.1, 1.0), step(0.15, 1.0)),
+        Phase::Parse => fill(|d| d.cyan, Shade::AS_IS, Shade::new(-0.15, 1.5)),
+        Phase::Upload => fill(|d| d.blue, Shade::new(-0.075, 1.25), Shade::new(-0.2, 1.5)),
+        Phase::Network => fill(|d| d.purple, Shade::new(0.075, 1.0), Shade::AS_IS),
+        Phase::Queue => fill(|d| d.yellow, Shade::AS_IS, Shade::new(-0.25, 1.0)),
+        Phase::Setup => fill(
+            |d| d.purple,
+            Shade::new(-0.05, 1.0),
+            Shade::new(-0.075, 1.25),
+        ),
+        Phase::Execute => fill(|d| d.green, Shade::AS_IS, Shade::new(-0.175, 1.25)),
+        Phase::ProcessOutputs => fill(
+            |d| d.orange,
+            Shade::new(-0.05, 1.0),
+            Shade::new(-0.175, 1.5),
+        ),
+        Phase::Fetch => fill(|d| d.blue, Shade::AS_IS, Shade::new(-0.1, 1.0)),
+        Phase::Retry => fill(|d| d.red, Shade::new(-0.025, 1.0), Shade::new(-0.075, 1.0)),
+        Phase::Other => fill(|d| d.neutral, Shade::new(-0.1, 1.0), Shade::new(0.15, 1.0)),
     }
 }
 
