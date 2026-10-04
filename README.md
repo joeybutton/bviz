@@ -67,9 +67,9 @@ bviz opens every file named on its command line, and needs at least one.
 ### Dependency graph
 
 ```sh
-bazel query --output=streamed_proto //... > /tmp/query.pb
-bazel cquery --output=streamed_proto --transitions=lite //... > /tmp/cquery.pb
-bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
+bazel query --output=streamed_proto --consistent_labels //... > /tmp/query.pb
+bazel cquery --output=streamed_proto --consistent_labels --transitions=lite //... > /tmp/cquery.pb
+bazel aquery --output=streamed_proto --consistent_labels //... > /tmp/aquery.pb
 bviz --query /tmp/query.pb --cquery /tmp/cquery.pb --aquery /tmp/aquery.pb
 ```
 
@@ -77,6 +77,10 @@ Any one of the three is enough. bviz merges them into a single graph, so each
 flag takes one file. Under `--transitions=lite` or `full`, cquery resolves each
 dependency's configuration, so an edge reaches the exact configured target it
 feeds; without it the edge lands on the dependency's target.
+
+`--consistent_labels` spells external repositories' labels canonically, as a
+trace profile does, so the profile's actions are associated with their targets
+in the graph.
 
 ### Trace profile
 
