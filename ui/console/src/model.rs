@@ -1,15 +1,10 @@
 use bviz_invocation::{Configurations, EpochMicros, Outcomes, Session};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
-use bviz_ui_playback::{DocumentClock, OnClock, Span};
-use gpui::{Context, Entity, EventEmitter, Task};
+use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
+use gpui::{App, Context, Entity, Task};
 
 pub(crate) type Source = bviz_ui_components::Source<Replay>;
-
-/// The read has landed, loaded or failed. Carried as an event because what it
-/// calls for is view-local — putting the playhead on the build that landed — and
-/// owed once, on the landing.
-pub(crate) struct SourceReplaced;
 
 /// What a build event stream is read into.
 pub(crate) struct Stream {
@@ -52,8 +47,6 @@ pub(crate) struct ConsoleModel {
     _load: Task<()>,
 }
 
-impl EventEmitter<SourceReplaced> for ConsoleModel {}
-
 impl ConsoleModel {
     /// The build `stream` is being read into, playable on `clock` once the read
     /// finishes and failed where it does not.
@@ -78,7 +71,6 @@ impl ConsoleModel {
                     Err(err) => Source::Failed(err),
                 };
                 model.place_on_clock(cx);
-                cx.emit(SourceReplaced);
             },
         );
         Self::new(load, clock)
@@ -107,6 +99,38 @@ impl ConsoleModel {
         on_clock.place(played, cx);
     }
 
+    /// The clock the views follow, where the document plays back.
+    pub(crate) fn clock(&self) -> Option<&Entity<Clock>> {
+        self.on_clock.as_ref().map(OnClock::clock)
+    }
+
+    /// The frame the views show, `None` while there is no replay: the one the
+    /// clock's time reaches, else the last, showing the finished build.
+    pub(crate) fn shown_frame(&self, cx: &App) -> Option<usize> {
+        let replay = self.replay()?;
+        let reached = self.on_clock.as_ref().and_then(|on_clock| {
+            let origin = origin(replay, on_clock.document_clock())?;
+            let now = on_clock.clock().read(cx).now()?;
+            // At the instants `clock_source` marks the frames at, so stepping
+            // to a mark shows its frame.
+            Some(last_reached(
+                replay.frame_count(),
+                |frame| origin.plus_secs_f64(replay.time_of(frame)),
+                now,
+            ))
+        });
+        Some(reached.unwrap_or(replay.frame_count() - 1))
+    }
+
+    /// Whether the replay, joined to other files, records no wall-clock time
+    /// to stand beside theirs on the clock.
+    pub(crate) fn unaligned(&self) -> bool {
+        match (self.replay(), &self.on_clock) {
+            (Some(replay), Some(on_clock)) => origin(replay, on_clock.document_clock()).is_none(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn source(&self) -> &Source {
         &self.source
     }
@@ -130,6 +154,25 @@ fn origin(replay: &Replay, clock: &DocumentClock) -> Option<EpochMicros> {
     }
 }
 
+/// The last of `count` frames, each at `instant_of` it in time order, that
+/// `now` has reached; the first where `now` reaches none.
+fn last_reached(
+    count: usize,
+    instant_of: impl Fn(usize) -> EpochMicros,
+    now: EpochMicros,
+) -> usize {
+    let (mut reached, mut beyond) = (0, count);
+    while reached < beyond {
+        let mid = reached + (beyond - reached) / 2;
+        if instant_of(mid) <= now {
+            reached = mid + 1;
+        } else {
+            beyond = mid;
+        }
+    }
+    reached.saturating_sub(1)
+}
+
 /// What `replay` gives a clock with its time zero at `origin`: its span, a step
 /// stopping at each frame, `None` where all its frames share one instant.
 fn clock_source(replay: &Replay, origin: EpochMicros) -> Option<bviz_ui_playback::Source> {
@@ -146,6 +189,29 @@ fn clock_source(replay: &Replay, origin: EpochMicros) -> Option<bviz_ui_playback
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_is_reached_at_the_instant_its_mark_stands_at() {
+        let origin = EpochMicros::from_millis(1_781_439_245_231);
+        // Each rounds down to its microsecond, which in seconds falls short of
+        // the frame's own time.
+        let times = [0.0, 1.000_000_2, 2.000_000_4];
+        let instant_of = |frame: usize| origin.plus_secs_f64(times[frame]);
+        for frame in 0..times.len() {
+            assert_eq!(
+                last_reached(times.len(), instant_of, instant_of(frame)),
+                frame
+            );
+        }
+        assert_eq!(
+            last_reached(times.len(), instant_of, origin.plus_micros(-1)),
+            0
+        );
+        assert_eq!(
+            last_reached(times.len(), instant_of, origin.plus_micros(1_999_999)),
+            1
+        );
+    }
     use bviz_invocation::{BuildOutcome, ConfiguredTarget};
 
     /// A build whose read has not finished, for exercising what a view reads

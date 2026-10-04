@@ -2,13 +2,12 @@
 //! text: the visible viewport, reflowed to the window, one shaped line per row
 //! with per-cell colors and background fills.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::model::{ConsoleModel, SourceReplaced};
+use crate::model::ConsoleModel;
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
-use bviz_ui_components::{
-    Button, Dropdown, Scrollbar, ScrubberColors, ScrubberState, TextInput, scrubber,
-};
+use bviz_ui_components::{Button, Scrollbar, TextInput};
+use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -23,13 +22,6 @@ use element::TerminalElement;
 actions!(
     bviz_console,
     [
-        PlayPause,
-        StepBack,
-        StepForward,
-        SeekStart,
-        SeekEnd,
-        SpeedUp,
-        SpeedDown,
         ScrollLineUp,
         ScrollLineDown,
         ScrollPageUp,
@@ -54,36 +46,18 @@ const GRID_KEY_CONTEXT: &str = "ConsoleGrid";
 /// The key context of the bar the find box opens as.
 const FIND_KEY_CONTEXT: &str = "ConsoleFind";
 
-/// The key context of the playback bar.
-const PLAYBACK_KEY_CONTEXT: &str = "ConsolePlayback";
-
 pub fn register_keys(cx: &mut App) {
-    let console_unless_find = format!("{CONSOLE_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
-    let console_unless_find = Some(console_unless_find.as_str());
     let grid_unless_find = format!("{GRID_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
     let grid_unless_find = Some(grid_unless_find.as_str());
     let console = Some(CONSOLE_KEY_CONTEXT);
     let find = Some(FIND_KEY_CONTEXT);
-    let playback = Some(PLAYBACK_KEY_CONTEXT);
     cx.bind_keys([
-        // Keys that don't collide with terminal scrolling work in either region,
-        // but stay inert while the find field has focus so they don't hijack
-        // typing and cursor movement there.
-        KeyBinding::new("space", PlayPause, console_unless_find),
-        KeyBinding::new("left", StepBack, console_unless_find),
-        KeyBinding::new("right", StepForward, console_unless_find),
-        KeyBinding::new("]", SpeedUp, console_unless_find),
-        KeyBinding::new("[", SpeedDown, console_unless_find),
-        // The arrows and home/end collide: they scroll the focused terminal but
-        // drive playback when the playback bar holds focus.
+        // Inert while the find field has focus, so they don't hijack cursor
+        // movement there; home and end scroll here rather than seek.
         KeyBinding::new("up", ScrollLineUp, grid_unless_find),
         KeyBinding::new("down", ScrollLineDown, grid_unless_find),
         KeyBinding::new("home", ScrollToTop, grid_unless_find),
         KeyBinding::new("end", ScrollToBottom, grid_unless_find),
-        KeyBinding::new("up", SpeedUp, playback),
-        KeyBinding::new("down", SpeedDown, playback),
-        KeyBinding::new("home", SeekStart, playback),
-        KeyBinding::new("end", SeekEnd, playback),
         // Paging and the commands work regardless of which region has focus.
         KeyBinding::new("pageup", ScrollPageUp, console),
         KeyBinding::new("pagedown", ScrollPageDown, console),
@@ -106,9 +80,6 @@ const SELECTION_AUTOSCROLL_STEP: i32 = 1;
 /// How long the scroll bar stays visible after the last scroll interaction.
 const SCROLLBAR_HIDE: Duration = Duration::from_millis(1200);
 
-/// Playback speed multipliers the speed control cycles through.
-const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
-
 /// Geometry of the painted terminal content, in window pixels, kept so mouse
 /// positions can be mapped to grid cells for selection.
 #[derive(Clone, Copy)]
@@ -121,7 +92,8 @@ struct ContentLayout {
     rows: usize,
 }
 
-/// A view replaying a build's captured console output under playback controls.
+/// A view replaying a build's captured console output as it stood at its
+/// document's playback time.
 pub struct ConsolePanel {
     /// Names the document shown, labelling this panel's tab.
     title: SharedString,
@@ -129,27 +101,9 @@ pub struct ConsolePanel {
     model: Entity<ConsoleModel>,
     /// Redraws as the build is read.
     _changed: Subscription,
-    /// Puts the playhead on the build as its read lands.
-    _source_replaced: Subscription,
-    /// The frame currently shown; an index into the build's [`Replay`] frames.
-    current_frame: usize,
-    /// Whether the timeline is advancing on its own.
-    playing: bool,
-    /// Playback speed multiplier (see [`SPEEDS`]).
-    speed: f32,
-    /// The speed selector; its chosen index drives [`speed`](Self::speed).
-    speed_dropdown: Entity<Dropdown>,
-    /// Keeps the subscription that applies the speed dropdown's selection.
-    _speed_observer: Subscription,
-    /// While playing, the wall-clock instant playback was last (re)started and the
-    /// build time it was at then, so the clock can map elapsed real time to a frame.
-    play_anchor: Option<(Instant, f64)>,
-    /// The playhead's time in seconds, shown on the scrubber and readout. It tracks
-    /// the playback clock continuously, so the playhead glides even when the shown
-    /// frame (a coarse build may have few) only changes in steps.
-    position: f64,
-    scrubber: ScrubberState,
-    /// The display terminal, built at the window size for [`current_frame`] and
+    /// Redraws as a gesture moves the document's playback time.
+    _clock_changed: Option<Subscription>,
+    /// The display terminal, built at the window size for the shown frame and
     /// rebuilt when the frame changes.
     terminal: Option<Terminal>,
     /// The frame [`terminal`] was built for, to detect when it must be rebuilt.
@@ -187,9 +141,6 @@ pub struct ConsolePanel {
     reveal_seq: u64,
     /// The terminal body's handle, focused so its scroll keys dispatch.
     body_focus: FocusHandle,
-    /// The playback bar's handle; when it holds focus the shared arrow and
-    /// home/end keys drive playback rather than scroll the terminal.
-    playback_focus: FocusHandle,
     /// Whether the find box is open.
     find_active: bool,
     /// The find box's text field, created on first open and reused.
@@ -205,38 +156,20 @@ impl ConsolePanel {
         cx: &mut Context<Self>,
     ) -> Self {
         // Tab cycles focus through the regions (handled by the shell's tab action
-        // via window.focus_next), in this order: playback bar, terminal, then the
-        // find field when it is open (its tab index is set on creation).
-        let body_focus = cx.focus_handle().tab_index(1).tab_stop(true);
-        let playback_focus = cx.focus_handle().tab_index(0).tab_stop(true);
-        // The speed dropdown is the source of truth for the speed index; applying
-        // its selection keeps the numeric multiplier and the playback clock in sync.
-        let labels = SPEEDS.iter().map(|speed| format!("{}×", *speed as i32));
-        let speed_dropdown = cx.new(|cx| Dropdown::new("speed", labels, 0, cx));
-        let speed_observer = cx.observe(&speed_dropdown, |view, dropdown, cx| {
-            view.speed = SPEEDS[dropdown.read(cx).selected().min(SPEEDS.len() - 1)];
-            if view.playing {
-                view.anchor_clock();
-            }
-            cx.notify();
-        });
+        // via window.focus_next), in this order: terminal, then the find field
+        // when it is open (its tab index is set on creation).
+        let body_focus = cx.focus_handle().tab_index(0).tab_stop(true);
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
-        let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
-            view.show_completed_build(cx);
-        });
+        let clock_changed = model
+            .read(cx)
+            .clock()
+            .cloned()
+            .map(|clock| cx.observe(&clock, |_, _, cx| cx.notify()));
         let mut view = Self {
             title,
             model,
             _changed: changed,
-            _source_replaced: source_replaced,
-            current_frame: 0,
-            playing: false,
-            speed: SPEEDS[0],
-            speed_dropdown,
-            _speed_observer: speed_observer,
-            play_anchor: None,
-            position: 0.0,
-            scrubber: ScrubberState::default(),
+            _clock_changed: clock_changed,
             terminal: None,
             terminal_frame: None,
             follow_bottom: true,
@@ -252,7 +185,6 @@ impl ConsolePanel {
             scrollbar_visible: false,
             reveal_seq: 0,
             body_focus,
-            playback_focus,
             find_active: false,
             find_input: None,
             find_observation: None,
@@ -260,7 +192,6 @@ impl ConsolePanel {
         // Show the bar briefly on launch so the scrollable extent is visible,
         // then let it auto-hide.
         view.reveal_scrollbar(cx);
-        view.show_completed_build(cx);
         view
     }
 
@@ -268,16 +199,6 @@ impl ConsolePanel {
     /// landed none.
     fn replay<'a>(&self, cx: &'a App) -> Option<&'a Replay> {
         self.model.read(cx).replay()
-    }
-
-    /// Put the playhead at the end of the build: a view opens on the completed
-    /// output, ready to replay it from the start.
-    fn show_completed_build(&mut self, cx: &App) {
-        let Some(replay) = self.replay(cx) else {
-            return;
-        };
-        self.current_frame = replay.frame_count().saturating_sub(1);
-        self.position = replay.duration();
     }
 
     /// Show the scroll bar and schedule it to hide after a period of no further
@@ -517,34 +438,6 @@ impl ConsolePanel {
         self.scroll(Scroll::Bottom, cx);
     }
 
-    fn on_play_pause(&mut self, _: &PlayPause, _: &mut Window, cx: &mut Context<Self>) {
-        self.play_pause(cx);
-    }
-
-    fn on_step_back(&mut self, _: &StepBack, _: &mut Window, cx: &mut Context<Self>) {
-        self.step(-1, cx);
-    }
-
-    fn on_step_forward(&mut self, _: &StepForward, _: &mut Window, cx: &mut Context<Self>) {
-        self.step(1, cx);
-    }
-
-    fn on_seek_start(&mut self, _: &SeekStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.seek_start(cx);
-    }
-
-    fn on_seek_end(&mut self, _: &SeekEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.seek_end(cx);
-    }
-
-    fn on_speed_up(&mut self, _: &SpeedUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.shift_speed(1, cx);
-    }
-
-    fn on_speed_down(&mut self, _: &SpeedDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.shift_speed(-1, cx);
-    }
-
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.terminal.as_ref().and_then(Terminal::selection_text) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -561,8 +454,8 @@ impl ConsolePanel {
         }
         self.find_active = true;
         if self.find_input.is_none() {
-            // Tab index 2: after the playback bar (0) and terminal (1) in the cycle.
-            let input = cx.new(|cx| TextInput::new(cx, "Find", 2));
+            // Tab index 1: after the terminal (0) in the cycle.
+            let input = cx.new(|cx| TextInput::new(cx, "Find", 1));
             self.find_observation =
                 Some(cx.observe(&input, |this, _input, cx| this.run_search(cx)));
             self.find_input = Some(input);
@@ -643,144 +536,6 @@ impl ConsolePanel {
             self.scroll(Scroll::Delta(lines), cx);
         }
     }
-
-    /// Toggle between playing and paused.
-    fn play_pause(&mut self, cx: &mut Context<Self>) {
-        if self.playing {
-            self.pause(cx);
-        } else {
-            self.play(cx);
-        }
-    }
-
-    /// Start advancing the timeline from the current frame, restarting from the
-    /// beginning if it sits at the end. Playback is driven from rendering: while
-    /// playing, each frame maps the elapsed real time to a timeline position and
-    /// requests the next frame (see [`advance_playback`](Self::advance_playback)).
-    fn play(&mut self, cx: &mut Context<Self>) {
-        let last = match self.replay(cx) {
-            Some(replay) => replay.frame_count().saturating_sub(1),
-            None => return,
-        };
-        if last == 0 {
-            return;
-        }
-        if self.current_frame >= last {
-            self.current_frame = 0;
-            self.position = 0.0;
-        }
-        self.playing = true;
-        self.anchor_clock();
-        cx.notify();
-    }
-
-    fn pause(&mut self, cx: &mut Context<Self>) {
-        self.playing = false;
-        self.play_anchor = None;
-        cx.notify();
-    }
-
-    /// Anchor the playback clock at the playhead: real time elapsed from now,
-    /// scaled by the speed, is added to the current position to find the frame to
-    /// show. Anchoring on the playhead rather than the shown frame's time keeps
-    /// playback continuous across a coarse timeline's large frame gaps.
-    fn anchor_clock(&mut self) {
-        self.play_anchor = Some((Instant::now(), self.position));
-    }
-
-    /// While playing, show the frame the clock has reached and request another
-    /// frame so playback keeps running; stop at the end. Called each render so
-    /// playback is paced by the window's frame loop rather than a detached timer,
-    /// which a quiescent window stops pumping.
-    fn advance_playback(&mut self, window: &mut Window, cx: &App) {
-        if !self.playing {
-            return;
-        }
-        let Some((started, base)) = self.play_anchor else {
-            return;
-        };
-        let target = base + started.elapsed().as_secs_f64() * self.speed as f64;
-        let (frame, last, duration) = match self.replay(cx) {
-            Some(replay) => (
-                replay.frame_at(target),
-                replay.frame_count().saturating_sub(1),
-                replay.duration(),
-            ),
-            None => return,
-        };
-        if frame >= last {
-            self.current_frame = last;
-            self.position = duration;
-            self.playing = false;
-            self.play_anchor = None;
-        } else {
-            self.current_frame = frame;
-            self.position = target.clamp(0.0, duration);
-            window.request_animation_frame();
-        }
-    }
-
-    /// Show a frame, clamped to the timeline, moving the playhead to its time and
-    /// keeping playback running from there.
-    fn seek_frame(&mut self, frame: usize, cx: &mut Context<Self>) {
-        let (frame, time) = match self.replay(cx) {
-            Some(replay) => {
-                let frame = frame.min(replay.frame_count().saturating_sub(1));
-                (frame, replay.time_of(frame))
-            }
-            None => return,
-        };
-        self.current_frame = frame;
-        self.position = time;
-        if self.playing {
-            self.anchor_clock();
-        }
-        cx.notify();
-    }
-
-    fn seek_start(&mut self, cx: &mut Context<Self>) {
-        self.seek_frame(0, cx);
-    }
-
-    fn seek_end(&mut self, cx: &mut Context<Self>) {
-        self.seek_frame(usize::MAX, cx);
-    }
-
-    /// Step the shown frame by `delta`, clamped to the timeline.
-    fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let frame = (self.current_frame as isize + delta).max(0) as usize;
-        self.seek_frame(frame, cx);
-    }
-
-    /// Move `delta` steps through the playback speeds, wrapping around. Drives the
-    /// dropdown, whose observer applies the new speed.
-    fn shift_speed(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = SPEEDS.len() as isize;
-        let current = self.speed_dropdown.read(cx).selected() as isize;
-        let next = (current + delta).rem_euclid(count) as usize;
-        self.speed_dropdown
-            .update(cx, |dropdown, cx| dropdown.set_selected(next, cx));
-    }
-
-    /// Pause and seek to the timeline position at `fraction` along the scrubber.
-    fn scrub_to(&mut self, fraction: f32, cx: &mut Context<Self>) {
-        // Grabbing the scrubber pauses playback; a drag that follows only seeks,
-        // so a keyboard play toggled mid-drag is left standing.
-        if !self.scrubber.held() {
-            self.playing = false;
-            self.play_anchor = None;
-        }
-        let (frame, position) = match self.replay(cx) {
-            Some(replay) => {
-                let position = fraction as f64 * replay.duration();
-                (replay.frame_at(position), position)
-            }
-            None => return,
-        };
-        self.current_frame = frame;
-        self.position = position;
-        cx.notify();
-    }
 }
 
 impl EventEmitter<PanelEvent> for ConsolePanel {}
@@ -813,20 +568,12 @@ impl Panel for ConsolePanel {
 
 impl Render for ConsolePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Advance the timeline if playing, pacing playback by the frame loop.
-        self.advance_playback(window, cx);
+        Clock::keep_pace(self.model.read(cx).clock(), window, cx);
         self.autoscroll_selection(window, cx);
         let theme = bviz_ui_theme::theme(window, cx);
         let colors = &theme.colors;
         let chrome = div()
             .key_context(Self::kind().key_context)
-            .on_action(cx.listener(Self::on_play_pause))
-            .on_action(cx.listener(Self::on_step_back))
-            .on_action(cx.listener(Self::on_step_forward))
-            .on_action(cx.listener(Self::on_seek_start))
-            .on_action(cx.listener(Self::on_seek_end))
-            .on_action(cx.listener(Self::on_speed_up))
-            .on_action(cx.listener(Self::on_speed_down))
             .on_action(cx.listener(Self::scroll_line_up))
             .on_action(cx.listener(Self::scroll_line_down))
             .on_action(cx.listener(Self::scroll_page_up))
@@ -850,11 +597,12 @@ impl Render for ConsolePanel {
                 } else {
                     None
                 };
-                // The terminal and the playback bar are separately focusable; the
-                // focused one gets the shared arrow/home/end keys and a left accent.
                 let terminal_focused = self.body_focus.is_focused(window);
-                let playback_focused = self.playback_focus.is_focused(window);
-                let controls = self.render_controls(colors, playback_focused, cx);
+                let unaligned = self
+                    .model
+                    .read(cx)
+                    .unaligned()
+                    .then(|| unaligned_note("build event stream", colors));
                 // Unfocused, the accent takes the canvas it is drawn against, so
                 // the grid keeps the same width either way.
                 let terminal_accent = if terminal_focused {
@@ -862,7 +610,7 @@ impl Render for ConsolePanel {
                 } else {
                     colors.background
                 };
-                chrome.child(controls).child(
+                chrome.children(unaligned).child(
                     div()
                         .key_context(GRID_KEY_CONTEXT)
                         .track_focus(&self.body_focus)
@@ -962,142 +710,4 @@ impl ConsolePanel {
                 .into_any_element(),
         )
     }
-
-    /// The playback control bar above the terminal: jump-to-start, play/pause, and
-    /// jump-to-end buttons, a draggable timeline scrubber, an elapsed/total
-    /// readout, and a speed control. `focused` shows the focus accent and selects
-    /// which region the shared arrow/home/end keys drive.
-    fn render_controls(
-        &self,
-        colors: &ThemeColors,
-        focused: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let playing = self.playing;
-        let (fraction, readout) = self.playback_readout(cx);
-
-        let view = cx.entity();
-        let start_view = view.clone();
-        let play_view = view.clone();
-        let end_view = view;
-
-        div()
-            .key_context(PLAYBACK_KEY_CONTEXT)
-            .track_focus(&self.playback_focus)
-            .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(40.))
-            .bg(colors.surface)
-            .border_b_1()
-            .border_color(colors.border)
-            .font_family(bviz_ui_assets::UI)
-            .text_color(colors.text)
-            // A click anywhere on the bar gives it focus, so the shared keys drive
-            // playback.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    this.playback_focus.focus(window, cx);
-                    cx.notify();
-                }),
-            )
-            // A left accent marks the bar as the focused region.
-            .when(focused, |bar| {
-                bar.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(2.))
-                        .bg(colors.border_focused),
-                )
-            })
-            .child(
-                Button::new("seek-start", move |_, _, cx| {
-                    start_view.update(cx, |this, cx| this.seek_start(cx))
-                })
-                .ghost()
-                .icon("skip-back"),
-            )
-            .child(
-                Button::new("play-pause", move |_, _, cx| {
-                    play_view.update(cx, |this, cx| this.play_pause(cx))
-                })
-                .ghost()
-                .icon(if playing { "pause" } else { "play" }),
-            )
-            .child(
-                Button::new("seek-end", move |_, _, cx| {
-                    end_view.update(cx, |this, cx| this.seek_end(cx))
-                })
-                .ghost()
-                .icon("skip-forward"),
-            )
-            .child(self.render_scrubber(fraction, colors, cx))
-            .child(div().w(px(128.)).text_size(px(12.)).child(readout))
-            .child(self.speed_dropdown.clone())
-            .into_any_element()
-    }
-
-    /// The played fraction (0..=1) positioning the playhead, and the
-    /// `current / total` readout text.
-    fn playback_readout(&self, cx: &App) -> (f32, SharedString) {
-        let (duration, real_time) = match self.replay(cx) {
-            Some(replay) => (replay.duration(), replay.real_time()),
-            None => (0.0, true),
-        };
-        // The playhead tracks the playback clock, so it glides smoothly even when
-        // the shown frame jumps across a coarse timeline's large gaps.
-        let current = self.position;
-        let fraction = if duration > 0.0 {
-            (current / duration).clamp(0.0, 1.0) as f32
-        } else {
-            0.0
-        };
-        // Without --show_timestamps the playhead time is interpolated, so mark the
-        // current time approximate; the total is still bracketed by the build's
-        // start and finish events and needs no mark.
-        let readout = if real_time {
-            format!("{} / {}", fmt_time(current), fmt_time(duration))
-        } else {
-            format!("~{} / {}", fmt_time(current), fmt_time(duration))
-        };
-        (fraction, SharedString::from(readout))
-    }
-
-    /// The playback scrubber, drawn at `fraction` and driving a seek on press or
-    /// drag.
-    fn render_scrubber(
-        &self,
-        fraction: f32,
-        colors: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // The played portion and the knob mark a position within the span the
-        // track carries, so they take the text they are read among.
-        let fills = ScrubberColors {
-            track: colors.element_hover.into(),
-            played: colors.text.into(),
-            knob: colors.text.into(),
-        };
-        scrubber(
-            "scrubber",
-            fraction,
-            fills,
-            |this| &mut this.scrubber,
-            cx.entity(),
-            |this, fraction, cx| this.scrub_to(fraction, cx),
-        )
-    }
-}
-
-/// Format a number of seconds as `M:SS`.
-fn fmt_time(seconds: f64) -> String {
-    let whole = seconds.max(0.0).round() as u64;
-    format!("{}:{:02}", whole / 60, whole % 60)
 }

@@ -3,9 +3,11 @@
 
 mod bar;
 mod clock;
+mod note;
 
 pub use bar::PlaybackBar;
 pub use clock::{Clock, DocumentClock, OnClock, Source, SourceId, Span, Speed, Timeline};
+pub use note::unaligned_note;
 
 use gpui::{Pixels, px};
 
