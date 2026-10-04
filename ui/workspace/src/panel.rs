@@ -1,7 +1,8 @@
 #[cfg(test)]
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
-use crate::{Documents, Pane, PanelGroup, ViewSpec};
+use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
+use bviz_ui_playback::Clock;
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
@@ -98,17 +99,28 @@ pub enum PanelEvent {
 #[derive(Clone)]
 pub struct AnyPanel {
     panel: Rc<dyn PanelOps>,
+    /// The document the panel shows a view of, wherever the panel moves.
+    document: DocumentId,
     /// Fixed for the panel's lifetime, so a panel keeps its number when it moves
     /// to another pane or another window.
     ordinal: Option<NonZeroUsize>,
 }
 
 impl AnyPanel {
-    pub(crate) fn new<T: Panel>(panel: Entity<T>, ordinal: Option<NonZeroUsize>) -> Self {
+    pub(crate) fn new<T: Panel>(
+        panel: Entity<T>,
+        document: DocumentId,
+        ordinal: Option<NonZeroUsize>,
+    ) -> Self {
         Self {
             panel: Rc::new(panel),
+            document,
             ordinal,
         }
+    }
+
+    pub(crate) fn document(&self) -> DocumentId {
+        self.document
     }
 
     pub fn view_kind(&self) -> ViewKind {
@@ -193,7 +205,12 @@ impl Member {
 }
 
 /// What a window opens, and lists as one entry of its Documents menu.
-pub struct Document(Members);
+pub struct Document {
+    members: Members,
+    /// The time every view of the document shows, for a document that can play
+    /// back.
+    clock: Option<Entity<Clock>>,
+}
 
 enum Members {
     /// One file opened by itself, which the document goes by the label of.
@@ -209,7 +226,10 @@ enum Members {
 
 impl From<Member> for Document {
     fn from(member: Member) -> Self {
-        Self(Members::Alone(member))
+        Self {
+            members: Members::Alone(member),
+            clock: None,
+        }
     }
 }
 
@@ -218,16 +238,26 @@ impl Document {
     /// menu lists under `label`. A window stacks, weighs and numbers each file
     /// as it does one opened by itself.
     pub fn join(label: SharedString, first: Member, second: Member, rest: Vec<Member>) -> Self {
-        Self(Members::Joined {
-            label,
-            first,
-            second,
-            rest,
-        })
+        Self {
+            members: Members::Joined {
+                label,
+                first,
+                second,
+                rest,
+            },
+            clock: None,
+        }
+    }
+
+    /// This document, playing back on `clock`, which the window drives from a
+    /// bar while one of the document's panels is the active one.
+    pub fn with_clock(mut self, clock: Entity<Clock>) -> Self {
+        self.clock = Some(clock);
+        self
     }
 
     fn members(&self) -> impl Iterator<Item = &Member> {
-        let (first, second, rest) = match &self.0 {
+        let (first, second, rest) = match &self.members {
             Members::Alone(member) => (member, None, &[][..]),
             Members::Joined {
                 first,
@@ -240,7 +270,7 @@ impl Document {
     }
 
     fn joined_label(&self) -> Option<&SharedString> {
-        match &self.0 {
+        match &self.members {
             Members::Alone(_) => None,
             Members::Joined { label, .. } => Some(label),
         }
@@ -262,13 +292,14 @@ impl Document {
             let ordinal = files.take(&member.label);
             (member.label, ordinal, member.views)
         };
-        let mut registration = |document: Self| match document.0 {
+        let mut registration = |document: Self| match document.members {
             Members::Alone(member) => {
                 let (label, ordinal, views) = held(member);
                 Registration {
                     name: numbered(label, ordinal),
                     first: Held { ordinal, views },
                     rest: Vec::new(),
+                    clock: document.clock,
                 }
             }
             Members::Joined {
@@ -286,6 +317,7 @@ impl Document {
                     name: numbered(label, ordinal),
                     first: held(first),
                     rest: iter::once(second).chain(rest).map(held).collect(),
+                    clock: document.clock,
                 }
             }
         };

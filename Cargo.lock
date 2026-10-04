@@ -1141,6 +1141,7 @@ version = "0.1.0"
 dependencies = [
  "bviz_ui_assets",
  "bviz_ui_components",
+ "bviz_ui_playback",
  "bviz_ui_shell",
  "bviz_ui_theme",
  "gpui",

@@ -9,6 +9,7 @@ use crate::{
     drop, panel_menu,
 };
 use bviz_ui_components::{Divider, DragEnd, Menu, MenuEvent, overlay_canvas, track_drag};
+use bviz_ui_playback::PlaybackBar;
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -260,6 +261,9 @@ pub struct Workspace {
     carrying: Carrying<EntityId, Destination>,
     /// The menu a panel was asked for, while it stands.
     panel_menu: Option<PanelMenu>,
+    /// The bar driving the clock of the active panel's document, while that
+    /// document plays back.
+    playback: Option<Entity<PlaybackBar>>,
     /// Draws the window afresh as the session's windows open and close, which
     /// changes where a panel of this one can be carried to.
     _windows_changed: Subscription,
@@ -293,6 +297,7 @@ impl Workspace {
             panel_drag: None,
             carrying: Carrying::new(),
             panel_menu: None,
+            playback: None,
             _windows_changed: windows_changed,
         };
         for pane in panes {
@@ -1066,6 +1071,29 @@ impl Workspace {
 
     pub fn active_panel(&self, cx: &App) -> AnyPanel {
         self.active.read(cx).active_panel().clone()
+    }
+
+    /// The bar driving the clock `panel`'s document plays back on, kept while
+    /// the active panel's document stays the same one, and `None` for a
+    /// document that does not play back.
+    fn playback_bar(
+        &mut self,
+        panel: &AnyPanel,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<PlaybackBar>> {
+        let documents = Documents::global(cx);
+        let Some((name, clock)) = documents.read(cx).playback(panel.document()) else {
+            self.playback = None;
+            return None;
+        };
+        let current = self
+            .playback
+            .as_ref()
+            .is_some_and(|bar| *bar.read(cx).clock() == clock);
+        if !current {
+            self.playback = Some(cx.new(|cx| PlaybackBar::new(name, clock, cx)));
+        }
+        self.playback.clone()
     }
 
     /// Adds `panel` to the active pane and shows it.
@@ -1898,21 +1926,18 @@ impl Render for Workspace {
         let panel = self.active_panel(cx);
         self.tell_panes_how_they_are_framed(cx);
         self.aim_panel_drag(window, cx);
-        let panes = div()
-            .flex()
-            .flex_col()
-            // The room the chrome's bands leave, asked for as the room left
-            // rather than as the whole of the window, which would squeeze those
-            // bands out of the height each of them asks for.
-            .flex_1()
-            .min_h(px(0.))
-            .w_full()
+        // The room the chrome's bands leave, asked for as the room left rather
+        // than as the whole of the window, which would squeeze those bands out
+        // of the height each of them asks for.
+        let room_left = || div().flex().flex_col().flex_1().min_h(px(0.)).w_full();
+        let panes = room_left()
             .child(self.body_element(&colors, cx))
             .child(measure_body(cx));
+        let playback = self.playback_bar(&panel, cx);
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
             .menu(self.documents_menu.clone())
-            .child(panes);
+            .child(room_left().child(panes).children(playback));
         let chrome = match panel.status(cx) {
             Some(status) => chrome.status(status),
             None => chrome,
