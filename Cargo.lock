@@ -893,6 +893,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_critical_path"
+version = "0.1.0"
+dependencies = [
+ "bviz_trace_profile",
+]
+
+[[package]]
 name = "bviz_execlog"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,16 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "critical_path",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_critical_path",
+    visibility = ["//ui/trace:__pkg__"],
+    deps = ["//trace/profile"],
+)
+
+rust_test(
+    name = "critical_path_test",
+    size = "small",
+    crate = ":critical_path",
+)

@@ -3,6 +3,7 @@ members = [
     "alloc",
     "bviz",
     "cli",
+    "critical_path",
     "execlog",
     "graph/layout",
     "invocation",

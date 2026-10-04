@@ -1,0 +1,13 @@
+[package]
+name = "bviz_critical_path"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_critical_path"
+path = "src/lib.rs"
+
+[dependencies]
+bviz_trace_profile = { path = "../trace/profile" }
