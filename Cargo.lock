@@ -1126,6 +1126,7 @@ name = "bviz_ui_trace"
 version = "0.1.0"
 dependencies = [
  "bviz_alloc",
+ "bviz_critical_path",
  "bviz_invocation",
  "bviz_trace_layout",
  "bviz_trace_profile",

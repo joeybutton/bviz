@@ -12,6 +12,7 @@ rust_library(
     visibility = ["//bviz:__pkg__"],
     deps = [
         "//alloc",
+        "//critical_path",
         "//invocation",
         "//trace/layout",
         "//trace/profile",

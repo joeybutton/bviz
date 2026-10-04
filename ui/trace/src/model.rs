@@ -5,6 +5,7 @@ use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
+use bviz_critical_path::CriticalPath;
 use bviz_invocation::Session;
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
@@ -37,29 +38,41 @@ pub(crate) struct SourceReplaced;
 /// rather than rebuilds.
 pub(crate) struct WorkingLanesDerived;
 
+/// The loaded profile's critical path is derived. Carried as an event because
+/// it concerns only the panel showing the path.
+pub(crate) struct CriticalPathDerived;
+
 /// A loaded profile with what is derived from it once for every reader of it.
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
-    working_lanes: DerivedLanes,
+    working_lanes: Derived<WorkingLanes>,
+    /// `None` for a profile with no critical-path lane.
+    critical_path: Derived<Option<CriticalPath>>,
     /// Derives the profile's action timings and attempts and reports them to
     /// its session; held with the profile, so that a profile replaced before
     /// they are ready reports none.
     _reporting_timings: Option<Task<()>>,
 }
 
-/// A profile's [`WorkingLanes`], which are derived off the UI thread.
-enum DerivedLanes {
+/// What is derived from a profile off the UI thread.
+pub(crate) enum Derived<T> {
     Deriving {
         /// Held with the profile it reads, so that it ends once another is
         /// loaded.
         _derivation: Task<()>,
     },
-    Derived(WorkingLanes),
+    Derived(T),
+}
+
+/// The tasks deriving what a [`LoadedProfile`] derives off the UI thread.
+struct Derivations {
+    working_lanes: Task<()>,
+    critical_path: Task<()>,
 }
 
 impl LoadedProfile {
-    /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx` and its action timings and attempts to `session`.
+    /// `profile` as loaded, its working lanes and critical path on their way
+    /// to the model of `cx` and its action timings and attempts to `session`.
     fn new(
         profile: Profile,
         session: Option<WeakEntity<Session>>,
@@ -77,6 +90,21 @@ impl LoadedProfile {
                 .update(cx, |model, cx| {
                     if model.adopt_working_lanes(&derived_from, lanes) {
                         cx.emit(WorkingLanesDerived);
+                    }
+                })
+                .ok();
+        });
+        let traced = flamer.profile().clone();
+        let tracing = cx.spawn(async move |model, cx| {
+            let derive = async move {
+                let path = CriticalPath::of(&traced);
+                (traced, path)
+            };
+            let (traced, path) = cx.background_executor().spawn(derive).await;
+            model
+                .update(cx, |model, cx| {
+                    if model.adopt_critical_path(&traced, path) {
+                        cx.emit(CriticalPathDerived);
                     }
                 })
                 .ok();
@@ -99,14 +127,25 @@ impl LoadedProfile {
         });
         LoadedProfile {
             _reporting_timings: reporting_timings,
-            ..LoadedProfile::deriving(flamer, deriving)
+            ..LoadedProfile::deriving(
+                flamer,
+                Derivations {
+                    working_lanes: deriving,
+                    critical_path: tracing,
+                },
+            )
         }
     }
 
-    fn deriving(flamer: Arc<TrackFlamer>, _derivation: Task<()>) -> LoadedProfile {
+    fn deriving(flamer: Arc<TrackFlamer>, derivations: Derivations) -> LoadedProfile {
         LoadedProfile {
             flamer,
-            working_lanes: DerivedLanes::Deriving { _derivation },
+            working_lanes: Derived::Deriving {
+                _derivation: derivations.working_lanes,
+            },
+            critical_path: Derived::Deriving {
+                _derivation: derivations.critical_path,
+            },
             _reporting_timings: None,
         }
     }
@@ -120,7 +159,17 @@ impl LoadedProfile {
     fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
         let own = Arc::ptr_eq(&self.flamer, flamer);
         if own {
-            self.working_lanes = DerivedLanes::Derived(lanes);
+            self.working_lanes = Derived::Derived(lanes);
+        }
+        own
+    }
+
+    /// Takes `path` as its own if it was derived from its own profile, and
+    /// says whether it did.
+    fn adopt_critical_path(&mut self, profile: &Arc<Profile>, path: Option<CriticalPath>) -> bool {
+        let own = Arc::ptr_eq(self.profile(), profile);
+        if own {
+            self.critical_path = Derived::Derived(path);
         }
         own
     }
@@ -203,6 +252,7 @@ pub(crate) struct TraceModel {
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
+impl EventEmitter<CriticalPathDerived> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
@@ -308,7 +358,7 @@ impl TraceModel {
     pub(crate) fn working_lanes(&self) -> Option<&WorkingLanes> {
         match &self.source {
             Source::Loaded(LoadedProfile {
-                working_lanes: DerivedLanes::Derived(lanes),
+                working_lanes: Derived::Derived(lanes),
                 ..
             }) => Some(lanes),
             _ => None,
@@ -318,6 +368,22 @@ impl TraceModel {
     fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
         match &mut self.source {
             Source::Loaded(loaded) => loaded.adopt_working_lanes(flamer, lanes),
+            _ => false,
+        }
+    }
+
+    /// The loaded profile's critical path, as far as it is derived; `None`
+    /// until a profile is loaded.
+    pub(crate) fn critical_path(&self) -> Option<&Derived<Option<CriticalPath>>> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(&loaded.critical_path),
+            _ => None,
+        }
+    }
+
+    fn adopt_critical_path(&mut self, profile: &Arc<Profile>, path: Option<CriticalPath>) -> bool {
+        match &mut self.source {
+            Source::Loaded(loaded) => loaded.adopt_critical_path(profile, path),
             _ => false,
         }
     }
@@ -765,7 +831,7 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadedProfile, TraceModel, clock_source};
+    use super::{Derivations, Derived, LoadedProfile, TraceModel, clock_source};
     use crate::Source;
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
@@ -802,6 +868,14 @@ mod tests {
         assert!(clock_source(&profile_started_at(None)).is_none());
     }
 
+    /// Derivations that have finished.
+    fn derivations() -> Derivations {
+        Derivations {
+            working_lanes: Task::ready(()),
+            critical_path: Task::ready(()),
+        }
+    }
+
     /// The flamer of a profile of one lane working over `[0, 100)`.
     fn flamer() -> Arc<TrackFlamer> {
         let json = r#"{"traceEvents":[
@@ -819,13 +893,34 @@ mod tests {
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
 
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), Task::ready(())));
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
         assert!(model.working_lanes().is_none());
 
         assert!(model.adopt_working_lanes(&loaded, loaded.working_lanes()));
         let adopted = model.working_lanes().expect("the loaded profile's lanes");
         assert_eq!(*adopted, loaded.working_lanes());
+    }
+
+    #[test]
+    fn a_critical_path_is_adopted_only_by_the_loaded_profile_it_was_derived_from() {
+        let mut model = model();
+        let replaced = flamer();
+        assert!(!model.adopt_critical_path(replaced.profile(), None));
+
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(!model.adopt_critical_path(replaced.profile(), None));
+        assert!(matches!(
+            model.critical_path(),
+            Some(Derived::Deriving { .. })
+        ));
+
+        assert!(model.adopt_critical_path(loaded.profile(), None));
+        assert!(matches!(
+            model.critical_path(),
+            Some(Derived::Derived(None))
+        ));
     }
 
     #[test]

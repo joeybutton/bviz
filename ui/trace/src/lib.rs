@@ -5,6 +5,7 @@
 
 mod chart;
 mod counters;
+mod critical_path;
 mod flame_panel;
 mod groups;
 mod model;
@@ -21,6 +22,7 @@ mod tracks_menu;
 
 use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
 
+pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
 use groups::{GroupChrome, group_label, lanes_headed_by_pool};
 use model::{SourceReplaced, TraceModel};
@@ -1530,10 +1532,10 @@ impl From<TraceSource> for Load {
 }
 
 /// The views rendering the profile `load` reads, as the timeline above the
-/// flame graph and stats that aggregate whatever tracks it has selected. Where
-/// it is opened as part of an invocation's `session`, it names what the profile
-/// holds an id of by what the session knows, and plays on `clock` where its
-/// document plays back.
+/// flame graph and stats that aggregate whatever tracks it has selected, and
+/// the critical path. Where it is opened as part of an invocation's `session`,
+/// it names what the profile holds an id of by what the session knows, and
+/// plays on `clock` where its document plays back.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
@@ -1556,9 +1558,13 @@ pub fn open(
                 let model = model.clone();
                 move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
             }),
-            vec![ViewSpec::new(move |cx| {
-                cx.new(|cx| StatsPanel::new(model.clone(), cx))
-            })],
+            vec![
+                ViewSpec::new({
+                    let model = model.clone();
+                    move |cx| cx.new(|cx| StatsPanel::new(model.clone(), cx))
+                }),
+                ViewSpec::new(move |cx| cx.new(|cx| CriticalPathPanel::new(model.clone(), cx))),
+            ],
         ),
     )
     .with_weight(Weight::CHART);
