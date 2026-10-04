@@ -11,8 +11,8 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
-use bviz_ui_playback::{DocumentClock, OnClock, Span};
-use gpui::{Context, Entity, EventEmitter, Task, WeakEntity};
+use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
+use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -273,6 +273,19 @@ impl TraceModel {
         if let Some(on_clock) = &mut self.on_clock {
             on_clock.place(played, cx);
         }
+    }
+
+    /// The clock the views follow, where the document plays back.
+    pub(crate) fn clock(&self) -> Option<&Entity<Clock>> {
+        self.on_clock.as_ref().map(OnClock::clock)
+    }
+
+    /// The profile instant the clock's time stands at, `None` while the loaded
+    /// profile plays on no clock.
+    pub(crate) fn playhead_us(&self, cx: &App) -> Option<i64> {
+        let origin = self.profile()?.metadata().epoch_origin?;
+        let now = self.clock()?.read(cx).now()?;
+        Some(now.micros() - origin.micros())
     }
 
     /// Whether the loaded profile plays on no clock its document has, recording

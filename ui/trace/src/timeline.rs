@@ -17,6 +17,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
+use bviz_ui_playback::Clock;
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
@@ -376,6 +377,9 @@ pub(crate) struct Timeline {
     _session_observer: Option<Subscription>,
     /// Redraws the counter plots once the working lanes are there to plot.
     _working_lanes_derived: Subscription,
+    /// Repaints the overlay, which draws the playhead, as a gesture moves the
+    /// document's clock.
+    _clock_changed: Option<Subscription>,
 }
 
 impl Timeline {
@@ -390,6 +394,8 @@ impl Timeline {
         let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
         let session = model.read(cx).session().cloned();
         let session_observer = session.map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
+        let clock = model.read(cx).clock().cloned();
+        let clock_changed = clock.map(|clock| cx.observe(&clock, |_, _, cx| cx.notify()));
         let working_lanes_derived = cx
             .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
                 timeline.invalidate_canvas(cx)
@@ -415,6 +421,7 @@ impl Timeline {
             _model_observer: model_observer,
             _session_observer: session_observer,
             _working_lanes_derived: working_lanes_derived,
+            _clock_changed: clock_changed,
         }
     }
 
@@ -922,6 +929,7 @@ impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (profile, lanes) = {
             let model = self.model.read(cx);
+            Clock::keep_pace(model.clock(), window, cx);
             let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
@@ -1526,9 +1534,44 @@ fn paint_time_selection(
     }
 }
 
-/// The overlay's paint closure: the time selection, the crosshair, the hover
-/// tooltip, and — while a drag runs — the window-global drag handlers, from the
-/// selection, crosshair, hover, and drag state it reads through `parent`.
+/// Width of the playhead's rule, broader than the crosshair's hairline so the
+/// two read apart where they cross.
+const PLAYHEAD_WIDTH_PX: f32 = 2.0;
+
+/// Paints the playback time, profile instant `at_us`, as a rule down the
+/// time-axis sections the crosshair covers, where it falls within the shown
+/// time.
+fn paint_playhead(
+    at_us: i64,
+    tv: TimeView,
+    regions: Regions,
+    show_counters: bool,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let x = regions.content_left + tv.x_of(at_us);
+    if !(regions.content_left..=regions.time_right).contains(&x) {
+        return;
+    }
+    let rule = |top: f32, height: f32, window: &mut Window| {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(x - PLAYHEAD_WIDTH_PX / 2.0), px(top)),
+                size(px(PLAYHEAD_WIDTH_PX), px(height)),
+            ),
+            palette.playhead,
+        ));
+    };
+    rule(regions.flame_top, regions.flame_h(), window);
+    if show_counters {
+        rule(regions.counters_top, regions.counters_h(), window);
+    }
+}
+
+/// The overlay's paint closure: the time selection, the playhead, the
+/// crosshair, the hover tooltip, and — while a drag runs — the window-global
+/// drag handlers, from the selection, clock, crosshair, hover, and drag state
+/// it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
@@ -1537,7 +1580,17 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = track_count(&profile);
-        let (tv, counters, counter_scroll, gutter_width, selection, crosshair, hovered, dragging) = {
+        let (
+            tv,
+            counters,
+            counter_scroll,
+            gutter_width,
+            selection,
+            playhead,
+            crosshair,
+            hovered,
+            dragging,
+        ) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
             let counter_scroll = timeline.counter_scroll(cx);
@@ -1554,6 +1607,7 @@ fn overlay_paint(
                 counter_scroll,
                 gutter_width,
                 selection,
+                model.playhead_us(cx),
                 timeline.crosshair,
                 hovered,
                 !matches!(timeline.drag, TimelineDrag::None),
@@ -1563,6 +1617,9 @@ fn overlay_paint(
         let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
         let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
+        if let Some(at_us) = playhead {
+            paint_playhead(at_us, tv, regions, show_counters, &palette, window);
+        }
         if let Some(at) = crosshair
             && f32::from(at.x) >= regions.content_left
         {
