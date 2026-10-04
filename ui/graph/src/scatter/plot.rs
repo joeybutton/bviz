@@ -248,8 +248,8 @@ impl Plotted {
             estimated: measured.estimated(),
             sizing,
             axes,
-            x: top(axes.x),
-            y: top(axes.y),
+            x: top(axes.x()),
+            y: top(axes.y()),
         }
     }
 }
@@ -521,11 +521,7 @@ mod tests {
         }
     }
 
-    /// Closure across, blast radius up.
-    const AXES: Axes = Axes {
-        x: Axis::Closure,
-        y: Axis::BlastRadius,
-    };
+    const AXES: Axes = Axes::OPENING;
 
     /// Where `target` is drawn through `area`.
     fn drawn_at(area: &DataArea, target: &Metrics) -> Point<Pixels> {
@@ -939,10 +935,7 @@ mod tests {
             2 => Some(Duration::from_secs(9)),
             _ => None,
         };
-        let axes = Axes {
-            x: Axis::ActionTime,
-            y: Axis::BlastRadius,
-        };
+        let axes = AXES.across(Axis::ActionTime);
         let plotted = Plotted::of(
             &measured,
             &reference,
@@ -984,6 +977,44 @@ mod tests {
         assert_eq!(plotted.y, by_closure.y);
         assert_eq!(plotted.marks[0].radius, by_closure.marks[1].radius);
         assert!(plotted.marks[0].radius < MAX_RADIUS);
+    }
+
+    /// Time up is scaled as time across is: to every timed point of the
+    /// reference, whatever the filter hides, while the closure across keeps
+    /// the scale it has with blast radius up.
+    #[test]
+    fn a_time_axis_up_is_scaled_to_every_timed_point_of_the_reference() {
+        let mut targets = [target(3, 1, 2), target(5, 20, 9), target(7, 3, 0)];
+        for (index, target) in targets.iter_mut().enumerate() {
+            target.id = Id(index as u32);
+        }
+        let reference = measured(&targets);
+        let measured = measured(&targets[..2]);
+        let time = |id: Id| match id.0 {
+            0 => Some(Duration::from_millis(40)),
+            2 => Some(Duration::from_secs(9)),
+            _ => None,
+        };
+        let plot = |axes, verdict: fn(Id) -> Verdict| {
+            Plotted::of(&measured, &reference, axes, time, |_| true, verdict, no_hue)
+        };
+        let shown = |_| Verdict::Shown;
+        let hiding_the_slowest = |id: Id| match id.0 {
+            2 => Verdict::Hidden,
+            _ => Verdict::Shown,
+        };
+        let by_time_up = plot(AXES.up(Axis::ActionTime), hiding_the_slowest);
+        let drawn: Vec<(Id, u32, u32)> = by_time_up
+            .marks
+            .iter()
+            .map(|m| (m.target.id, m.x, m.y))
+            .collect();
+        assert_eq!(drawn, [(Id(0), 3, 40)]);
+        assert_eq!(by_time_up.y, LogScale::covering(9_000, Ladder::Millis));
+        assert_eq!(by_time_up.y, plot(AXES.across(Axis::ActionTime), shown).x);
+        let opening = plot(AXES, shown);
+        assert_eq!(by_time_up.x, opening.x);
+        assert_eq!(by_time_up.marks[0].radius, opening.marks[1].radius);
     }
 
     #[test]

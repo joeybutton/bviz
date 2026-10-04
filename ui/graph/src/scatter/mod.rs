@@ -1,5 +1,6 @@
-//! A scatter plot of a graph's actions, configured targets or targets by how
-//! much of the build each pulls in against how much of it depends on it.
+//! A scatter plot of a graph's actions, configured targets or targets by two
+//! of: how much of the build each pulls in, how much of it depends on it, and
+//! how long its actions took.
 
 mod axis;
 mod hue;
@@ -56,37 +57,10 @@ gpui::actions!(
     [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
 );
 
-/// What the picker offers to place points across the plot by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Across {
-    Closure,
-    ActionTime,
-}
-
-impl Across {
-    /// In the picker's order, which is the order they are declared in.
-    const ALL: [Across; 2] = [Across::Closure, Across::ActionTime];
-
-    fn axis(self) -> Axis {
-        match self {
-            Across::Closure => Axis::Closure,
-            Across::ActionTime => Axis::ActionTime,
-        }
-    }
-
-    /// Where the picker offers it.
-    fn index(self) -> usize {
-        self as usize
-    }
-}
-
-/// What the plot places its points up the plot by.
-const UP: Axis = Axis::BlastRadius;
-
 /// What the panel reads while the graph is being measured.
 const MEASURING: &str = "Computing metrics…";
 
-/// The points of a graph, placed by their closure and blast radius.
+/// The points of a graph, placed by two of their measures.
 pub struct ScatterPanel {
     focus: FocusHandle,
     /// Measures the graph the first time this panel is shown.
@@ -218,15 +192,17 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Places the points across the plot by `across`.
-    fn choose_across(&mut self, across: Across, cx: &mut Context<Self>) {
+    /// Places the points by the axes `choose` makes of those chosen.
+    fn choose_axes(&mut self, choose: impl FnOnce(Axes) -> Axes, cx: &mut Context<Self>) {
         let Some(choice) = &mut self.choice else {
             return;
         };
-        if choice.across == across {
+        let axes = choose(choice.axes);
+        if choice.axes == axes {
             return;
         }
-        choice.across = across;
+        choice.axes = axes;
+        choice.show_axes(cx);
         self.close_pick(cx);
         self.replot(cx);
         cx.notify();
@@ -289,7 +265,7 @@ impl ScatterPanel {
         let Some(((scope, reference), choice)) = self.scopes().zip(self.choice.as_ref()) else {
             return;
         };
-        let (axes, colour) = (choice.axes(), choice.colour);
+        let (axes, colour) = (choice.axes, choice.colour);
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
@@ -651,12 +627,14 @@ struct Choice {
     units: Vec<Unit>,
     picker: Entity<Dropdown>,
     _picked: Subscription,
-    across: Across,
+    axes: Axes,
     /// Whether any point of the unit plotted has an action time, which the
     /// choices reading it are offered by.
     timed: bool,
     across_picker: Entity<Dropdown>,
     _across_picked: Subscription,
+    up_picker: Entity<Dropdown>,
+    _up_picked: Subscription,
     colour: ColourBy,
     colour_picker: Entity<Dropdown>,
     _colour_picked: Subscription,
@@ -692,12 +670,21 @@ impl Choice {
                 view.choose_unit(unit, cx);
             }
         });
-        let names = Across::ALL.map(|across| across.axis().name());
-        let across_picker = cx.new(|cx| Dropdown::new("scatter-across", names, 0, cx));
+        let axes = Axes::OPENING;
+        let names = Axis::ALL.map(Axis::name);
+        let across_picker =
+            cx.new(|cx| Dropdown::new("scatter-across", names, axes.x().index(), cx));
         let across_picked = cx.subscribe(&across_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
-            if let Some(&across) = Across::ALL.get(*index) {
-                view.choose_across(across, cx);
+            if let Some(&axis) = Axis::ALL.get(*index) {
+                view.choose_axes(|axes| axes.across(axis), cx);
+            }
+        });
+        let up_picker = cx.new(|cx| Dropdown::new("scatter-up", names, axes.y().index(), cx));
+        let up_picked = cx.subscribe(&up_picker, |view, _, event, cx| {
+            let DropdownEvent::Changed(index) = event;
+            if let Some(&axis) = Axis::ALL.get(*index) {
+                view.choose_axes(|axes| axes.up(axis), cx);
             }
         });
         let names = ColourBy::ALL.map(|by| by.label(scope.unit()));
@@ -715,9 +702,11 @@ impl Choice {
             units,
             picker,
             _picked: picked,
-            across: Across::ALL[0],
+            axes,
             across_picker,
             _across_picked: across_picked,
+            up_picker,
+            _up_picked: up_picked,
             timed,
             colour: ColourBy::ALL[0],
             colour_picker,
@@ -738,10 +727,12 @@ impl Choice {
         });
     }
 
-    fn axes(&self) -> Axes {
-        Axes {
-            x: self.across.axis(),
-            y: UP,
+    /// Shows on each axis's picker the measure chosen for it.
+    fn show_axes(&self, cx: &mut Context<ScatterPanel>) {
+        let axes = self.axes;
+        let pickers = [(&self.across_picker, axes.x()), (&self.up_picker, axes.y())];
+        for (picker, axis) in pickers {
+            picker.update(cx, |picker, cx| picker.set_selected(axis.index(), cx));
         }
     }
 
@@ -750,22 +741,23 @@ impl Choice {
     /// shows what is chosen as chosen. Whether a choice fell back.
     fn offer_times(&mut self, timed: bool, cx: &mut Context<ScatterPanel>) -> bool {
         self.timed = timed;
-        let across_falls = !timed && self.across == Across::ActionTime;
-        if across_falls {
-            self.across = Across::Closure;
+        let axes_fall = !timed && self.axes.reads_time();
+        if axes_fall {
+            self.axes = self.axes.untimed();
         }
         let colour_falls = !timed && self.colour == ColourBy::Runner;
         if colour_falls {
             self.colour = ColourBy::Identity;
         }
-        let across = self.across;
-        self.across_picker.update(cx, |picker, cx| {
-            for offered in Across::ALL {
-                let available = timed || !offered.axis().reads_time();
-                picker.set_available(offered.index(), available, cx);
-            }
-            picker.set_selected(across.index(), cx);
-        });
+        for picker in [&self.across_picker, &self.up_picker] {
+            picker.update(cx, |picker, cx| {
+                for offered in Axis::ALL {
+                    let available = timed || !offered.reads_time();
+                    picker.set_available(offered.index(), available, cx);
+                }
+            });
+        }
+        self.show_axes(cx);
         let colour = self.colour;
         self.colour_picker.update(cx, |picker, cx| {
             for offered in ColourBy::ALL {
@@ -774,7 +766,7 @@ impl Choice {
             }
             picker.set_selected(colour.index(), cx);
         });
-        across_falls || colour_falls
+        axes_fall || colour_falls
     }
 
     /// The scope's unit over every loaded input describing it, whose measure
@@ -1120,9 +1112,10 @@ impl Render for ScatterPanel {
             return root.child(placeholder);
         }
         let root = root.children(self.choice.as_ref().map(|choice| {
-            let measuring = self.plot.as_ref().is_some_and(|plot| {
-                plot.scope != choice.scope || plot.plotted.axes != choice.axes()
-            });
+            let measuring = self
+                .plot
+                .as_ref()
+                .is_some_and(|plot| plot.scope != choice.scope || plot.plotted.axes != choice.axes);
             let times = model
                 .loaded()
                 .map_or(Err(Untimed::NoProfile), Loaded::times);
@@ -1612,11 +1605,13 @@ fn strip(
             .tooltip(TextTooltip::builder(note, tip))
             .child(picker.clone())
     };
+    let time_axis = "place points by their action time";
     let across = group("across").child(timed_picker(
         "scatter-across-why",
         &choice.across_picker,
-        "place points by their action time",
+        time_axis,
     ));
+    let up = group("up").child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
     let colour = group("colour").child(timed_picker(
         "scatter-colour-why",
         &choice.colour_picker,
@@ -1631,6 +1626,7 @@ fn strip(
     Toolbar::new()
         .child(unit)
         .child(across)
+        .child(up)
         .child(colour)
         .child(inputs)
         .when(measuring, |bar| {
@@ -1728,7 +1724,7 @@ fn unplaced(plot: &Plot) -> Option<String> {
         _ => names.many,
     };
     let axes = plot.plotted.axes;
-    let lacked: Vec<&str> = [axes.x, axes.y]
+    let lacked: Vec<&str> = [axes.x(), axes.y()]
         .into_iter()
         .filter(|axis| axis.reads_time())
         .map(Axis::name)

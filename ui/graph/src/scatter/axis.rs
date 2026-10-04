@@ -37,6 +37,12 @@ impl Axis {
         }
     }
 
+    /// Where a picker offers the measure, in the order of [`ALL`](Self::ALL),
+    /// which is the order they are declared in.
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+
     /// Whether the axis places a point by the action time the graph places on
     /// it, which a point can lack, and which changes with the session's
     /// timings.
@@ -101,14 +107,67 @@ fn time_tick_label(millis: u32) -> String {
     }
 }
 
-/// The measures a plot places its points by: across, and up.
+/// The measures a plot places its points by: across, and up, never the same
+/// measure on both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Axes {
-    pub(crate) x: Axis,
-    pub(crate) y: Axis,
+    x: Axis,
+    y: Axis,
 }
 
 impl Axes {
+    /// Closure across, blast radius up.
+    pub(crate) const OPENING: Axes = Axes {
+        x: Axis::Closure,
+        y: Axis::BlastRadius,
+    };
+
+    pub(crate) fn x(self) -> Axis {
+        self.x
+    }
+
+    pub(crate) fn y(self) -> Axis {
+        self.y
+    }
+
+    /// These axes with `axis` across, swapped with the measure up where that
+    /// is `axis`.
+    pub(crate) fn across(self, axis: Axis) -> Axes {
+        match axis == self.y {
+            true => Axes { x: axis, y: self.x },
+            false => Axes { x: axis, ..self },
+        }
+    }
+
+    /// These axes with `axis` up, by the rule [`across`](Self::across) keeps.
+    pub(crate) fn up(self, axis: Axis) -> Axes {
+        self.transposed().across(axis).transposed()
+    }
+
+    fn transposed(self) -> Axes {
+        Axes {
+            x: self.y,
+            y: self.x,
+        }
+    }
+
+    /// These axes with the measure on neither in place of one that
+    /// [reads time](Axis::reads_time).
+    pub(crate) fn untimed(self) -> Axes {
+        let spare = match (self.x, self.y) {
+            (Axis::Closure, Axis::BlastRadius) | (Axis::BlastRadius, Axis::Closure) => {
+                Axis::ActionTime
+            }
+            (Axis::Closure, _) | (_, Axis::Closure) => Axis::BlastRadius,
+            _ => Axis::Closure,
+        };
+        match (self.x.reads_time(), self.y.reads_time()) {
+            (true, _) => self.across(spare),
+            (_, true) => self.up(spare),
+            _ => self,
+        }
+    }
+
     /// Where `point`, whose actions took `time`, falls along each axis's
     /// scale; absent where it has no measure on one of them.
     pub(crate) fn place(self, point: &Metrics, time: Option<Duration>) -> Option<(u32, u32)> {
@@ -256,10 +315,7 @@ mod tests {
     #[test]
     fn a_tooltip_reads_the_plotted_measures_and_then_those_left_off_the_axes() {
         let timed = Some(Duration::from_millis(3_200));
-        let by_time = Axes {
-            x: Axis::ActionTime,
-            y: Axis::BlastRadius,
-        };
+        let by_time = Axes::OPENING.across(Axis::ActionTime);
         assert_eq!(
             by_time.readings(&point(3, 4), timed),
             "action time 3.2s · blast radius ≈4"
@@ -268,14 +324,86 @@ mod tests {
             by_time.unplaced(&point(3, 4), timed).as_deref(),
             Some("closure 3")
         );
-        let by_closure = Axes {
-            x: Axis::Closure,
-            ..by_time
-        };
+        let by_closure = by_time.across(Axis::Closure);
         assert_eq!(
             by_closure.unplaced(&point(3, 4), timed).as_deref(),
             Some("action time 3.2s")
         );
         assert_eq!(by_closure.unplaced(&point(3, 4), None), None);
+    }
+
+    #[test]
+    fn choosing_the_measure_the_other_axis_shows_swaps_the_axes() {
+        let opening = Axes::OPENING;
+        let swapped = Axes {
+            x: Axis::BlastRadius,
+            y: Axis::Closure,
+        };
+        assert_eq!(opening.across(Axis::BlastRadius), swapped);
+        assert_eq!(opening.up(Axis::Closure), swapped);
+        assert_eq!(opening.across(Axis::Closure), opening);
+        assert_eq!(
+            opening.up(Axis::ActionTime),
+            Axes {
+                x: Axis::Closure,
+                y: Axis::ActionTime,
+            }
+        );
+        let closure_by_time = opening.up(Axis::Closure).across(Axis::ActionTime);
+        assert_eq!(
+            closure_by_time,
+            Axes {
+                x: Axis::ActionTime,
+                y: Axis::Closure,
+            }
+        );
+        for x in Axis::ALL {
+            for y in Axis::ALL {
+                let axes = opening.across(x).up(y);
+                assert_ne!(axes.x, axes.y);
+                assert_eq!(axes.y, y);
+            }
+        }
+    }
+
+    #[test]
+    fn an_axis_reading_time_falls_back_to_the_measure_on_neither_axis() {
+        let fallen = |x, y| Axes { x, y }.untimed();
+        let (closure, blast, time) = (Axis::Closure, Axis::BlastRadius, Axis::ActionTime);
+        assert_eq!(
+            fallen(time, blast),
+            Axes {
+                x: closure,
+                y: blast
+            }
+        );
+        assert_eq!(
+            fallen(time, closure),
+            Axes {
+                x: blast,
+                y: closure
+            }
+        );
+        assert_eq!(
+            fallen(closure, time),
+            Axes {
+                x: closure,
+                y: blast
+            }
+        );
+        assert_eq!(
+            fallen(blast, time),
+            Axes {
+                x: blast,
+                y: closure
+            }
+        );
+        assert_eq!(
+            fallen(blast, closure),
+            Axes {
+                x: blast,
+                y: closure
+            }
+        );
     }
 }

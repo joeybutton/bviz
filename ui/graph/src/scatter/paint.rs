@@ -245,7 +245,7 @@ fn paint_axes(
             ink.axis,
         ));
         if shown.labelled {
-            let text = plotted.axes.x.tick_label(tick.value);
+            let text = plotted.axes.x().tick_label(tick.value);
             paint_text(
                 &text,
                 TICK_LABEL_SIZE,
@@ -266,7 +266,7 @@ fn paint_axes(
             ink.axis,
         ));
         if shown.labelled {
-            let text = plotted.axes.y.tick_label(tick.value);
+            let text = plotted.axes.y().tick_label(tick.value);
             let top = y - px(TICK_LABEL_SIZE / 2.);
             paint_text(
                 &text,
@@ -283,7 +283,7 @@ fn paint_axes(
     let x_title_top = label_top + px(TICK_LABEL_SIZE + LABEL_GAP * 2.);
     let x_center = axes.left() + axes.size.width / 2.;
     paint_text(
-        plotted.axes.x.title(),
+        plotted.axes.x().title(),
         TITLE_SIZE,
         ink.label,
         Align::Center(x_center),
@@ -293,7 +293,7 @@ fn paint_axes(
     );
     let y_title_top = axes.top() - px(TITLE_SIZE + LABEL_GAP * 2.);
     paint_text(
-        plotted.axes.y.title(),
+        plotted.axes.y().title(),
         TITLE_SIZE,
         ink.label,
         Align::Start(left),
