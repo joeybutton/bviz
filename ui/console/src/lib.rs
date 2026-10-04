@@ -19,7 +19,7 @@ use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_playback::DocumentClock;
-use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_workspace::{Document, Member, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
@@ -107,7 +107,11 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, None, None, window, cx).into(),
+        |load, window, cx| {
+            Document::playing_on(DocumentClock::alone(cx), |clock| {
+                open(load, None, Some(clock.clone()), window, cx).into()
+            })
+        },
         &[console::register_keys],
     );
 }
