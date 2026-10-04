@@ -149,6 +149,7 @@ impl<T> Reported<T> {
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
+    attempts: Reported<Attempts>,
     configurations: Configurations,
     outcomes: Reported<Outcomes>,
     timings: Reported<Timings>,
@@ -188,6 +189,20 @@ impl Session {
 
     pub fn report_timings(&mut self, reported: Timings) {
         self.timings.replace(reported);
+    }
+
+    /// When the invocation's actions were executed; none where its profile
+    /// cannot place them on the wall clock.
+    pub fn attempts(&self) -> &Attempts {
+        &self.attempts.value
+    }
+
+    pub fn attempts_revision(&self) -> Revision {
+        self.attempts.revision
+    }
+
+    pub fn report_attempts(&mut self, reported: Attempts) {
+        self.attempts.replace(reported);
     }
 }
 
@@ -351,6 +366,31 @@ mod tests {
         session.report_timings(Timings::default());
         assert_ne!(session.timings_revision(), timed);
         assert!(session.timings().is_empty());
+    }
+
+    #[test]
+    fn a_sessions_attempts_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let unattempted = session.attempts_revision();
+        session.report_timings(Timings::default());
+        assert_eq!(session.attempts_revision(), unattempted);
+
+        let attempt = attempts::tests::attempt(0, 10, &[]);
+        let mut attempts = Attempts::default();
+        attempts.record(Some("bazel-out/a.o"), None, attempt);
+        session.report_attempts(attempts);
+        let attempted = session.attempts_revision();
+        assert_ne!(attempted, unattempted);
+        assert_eq!(
+            session.attempts().action("bazel-out/a.o"),
+            Some(&[attempt][..])
+        );
+        session.report_timings(Timings::default());
+        assert_eq!(session.attempts_revision(), attempted);
+
+        session.report_attempts(Attempts::default());
+        assert_ne!(session.attempts_revision(), attempted);
+        assert!(session.attempts().is_empty());
     }
 
     #[test]

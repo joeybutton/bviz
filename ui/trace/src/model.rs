@@ -40,9 +40,9 @@ pub(crate) struct WorkingLanesDerived;
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
     working_lanes: DerivedLanes,
-    /// Derives the profile's action timings and reports them to its session;
-    /// held with the profile, so that a profile replaced before its timings
-    /// are ready reports none.
+    /// Derives the profile's action timings and attempts and reports them to
+    /// its session; held with the profile, so that a profile replaced before
+    /// they are ready reports none.
     _reporting_timings: Option<Task<()>>,
 }
 
@@ -58,7 +58,7 @@ enum DerivedLanes {
 
 impl LoadedProfile {
     /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx` and its action timings to `session`.
+    /// `cx` and its action timings and attempts to `session`.
     fn new(
         profile: Profile,
         session: Option<WeakEntity<Session>>,
@@ -83,13 +83,14 @@ impl LoadedProfile {
         let reporting_timings = session.map(|session| {
             let timed = flamer.profile().clone();
             cx.spawn(async move |_, cx| {
-                let timings = cx
+                let (timings, attempts) = cx
                     .background_executor()
-                    .spawn(async move { timed.timings() })
+                    .spawn(async move { (timed.timings(), timed.attempts()) })
                     .await;
                 session
                     .update(cx, |session, cx| {
                         session.report_timings(timings);
+                        session.report_attempts(attempts.unwrap_or_default());
                         cx.notify();
                     })
                     .ok();

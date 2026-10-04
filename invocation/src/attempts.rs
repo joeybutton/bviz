@@ -271,7 +271,7 @@ impl Attempts {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const ORIGIN_MS: i64 = 1_781_439_245_231;
@@ -280,7 +280,7 @@ mod tests {
         EpochMicros::from_millis(ORIGIN_MS).plus_micros(micros)
     }
 
-    fn attempt(start: i64, end: i64, seen: &[(Phase, i64)]) -> Attempt {
+    pub(crate) fn attempt(start: i64, end: i64, seen: &[(Phase, i64)]) -> Attempt {
         Attempt::new(
             at(start),
             at(end),
