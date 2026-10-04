@@ -91,8 +91,10 @@ bviz --profile /tmp/build.profile.gz
 
 For a more complete profile, add `--noslim_profile --record_full_profiler_data
 --experimental_profile_include_target_label
---experimental_profile_include_target_configuration`. The profile then keeps
-short events and names each action's target, at the cost of a larger file.
+--experimental_profile_include_target_configuration
+--experimental_profile_include_primary_output`. The profile then keeps short
+events and names each action's target and primary output, at the cost of a
+larger file.
 
 ### Console replay
 
