@@ -1081,6 +1081,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_ui_playback"
+version = "0.1.0"
+dependencies = [
+ "bviz_invocation",
+ "gpui",
+]
+
+[[package]]
 name = "bviz_ui_shell"
 version = "0.1.0"
 dependencies = [
