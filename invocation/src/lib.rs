@@ -6,10 +6,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod outcomes;
+mod runner;
+mod timings;
 
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
+pub use runner::{Runner, Spawns};
+pub use timings::{Profiled, Share, Spent, Timing, Timings};
 
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
@@ -111,9 +115,9 @@ fn short(checksum: &str) -> String {
     checksum.chars().take(CHECKSUM_SHOWN).collect()
 }
 
-/// Which of the reports of outcomes a [`Session`] has taken its outcomes are
-/// of. A reader that keeps the one its reading was taken at can tell whether
-/// the outcomes are still those it read.
+/// Which of the reports of one kind a [`Session`] has taken what it holds of
+/// that kind from. A reader that keeps the one its reading was taken at can
+/// tell whether what it read is still what the session holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision(u64);
 
@@ -124,6 +128,8 @@ pub struct Session {
     configurations: Configurations,
     outcomes: Outcomes,
     reported: Revision,
+    timings: Timings,
+    timed: Revision,
 }
 
 impl Session {
@@ -153,6 +159,25 @@ impl Session {
     pub fn report_outcomes(&mut self, reported: Outcomes) {
         self.outcomes = reported;
         self.reported.0 += 1;
+    }
+
+    /// What the invocation's profile recorded of its actions.
+    pub fn timings(&self) -> &Timings {
+        &self.timings
+    }
+
+    /// The same for as long as [`timings`](Self::timings) are those of one
+    /// report, whatever else the session learns meanwhile.
+    pub fn timings_revision(&self) -> Revision {
+        self.timed
+    }
+
+    /// Takes `reported` for what the invocation's profile recorded of its
+    /// actions. An invocation writes one profile, so these stand in place of
+    /// any reported before.
+    pub fn report_timings(&mut self, reported: Timings) {
+        self.timings = reported;
+        self.timed.0 += 1;
     }
 }
 
@@ -273,6 +298,39 @@ mod tests {
         session.report_outcomes(Outcomes::default());
         assert_ne!(session.outcomes_revision(), first);
         assert_ne!(session.outcomes_revision(), unreported);
+    }
+
+    #[test]
+    fn a_sessions_timings_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let untimed = session.timings_revision();
+        session.report_outcomes(Outcomes::default());
+        assert_eq!(session.timings_revision(), untimed);
+
+        let mut timings = Timings::default();
+        let wall = std::time::Duration::from_millis(3);
+        timings.record(Profiled {
+            primary_output: Some("bazel-out/a.o"),
+            owner: None,
+            wall,
+            spawns: Spawns::on(Runner::Local, wall),
+        });
+        let timing = Timing {
+            wall,
+            runner: Runner::Local,
+        };
+        session.report_timings(timings);
+        let timed = session.timings_revision();
+        assert_ne!(timed, untimed);
+        assert_eq!(session.timings().action("bazel-out/a.o"), Some(timing));
+        let outcomes = session.outcomes_revision();
+        session.report_outcomes(Outcomes::default());
+        assert_eq!(session.timings_revision(), timed);
+        assert_ne!(session.outcomes_revision(), outcomes);
+
+        session.report_timings(Timings::default());
+        assert_ne!(session.timings_revision(), timed);
+        assert!(session.timings().is_empty());
     }
 
     #[test]

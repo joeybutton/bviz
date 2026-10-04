@@ -2,7 +2,6 @@
 //! marks at once, of every point under it.
 
 use super::plot::Spot;
-use bviz_graph_layout::metrics::Count;
 use bviz_ui_components::menu_chrome::sheet_height;
 use bviz_ui_components::{beside_anchor, room_beside};
 use gpui::{Bounds, Pixels, Point, SharedString, Size, point, px, size};
@@ -49,10 +48,12 @@ pub(super) struct PickRow {
     /// What tells the point apart from the others whose rows read alike, as
     /// [`hints`] chooses it.
     pub(super) hint: Option<SharedString>,
-    /// The point's closure and blast radius as the row reads them.
-    pub(super) counts: SharedString,
-    pub(super) closure: Count,
-    pub(super) blast_radius: Count,
+    /// The point's measures along both axes as the row reads them.
+    pub(super) measures: SharedString,
+    /// Where the point falls along the horizontal axis's scale.
+    pub(super) x: u32,
+    /// Where the point falls along the vertical axis's scale.
+    pub(super) y: u32,
     /// What the tooltip for the point reads while the row is aimed at.
     pub(super) tooltip: Vec<String>,
 }
@@ -114,17 +115,12 @@ pub(super) fn hints<K: Eq + Hash>(
         .collect()
 }
 
-/// Puts `rows` in the order the list reads: the widest blast radius first, then
-/// the largest closure, then by what the rows read, and the order the marks are
-/// drawn in among rows alike in all of those.
+/// Puts `rows` in the order the list reads: the highest on the plot first,
+/// then the furthest right, then by what the rows read, and the order the marks
+/// are drawn in among rows alike in all of those.
 pub(super) fn order(rows: &mut [PickRow]) {
     rows.sort_by(|a, b| {
-        let key = |row: &PickRow| {
-            (
-                Reverse(row.blast_radius.value()),
-                Reverse(row.closure.value()),
-            )
-        };
+        let key = |row: &PickRow| (Reverse(row.y), Reverse(row.x));
         key(a)
             .cmp(&key(b))
             .then_with(|| a.mnemonic.cmp(&b.mnemonic))
@@ -266,7 +262,7 @@ mod tests {
     use super::*;
     use bviz_ui_components::menu_chrome::{SHEET_BORDER, SHEET_PADDING};
 
-    fn row(mark: usize, label: &str, closure: u32, blast_radius: u32) -> PickRow {
+    fn row(mark: usize, label: &str, x: u32, y: u32) -> PickRow {
         let (label, hint) = match label.split_once(' ') {
             Some((label, hint)) => (label, Some(hint.to_owned().into())),
             None => (label, None),
@@ -277,9 +273,9 @@ mod tests {
             package: SharedString::default(),
             name: label.to_owned().into(),
             hint,
-            counts: SharedString::default(),
-            closure: Count::Exact(closure),
-            blast_radius: Count::Estimated(blast_radius),
+            measures: SharedString::default(),
+            x,
+            y,
             tooltip: Vec::new(),
         }
     }
@@ -363,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_reads_widest_blast_radius_then_largest_closure_then_name() {
+    fn the_list_reads_highest_then_furthest_right_then_name() {
         let mut rows = vec![
             row(0, "b", 5, 10),
             row(1, "a y.o", 5, 10),

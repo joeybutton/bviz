@@ -4,9 +4,9 @@ use super::{
     Action, Badged, BuildTally, Causes, Ended, Fate, Listed, Mismatches, Name, Row, Said, Saying,
     Share, Shown, TestTally, Traced, Unbuilt, wholly_cached,
 };
+use crate::duration::lasted;
 use crate::status::Status;
 use bviz_invocation::{Configurations, ConfiguredTarget, TestOutcome, TestStatus};
-use std::time::Duration;
 
 /// `count` of a thing named `one`, or `many` where there is not one of it.
 fn counted(count: usize, one: &str, many: &str) -> String {
@@ -66,24 +66,6 @@ impl TestTally {
                 ],
             )
         })
-    }
-}
-
-/// How long a test ran, to the precision a reader compares runs at.
-fn lasted(run: Duration) -> String {
-    const TENTHS: u64 = 10;
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    let tenths = (run.as_secs_f64() * TENTHS as f64).round() as u64;
-    let seconds = run.as_secs_f64().round() as u64;
-    if tenths == 0 {
-        "under 0.1s".to_owned()
-    } else if tenths < MINUTE * TENTHS {
-        format!("{}.{}s", tenths / TENTHS, tenths % TENTHS)
-    } else if seconds < HOUR {
-        format!("{}m {:02}s", seconds / MINUTE, seconds % MINUTE)
-    } else {
-        format!("{}h {:02}m", seconds / HOUR, seconds % HOUR / MINUTE)
     }
 }
 
@@ -446,6 +428,7 @@ mod tests {
     use super::*;
     use bviz_graph_layout::Id;
     use std::num::NonZeroU32;
+    use std::time::Duration;
 
     #[test]
     fn a_long_line_of_what_the_build_said_is_broken_at_a_space() {
@@ -485,23 +468,6 @@ mod tests {
         assert_eq!(hover("name", "detail", " \n"), "name\ndetail");
     }
 
-    /// A run is timed as it rounds, so one rounding up to a minute reads as
-    /// the minute, and one rounding to no tenth of a second as under one.
-    #[test]
-    fn a_run_is_timed_to_the_precision_it_is_compared_at() {
-        let lasted = |millis| lasted(Duration::from_millis(millis));
-        assert_eq!(lasted(0), "under 0.1s");
-        assert_eq!(lasted(49), "under 0.1s");
-        assert_eq!(lasted(50), "0.1s");
-        assert_eq!(lasted(3_038), "3.0s");
-        assert_eq!(lasted(59_949), "59.9s");
-        assert_eq!(lasted(59_950), "1m 00s");
-        assert_eq!(lasted(59_999), "1m 00s");
-        assert_eq!(lasted(125_400), "2m 05s");
-        assert_eq!(lasted(3_599_600), "1h 00m");
-        assert_eq!(lasted((3 * 3600 + 7 * 60 + 59) * 1000), "3h 07m");
-    }
-
     #[test]
     fn a_test_is_said_to_have_ended_as_its_attempts_runs_and_shards_explain() {
         let flaky = TestOutcome {
@@ -510,7 +476,7 @@ mod tests {
             run_duration: Duration::from_millis(80),
             ..test(TestStatus::Flaky)
         };
-        assert_eq!(ran(&flaky), "flaky: passed on attempt 2 in 0.1s");
+        assert_eq!(ran(&flaky), "flaky: passed on attempt 2 in 80ms");
         let retried = TestOutcome {
             attempts: 3,
             ..test(TestStatus::Failed)

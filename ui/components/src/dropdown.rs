@@ -16,12 +16,21 @@ pub enum DropdownEvent {
     Changed(usize),
 }
 
+/// One option a [`Dropdown`] offers.
+struct Choice {
+    label: SharedString,
+    /// Whether picking it does anything. An option the data behind the control
+    /// cannot answer is drawn greyed and cannot be picked, so that it says it
+    /// can do nothing rather than silently doing nothing.
+    available: bool,
+}
+
 /// A dropdown over a fixed list of options. The chosen index is read with
 /// [`selected`](Self::selected); subscribe to [`DropdownEvent`] to react to a
 /// user's selection change.
 pub struct Dropdown {
     id: ElementId,
-    options: Vec<SharedString>,
+    options: Vec<Choice>,
     selected: usize,
     open: bool,
     focus_handle: FocusHandle,
@@ -39,7 +48,13 @@ impl Dropdown {
     ) -> Self {
         Self {
             id: id.into(),
-            options: options.into_iter().map(Into::into).collect(),
+            options: options
+                .into_iter()
+                .map(|label| Choice {
+                    label: label.into(),
+                    available: true,
+                })
+                .collect(),
             selected,
             open: false,
             focus_handle: cx.focus_handle(),
@@ -50,6 +65,33 @@ impl Dropdown {
     /// The index of the chosen option.
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Makes the option at `index` one that can be picked, or one that cannot.
+    pub fn set_available(&mut self, index: usize, available: bool, cx: &mut Context<Self>) {
+        if let Some(choice) = self.options.get_mut(index)
+            && choice.available != available
+        {
+            choice.available = available;
+            cx.notify();
+        }
+    }
+
+    /// Names the option at `index` `label`, for an option whose meaning
+    /// follows a choice made elsewhere.
+    pub fn set_label(
+        &mut self,
+        index: usize,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let label = label.into();
+        if let Some(choice) = self.options.get_mut(index)
+            && choice.label != label
+        {
+            choice.label = label;
+            cx.notify();
+        }
     }
 
     /// Set the chosen index if in range and different, reporting whether it changed.
@@ -69,6 +111,13 @@ impl Dropdown {
     }
 
     fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self
+            .options
+            .get(index)
+            .is_some_and(|choice| choice.available)
+        {
+            return;
+        }
         self.open = false;
         if self.select(index) {
             cx.emit(DropdownEvent::Changed(index));
@@ -82,7 +131,11 @@ impl Dropdown {
         option_width: Pixels,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let label = self.options.get(self.selected).cloned().unwrap_or_default();
+        let label = self
+            .options
+            .get(self.selected)
+            .map(|choice| choice.label.clone())
+            .unwrap_or_default();
         menu_chrome::trigger(self.id.clone(), colors)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open = !this.open;
@@ -103,8 +156,11 @@ impl Dropdown {
                 colors,
                 index == self.selected,
             )
+            .when(!option.available, |row| {
+                row.cursor_default().text_color(colors.text_disabled)
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)))
-            .child(div().whitespace_nowrap().child(option.clone()))
+            .child(div().whitespace_nowrap().child(option.label.clone()))
         });
         // Defer the menu so it paints over the content below the trigger.
         deferred(menu_chrome::sheet(colors).children(rows))
@@ -129,7 +185,10 @@ impl Render for Dropdown {
         }
 
         let colors = bviz_ui_theme::theme(window, cx).colors;
-        let option_width = menu_chrome::widest(window, self.options.iter().cloned());
+        let option_width = menu_chrome::widest(
+            window,
+            self.options.iter().map(|choice| choice.label.clone()),
+        );
 
         div()
             .relative()

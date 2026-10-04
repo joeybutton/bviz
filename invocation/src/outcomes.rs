@@ -164,7 +164,7 @@ pub struct FailedAction {
 /// A value for each configured target reported on. The configurations of one
 /// label are few and share the label's entry, which a lookup reaches by a
 /// borrowed label.
-struct PerTarget<T>(HashMap<String, Vec<(Option<String>, T)>>);
+pub(crate) struct PerTarget<T>(HashMap<String, Vec<(Option<String>, T)>>);
 
 impl<T> Default for PerTarget<T> {
     fn default() -> Self {
@@ -173,7 +173,11 @@ impl<T> Default for PerTarget<T> {
 }
 
 impl<T> PerTarget<T> {
-    fn get(&self, target: ConfiguredTarget<&str>) -> Option<&T> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn get(&self, target: ConfiguredTarget<&str>) -> Option<&T> {
         let configurations = self.0.get(target.label)?;
         configurations
             .iter()
@@ -183,7 +187,12 @@ impl<T> PerTarget<T> {
 
     /// Holds `value` for `target`, or has `combine` fold it into the value
     /// `target` already has.
-    fn report(&mut self, target: ConfiguredTarget, value: T, combine: impl FnOnce(&mut T, T)) {
+    pub(crate) fn report(
+        &mut self,
+        target: ConfiguredTarget,
+        value: T,
+        combine: impl FnOnce(&mut T, T),
+    ) {
         let configurations = self.0.entry(target.label).or_default();
         let reported = configurations
             .iter_mut()
@@ -194,7 +203,7 @@ impl<T> PerTarget<T> {
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = (ConfiguredTarget<&str>, &T)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ConfiguredTarget<&str>, &T)> {
         self.0.iter().flat_map(|(label, configurations)| {
             configurations.iter().map(move |(configuration, value)| {
                 let target = ConfiguredTarget {

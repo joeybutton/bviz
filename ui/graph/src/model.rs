@@ -3,6 +3,8 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use crate::report::Report;
 use crate::status::{Nodes, Statuses};
+use crate::timecard::Timecard;
+use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
@@ -107,6 +109,13 @@ pub(crate) struct Loaded {
     /// from: those of a session no build has reported to, until a report is
     /// taken up.
     taken_up: Revision,
+    /// How long the actions the invocation's profile recorded took, placed on
+    /// the graph's nodes.
+    times: Result<NodeTimes, Untimed>,
+    /// Where the actions the invocation's profile recorded spent their time,
+    /// as the card over the graph lists it.
+    timecard: Timecard,
+    timed: Revision,
 }
 
 impl Loaded {
@@ -118,6 +127,9 @@ impl Loaded {
             statuses: Statuses::default(),
             reported: Report::default(),
             taken_up: Revision::default(),
+            times: Err(Untimed::NoProfile),
+            timecard: Timecard::default(),
+            timed: Revision::default(),
         }
     }
 
@@ -136,10 +148,48 @@ impl Loaded {
         self.taken_up
     }
 
-    /// Takes up what the build of `session` reports of the graph's nodes, and
-    /// says whether that changed anything a view of the graph shows. Outcomes
-    /// already taken up are not read again.
+    /// Which of its session's timings the [times](Self::times) and the
+    /// [timecard](Self::timecard) are read from, as
+    /// [`taken_up`](Self::taken_up) is for outcomes.
+    pub(crate) fn timed(&self) -> Revision {
+        self.timed
+    }
+
+    pub(crate) fn times(&self) -> Result<&NodeTimes, Untimed> {
+        self.times.as_ref().map_err(|untimed| *untimed)
+    }
+
+    pub(crate) fn timecard(&self) -> &Timecard {
+        &self.timecard
+    }
+
+    /// Takes up what the build and the profile of `session` report of the
+    /// graph's nodes, and says whether that changed anything a view of the
+    /// graph shows. Each is read again only once it is reported anew.
     fn report(&mut self, session: &Session) -> bool {
+        let outcomes = self.take_up_outcomes(session);
+        let timings = self.take_up_timings(session);
+        outcomes || timings
+    }
+
+    fn take_up_timings(&mut self, session: &Session) -> bool {
+        let revision = session.timings_revision();
+        if self.timed == revision {
+            return false;
+        }
+        self.timed = revision;
+        let timings = session.timings();
+        let base = &self.shared.base;
+        let landings = landings(base, &self.shared.names, timings);
+        let times = NodeTimes::resolve(&landings, base, timings);
+        let timecard = Timecard::of(timings, &landings);
+        let changed = self.times != times || self.timecard != timecard;
+        self.times = times;
+        self.timecard = timecard;
+        changed
+    }
+
+    fn take_up_outcomes(&mut self, session: &Session) -> bool {
         let revision = session.outcomes_revision();
         if self.taken_up == revision {
             return false;
@@ -558,7 +608,10 @@ mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
-    use bviz_invocation::{BuildOutcome, ConfiguredTarget, Outcomes};
+    use bviz_invocation::{
+        BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
+    };
+    use std::time::Duration;
 
     #[test]
     fn a_graph_describes_its_configurations_by_checksum() {
@@ -574,12 +627,15 @@ mod tests {
         assert_eq!(name("91e24984663c"), None);
     }
 
-    /// The graph of the one target `//app:bin`, as a read lands it.
+    /// The graph of the one target `//app:bin` and the action writing it, as
+    /// a read lands it.
     fn loaded() -> Loaded {
         let mut names = Names::default();
         let mut base = Graph::new();
         let bin = names.intern("target://app:bin");
         base.add_node(Node::new(bin, "bin", Kind::Target, None));
+        let link = names.intern("action:bazel-out/bin/app/bin");
+        base.add_node(Node::new(link, "link", Kind::Action, Some(bin)));
         let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
         let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
         let (base, reduced_base) = (Arc::new(base), Arc::new(reduced_base));
@@ -632,6 +688,46 @@ mod tests {
         assert!(!loaded.report(&session));
         session.report_outcomes(reporting(BuildOutcome::Built));
         assert!(loaded.report(&session));
+    }
+
+    const SANDBOXED_WALL: Duration = Duration::from_millis(7);
+
+    fn timing(primary_output: &str) -> Timings {
+        let mut timings = Timings::default();
+        timings.record(Profiled {
+            primary_output: Some(primary_output),
+            owner: None,
+            wall: SANDBOXED_WALL,
+            spawns: Spawns::on(Runner::Sandboxed, SANDBOXED_WALL),
+        });
+        timings
+    }
+
+    /// A report of timings is taken up apart from one of outcomes, so that
+    /// either landing leaves what the other placed as it was.
+    #[test]
+    fn a_graph_takes_up_timings_and_outcomes_each_once_per_report_of_them() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        assert_eq!(loaded.times, Err(Untimed::NoProfile));
+
+        session.report_timings(timing("bazel-out/bin/app/bin"));
+        assert!(loaded.report(&session));
+        assert!(loaded.times.is_ok());
+        assert!(!loaded.report(&session));
+
+        session.report_outcomes(reporting(BuildOutcome::NotBuilt));
+        let timed = loaded.timed;
+        assert!(loaded.report(&session));
+        assert_eq!(loaded.timed, timed);
+        assert!(loaded.times.is_ok());
+
+        let taken_up = loaded.taken_up;
+        session.report_timings(timing("bazel-out/bin/app/other"));
+        assert!(loaded.report(&session));
+        assert_eq!(loaded.taken_up, taken_up);
+        assert_eq!(loaded.times, Err(Untimed::Unplaced));
+        assert_ne!(loaded.statuses, Statuses::default());
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.

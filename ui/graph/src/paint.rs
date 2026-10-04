@@ -1,14 +1,17 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
+use crate::colour::Colouring;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::status::{Status, Statuses};
+use crate::timing::{NodeTimes, Ran};
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
+use bviz_invocation::Runner;
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
@@ -173,6 +176,43 @@ const PARALLEL_SPACING: f32 = MARKED_WIDTH + LANE_GAP;
 /// staying apart from one another and off the canvas.
 const KIND_BLEND: f32 = 0.6;
 
+/// How far the canvas is carried toward the yellow slot to fill the box
+/// holding the least time of its kind.
+const RAMP_LEAST: f32 = 0.225;
+
+/// How far the canvas is carried toward the blue slot to fill the box holding
+/// the most time of its kind.
+const RAMP_MOST: f32 = 0.45;
+
+/// How far an open container's fill is tinted toward the reading it wears
+/// closed.
+const OPEN_TINT: f32 = 0.5;
+
+/// How far a runner's fill is carried toward the canvas in perceptual
+/// lightness, past the blend toward it, which parts the warm slots that
+/// otherwise crowd one another.
+const RUNNER_DIM: f32 = 0.08;
+
+const REMOTE_EXECUTION_BLEND: f32 = 0.575;
+const WORKER_BLEND: f32 = 0.425;
+const SANDBOXED_BLEND: f32 = 0.65;
+const LOCAL_BLEND: f32 = 0.45;
+const REMOTE_CACHE_HIT_BLEND: f32 = 0.375;
+const DISK_CACHE_HIT_BLEND: f32 = 0.575;
+const NO_SPAWN_RECORDED_BLEND: f32 = 0.525;
+
+/// How far the neutral slot is carried toward the canvas to fill a box whose
+/// actions ran on a mix of runners.
+const MIXED_BLEND: f32 = 0.4;
+
+/// How far the mixed fill is then carried away from the canvas in perceptual
+/// lightness.
+const MIXED_LIFT: f32 = 0.04;
+
+/// How far a mark standing for a mix of runners is carried from the neutral
+/// slot toward the label ink, away from the canvas.
+const MIXED_MARK_TINT: f32 = 0.5;
+
 /// How far a group's fill is tinted toward the accent of the files it holds: far
 /// enough to be told from a plain container fill, and not so far that the group
 /// passes for one of the files.
@@ -210,6 +250,7 @@ pub(crate) struct Scene {
     pub(crate) selected: Option<Id>,
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
+    pub(crate) colouring: Colouring,
 }
 
 impl Scene {
@@ -332,6 +373,7 @@ pub(crate) fn canvas_body(
             return;
         };
         let statuses = loaded.statuses();
+        let fills = Fills::of(scene.colouring, loaded.times().ok());
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -357,7 +399,7 @@ pub(crate) fn canvas_body(
             )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &marks, statuses);
+                let b = PaintBox::of(&p, &scene, &marks, statuses, &fills);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -483,6 +525,102 @@ impl Palette {
         }
     }
 
+    /// Fill for a box by the kind of node it stands for.
+    fn kind_fill(&self, kind: Kind, compound: bool) -> Rgba {
+        match compound {
+            true => self.container_fill(kind),
+            false => self.leaf_fill(kind),
+        }
+    }
+
+    /// Fill for a box holding time, `place` being where that time stands from
+    /// 0 for the least its kind holds to 1 for the most: a ramp from a pale
+    /// yellow to a deeper blue, which stands further off the canvas the more
+    /// time it says. Within the bounds every fill is held to — a name legible
+    /// on it, the connectors and the marks drawn over it clear of it — and the
+    /// least-timed box apart from an untimed one, its ends stand as far apart
+    /// as the bounds let them.
+    pub(crate) fn time_fill(&self, place: f32) -> Rgba {
+        let least = bviz_ui_theme::mix(self.background, self.data.yellow, RAMP_LEAST);
+        let most = bviz_ui_theme::mix(self.background, self.data.blue, RAMP_MOST);
+        bviz_ui_theme::mix(least, most, place)
+    }
+
+    /// `fill` as a box wears it: whole on a box drawn closed, and on an open
+    /// container only as a tint of the container's own fill, far enough that
+    /// its reading shows and short of the whole: an open container is the
+    /// ground the boxes it holds are drawn on, and one of those wearing the
+    /// same reading in full must still stand off it.
+    fn held_fill(&self, kind: Kind, compound: bool, fill: Rgba) -> Rgba {
+        match compound {
+            true => bviz_ui_theme::mix(self.container_fill(kind), fill, OPEN_TINT),
+            false => fill,
+        }
+    }
+
+    /// Fill for a box whose actions ran as `ran` says: its
+    /// [slot](Self::ran_slot) carried toward the canvas, and for a mix of
+    /// runners then away from it, so the mix reads as a fill of its own beside
+    /// an untimed box and beside every runner.
+    pub(crate) fn ran_fill(&self, ran: Ran) -> Rgba {
+        let Ran::On(runner) = ran else {
+            let mixed = bviz_ui_theme::mix(self.ran_slot(Some(ran)), self.background, MIXED_BLEND);
+            return bviz_ui_theme::lighten(mixed, MIXED_LIFT.copysign(self.mark_lift()));
+        };
+        let (slot, blend) = self.runner_accent(runner);
+        let carried = bviz_ui_theme::mix(slot, self.background, blend);
+        bviz_ui_theme::lighten(carried, -RUNNER_DIM.copysign(self.mark_lift()))
+    }
+
+    /// The colour a point whose actions ran as `ran`, `None` where no time
+    /// lands on it, is drawn in where it is a mark rather than ground: its
+    /// slot, and for a mix of runners that slot carried away from the canvas,
+    /// as a mixed box's fill is, so it stands apart from an untimed point.
+    pub(crate) fn ran_mark(&self, ran: Option<Ran>) -> Rgba {
+        let slot = self.ran_slot(ran);
+        match ran {
+            Some(Ran::Mixed) => bviz_ui_theme::mix(slot, self.label, MIXED_MARK_TINT),
+            Some(Ran::On(_)) | None => slot.into(),
+        }
+    }
+
+    /// The slot the actions of a box that ran as `ran`, `None` where no time
+    /// lands on it, are coloured from: [each runner's](Self::runner_accent),
+    /// and for a mix of runners or no time at all, which no runner stands for,
+    /// the neutral slot.
+    fn ran_slot(&self, ran: Option<Ran>) -> Hsla {
+        match ran {
+            Some(Ran::On(runner)) => self.runner_accent(runner).0,
+            Some(Ran::Mixed) | None => self.data.neutral,
+        }
+    }
+
+    /// The slot each runner is coloured from, every runner its own, and how
+    /// far that slot is carried toward the canvas to fill a box. The slots
+    /// crowd one another unevenly around the wheel, so each is carried as far
+    /// as sets it apart from its neighbours within the bounds every fill is
+    /// held to.
+    fn runner_accent(&self, runner: Runner) -> (Hsla, f32) {
+        match runner {
+            Runner::RemoteExecution => (self.data.blue, REMOTE_EXECUTION_BLEND),
+            Runner::Worker => (self.data.purple, WORKER_BLEND),
+            Runner::Sandboxed => (self.data.orange, SANDBOXED_BLEND),
+            Runner::Local => (self.data.red, LOCAL_BLEND),
+            Runner::RemoteCacheHit => (self.data.cyan, REMOTE_CACHE_HIT_BLEND),
+            Runner::DiskCacheHit => (self.data.green, DISK_CACHE_HIT_BLEND),
+            Runner::NoSpawnRecorded => (self.data.yellow, NO_SPAWN_RECORDED_BLEND),
+        }
+    }
+
+    /// Fill for a box no time lands on: a container keeps the fill it wears
+    /// by kind, and a leaf takes the [slot](Self::ran_slot) of no time at all.
+    pub(crate) fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
+        match compound {
+            true => self.container_fill(kind),
+            false => bviz_ui_theme::mix(self.ran_slot(None), self.background, KIND_BLEND),
+        }
+    }
+
     /// Connector color, keyed by the query an edge came from, so static (query),
     /// configured (cquery), and execution-phase (aquery) dependencies read
     /// distinctly; a filter's synthetic transitive edges take a fourth hue of
@@ -556,6 +694,46 @@ impl Palette {
     }
 }
 
+/// What a frame fills its boxes by: the colouring chosen, with what that
+/// colouring reads.
+pub(crate) enum Fills<'a> {
+    Kind,
+    Time(&'a NodeTimes),
+    Runner(&'a NodeTimes),
+}
+
+impl<'a> Fills<'a> {
+    /// The fills `colouring` gives the boxes of a graph whose nodes carry
+    /// `times`. A colouring by time over a graph carrying none fills by kind.
+    pub(crate) fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
+        match (colouring, times) {
+            (Colouring::Time, Some(times)) => Fills::Time(times),
+            (Colouring::Runner, Some(times)) => Fills::Runner(times),
+            _ => Fills::Kind,
+        }
+    }
+
+    fn fill(&self, b: &bviz_graph_layout::Box, palette: &Palette) -> Rgba {
+        match self {
+            Fills::Kind => palette.kind_fill(b.kind, b.compound),
+            Fills::Time(times) => match times.get(b.id).zip(times.extent(b.kind)) {
+                Some((timed, extent)) => {
+                    let fill = palette.time_fill(extent.place(timed.held.total().wall));
+                    palette.held_fill(b.kind, b.compound, fill)
+                }
+                None => palette.untimed_fill(b.kind, b.compound),
+            },
+            Fills::Runner(times) => match times.get(b.id) {
+                Some(timed) => {
+                    let fill = palette.ran_fill(Ran::of(&timed.held));
+                    palette.held_fill(b.kind, b.compound, fill)
+                }
+                None => palette.untimed_fill(b.kind, b.compound),
+            },
+        }
+    }
+}
+
 /// A disclosure title as a frame painted it, by which a gesture landing on the
 /// title reaches the box it names.
 pub(crate) struct TitleTarget {
@@ -614,15 +792,17 @@ struct PaintBox<'a> {
 }
 
 impl<'a> PaintBox<'a> {
-    fn of(p: &Placed<'a>, scene: &Scene, marks: &Marks, statuses: &Statuses) -> Self {
+    fn of(
+        p: &Placed<'a>,
+        scene: &Scene,
+        marks: &Marks,
+        statuses: &Statuses,
+        fills: &Fills,
+    ) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
         let alpha = alpha * receded(marks.strength(marked), scene.filter_strength(b.id));
-        let palette = &scene.palette;
-        let fill = match b.compound {
-            true => palette.container_fill(b.kind),
-            false => palette.leaf_fill(b.kind),
-        };
+        let fill = fills.fill(b, &scene.palette);
         let toggled = match scene.highlight {
             Some((id, alpha)) if id == b.id => alpha,
             _ => 0.0,
@@ -2425,7 +2605,8 @@ mod colors {
     use super::*;
     use bviz_ui_theme::{
         MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
-        built_in_themes, contrast_ratio, distance, label_on, level_step, luminance, oklch, over,
+        MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, distance, label_on, level_step,
+        luminance, oklch, over,
     };
     use gpui::SharedString;
 
@@ -2436,6 +2617,9 @@ mod colors {
     /// One node kind per container fill: the two that carry a fill of their own,
     /// and one standing for every kind that takes the plain one.
     const CONTAINER_KINDS: [Kind; 3] = [Kind::Package, Kind::MergeGroup, Kind::Target];
+
+    /// One node kind per container fill a container holding actions wears.
+    const TIMED_CONTAINER_KINDS: [Kind; 2] = [Kind::Package, Kind::Target];
 
     /// Every provenance a connector is drawn in.
     const EDGE_KINDS: [EdgeKind; 4] = [
@@ -2454,12 +2638,42 @@ mod colors {
             .collect()
     }
 
+    /// Places along the time ramp standing for every fill it gives: its two
+    /// ends and evenly between.
+    const RAMP_PLACES: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
     /// Every fill a box is painted in, each once.
     fn box_fills(p: &Palette) -> Vec<Rgba> {
         ACCENTED_KINDS
             .iter()
             .map(|kind| p.leaf_fill(*kind))
             .chain(CONTAINER_KINDS.iter().map(|kind| p.container_fill(*kind)))
+            .chain([p.untimed_fill(Kind::Action, false)])
+            .chain(readings(p).into_iter().flat_map(|fill| {
+                TIMED_CONTAINER_KINDS
+                    .map(|kind| p.held_fill(kind, true, fill))
+                    .into_iter()
+                    .chain([fill])
+            }))
+            .collect()
+    }
+
+    /// Every fill a box coloured by runner wears.
+    fn ran_fills(p: &Palette) -> Vec<Rgba> {
+        Runner::ALL
+            .map(Ran::On)
+            .into_iter()
+            .chain([Ran::Mixed])
+            .map(|ran| p.ran_fill(ran))
+            .collect()
+    }
+
+    /// Every fill a closed box coloured by time or by runner wears.
+    fn readings(p: &Palette) -> Vec<Rgba> {
+        RAMP_PLACES
+            .map(|place| p.time_fill(place))
+            .into_iter()
+            .chain(ran_fills(p))
             .collect()
     }
 
@@ -2510,6 +2724,91 @@ mod colors {
                         apart >= MIN_DISTINCT_COLOR,
                         "{theme} {kind:?}/{other:?}: {apart}"
                     );
+                }
+            }
+        }
+    }
+
+    /// An untimed box must not pass for one holding the least time of its
+    /// kind, and the ramp must stand further off the canvas at every step
+    /// along it.
+    #[test]
+    fn the_time_ramp_is_told_from_an_untimed_box_and_steps_off_the_canvas() {
+        for (theme, p) in palettes() {
+            let least = p.time_fill(0.0);
+            for untimed in [
+                p.untimed_fill(Kind::Action, false),
+                p.untimed_fill(Kind::Target, true),
+                p.untimed_fill(Kind::Package, true),
+            ] {
+                let apart = distance(least, untimed);
+                assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
+            }
+            let canvas = luminance(p.background);
+            let off_canvas: Vec<f32> = RAMP_PLACES
+                .iter()
+                .map(|place| (luminance(p.time_fill(*place)) - canvas).abs())
+                .collect();
+            assert!(off_canvas.is_sorted(), "{theme}: {off_canvas:?}");
+        }
+    }
+
+    /// A box held in an open container that reads the same as the container
+    /// must still stand off it, or the container swallows it.
+    #[test]
+    fn a_box_stands_off_the_open_container_reading_the_same() {
+        for (theme, p) in palettes() {
+            for fill in readings(&p) {
+                for kind in TIMED_CONTAINER_KINDS {
+                    let open = p.held_fill(kind, true, fill);
+                    let apart = distance(open, fill);
+                    assert!(apart >= MIN_VISIBLE_STEP, "{theme} {kind:?}: {apart}");
+                    for ground in [open, over(p.highlight_wash(1.0), open)] {
+                        let held = contrast_ratio(label_on(open), ground);
+                        assert!(held >= MIN_TEXT_CONTRAST, "{theme} {kind:?}: {held}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A box's runner is read off its fill, so no two runners, nor a mix of
+    /// them, may be taken for each other or for a box no action lands on.
+    #[test]
+    fn every_runner_is_told_from_the_others_and_from_an_untimed_box() {
+        for (theme, p) in palettes() {
+            let fills = ran_fills(&p);
+            for (i, fill) in fills.iter().enumerate() {
+                for untimed in [
+                    p.untimed_fill(Kind::Action, false),
+                    p.untimed_fill(Kind::Target, true),
+                    p.untimed_fill(Kind::Package, true),
+                    p.background,
+                ] {
+                    let apart = distance(*fill, untimed);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}: {apart}");
+                }
+                for (j, other) in fills.iter().enumerate().skip(i + 1) {
+                    let apart = distance(*fill, *other);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}/{j}: {apart}");
+                }
+            }
+        }
+    }
+
+    /// A point's runner is read off its mark, so neither a mix of runners nor
+    /// no time at all may be taken for each other or for any runner.
+    #[test]
+    fn a_mixed_and_an_untimed_mark_are_told_from_each_other_and_every_runner() {
+        for (theme, p) in palettes() {
+            let runners = Runner::ALL.map(|runner| p.ran_mark(Some(Ran::On(runner))));
+            let (mixed, untimed) = (p.ran_mark(Some(Ran::Mixed)), p.ran_mark(None));
+            let apart = distance(mixed, untimed);
+            assert!(apart >= MIN_DISTINCT_COLOR, "{theme}: {apart}");
+            for (runner, mark) in Runner::ALL.iter().zip(runners) {
+                for other in [mixed, untimed] {
+                    let apart = distance(mark, other);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {runner:?}: {apart}");
                 }
             }
         }

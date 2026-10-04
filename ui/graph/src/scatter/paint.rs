@@ -1,6 +1,6 @@
 //! Painting the scatter plot: its axes and the marks placed along them.
 
-use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, Zoom, tick_label};
+use super::plot::{DataArea, LogScale, Mark, Plotted, Tick, Zoom};
 use crate::Palette;
 use crate::paint::UNMARKED_FADE;
 use bviz_ui_theme::mix;
@@ -36,9 +36,6 @@ const GRID_BLEND: f32 = 0.5;
 /// Opacity of a mark, so a dense cluster reads darker than a lone target.
 const MARK_ALPHA: f32 = 0.5;
 
-const X_TITLE: &str = "closure size (transitive dependencies)";
-const Y_TITLE: &str = "blast radius (transitive dependents)";
-
 /// The frame the axes are drawn along within a plot filling `bounds`; `None`
 /// where that leaves no room worth plotting in.
 fn axes_within(bounds: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
@@ -55,7 +52,7 @@ fn axes_within(bounds: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     (axes.size.width >= px(MIN_FRAME) && axes.size.height >= px(MIN_FRAME)).then_some(axes)
 }
 
-/// Where the counts of `plotted` are placed in a plot filling `bounds` at
+/// Where the points of `plotted` are placed in a plot filling `bounds` at
 /// `zoom`, which every pointer gesture over the plot resolves through as its
 /// paint does.
 pub(crate) fn data_area(plotted: &Plotted, zoom: Zoom, bounds: Bounds<Pixels>) -> Option<DataArea> {
@@ -89,7 +86,7 @@ pub(crate) fn paint_plot(
     window.with_content_mask(Some(mask), |window| {
         window.paint_layer(axes, |window| {
             for mark in &plotted.marks {
-                let center = area.place(&mark.target);
+                let center = area.place(mark);
                 let r = px(mark.radius);
                 let fade = if mark.faded { UNMARKED_FADE } else { 1.0 };
                 let color = Rgba {
@@ -120,7 +117,7 @@ pub(crate) fn paint_ring(
     palette: &Palette,
     window: &mut Window,
 ) -> Point<Pixels> {
-    let center = area.place(&mark.target);
+    let center = area.place(mark);
     let r = px(mark.radius + RING_GAP + RING_WIDTH);
     window.paint_quad(quad(
         Bounds::new(center - point(r, r), size(r * 2., r * 2.)),
@@ -167,7 +164,7 @@ struct ShownTick {
 /// The ticks of `scale` in view, `visible` giving where one falls where it is.
 /// Every major tick is labelled, and every minor one too where fewer than
 /// [`MIN_LABELLED`] majors are in view, so a zoom always reads against
-/// labelled counts.
+/// labelled values.
 fn shown_ticks(scale: LogScale, visible: impl Fn(u32) -> Option<Pixels>) -> Vec<ShownTick> {
     let ticks = scale.ticks();
     let mut shown: Vec<ShownTick> = Vec::with_capacity(ticks.len());
@@ -248,7 +245,7 @@ fn paint_axes(
             ink.axis,
         ));
         if shown.labelled {
-            let text = tick_label(tick.value);
+            let text = plotted.axes.x().tick_label(tick.value);
             paint_text(
                 &text,
                 TICK_LABEL_SIZE,
@@ -269,7 +266,7 @@ fn paint_axes(
             ink.axis,
         ));
         if shown.labelled {
-            let text = tick_label(tick.value);
+            let text = plotted.axes.y().tick_label(tick.value);
             let top = y - px(TICK_LABEL_SIZE / 2.);
             paint_text(
                 &text,
@@ -286,7 +283,7 @@ fn paint_axes(
     let x_title_top = label_top + px(TICK_LABEL_SIZE + LABEL_GAP * 2.);
     let x_center = axes.left() + axes.size.width / 2.;
     paint_text(
-        X_TITLE,
+        plotted.axes.x().title(),
         TITLE_SIZE,
         ink.label,
         Align::Center(x_center),
@@ -296,7 +293,7 @@ fn paint_axes(
     );
     let y_title_top = axes.top() - px(TITLE_SIZE + LABEL_GAP * 2.);
     paint_text(
-        Y_TITLE,
+        plotted.axes.y().title(),
         TITLE_SIZE,
         ink.label,
         Align::Start(left),

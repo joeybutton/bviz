@@ -398,6 +398,29 @@ mod tests {
     }
 
     #[test]
+    fn the_primary_output_lands_on_the_detail_and_any_other_value_reads_as_none() {
+        let json = r#"{
+            "traceEvents": [
+                {"cat":"action processing","name":"a","ph":"X","ts":0,"dur":2,"tid":1,"out":"bazel-out/a","args":{"mnemonic":"M"}},
+                {"cat":"action processing","name":"b","ph":"X","ts":2,"dur":2,"tid":1,"out":"bazel-out/b"},
+                {"cat":"action processing","name":"c","ph":"X","ts":4,"dur":2,"tid":1},
+                {"cat":"action processing","name":"d","ph":"X","ts":6,"dur":2,"tid":1,"out":3},
+                {"cat":"action processing","name":"e","ph":"X","ts":8,"dur":2,"tid":1,"out":["x"]}
+            ]
+        }"#;
+        let p = parse(json);
+        let outs: Vec<_> = p
+            .details(&p.threads()[0])
+            .iter()
+            .map(|d| p.opt_str(d.out))
+            .collect();
+        assert_eq!(
+            outs,
+            [Some("bazel-out/a"), Some("bazel-out/b"), None, None, None]
+        );
+    }
+
+    #[test]
     fn negative_duration_clamps_to_zero() {
         let json = r#"{
             "traceEvents": [
@@ -460,7 +483,7 @@ mod tests {
             for (s, d) in p.slices(t).iter().zip(p.details(t)) {
                 writeln!(
                     out,
-                    "  slice {:?} cat={:?} ts={} dur={} depth={} role={:?} tgt={:?} mn={:?} cfg={:?}",
+                    "  slice {:?} cat={:?} ts={} dur={} depth={} role={:?} tgt={:?} mn={:?} cfg={:?} out={:?}",
                     p.str(s.name),
                     p.str(d.category),
                     s.start_us,
@@ -470,6 +493,7 @@ mod tests {
                     p.opt_str(d.target),
                     p.opt_str(d.mnemonic),
                     p.opt_str(d.configuration),
+                    p.opt_str(d.out),
                 )
                 .unwrap();
             }
@@ -660,6 +684,10 @@ mod tests {
             + "{\"name\":\"first\",\"name\":\"second\",\"ph\":\"X\",\"ts\":3,\"dur\":1,\"tid\":2,\"args\":{\"a\":\"x\"},\"args\":{\"b\":\"y\"}},\n"
             + "{\"pid\":7,\"weird\":[1,{\"q\":\"]\"},\"s\\\"t\"],\"other\":{\"deep\":[true,null]},\"name\":\"u1\",\"ph\":\"X\",\"ts\":4,\"dur\":1,\"tid\":2},\n"
             + "{\"name\":\"argsy\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"args\":{\"s\":\"v\",\"i\":-3,\"big\":9223372036854775808,\"b\":true,\"nb\":false,\"z\":null,\"arr\":[1,2],\"obj\":{\"k\":\"v\"},\"esc\":\"a\\tb\"}},\n"
+            + "{\"name\":\"outs\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"out\":\"bazel-out/a\"},\n"
+            + "{\"name\":\"outu\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"out\":\"bazel-out/\\u0062\",\"args\":{\"target\":\"//a:b\"}},\n"
+            + "{\"name\":\"outn\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"out\":7},\n"
+            + "{\"name\":\"outo\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"out\":{\"k\":[1]}},\n"
             + "{\"name\":\"floatarg\",\"ph\":\"X\",\"ts\":5,\"dur\":1,\"tid\":2,\"args\":{\"f\":2.75}},\n"
             // The saturated i64::MAX start plus a positive dur exercises the
             // depth pass's saturating end computation.
@@ -700,7 +728,7 @@ mod tests {
 
     #[test]
     fn scan_event_reads_a_typical_event() {
-        let json = r#"{"cat":"skyframe evaluator","name":"a b","ph":"X","ts":10,"dur":20,"tid":3,"args":{"target":"//a:b","n":4}} ,"#;
+        let json = r#"{"cat":"skyframe evaluator","name":"a b","ph":"X","ts":10,"dur":20,"tid":3,"out":"bazel-out/x","args":{"target":"//a:b","n":4}} ,"#;
         let mut scratch = Vec::new();
         let (ev, end) = scan_event(json, 0, &mut scratch).expect("fast path");
         assert_eq!(&json[end..], " ,");
@@ -710,6 +738,7 @@ mod tests {
         assert_eq!(ev.ts, Some(10.0));
         assert_eq!(ev.dur, Some(20.0));
         assert_eq!(ev.tid, Some(3));
+        assert_eq!(ev.out.as_deref(), Some("bazel-out/x"));
         assert!(ev.has_args);
         assert_eq!(scratch.len(), 2);
         assert_eq!(arg_str(&scratch, "target"), Some("//a:b"));

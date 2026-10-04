@@ -1,41 +1,101 @@
-//! Where the scatter plot's marks and ticks fall: counts on logarithmic axes,
-//! and a mark's size by the count its measurement sizes points by.
+//! Where the scatter plot's marks and ticks fall: measures on logarithmic
+//! axes, and a mark's size by the count its measurement sizes points by.
 
+use super::axis::{Axes, Axis};
 use super::hue::Hue;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Sizing};
 use bviz_graph_layout::select::Verdict;
 use gpui::{Bounds, Pixels, Point, point, px};
+use std::time::Duration;
 
-/// A count axis scaled by `log10(1 + n)`, so a count of zero sits at the origin
-/// and every decade past it spans the same length.
+/// An axis scaled by `log10(1 + n)`, so a value of zero sits at the origin and
+/// every decade past it spans the same length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LogScale {
-    /// The count at the far end of the axis: the first step of the 1-2-5
-    /// sequence at or past every count plotted on it.
+    /// The value at the far end of the axis: the first tick of its ladder at
+    /// or past every value plotted on it.
     top: u32,
+    ladder: Ladder,
 }
 
-/// A mark on a [`LogScale`]. The majors are zero and the powers of ten; the
-/// minors fall at twice and five times each power.
+/// A mark on a [`LogScale`]. The majors are zero and the first tick of each
+/// band of the scale's [`Ladder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tick {
     pub(crate) value: u32,
     pub(crate) major: bool,
 }
 
-/// The multiples of each power of ten a tick falls on.
-const TICK_STEPS: [u32; 3] = [1, 2, 5];
+/// The values the ticks of a [`LogScale`] fall on past zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ladder {
+    /// Once, twice and five times each power of ten.
+    Counts,
+    /// Round durations in milliseconds: as [`Counts`](Self::Counts), but for
+    /// stepping [as a clock does](CLOCK_BANDS) from ten seconds to the minute
+    /// and from ten minutes to the hour.
+    Millis,
+}
+
+/// The multiples of a band's unit its ticks fall on, but for a clock band.
+const DECADE_STEPS: [u32; 3] = [1, 2, 5];
+
+/// The multiples of a [clock band](CLOCK_BANDS)'s unit its ticks fall on.
+const CLOCK_STEPS: [u32; 3] = [1, 2, 3];
+
+pub(super) const SECOND_MS: u32 = 1_000;
+pub(super) const MINUTE_MS: u32 = 60 * SECOND_MS;
+pub(super) const HOUR_MS: u32 = 60 * MINUTE_MS;
+
+/// The units of the bands of [`Ladder::Millis`] stepping as a clock does:
+/// ten seconds, followed by the minute, and ten minutes, by the hour.
+const CLOCK_BANDS: [u32; 2] = [10 * SECOND_MS, 10 * MINUTE_MS];
+
+impl Ladder {
+    /// The unit of each band of ticks, ascending, with the multiples of it
+    /// the band's ticks fall on.
+    fn bands(self) -> impl Iterator<Item = (u32, [u32; 3])> {
+        let next = move |&unit: &u32| match self {
+            Ladder::Millis if unit == CLOCK_BANDS[0] => Some(MINUTE_MS),
+            Ladder::Millis if unit == CLOCK_BANDS[1] => Some(HOUR_MS),
+            Ladder::Millis | Ladder::Counts => unit.checked_mul(10),
+        };
+        std::iter::successors(Some(1u32), next).map(move |unit| {
+            let steps = match self == Ladder::Millis && CLOCK_BANDS.contains(&unit) {
+                true => CLOCK_STEPS,
+                false => DECADE_STEPS,
+            };
+            (unit, steps)
+        })
+    }
+
+    /// Every tick past zero a `u32` holds, ascending.
+    fn rungs(self) -> impl Iterator<Item = Tick> {
+        self.bands()
+            .flat_map(|(unit, steps)| {
+                steps.map(|step| {
+                    let value = unit.checked_mul(step)?;
+                    Some(Tick {
+                        value,
+                        major: step == 1,
+                    })
+                })
+            })
+            .map_while(|tick| tick)
+    }
+}
 
 impl LogScale {
-    /// An axis reaching at least `max`, and one step even where `max` is zero.
-    pub(crate) fn covering(max: u32) -> Self {
-        let top = decades()
-            .flat_map(|decade| TICK_STEPS.map(|step| decade.checked_mul(step)))
-            .map_while(|value| value)
+    /// An axis whose ticks fall on `ladder`, reaching at least `max`, and one
+    /// tick even where `max` is zero.
+    pub(crate) fn covering(max: u32, ladder: Ladder) -> Self {
+        let top = ladder
+            .rungs()
+            .map(|tick| tick.value)
             .find(|&value| value >= max)
             .unwrap_or(u32::MAX);
-        Self { top }
+        Self { top, ladder }
     }
 
     /// Where `n` falls along the axis, from 0 at the origin to 1 at its far end.
@@ -50,28 +110,16 @@ impl LogScale {
 
     /// The ticks from zero to the far end, ascending.
     pub(crate) fn ticks(self) -> Vec<Tick> {
-        let mut ticks = vec![Tick {
+        let zero = Tick {
             value: 0,
             major: true,
-        }];
-        for decade in decades() {
-            for step in TICK_STEPS {
-                match decade.checked_mul(step).filter(|&value| value <= self.top) {
-                    Some(value) => ticks.push(Tick {
-                        value,
-                        major: step == 1,
-                    }),
-                    None => return ticks,
-                }
-            }
-        }
-        ticks
+        };
+        let past_zero = self
+            .ladder
+            .rungs()
+            .take_while(|tick| tick.value <= self.top);
+        std::iter::once(zero).chain(past_zero).collect()
     }
-}
-
-/// The powers of ten a `u32` holds, ascending.
-fn decades() -> impl Iterator<Item = u32> {
-    std::iter::successors(Some(1u32), |&decade| decade.checked_mul(10))
 }
 
 fn log_count(n: u32) -> f64 {
@@ -94,10 +142,16 @@ pub(crate) const MIN_RADIUS: f32 = 2.5;
 /// The radius of the mark for the largest point.
 pub(crate) const MAX_RADIUS: f32 = 8.0;
 
-/// One point as the plot draws it.
+/// One point as the plot draws it, at `x` along the horizontal axis's scale
+/// and `y` along the vertical one's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Mark {
     pub(crate) target: Metrics,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    /// How long the actions the point stands for took, where any time lands
+    /// on them.
+    pub(crate) time: Option<Duration>,
     pub(crate) radius: f32,
     /// Whether the filter draws the point as no part of what it selects.
     pub(crate) faded: bool,
@@ -105,47 +159,68 @@ pub(crate) struct Mark {
 }
 
 /// The marks a measurement's points draw as, and the axes that hold them. The
-/// axes and the mark sizes are scaled to every point plotted of it and of a
-/// reference measure, drawn or not, so neither a filter nor measuring over
-/// fewer of the inputs the reference reads moves the scale a mark is read on.
+/// mark sizes are scaled to every point plotted of it and of a reference
+/// measure, drawn or not, and each axis to every such point with a measure on
+/// it, whether or not it has one on the other, so neither a filter, nor
+/// measuring over fewer of the inputs the reference reads, nor what the other
+/// axis measures moves the scale a mark is read on. A point is plotted only
+/// where it has a measure on both axes.
 pub(crate) struct Plotted {
-    /// The faded before the rest, so none hides a mark the filter selects, and
-    /// largest first within each, so a small mark is drawn over any large one
-    /// it overlaps.
+    /// The faded before the rest, so none hides a mark the filter selects,
+    /// within each those whose hue recedes before the rest, and largest first
+    /// within those, so a small mark is drawn over any large one it overlaps.
     pub(crate) marks: Vec<Mark>,
     /// How many points are plotted, of which `marks` draws those the filter
     /// does not hide.
     pub(crate) plotted: usize,
+    /// How many points the filter does not hide are left unplotted for want
+    /// of a measure on an axis.
+    pub(crate) unplaced: usize,
     /// Whether any count measured is an estimate.
     pub(crate) estimated: bool,
     /// What a mark's size stands for.
     pub(crate) sizing: Sizing,
-    /// Closure along the horizontal axis.
+    pub(crate) axes: Axes,
     pub(crate) x: LogScale,
-    /// Blast radius along the vertical axis.
     pub(crate) y: LogScale,
 }
 
 impl Plotted {
-    /// The marks of those points `measured` that `plots` takes, as the filter
-    /// whose verdict on a node `verdict` gives draws them, in the hue `hue`
-    /// gives, scaled to `measured` and `reference` alike.
+    /// The marks of those points `measured` that `plots` takes, placed by
+    /// `axes` with the action time `time` gives a node, as the filter whose
+    /// verdict on a node `verdict` gives draws them, in the hue `hue` gives,
+    /// scaled to `measured` and `reference` alike.
     pub(crate) fn of(
         measured: &Measurement,
         reference: &Measurement,
+        axes: Axes,
+        time: impl Fn(Id) -> Option<Duration>,
         plots: impl Fn(&Metrics) -> bool,
         verdict: impl Fn(Id) -> Verdict,
         hue: impl Fn(&Metrics) -> Hue,
     ) -> Self {
         let (targets, sizing) = (&measured.points, measured.sizing);
+        let place = |t: &Metrics| {
+            let time = time(t.id);
+            let (x, y) = axes.place(t, time)?;
+            Some((x, y, time))
+        };
         let scaled = || targets.iter().chain(&reference.points).filter(|t| plots(t));
-        let max = |measure: &dyn Fn(&Metrics) -> u32| scaled().map(measure).max();
-        let largest = max(&|t| sizing.of(t)).unwrap_or(0);
-        let mut plotted = 0;
+        let largest = scaled().map(|t| sizing.of(t)).max().unwrap_or(0);
+        let top = |axis: Axis| {
+            let values = scaled().filter_map(|t| axis.position(t, time(t.id)));
+            LogScale::covering(values.max().unwrap_or(0), axis.ladder())
+        };
+        let (mut plotted, mut unplaced) = (0, 0);
         let mut marks: Vec<Mark> = Vec::with_capacity(targets.len());
         marks.extend(targets.iter().filter(|t| plots(t)).filter_map(|&target| {
+            let verdict = verdict(target.id);
+            let Some((x, y, time)) = place(&target) else {
+                unplaced += usize::from(verdict != Verdict::Hidden);
+                return None;
+            };
             plotted += 1;
-            let faded = match verdict(target.id) {
+            let faded = match verdict {
                 Verdict::Hidden => return None,
                 Verdict::Faded => true,
                 // The graph draws a target kept only to frame what it holds as
@@ -154,19 +229,27 @@ impl Plotted {
             };
             Some(Mark {
                 target,
+                x,
+                y,
+                time,
                 radius: radius(sizing.of(&target), largest),
                 faded,
                 hue: hue(&target),
             })
         }));
-        marks.sort_by_key(|mark| (!mark.faded, std::cmp::Reverse(sizing.of(&mark.target))));
+        marks.sort_by_key(|mark| {
+            let size = std::cmp::Reverse(sizing.of(&mark.target));
+            (!mark.faded, !mark.hue.recedes(), size)
+        });
         Self {
             marks,
             plotted,
+            unplaced,
             estimated: measured.estimated(),
             sizing,
-            x: LogScale::covering(max(&|t| t.closure.value()).unwrap_or(0)),
-            y: LogScale::covering(max(&|t| t.blast_radius.value()).unwrap_or(0)),
+            axes,
+            x: top(axes.x()),
+            y: top(axes.y()),
         }
     }
 }
@@ -246,7 +329,7 @@ impl Zoom {
     };
 }
 
-/// The region counts are placed in, inset from the axes by the largest mark's
+/// The region values are placed in, inset from the axes by the largest mark's
 /// radius so that, at the whole of each axis, no mark crosses them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DataArea {
@@ -280,19 +363,21 @@ impl DataArea {
         self.frame
     }
 
-    /// The horizontal position of a closure of `n`.
+    /// The horizontal position of `n` along the horizontal axis.
     pub(crate) fn x_of(&self, n: u32) -> Pixels {
         let across = self.zoom.x.across(self.x.fraction(n));
         self.bounds.left() + self.bounds.size.width * across
     }
 
-    /// The vertical position of a blast radius of `n`, rising up the plot.
+    /// The vertical position of `n` along the vertical axis, rising up the
+    /// plot.
     pub(crate) fn y_of(&self, n: u32) -> Pixels {
         let across = self.zoom.y.across(self.y.fraction(n));
         self.bounds.bottom() - self.bounds.size.height * across
     }
 
-    /// Where a closure of `n` falls, where that is within the frame.
+    /// Where `n` falls along the horizontal axis, where that is within the
+    /// frame.
     pub(crate) fn visible_x(&self, n: u32) -> Option<Pixels> {
         let x = self.x_of(n);
         (self.frame.left()..=self.frame.right())
@@ -300,7 +385,8 @@ impl DataArea {
             .then_some(x)
     }
 
-    /// Where a blast radius of `n` falls, where that is within the frame.
+    /// Where `n` falls along the vertical axis, where that is within the
+    /// frame.
     pub(crate) fn visible_y(&self, n: u32) -> Option<Pixels> {
         let y = self.y_of(n);
         (self.frame.top()..=self.frame.bottom())
@@ -319,7 +405,7 @@ impl DataArea {
         }
     }
 
-    /// The zoom carried along with a drag by `by`, so the counts under the
+    /// The zoom carried along with a drag by `by`, so the values under the
     /// pointer follow it.
     pub(crate) fn panned(&self, by: Point<Pixels>) -> Zoom {
         Zoom {
@@ -346,11 +432,14 @@ impl DataArea {
         )
     }
 
-    pub(crate) fn place(&self, target: &Metrics) -> Point<Pixels> {
-        point(
-            self.x_of(target.closure.value()),
-            self.y_of(target.blast_radius.value()),
-        )
+    /// Where a point at `x` along the horizontal axis and `y` along the
+    /// vertical one is drawn.
+    pub(crate) fn point_at(&self, x: u32, y: u32) -> Point<Pixels> {
+        point(self.x_of(x), self.y_of(y))
+    }
+
+    pub(crate) fn place(&self, mark: &Mark) -> Point<Pixels> {
+        self.point_at(mark.x, mark.y)
     }
 
     /// What a pointer at `at` over `marks` picks: every mark whose rim lies
@@ -361,7 +450,7 @@ impl DataArea {
         let mut covered = Vec::with_capacity(COVERED_RESERVE);
         let mut nearest: Option<(usize, f32)> = None;
         for (index, mark) in marks.iter().enumerate() {
-            let center = self.place(&mark.target);
+            let center = self.place(mark);
             let distance = f32::from(center.x - at.x).hypot(f32::from(center.y - at.y));
             if distance > mark.radius + PICK_SLOP || !self.frame.contains(&center) {
                 continue;
@@ -432,6 +521,17 @@ mod tests {
         }
     }
 
+    const AXES: Axes = Axes::OPENING;
+
+    /// Where `target` is drawn through `area`.
+    fn drawn_at(area: &DataArea, target: &Metrics) -> Point<Pixels> {
+        area.point_at(target.closure.value(), target.blast_radius.value())
+    }
+
+    fn untimed(_: Id) -> Option<Duration> {
+        None
+    }
+
     fn no_hue(_: &Metrics) -> Hue {
         Hue::Other
     }
@@ -448,12 +548,20 @@ mod tests {
     /// The marks of `targets` through a filter drawing every one.
     fn shown(targets: &[Metrics]) -> Plotted {
         let measured = measured(targets);
-        Plotted::of(&measured, &measured, |_| true, |_| Verdict::Shown, no_hue)
+        Plotted::of(
+            &measured,
+            &measured,
+            AXES,
+            untimed,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        )
     }
 
     #[test]
     fn an_axis_ends_on_the_first_step_past_its_largest_count() {
-        let top = |max| LogScale::covering(max).top;
+        let top = |max| LogScale::covering(max, Ladder::Counts).top;
         assert_eq!(
             [top(0), top(1), top(3), top(20), top(21), top(999)],
             [1, 1, 5, 20, 50, 1_000]
@@ -463,7 +571,7 @@ mod tests {
 
     #[test]
     fn zero_sits_at_the_origin_and_the_top_at_the_end() {
-        let scale = LogScale::covering(700);
+        let scale = LogScale::covering(700, Ladder::Counts);
         assert_eq!(scale.fraction(0), 0.0);
         assert_eq!(scale.fraction(1_000), 1.0);
         let decade = |n: u32| scale.fraction(n * 10 - 1) - scale.fraction(n - 1);
@@ -475,7 +583,7 @@ mod tests {
 
     #[test]
     fn ticks_mark_each_decade_with_minors_between() {
-        let ticks: Vec<(u32, bool)> = LogScale::covering(150)
+        let ticks: Vec<(u32, bool)> = LogScale::covering(150, Ladder::Counts)
             .ticks()
             .into_iter()
             .map(|t| (t.value, t.major))
@@ -492,6 +600,36 @@ mod tests {
                 (50, false),
                 (100, true),
                 (200, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn time_ticks_fall_on_round_durations_with_a_major_at_each_band() {
+        let ticks: Vec<(u32, bool)> = LogScale::covering(2 * HOUR_MS, Ladder::Millis)
+            .ticks()
+            .into_iter()
+            .filter(|t| t.value >= SECOND_MS)
+            .map(|t| (t.value, t.major))
+            .collect();
+        let (s, m, h) = (SECOND_MS, MINUTE_MS, HOUR_MS);
+        assert_eq!(
+            ticks,
+            [
+                (s, true),
+                (2 * s, false),
+                (5 * s, false),
+                (10 * s, true),
+                (20 * s, false),
+                (30 * s, false),
+                (m, true),
+                (2 * m, false),
+                (5 * m, false),
+                (10 * m, true),
+                (20 * m, false),
+                (30 * m, false),
+                (h, true),
+                (2 * h, false),
             ]
         );
     }
@@ -526,7 +664,7 @@ mod tests {
         let axes = Bounds::new(point(px(40.), px(10.)), size(px(300.), px(200.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
         for mark in &plotted.marks {
-            let at = area.place(&mark.target);
+            let at = area.place(mark);
             let r = px(mark.radius);
             assert!(
                 at.x - r >= axes.left() && at.x + r <= axes.right(),
@@ -545,13 +683,13 @@ mod tests {
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let origin = area.place(&targets[0]);
+        let origin = drawn_at(&area, &targets[0]);
         let picked = area.pick(&plotted.marks, origin + point(px(1.), px(-1.)));
         let origin_mark = plotted.marks.iter().position(|m| m.target == targets[0]);
         assert_eq!(picked.as_ref().map(|p| p.mark), origin_mark);
         assert_eq!(picked.map(|p| p.others()), Some(0));
 
-        let shared = area.pick(&plotted.marks, area.place(&targets[1]));
+        let shared = area.pick(&plotted.marks, drawn_at(&area, &targets[1]));
         // The mark drawn last is the one on top.
         let top = plotted
             .marks
@@ -585,10 +723,20 @@ mod tests {
             true => Verdict::Hidden,
             false => Verdict::Shown,
         };
-        let plotted = Plotted::of(&measured, &measured, |_| true, verdict, no_hue);
+        let plotted = Plotted::of(
+            &measured,
+            &measured,
+            AXES,
+            untimed,
+            |_| true,
+            verdict,
+            no_hue,
+        );
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let area = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let picked = area.pick(&plotted.marks, area.place(&targets[0])).unwrap();
+        let picked = area
+            .pick(&plotted.marks, drawn_at(&area, &targets[0]))
+            .unwrap();
         let mut covered: Vec<Id> = picked
             .covered
             .iter()
@@ -608,6 +756,8 @@ mod tests {
         let plotted = Plotted::of(
             &measured,
             &measured,
+            AXES,
+            untimed,
             |_| true,
             |id| match id {
                 id if id == hidden => Verdict::Hidden,
@@ -643,6 +793,8 @@ mod tests {
         let plotted = Plotted::of(
             &measured,
             &measured,
+            AXES,
+            untimed,
             |t| t.id != unplotted,
             |_| Verdict::Shown,
             no_hue,
@@ -660,8 +812,24 @@ mod tests {
     fn a_narrower_measure_is_drawn_on_the_scale_of_its_reference() {
         let whole = measured(&[target(3, 1, 1), target(400, 90, 9)]);
         let narrower = measured(&[target(3, 1, 1), target(40, 2, 3)]);
-        let plotted = Plotted::of(&narrower, &whole, |_| true, |_| Verdict::Shown, no_hue);
-        let reference = Plotted::of(&whole, &whole, |_| true, |_| Verdict::Shown, no_hue);
+        let plotted = Plotted::of(
+            &narrower,
+            &whole,
+            AXES,
+            untimed,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        );
+        let reference = Plotted::of(
+            &whole,
+            &whole,
+            AXES,
+            untimed,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        );
         assert_eq!((plotted.x, plotted.y), (reference.x, reference.y));
         let largest =
             |plotted: &Plotted| plotted.marks.iter().map(|m| m.radius).fold(0.0, f32::max);
@@ -684,8 +852,12 @@ mod tests {
 
     #[test]
     fn the_deepest_zoom_keeps_two_ticks_in_view_anywhere_on_the_axis() {
-        for top in [1, 7, 150, 90_000] {
-            let scale = LogScale::covering(top);
+        let scales = [1, 7, 150, 90_000]
+            .map(|top| LogScale::covering(top, Ladder::Counts))
+            .into_iter()
+            .chain([45_000, 7_200_000].map(|top| LogScale::covering(top, Ladder::Millis)));
+        for scale in scales {
+            let top = scale.top;
             let values: Vec<f32> = scale
                 .ticks()
                 .iter()
@@ -710,12 +882,12 @@ mod tests {
         let plotted = shown(&targets);
         let axes = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let whole = DataArea::within(axes, plotted.x, plotted.y, Zoom::WHOLE);
-        let at = whole.place(&targets[2]);
+        let at = drawn_at(&whole, &targets[2]);
         let zoom = whole.zoomed(at, 3.0);
         let zoomed = DataArea::within(axes, plotted.x, plotted.y, zoom);
-        let moved = zoomed.place(&targets[2]) - at;
+        let moved = drawn_at(&zoomed, &targets[2]) - at;
         assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
-        let corner = zoomed.place(&targets[1]);
+        let corner = drawn_at(&zoomed, &targets[1]);
         assert!(!axes.contains(&corner));
         assert_eq!(zoomed.pick(&plotted.marks, corner), None);
     }
@@ -739,10 +911,130 @@ mod tests {
         let zoom = DataArea::within(wide, plotted.x, plotted.y, Zoom::WHOLE)
             .zoomed(point(px(300.), px(200.)), 2.0);
         let before = DataArea::within(wide, plotted.x, plotted.y, zoom);
-        let spot = before.spot(before.place(&targets[2]));
+        let spot = before.spot(drawn_at(&before, &targets[2]));
         let narrow = Bounds::new(point(px(40.), px(60.)), size(px(320.), px(700.)));
         let after = DataArea::within(narrow, plotted.x, plotted.y, zoom);
-        let moved = after.at_spot(spot) - after.place(&targets[2]);
+        let moved = after.at_spot(spot) - drawn_at(&after, &targets[2]);
         assert!(f32::from(moved.x).abs() < 0.01 && f32::from(moved.y).abs() < 0.01);
+    }
+
+    /// A point no action time lands on has no place on a time axis, which is
+    /// scaled to the timed points of the reference alone, but still scales the
+    /// other axis and the mark sizes, so neither moves as the time axis is
+    /// chosen.
+    #[test]
+    fn a_time_axis_leaves_out_and_counts_the_untimed_points() {
+        let mut targets = [target(3, 1, 2), target(5, 20, 9), target(7, 3, 0)];
+        for (index, target) in targets.iter_mut().enumerate() {
+            target.id = Id(index as u32);
+        }
+        let reference = measured(&targets);
+        let measured = measured(&targets[..2]);
+        let time = |id: Id| match id.0 {
+            0 => Some(Duration::from_millis(40)),
+            2 => Some(Duration::from_secs(9)),
+            _ => None,
+        };
+        let axes = AXES.across(Axis::ActionTime);
+        let plotted = Plotted::of(
+            &measured,
+            &reference,
+            axes,
+            time,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        );
+        let drawn: Vec<(Id, u32)> = plotted.marks.iter().map(|m| (m.target.id, m.x)).collect();
+        assert_eq!(drawn, [(Id(0), 40)]);
+        assert_eq!((plotted.plotted, plotted.unplaced), (1, 1));
+        assert_eq!(plotted.x, LogScale::covering(9_000, Ladder::Millis));
+        let hiding_the_untimed = Plotted::of(
+            &measured,
+            &reference,
+            axes,
+            time,
+            |_| true,
+            |id| match id.0 {
+                1 => Verdict::Hidden,
+                _ => Verdict::Shown,
+            },
+            no_hue,
+        );
+        assert_eq!(
+            hiding_the_untimed.unplaced, 0,
+            "only a drawn point is left out"
+        );
+        let by_closure = Plotted::of(
+            &measured,
+            &reference,
+            AXES,
+            time,
+            |_| true,
+            |_| Verdict::Shown,
+            no_hue,
+        );
+        assert_eq!(plotted.y, by_closure.y);
+        assert_eq!(plotted.marks[0].radius, by_closure.marks[1].radius);
+        assert!(plotted.marks[0].radius < MAX_RADIUS);
+    }
+
+    /// Time up is scaled as time across is: to every timed point of the
+    /// reference, whatever the filter hides, while the closure across keeps
+    /// the scale it has with blast radius up.
+    #[test]
+    fn a_time_axis_up_is_scaled_to_every_timed_point_of_the_reference() {
+        let mut targets = [target(3, 1, 2), target(5, 20, 9), target(7, 3, 0)];
+        for (index, target) in targets.iter_mut().enumerate() {
+            target.id = Id(index as u32);
+        }
+        let reference = measured(&targets);
+        let measured = measured(&targets[..2]);
+        let time = |id: Id| match id.0 {
+            0 => Some(Duration::from_millis(40)),
+            2 => Some(Duration::from_secs(9)),
+            _ => None,
+        };
+        let plot = |axes, verdict: fn(Id) -> Verdict| {
+            Plotted::of(&measured, &reference, axes, time, |_| true, verdict, no_hue)
+        };
+        let shown = |_| Verdict::Shown;
+        let hiding_the_slowest = |id: Id| match id.0 {
+            2 => Verdict::Hidden,
+            _ => Verdict::Shown,
+        };
+        let by_time_up = plot(AXES.up(Axis::ActionTime), hiding_the_slowest);
+        let drawn: Vec<(Id, u32, u32)> = by_time_up
+            .marks
+            .iter()
+            .map(|m| (m.target.id, m.x, m.y))
+            .collect();
+        assert_eq!(drawn, [(Id(0), 3, 40)]);
+        assert_eq!(by_time_up.y, LogScale::covering(9_000, Ladder::Millis));
+        assert_eq!(by_time_up.y, plot(AXES.across(Axis::ActionTime), shown).x);
+        let opening = plot(AXES, shown);
+        assert_eq!(by_time_up.x, opening.x);
+        assert_eq!(by_time_up.marks[0].radius, opening.marks[1].radius);
+    }
+
+    #[test]
+    fn an_untimed_mark_is_drawn_beneath_a_timed_one_of_any_size() {
+        let targets = [target(1, 1, 0), target(2, 2, 9)];
+        let measured = measured(&targets);
+        let hue = |t: &Metrics| match t.fan_in {
+            0 => Hue::Untimed,
+            _ => Hue::Other,
+        };
+        let plotted = Plotted::of(
+            &measured,
+            &measured,
+            AXES,
+            untimed,
+            |_| true,
+            |_| Verdict::Shown,
+            hue,
+        );
+        let hues: Vec<Hue> = plotted.marks.iter().map(|m| m.hue).collect();
+        assert_eq!(hues, [Hue::Untimed, Hue::Other]);
     }
 }

@@ -108,7 +108,13 @@ impl Builder {
                     let name = interner.intern(name);
                     let category = interner.intern(category);
                     self.categories.insert(category);
-                    let detail = build_slice_detail(interner, &mut self.args_pool, category, args);
+                    let detail = build_slice_detail(
+                        interner,
+                        &mut self.args_pool,
+                        category,
+                        ev.out.as_deref(),
+                        args,
+                    );
                     self.staging.push((
                         tid,
                         Slice {
@@ -924,10 +930,12 @@ fn build_slice_detail(
     interner: &mut Writer,
     args_pool: &mut Vec<(Str, Str)>,
     category: Str,
+    primary_output: Option<&str>,
     args: Option<&[ArgEntry]>,
 ) -> SliceDetail {
     let mut out = SliceDetail {
         category,
+        out: primary_output.map(|s| interner.intern(s)).into(),
         ..SliceDetail::default()
     };
     let Some(args) = args else {
