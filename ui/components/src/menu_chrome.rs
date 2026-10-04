@@ -5,9 +5,11 @@
 use crate::{CONTROL_HEIGHT, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
-    Div, ElementId, Hsla, MouseButton, Pixels, SharedString, Stateful, Svg, Window, div,
-    prelude::*, px,
+    AnyElement, App, Bounds, Deferred, Div, Edges, Element, ElementId, GlobalElementId, Hsla,
+    InspectorElementId, LayoutId, MouseButton, Pixels, Point, Position, SharedString, Size,
+    Stateful, Style, Svg, Window, deferred, div, point, prelude::*, px,
 };
+use std::panic::Location;
 
 /// Breathing room between a trigger and the menu it opens.
 const MENU_GAP: Pixels = px(2.);
@@ -136,21 +138,136 @@ pub fn widest(window: &mut Window, labels: impl Iterator<Item = SharedString>) -
     laid_out_width(measured)
 }
 
-/// The sheet a menu's rows sit on, anchored under the trigger. The caller defers
-/// it so it paints over the content below; its layout stays in place.
+/// The sheet a menu's rows sit on, for [`under_trigger`] to place.
 ///
 /// No explicit width: the sheet shrinks to fit its rows, so a row never wraps.
 pub(crate) fn sheet(colors: &ThemeColors) -> Div {
-    surface(
-        div()
-            .occlude()
-            .absolute()
-            .top(CONTROL_HEIGHT + MENU_GAP)
-            .left_0()
-            .flex()
-            .flex_col(),
-        colors,
+    surface(div().occlude().absolute().flex().flex_col(), colors)
+}
+
+/// `sheet` opened from the trigger its holder lays out: below the trigger, or
+/// above it where the window has no room below, and held inside the window
+/// where it fits neither way. The holder is the trigger's `relative` parent,
+/// laid out to the trigger's bounds.
+pub(crate) fn under_trigger(sheet: impl IntoElement) -> Deferred {
+    deferred(UnderTrigger {
+        sheet: sheet.into_any_element(),
+    })
+}
+
+/// Where a list of `extent` opens from the trigger laid out at `trigger`
+/// inside `room`.
+fn opened_under(
+    trigger: Bounds<Pixels>,
+    extent: Size<Pixels>,
+    room: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    opened(
+        point(trigger.left(), trigger.bottom() + MENU_GAP),
+        point(trigger.right(), trigger.top() - MENU_GAP),
+        extent,
+        room,
     )
+}
+
+/// Where a list of `extent` opens for a menu asked at `from`: down and to the
+/// right of it, flipped back across `back` on an axis where it would otherwise
+/// hang out of `room`, and held against the room's near edge where it fits
+/// neither way.
+pub(crate) fn opened(
+    from: Point<Pixels>,
+    back: Point<Pixels>,
+    extent: Size<Pixels>,
+    room: Bounds<Pixels>,
+) -> Bounds<Pixels> {
+    let along = |from: Pixels, back: Pixels, extent: Pixels, start: Pixels, end: Pixels| {
+        let placed = match from + extent <= end {
+            true => from,
+            false => back - extent,
+        };
+        placed.clamp(start, (end - extent).max(start))
+    };
+    Bounds::new(
+        point(
+            along(from.x, back.x, extent.width, room.left(), room.right()),
+            along(from.y, back.y, extent.height, room.top(), room.bottom()),
+        ),
+        extent,
+    )
+}
+
+/// Lays its sheet out at its own size and places it, once the trigger's bounds
+/// are known, by [`opened_under`].
+struct UnderTrigger {
+    sheet: AnyElement,
+}
+
+impl IntoElement for UnderTrigger {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for UnderTrigger {
+    type RequestLayoutState = LayoutId;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, LayoutId) {
+        let sheet = self.sheet.request_layout(window, cx);
+        let style = Style {
+            position: Position::Absolute,
+            inset: Edges::all(px(0.).into()),
+            ..Style::default()
+        };
+        (window.request_layout(style, [sheet], cx), sheet)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        trigger: Bounds<Pixels>,
+        sheet: &mut LayoutId,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let laid = window.layout_bounds(*sheet);
+        let inset = window.client_inset().unwrap_or_default();
+        let room = Bounds::new(Point::default(), window.viewport_size()).inset(inset);
+        let placed = opened_under(trigger, laid.size, room);
+        window.with_element_offset(placed.origin - laid.origin, |window| {
+            self.sheet.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut LayoutId,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.sheet.paint(window, cx);
+    }
 }
 
 /// `element` given the look of a sheet a menu's rows sit on, wherever it
@@ -265,6 +382,7 @@ mod tests {
     use bviz_ui_theme::{
         MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, level_step,
     };
+    use gpui::size;
 
     /// A sheet stands inside its bound however little room that leaves, even
     /// where the bound is shorter than what it holds above its rows.
@@ -280,6 +398,25 @@ mod tests {
             sheet_height(2, row, row, px(400.)),
             SHEET_PADDING * 2. + SHEET_BORDER * 2. + row * 3.
         );
+    }
+
+    /// A menu opens below its trigger where the window has room for it, and
+    /// above it where it does not, so its last row is never past the edge.
+    #[test]
+    fn a_menu_opens_above_a_trigger_with_no_room_below() {
+        let room = Bounds::new(Point::default(), size(px(800.), px(600.)));
+        let extent = size(px(120.), px(300.));
+        let trigger = |top: f32| Bounds::new(point(px(100.), px(top)), size(px(80.), px(28.)));
+
+        let high = trigger(100.);
+        assert_eq!(
+            opened_under(high, extent, room).top(),
+            high.bottom() + MENU_GAP
+        );
+        let low = trigger(500.);
+        let opened = opened_under(low, extent, room);
+        assert_eq!(opened.bottom(), low.top() - MENU_GAP);
+        assert_eq!(opened.left(), low.left());
     }
 
     /// A row names what choosing it does, so its label has to be read on the

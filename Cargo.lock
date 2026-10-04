@@ -864,6 +864,7 @@ dependencies = [
  "bviz_cli",
  "bviz_invocation",
  "bviz_ui_console",
+ "bviz_ui_execlog",
  "bviz_ui_graph",
  "bviz_ui_trace",
  "bviz_ui_workspace",
@@ -884,9 +885,21 @@ name = "bviz_cli"
 version = "0.1.0"
 dependencies = [
  "bviz_ui_console_args",
+ "bviz_ui_execlog_args",
  "bviz_ui_graph_args",
  "bviz_ui_trace_args",
  "clap",
+]
+
+[[package]]
+name = "bviz_execlog"
+version = "0.1.0"
+dependencies = [
+ "bviz_invocation",
+ "bviz_parallel",
+ "prost",
+ "rustc-hash 2.1.3",
+ "zstd",
 ]
 
 [[package]]
@@ -927,6 +940,15 @@ version = "0.1.0"
 dependencies = [
  "num_cpus",
  "rayon",
+]
+
+[[package]]
+name = "bviz_proto_field_numbers_gen"
+version = "0.1.0"
+dependencies = [
+ "heck 0.5.0",
+ "prost",
+ "prost-types",
 ]
 
 [[package]]
@@ -1007,6 +1029,29 @@ dependencies = [
 
 [[package]]
 name = "bviz_ui_console_args"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "bviz_ui_execlog"
+version = "0.1.0"
+dependencies = [
+ "bviz_alloc",
+ "bviz_execlog",
+ "bviz_invocation",
+ "bviz_ui_assets",
+ "bviz_ui_components",
+ "bviz_ui_execlog_args",
+ "bviz_ui_theme",
+ "bviz_ui_workspace",
+ "clap",
+ "gpui",
+]
+
+[[package]]
+name = "bviz_ui_execlog_args"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -7845,6 +7890,34 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "ztracing"

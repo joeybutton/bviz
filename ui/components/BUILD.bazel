@@ -20,6 +20,7 @@ rust_library(
     crate_name = "bviz_ui_components",
     visibility = [
         "//ui/console:__pkg__",
+        "//ui/execlog:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/shell:__pkg__",
         "//ui/trace:__pkg__",

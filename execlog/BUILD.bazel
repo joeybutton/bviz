@@ -1,0 +1,47 @@
+load("@bazel_lib//lib:run_binary.bzl", "run_binary")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+run_binary(
+    name = "spawn_fields",
+    srcs = ["@bazel_spawn_proto//:bazel_spawn_proto_descriptor_set"],
+    outs = ["src/spawn_fields.rs"],
+    args = [
+        "$(execpath @bazel_spawn_proto//:bazel_spawn_proto_descriptor_set)",
+        "src/main/protobuf/spawn.proto",
+        "$(execpath src/spawn_fields.rs)",
+    ],
+    tool = "//tools/proto_field_numbers:proto_field_numbers_gen",
+)
+
+rust_library(
+    name = "execlog",
+    srcs = glob(["src/**/*.rs"]) + [":spawn_fields"],
+    crate_name = "bviz_execlog",
+    visibility = ["//ui/execlog:__pkg__"],
+    deps = [
+        "//invocation",
+        "//util/parallel",
+        "@bazel_spawn_proto//:bazel_spawn_rust_proto",
+        "@crates//:prost",
+        "@crates//:rustc-hash",
+        "@crates//:zstd",
+    ],
+)
+
+rust_test(
+    name = "execlog_test",
+    size = "small",
+    crate = ":execlog",
+)
+
+rust_binary(
+    name = "bench_load",
+    srcs = ["bench/load.rs"],
+    crate_name = "bench_load",
+    deps = [
+        ":execlog",
+        "//alloc",
+    ],
+)

@@ -1,0 +1,17 @@
+[package]
+name = "bviz_execlog"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_execlog"
+path = "src/lib.rs"
+
+[dependencies]
+bviz_invocation = { workspace = true }
+bviz_parallel = { workspace = true }
+prost = { workspace = true }
+rustc-hash = { workspace = true }
+zstd = { workspace = true }

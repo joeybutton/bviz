@@ -6,8 +6,10 @@ rust_library(
     crate_name = "bviz_alloc",
     visibility = [
         "//bviz:__pkg__",
+        "//execlog:__pkg__",
         "//trace/layout:__pkg__",
         "//trace/profile:__pkg__",
+        "//ui/execlog:__pkg__",
         "//ui/trace:__pkg__",
     ],
     deps = [

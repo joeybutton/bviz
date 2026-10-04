@@ -9,7 +9,7 @@ use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, deferred, div,
+    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
     prelude::*, px,
 };
 use std::collections::HashSet;
@@ -379,8 +379,7 @@ impl MultiSelect {
             )
             .child(self.header(colors, cx))
             .child(self.list(colors, label_width, window, cx));
-        // Defer the menu so it paints over the content below the trigger.
-        deferred(sheet)
+        menu_chrome::under_trigger(sheet)
     }
 
     /// The actions over every value the menu holds, lined up with the actions a

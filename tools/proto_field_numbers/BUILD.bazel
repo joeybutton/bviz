@@ -1,0 +1,13 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+
+rust_binary(
+    name = "proto_field_numbers_gen",
+    srcs = ["proto_field_numbers_gen.rs"],
+    crate_name = "bviz_proto_field_numbers_gen",
+    visibility = ["//execlog:__pkg__"],
+    deps = [
+        "@crates//:heck",
+        "@crates//:prost",
+        "@crates//:prost-types",
+    ],
+)

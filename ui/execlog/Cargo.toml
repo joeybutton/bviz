@@ -1,0 +1,26 @@
+[package]
+name = "bviz_ui_execlog"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "execlog"
+path = "src/main.rs"
+
+[lib]
+name = "bviz_ui_execlog"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+gpui = { workspace = true }
+bviz_alloc = { path = "../../alloc" }
+bviz_execlog = { path = "../../execlog" }
+bviz_invocation = { workspace = true }
+bviz_ui_assets = { path = "../assets" }
+bviz_ui_components = { path = "../components" }
+bviz_ui_execlog_args = { path = "args" }
+bviz_ui_theme = { path = "../theme" }
+bviz_ui_workspace = { path = "../workspace" }
