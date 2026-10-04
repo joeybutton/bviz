@@ -1123,6 +1123,7 @@ dependencies = [
  "bviz_trace_profile",
  "bviz_ui_assets",
  "bviz_ui_components",
+ "bviz_ui_playback",
  "bviz_ui_theme",
  "bviz_ui_trace_args",
  "bviz_ui_workspace",

@@ -79,7 +79,7 @@ impl Load {
         let session = session.cloned();
         match self {
             Self::Graph(load) => bviz_ui_graph::open(load, session, window, cx),
-            Self::Trace(load) => bviz_ui_trace::open(load, session, window, cx),
+            Self::Trace(load) => bviz_ui_trace::open(load, session, clock.cloned(), window, cx),
             Self::Console(load) => bviz_ui_console::open(load, session, clock.cloned(), window, cx),
             Self::ExecLog(load) => bviz_ui_execlog::open(load, window, cx),
         }

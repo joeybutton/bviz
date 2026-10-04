@@ -18,6 +18,7 @@ bviz_trace_profile = { path = "../../trace/profile" }
 bviz_trace_layout = { path = "../../trace/layout" }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
+bviz_ui_playback = { path = "../playback" }
 bviz_ui_theme = { path = "../theme" }
 bviz_ui_trace_args = { path = "args" }
 bviz_ui_workspace = { path = "../workspace" }
