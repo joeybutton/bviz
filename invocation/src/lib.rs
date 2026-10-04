@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod attempts;
 mod outcomes;
 mod runner;
 mod timings;
 
+pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };

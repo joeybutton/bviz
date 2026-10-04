@@ -1,8 +1,10 @@
 use std::time::Duration;
 
-use bviz_invocation::{ConfiguredTarget, Profiled, Runner, Spawns, Timings};
+use bviz_invocation::{
+    Attempt, Attempts, ConfiguredTarget, Phase, Profiled, Runner, Spawns, Timings, Venue,
+};
 
-use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice};
+use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, TimeSpan};
 
 /// One action span the profile records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,8 +13,42 @@ pub struct Action {
     pub out: OptStr,
     pub target: OptStr,
     pub configuration: OptStr,
-    pub wall: Duration,
+    pub span: TimeSpan,
     pub spawns: Spawns,
+    pub phases: Sightings,
+}
+
+impl Action {
+    pub fn wall(&self) -> Duration {
+        micros(self.span.end_us.saturating_sub(self.span.start_us))
+    }
+}
+
+/// When the spans nested in an action's span first showed each phase, in the
+/// profile's microseconds. Bazel never records an action entering
+/// [`Phase::Preparing`], which it does at the start of its span.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sightings([Option<i64>; Phase::ALL.len()]);
+
+impl Sightings {
+    pub fn of(&self, phase: Phase) -> Option<i64> {
+        self.0[phase.index()]
+    }
+
+    /// Each phase seen, with when.
+    pub fn seen(&self) -> impl Iterator<Item = (Phase, i64)> + '_ {
+        Phase::ALL
+            .into_iter()
+            .filter_map(|phase| Some((phase, self.of(phase)?)))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    fn saw(&mut self, phase: Phase, at_us: i64) {
+        self.0[phase.index()].get_or_insert(at_us);
+    }
 }
 
 /// The Bazel `cat` of the span that covers an action's execution from start to
@@ -28,44 +64,133 @@ const REMOTE_CHANNEL_SPAN: &str = "init channel and check server capabilities";
 /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/sandbox/AbstractSandboxSpawnRunner.java#L151>
 const SANDBOXED_SUBPROCESS_SPAN: &str = "subprocess.run";
 
-/// What the spans of one Bazel `cat` nested in an action's span say of its
-/// runner.
+/// The span a sandboxed spawn opens once its subprocess has exited. Bazel
+/// records it however briefly it lasts, so it shows a run whose own span fell
+/// under the profile's threshold:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/sandbox/AbstractSandboxSpawnRunner.java#L154>
+const SANDBOX_POSTCONDITION_SPAN: &str = "sandbox.verifyPostCondition";
+
+/// How the name of an `action resource lock` span begins when it waits for
+/// local resources; Bazel records other waits under the category too:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/actions/ResourceManager.java#L382>
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/remote/RemoteRewoundActionSynchronizer.java#L141>
+const RESOURCE_WAIT_PREFIX: &str = "Acquiring resources for: ";
+
+/// What one span nested in an action's span says of the action.
+#[derive(Debug, Clone, Copy)]
+struct Sign {
+    runner: Option<Runner>,
+    phase: Option<Phase>,
+}
+
+impl Sign {
+    const SILENT: Sign = Sign {
+        runner: None,
+        phase: None,
+    };
+
+    const fn ran(runner: Runner, phase: Phase) -> Sign {
+        Sign {
+            runner: Some(runner),
+            phase: Some(phase),
+        }
+    }
+
+    const fn held(runner: Runner) -> Sign {
+        Sign {
+            runner: Some(runner),
+            phase: None,
+        }
+    }
+
+    const fn shows(phase: Phase) -> Sign {
+        Sign {
+            runner: None,
+            phase: Some(phase),
+        }
+    }
+}
+
+/// What the spans of one Bazel `cat` nested in an action's span say of it.
 #[derive(Debug, Clone, Copy)]
 enum Evidence {
-    Silent,
-    Of(Runner),
-    /// Left to the span's name: only a sandboxed subprocess says anything.
-    Named,
+    Of(Sign),
+    /// Left to the span's name, the category holding spans that say different
+    /// things.
+    Named(Shared),
+}
+
+/// A category whose spans [`Evidence::Named`] reads by name.
+#[derive(Debug, Clone, Copy)]
+enum Shared {
+    Info,
+    ResourceLock,
 }
 
 impl Evidence {
     fn of(category: &str, cache_hit: Runner) -> Evidence {
         use Runner::*;
-        match category {
-            "remote action execution"
-            | "Remote execution process wall time"
-            | "Remote execution queuing time"
-            | "Remote execution setup" => Evidence::Of(RemoteExecution),
-            "local execution in worker"
-            | "setting up inputs for worker"
+        const LOCAL: Phase = Phase::Running(Venue::Local);
+        const REMOTE: Phase = Phase::Running(Venue::Remote);
+        Evidence::Of(match category {
+            "remote action execution" | "Remote execution process wall time" => {
+                Sign::ran(RemoteExecution, REMOTE)
+            }
+            // Also waiting to build the remote action, which comes before the
+            // cache check, so it shows no phase:
+            // <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/remote/RemoteExecutionService.java#L507>
+            "Remote execution setup" => Sign::held(RemoteExecution),
+            "Remote execution queuing time" => Sign::ran(RemoteExecution, Phase::Scheduling),
+            "local execution in worker" | "waiting for response from worker" => {
+                Sign::ran(Worker, LOCAL)
+            }
+            "setting up inputs for worker"
             | "borrowing a worker"
-            | "waiting for response from worker"
-            | "copying outputs from worker" => Evidence::Of(Worker),
-            "local action execution" | "Local execution process wall time" => Evidence::Of(Local),
-            "Sandbox execution process wall time" => Evidence::Of(Sandboxed),
-            "remote action cache check" => Evidence::Of(cache_hit),
-            "general information" => Evidence::Named,
-            _ => Evidence::Silent,
-        }
+            | "copying outputs from worker" => Sign::held(Worker),
+            "local action execution" | "Local execution process wall time" => {
+                Sign::ran(Local, LOCAL)
+            }
+            "Sandbox execution process wall time" => Sign::ran(Sandboxed, LOCAL),
+            "remote action cache check" => Sign::ran(cache_hit, Phase::CheckingCache),
+            "action resource lock" => return Evidence::Named(Shared::ResourceLock),
+            "general information" => return Evidence::Named(Shared::Info),
+            _ => Sign::SILENT,
+        })
     }
 
-    fn runner(self, profile: &Profile, slice: &Slice) -> Option<Runner> {
+    fn sign(self, profile: &Profile, slice: &Slice) -> Sign {
+        let name = || profile.str(slice.name);
         match self {
-            Evidence::Silent => None,
-            Evidence::Of(runner) => Some(runner),
-            Evidence::Named => {
-                (profile.str(slice.name) == SANDBOXED_SUBPROCESS_SPAN).then_some(Runner::Sandboxed)
+            Evidence::Of(sign) => sign,
+            Evidence::Named(Shared::Info) => match name() {
+                SANDBOXED_SUBPROCESS_SPAN => {
+                    Sign::ran(Runner::Sandboxed, Phase::Running(Venue::Local))
+                }
+                SANDBOX_POSTCONDITION_SPAN => Sign::shows(Phase::Running(Venue::Local)),
+                _ => Sign::SILENT,
+            },
+            Evidence::Named(Shared::ResourceLock) if name().starts_with(RESOURCE_WAIT_PREFIX) => {
+                Sign::shows(Phase::Scheduling)
             }
+            Evidence::Named(Shared::ResourceLock) => Sign::SILENT,
+        }
+    }
+}
+
+/// Defers running entered in a span that encloses `scheduling` until
+/// `scheduling` ends: a spawn runner opens its span before it waits for local
+/// resources or in a remote executor's queue, and runs once the wait ends.
+fn defer_running(
+    phases: &mut Sightings,
+    shown_until: &[i64; Phase::ALL.len()],
+    scheduling: &Slice,
+) {
+    for venue in Venue::ALL {
+        let running = Phase::Running(venue);
+        if let Some(entered) = phases.of(running)
+            && scheduling.start_us < shown_until[running.index()]
+        {
+            phases.0[running.index()] = Some(entered.max(scheduling.end_us()));
         }
     }
 }
@@ -90,10 +215,10 @@ impl Profile {
             .categories()
             .map(|category| Evidence::of(self.str(category), cache_hit))
             .collect();
-        let runner_of = |slice: &Slice| {
+        let sign_of = |slice: &Slice| {
             slice
                 .category
-                .and_then(|id| evidence[id.position()].runner(self, slice))
+                .map_or(Sign::SILENT, |id| evidence[id.position()].sign(self, slice))
         };
         let is_action = |slice: &Slice| slice.category == Some(action_category);
         let span_count = self
@@ -109,36 +234,57 @@ impl Profile {
                     continue;
                 }
                 let mut spawns = Spawns::default();
+                let mut phases = Sightings::default();
                 // By runner, when the last span counted for it ends: a span of
                 // the runner starting before then is nested in that one, whose
                 // time covers its own.
                 let mut counted_until = [i64::MIN; Runner::ALL.len()];
+                // By phase, when the span that first showed it ends.
+                let mut shown_until = [i64::MIN; Phase::ALL.len()];
                 // A span's descendants are the run after it nested deeper.
                 for nested in slices[i + 1..]
                     .iter()
                     .take_while(|nested| nested.depth > slice.depth)
                 {
-                    let Some(runner) = runner_of(nested) else {
-                        continue;
-                    };
-                    let until = &mut counted_until[runner.index()];
-                    if nested.start_us >= *until {
-                        *until = nested.end_us();
-                        spawns.ran(runner, micros(nested.dur_us));
+                    let sign = sign_of(nested);
+                    if let Some(runner) = sign.runner {
+                        let until = &mut counted_until[runner.index()];
+                        if nested.start_us >= *until {
+                            *until = nested.end_us();
+                            spawns.ran(runner, micros(nested.dur_us));
+                        }
                     }
+                    match sign.phase {
+                        Some(Phase::Scheduling) => {
+                            phases.saw(Phase::Scheduling, nested.start_us);
+                            defer_running(&mut phases, &shown_until, nested);
+                        }
+                        Some(phase) if phases.of(phase).is_none() => {
+                            phases.saw(phase, nested.start_us);
+                            shown_until[phase.index()] = nested.end_us();
+                        }
+                        _ => {}
+                    }
+                }
+                if phases.is_empty() {
+                    phases.saw(Phase::Running(Venue::Local), slice.start_us);
                 }
                 let action = Action {
                     out: detail.out,
                     target: detail.target,
                     configuration: detail.configuration,
-                    wall: micros(slice.dur_us),
+                    span: TimeSpan {
+                        start_us: slice.start_us,
+                        end_us: slice.end_us(),
+                    },
                     spawns,
+                    phases,
                 };
-                started.push((slice.start_us, action));
+                started.push(action);
             }
         }
-        started.sort_by_key(|&(start_us, _)| start_us);
-        started.into_iter().map(|(_, action)| action).collect()
+        started.sort_by_key(|action| action.span.start_us);
+        started
     }
 
     /// The time each of [its actions](Self::actions) took and where it ran.
@@ -146,17 +292,40 @@ impl Profile {
         let actions = self.actions();
         let mut timings = Timings::with_capacity(actions.len());
         for action in &actions {
-            let owner = self
-                .opt_str(action.target)
-                .map(|label| ConfiguredTarget::new(label, self.opt_str(action.configuration)));
             timings.record(Profiled {
                 primary_output: self.opt_str(action.out),
-                owner,
-                wall: action.wall,
+                owner: self.owner(action),
+                wall: action.wall(),
                 spawns: action.spawns,
             });
         }
         timings
+    }
+
+    /// Each of [its actions](Self::actions) as an execution attempt on the
+    /// wall clock; `None` for a profile that does not say when its clock
+    /// started.
+    pub fn attempts(&self) -> Option<Attempts> {
+        let origin = self.metadata().epoch_origin?;
+        let actions = self.actions();
+        let mut attempts = Attempts::with_capacity(actions.len());
+        for action in &actions {
+            let attempt = Attempt::new(
+                origin.plus_micros(action.span.start_us),
+                origin.plus_micros(action.span.end_us),
+                action
+                    .phases
+                    .seen()
+                    .map(|(phase, at_us)| (phase, origin.plus_micros(at_us))),
+            );
+            attempts.record(self.opt_str(action.out), self.owner(action), attempt);
+        }
+        Some(attempts)
+    }
+
+    fn owner(&self, action: &Action) -> Option<ConfiguredTarget<&str>> {
+        self.opt_str(action.target)
+            .map(|label| ConfiguredTarget::new(label, self.opt_str(action.configuration)))
     }
 
     /// The runner of an action answered by a cache lookup. Bazel records a
@@ -184,10 +353,13 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_invocation::Timing;
+    use bviz_invocation::{Done, EpochMicros, State, Timing};
 
     const ACTION_TIDS: [i64; 2] = [2, 3];
     const MAIN_TID: i64 = 1;
+    /// When the clock of every profile [`profile`] writes started, in
+    /// milliseconds since the Unix epoch.
+    const ORIGIN_MS: i64 = 1_781_439_245_231;
 
     /// A span on an action thread: `(cat, name, ts, dur)`.
     type Span<'a> = (&'a str, &'a str, i64, i64);
@@ -224,7 +396,10 @@ mod tests {
             }
             at += 1000;
         }
-        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let json = format!(
+            r#"{{"otherData":{{"profile_start_ts":{ORIGIN_MS}}},"traceEvents":[{}]}}"#,
+            events.join(",")
+        );
         Profile::from_bytes(json.as_bytes()).expect("parse")
     }
 
@@ -390,7 +565,7 @@ mod tests {
         );
         let a = &actions[0];
         assert_eq!(
-            (p.opt_str(a.target), p.opt_str(a.configuration), a.wall),
+            (p.opt_str(a.target), p.opt_str(a.configuration), a.wall()),
             (Some("//p:t"), Some("c"), Duration::from_micros(100))
         );
     }
@@ -444,5 +619,282 @@ mod tests {
     #[test]
     fn a_profile_without_actions_has_none() {
         assert!(profile(true, &[]).actions().is_empty());
+    }
+
+    const LOCAL: Phase = Phase::Running(Venue::Local);
+    const REMOTE: Phase = Phase::Running(Venue::Remote);
+
+    /// The instant `micros` into the clock of a profile [`profile`] writes.
+    fn at(micros: i64) -> EpochMicros {
+        EpochMicros::from_millis(ORIGIN_MS).plus_micros(micros)
+    }
+
+    /// The attempts at the actions of a profile [`profile`] writes, one per
+    /// entry of `actions` and all writing one primary output.
+    fn attempts(remote: bool, actions: &[&[Span]]) -> Vec<Attempt> {
+        let named: Vec<_> = actions.iter().map(|&n| (Some("bazel-out/o"), n)).collect();
+        let attempts = profile(remote, &named).attempts().expect("aligned");
+        attempts.action("bazel-out/o").expect("recorded").to_vec()
+    }
+
+    fn attempt(remote: bool, nested: &[Span]) -> Attempt {
+        let attempts = attempts(remote, &[nested]);
+        assert_eq!(attempts.len(), 1);
+        attempts[0]
+    }
+
+    /// When `attempt` entered each phase it did, in the profile's clock.
+    fn entered(attempt: &Attempt) -> Vec<(Phase, i64)> {
+        Phase::ALL
+            .into_iter()
+            .filter_map(|phase| {
+                let entered = attempt.entered(phase)?;
+                Some((phase, entered.micros() - at(0).micros()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_attempt_spans_its_action_on_the_wall_clock() {
+        let a = attempt(false, &[CACHE_CHECK]);
+        assert_eq!((a.start(), a.end()), (at(0), at(100)));
+    }
+
+    #[test]
+    fn a_profile_without_an_epoch_origin_has_no_attempts() {
+        let json = format!(
+            r#"{{"traceEvents":[{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":0,"dur":100,"tid":2}}]}}"#
+        );
+        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        assert_eq!(p.actions().len(), 1);
+        assert!(p.attempts().is_none());
+    }
+
+    #[test]
+    fn an_attempt_answered_by_a_cache_check_alone_is_done_cached() {
+        let a = attempt(true, &[ACTION_EXECUTE, CACHE_CHECK]);
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (Phase::CheckingCache, 1)]
+        );
+        assert_eq!(a.state_at(at(3)), State::In(Phase::CheckingCache));
+        assert_eq!(a.state_at(at(50)), State::In(Phase::CheckingCache));
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+    }
+
+    #[test]
+    fn an_action_with_no_spawn_runs_locally_for_its_whole_span() {
+        let a = attempt(
+            true,
+            &[
+                ACTION_EXECUTE,
+                ("general information", "checkOutputs", 95, 2),
+            ],
+        );
+        assert_eq!(entered(&a), [(Phase::Preparing, 0), (LOCAL, 0)]);
+        assert_eq!(a.state_at(at(0)), State::In(LOCAL));
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Executed));
+    }
+
+    #[test]
+    fn a_local_spawn_schedules_while_it_waits_for_resources_then_runs() {
+        let a = attempt(
+            false,
+            &[
+                ACTION_EXECUTE,
+                CACHE_CHECK,
+                ("local action execution", "Genrule", 10, 80),
+                (
+                    "action resource lock",
+                    "Acquiring resources for: Genrule",
+                    11,
+                    19,
+                ),
+                ("Local execution process wall time", "Genrule", 31, 58),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [
+                (Phase::Preparing, 0),
+                (Phase::CheckingCache, 1),
+                (Phase::Scheduling, 11),
+                (LOCAL, 30),
+            ]
+        );
+        assert_eq!(a.state_at(at(20)), State::In(Phase::Scheduling));
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Executed));
+    }
+
+    #[test]
+    fn a_sandboxed_spawn_runs_locally_once_it_has_its_resources() {
+        let a = attempt(
+            false,
+            &[
+                ACTION_EXECUTE,
+                (
+                    "action resource lock",
+                    "Acquiring resources for: Genrule",
+                    5,
+                    15,
+                ),
+                ("general information", "subprocess.run", 30, 50),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (Phase::Scheduling, 5), (LOCAL, 30)]
+        );
+    }
+
+    #[test]
+    fn a_remote_execution_schedules_while_queued_then_runs_remotely() {
+        let a = attempt(
+            true,
+            &[
+                ACTION_EXECUTE,
+                CACHE_CHECK,
+                (
+                    "Remote execution upload time",
+                    "upload missing inputs",
+                    7,
+                    2,
+                ),
+                ("remote action execution", "execute remotely", 10, 80),
+                ("remote action execution", "send Execute request", 11, 78),
+                ("Remote execution queuing time", "queue", 12, 20),
+                ("Remote execution process wall time", "execute", 35, 50),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [
+                (Phase::Preparing, 0),
+                (Phase::CheckingCache, 1),
+                (Phase::Scheduling, 12),
+                (REMOTE, 32),
+            ]
+        );
+        assert_eq!(a.state_at(at(9)), State::In(Phase::CheckingCache));
+        assert_eq!(a.state_at(at(20)), State::In(Phase::Scheduling));
+        assert_eq!(a.state_at(at(40)), State::In(REMOTE));
+    }
+
+    const CACHE_CHECK_LATE: Span = ("remote action cache check", "check cache hit", 20, 5);
+
+    #[test]
+    fn phases_only_move_forward() {
+        let a = attempt(
+            false,
+            &[
+                (
+                    "action resource lock",
+                    "Acquiring resources for: Genrule",
+                    5,
+                    5,
+                ),
+                CACHE_CHECK_LATE,
+                ("Local execution process wall time", "Genrule", 30, 60),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (Phase::Scheduling, 5), (LOCAL, 30)]
+        );
+        assert_eq!(a.state_at(at(25)), State::In(Phase::Scheduling));
+    }
+
+    #[test]
+    fn a_remote_attempt_falling_back_to_a_local_run_runs_on_each_in_turn() {
+        let a = attempt(
+            true,
+            &[
+                ("remote action execution", "execute remotely", 10, 5),
+                ("local action execution", "TestRunner", 20, 70),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (LOCAL, 20), (REMOTE, 10)]
+        );
+        assert_eq!(a.state_at(at(12)), State::In(REMOTE));
+        assert_eq!(a.state_at(at(50)), State::In(LOCAL));
+    }
+
+    #[test]
+    fn a_hit_after_waiting_to_build_the_remote_action_is_done_cached() {
+        let a = attempt(
+            true,
+            &[
+                ACTION_EXECUTE,
+                ("Remote execution setup", "acquiring semaphore", 2, 60),
+                CACHE_CHECK_LATE,
+                ("remote output download", "download outputs", 70, 5),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (Phase::CheckingCache, 20)]
+        );
+        assert_eq!(a.state_at(at(30)), State::In(Phase::CheckingCache));
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+    }
+
+    #[test]
+    fn a_sandboxed_run_too_brief_for_its_own_span_runs_by_its_postcondition_check() {
+        let a = attempt(
+            false,
+            &[
+                ACTION_EXECUTE,
+                CACHE_CHECK,
+                ("general information", "context.prefetchInputs", 8, 1),
+                ("general information", "sandbox.verifyPostCondition", 40, 1),
+                ("general information", "sandbox.delete", 45, 1),
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [
+                (Phase::Preparing, 0),
+                (Phase::CheckingCache, 1),
+                (LOCAL, 40)
+            ]
+        );
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Executed));
+    }
+
+    #[test]
+    fn only_waiting_for_local_resources_among_resource_locks_schedules() {
+        let a = attempt(
+            false,
+            &[
+                (
+                    "action resource lock",
+                    "action.enterActionPreparation",
+                    2,
+                    10,
+                ),
+                CACHE_CHECK_LATE,
+            ],
+        );
+        assert_eq!(
+            entered(&a),
+            [(Phase::Preparing, 0), (Phase::CheckingCache, 20)]
+        );
+        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+    }
+
+    #[test]
+    fn an_action_executed_again_is_a_second_attempt() {
+        let hit: &[Span] = &[CACHE_CHECK];
+        let ran: &[Span] = &[("general information", "subprocess.run", 10, 50)];
+        let attempts = attempts(false, &[hit, ran]);
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|a| (a.start(), a.done()))
+                .collect::<Vec<_>>(),
+            [(at(0), Done::Cached), (at(1000), Done::Executed)]
+        );
     }
 }
