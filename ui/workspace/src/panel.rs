@@ -2,7 +2,7 @@
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
 use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
-use bviz_ui_playback::Clock;
+use bviz_ui_playback::{Clock, DocumentClock};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Window,
@@ -249,11 +249,13 @@ impl Document {
         }
     }
 
-    /// This document, playing back on `clock`, which the window drives from a
-    /// bar while one of the document's panels is the active one.
-    pub fn with_clock(mut self, clock: Entity<Clock>) -> Self {
-        self.clock = Some(clock);
-        self
+    /// The document `open` makes of files following `clock`, which the window
+    /// drives from a bar while one of the document's panels is the active one.
+    pub fn playing_on(clock: DocumentClock, open: impl FnOnce(&DocumentClock) -> Self) -> Self {
+        Self {
+            clock: Some(clock.clock().clone()),
+            ..open(&clock)
+        }
     }
 
     fn members(&self) -> impl Iterator<Item = &Member> {

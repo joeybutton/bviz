@@ -31,11 +31,10 @@ impl EpochMicros {
         EpochMicros(millis.saturating_mul(MICROS_PER_MILLI))
     }
 
-    /// The instant `seconds` seconds after the Unix epoch, to the nearest
-    /// microsecond and saturating at the representable range; the epoch itself
-    /// for a NaN.
+    /// The instant `seconds` seconds after the Unix epoch, placed as
+    /// [`plus_secs_f64`](Self::plus_secs_f64) places it.
     pub fn from_secs_f64(seconds: f64) -> EpochMicros {
-        EpochMicros((seconds * MICROS_PER_SECOND).round() as i64)
+        EpochMicros(0).plus_secs_f64(seconds)
     }
 
     pub const fn micros(self) -> i64 {
@@ -46,6 +45,13 @@ impl EpochMicros {
     /// negative count), saturating at the representable range.
     pub const fn plus_micros(self, micros: i64) -> EpochMicros {
         EpochMicros(self.0.saturating_add(micros))
+    }
+
+    /// The instant `seconds` seconds after this one, to the nearest
+    /// microsecond and saturating at the representable range; this one for a
+    /// NaN.
+    pub fn plus_secs_f64(self, seconds: f64) -> EpochMicros {
+        self.plus_micros((seconds * MICROS_PER_SECOND).round() as i64)
     }
 }
 
@@ -237,6 +243,11 @@ mod tests {
         assert!(origin < later && origin.plus_micros(-1) < origin);
         assert_eq!(later.max(origin), later);
         assert_eq!(origin.plus_micros(i64::MAX).micros(), i64::MAX);
+        assert_eq!(
+            origin.plus_secs_f64(1.000_000_6),
+            origin.plus_micros(1_000_001)
+        );
+        assert_eq!(origin.plus_secs_f64(f64::NAN), origin);
     }
 
     #[test]

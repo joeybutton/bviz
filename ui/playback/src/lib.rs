@@ -5,7 +5,7 @@ mod bar;
 mod clock;
 
 pub use bar::PlaybackBar;
-pub use clock::{Clock, Source, SourceId, Span, Speed, Timeline};
+pub use clock::{Clock, DocumentClock, OnClock, Source, SourceId, Span, Speed, Timeline};
 
 use gpui::{Pixels, px};
 

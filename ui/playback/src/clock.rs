@@ -1,5 +1,5 @@
 use bviz_invocation::EpochMicros;
-use gpui::{App, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, Window};
 use std::time::Instant;
 
 /// The playback speeds, as multiples of real time, in the order stepping
@@ -450,6 +450,76 @@ impl Clock {
             }
         };
         cx.notify();
+    }
+}
+
+/// A document's clock as the views of one of its files receive it, saying
+/// whether that file's times must meet another's.
+#[derive(Clone)]
+pub enum DocumentClock {
+    /// The clock of a document the file makes up by itself, which no other
+    /// file's times share.
+    Alone(Entity<Clock>),
+    /// The clock of a document joining several files, on which each file's
+    /// times stand where the wall clock puts them.
+    Joined(Entity<Clock>),
+}
+
+impl DocumentClock {
+    pub fn alone(cx: &mut App) -> Self {
+        Self::Alone(cx.new(|_| Clock::default()))
+    }
+
+    pub fn joined(cx: &mut App) -> Self {
+        Self::Joined(cx.new(|_| Clock::default()))
+    }
+
+    pub fn clock(&self) -> &Entity<Clock> {
+        match self {
+            Self::Alone(clock) | Self::Joined(clock) => clock,
+        }
+    }
+}
+
+/// A file's place on its document's clock, through which the file registers,
+/// replaces or withdraws what it plays there as that changes.
+pub struct OnClock {
+    clock: DocumentClock,
+    /// `None` while the file gives the clock no time to play.
+    source: Option<SourceId>,
+}
+
+impl OnClock {
+    pub fn new(clock: DocumentClock) -> Self {
+        Self {
+            clock,
+            source: None,
+        }
+    }
+
+    pub fn document_clock(&self) -> &DocumentClock {
+        &self.clock
+    }
+
+    pub fn clock(&self) -> &Entity<Clock> {
+        self.clock.clock()
+    }
+
+    /// Registers `played` with the clock as what the file plays, or withdraws
+    /// the file's source where it plays nothing.
+    pub fn place(&mut self, played: Option<Source>, cx: &mut App) {
+        let source = &mut self.source;
+        self.clock
+            .clock()
+            .update(cx, |clock, cx| match (*source, played) {
+                (Some(id), Some(played)) => clock.replace_source(id, played, cx),
+                (None, Some(played)) => *source = Some(clock.add_source(played, cx)),
+                (Some(id), None) => {
+                    clock.remove_source(id, cx);
+                    *source = None;
+                }
+                (None, None) => {}
+            });
     }
 }
 

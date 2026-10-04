@@ -5,7 +5,7 @@ mod group;
 
 use bviz_cli::{Cli, Source, Sources};
 use bviz_invocation::Session;
-use bviz_ui_playback::Clock;
+use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member};
 use clap::Parser;
 use gpui::{App, AppContext, Entity, Pixels, Size, Window, px};
@@ -67,13 +67,20 @@ impl Load {
     }
 
     /// The views of what this reads, sharing `session` with the other files of
-    /// its invocation where it is opened as one of them.
-    fn open(self, session: Option<&Entity<Session>>, window: &mut Window, cx: &mut App) -> Member {
+    /// its invocation where it is opened as one of them, and following `clock`
+    /// where its document plays back.
+    fn open(
+        self,
+        session: Option<&Entity<Session>>,
+        clock: Option<&DocumentClock>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Member {
         let session = session.cloned();
         match self {
             Self::Graph(load) => bviz_ui_graph::open(load, session, window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, session, window, cx),
-            Self::Console(load) => bviz_ui_console::open(load, session, window, cx),
+            Self::Console(load) => bviz_ui_console::open(load, session, clock.cloned(), window, cx),
             Self::ExecLog(load) => bviz_ui_execlog::open(load, window, cx),
         }
     }
@@ -86,15 +93,12 @@ impl Load {
 /// execution log with a graph, shows no playback bar.
 fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
     match opening {
-        Opening::Alone(load) => {
-            let plays_back = matches!(load, Load::Console(_));
-            let document = Document::from(load.open(None, window, cx));
-            if plays_back {
-                document.with_clock(cx.new(|_| Clock::default()))
-            } else {
-                document
-            }
+        Opening::Alone(load @ Load::Console(_)) => {
+            Document::playing_on(DocumentClock::alone(cx), |clock| {
+                load.open(None, Some(clock), window, cx).into()
+            })
         }
+        Opening::Alone(load) => load.open(None, None, window, cx).into(),
         Opening::Invocation {
             id,
             first,
@@ -102,14 +106,16 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
             rest,
         } => {
             let session = cx.new(|_| Session::default());
-            let first = first.open(Some(&session), window, cx);
-            let second = second.open(Some(&session), window, cx);
-            let mut others = Vec::with_capacity(rest.len());
-            for load in rest {
-                others.push(load.open(Some(&session), window, cx));
-            }
-            Document::join(group::label(&id).into(), first, second, others)
-                .with_clock(cx.new(|_| Clock::default()))
+            Document::playing_on(DocumentClock::joined(cx), |clock| {
+                let mut open = |load: Load| load.open(Some(&session), Some(clock), window, cx);
+                let first = open(first);
+                let second = open(second);
+                let mut others = Vec::with_capacity(rest.len());
+                for load in rest {
+                    others.push(open(load));
+                }
+                Document::join(group::label(&id).into(), first, second, others)
+            })
         }
     }
 }

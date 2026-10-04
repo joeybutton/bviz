@@ -16,6 +16,7 @@ rust_library(
         "//ui/assets",
         "//ui/components",
         "//ui/console/args",
+        "//ui/playback",
         "//ui/theme",
         "//ui/workspace",
         "@crates//:clap",
