@@ -166,15 +166,17 @@ fn sort_stats(rows: &[StatRow], column: StatsColumn, desc: bool) -> Vec<u32> {
     keyed.into_iter().map(|k| k as u32).collect()
 }
 
-/// One stats-table cell, header or body, laid out per its column spec. A fixed
-/// column reserves its width and never shrinks (a bare `w(px)` is only a flex
-/// basis and gets shrunk unevenly between header and body when a row overflows,
-/// drifting the columns out of alignment) and right-aligns its value; the
-/// flexible key column takes the remainder and ellipsizes a long name. Only the
-/// key column ellipsizes: a right-aligned numeric cell with `text_ellipsis`
-/// truncates values that already fit, so its fixed width is just sized to hold
-/// the longest value instead.
-fn stats_cell(spec: &StatsColumnSpec, content: impl IntoIterator<Item = impl IntoElement>) -> Div {
+/// One table cell, header or body, laid out per its column's `width`, `None`
+/// for the one flexible column. A fixed column holds its width exactly, never
+/// shrinking as a flex item, so header and body rows keep their columns aligned
+/// even where a row overflows; it right-aligns its value and clips it, its
+/// width sized to the longest value, since `text_ellipsis` on a right-aligned
+/// cell cuts values that fit. The flexible column takes the remainder and
+/// ellipsizes a long value.
+pub(crate) fn table_cell(
+    width: Option<f32>,
+    content: impl IntoIterator<Item = impl IntoElement>,
+) -> Div {
     let cell = div()
         .flex()
         .flex_row()
@@ -185,7 +187,7 @@ fn stats_cell(spec: &StatsColumnSpec, content: impl IntoIterator<Item = impl Int
         .overflow_hidden()
         .whitespace_nowrap()
         .children(content);
-    match spec.width {
+    match width {
         Some(w) => cell.w(px(w)).flex_shrink_0().justify_end(),
         None => cell.flex_1().min_w_0().text_ellipsis(),
     }
@@ -279,7 +281,7 @@ impl StatsPanel {
     /// group's share of the summed self times (so it totals 100%).
     ///
     /// Header and body cells are laid out from the one [`STATS_COLUMNS`] spec
-    /// through [`stats_cell`], so their widths cannot disagree at any window
+    /// through [`table_cell`], so their widths cannot disagree at any window
     /// width: each fixed column reserves its pixel width without shrinking, and
     /// the one flexible column takes the remainder.
     fn stats_table(&self, palette: &Palette, cx: &mut Context<Self>) -> Div {
@@ -326,7 +328,7 @@ impl StatsPanel {
                     (Some(caret), false) => vec![label, caret],
                     (None, _) => vec![label],
                 };
-                stats_cell(spec, content)
+                table_cell(spec.width, content)
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
@@ -382,7 +384,7 @@ impl StatsPanel {
                             StatsColumn::Max => format_duration(row.max_us).into(),
                             StatsColumn::Percent => format!("{pct:.1}%").into(),
                         };
-                        stats_cell(spec, [text])
+                        table_cell(spec.width, [text])
                     });
                     // The row's fill runs under the reserved scroll-bar strip
                     // as well as under the cells, and only the cells take a
