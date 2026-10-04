@@ -110,6 +110,12 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
         KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
         KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
+        KeyBinding::new("left", exclusive::SelectPrevious, outside_roots),
+        KeyBinding::new("right", exclusive::SelectNext, outside_roots),
+        KeyBinding::new("up", exclusive::SelectParent, outside_roots),
+        KeyBinding::new("down", exclusive::SelectChild, outside_roots),
+        KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
+        KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,

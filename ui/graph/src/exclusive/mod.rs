@@ -5,6 +5,7 @@
 mod icicle;
 mod paint;
 mod roots;
+mod selection;
 mod transition;
 
 use crate::Palette;
@@ -20,15 +21,15 @@ use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::{
-    QueryField, QueryFieldEvent, Toolbar, TooltipColors, cached_layer, centered_notice,
-    centered_spinner, load_in_background, paint_tooltip_box,
+    QueryField, QueryFieldEvent, Toolbar, TooltipColors, beside_anchor, cached_layer,
+    centered_notice, centered_spinner, load_in_background, paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    Rgba, SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px,
-    relative,
+    Rgba, SharedString, Size, Subscription, Task, WeakEntity, Window, canvas, div, point,
+    prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -36,6 +37,7 @@ use paint::{
     shared_name,
 };
 use roots::{Found, Within};
+use selection::Step;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,7 +49,20 @@ pub(crate) const KEY_CONTEXT: &str = "GraphExclusive";
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 
-gpui::actions!(bviz_graph, [ShowWholeBuild, FocusUp, LeaveRoots]);
+gpui::actions!(
+    bviz_graph,
+    [
+        ShowWholeBuild,
+        FocusUp,
+        LeaveRoots,
+        SelectPrevious,
+        SelectNext,
+        SelectParent,
+        SelectChild,
+        FocusSelected,
+        ShowSelected,
+    ]
+);
 
 /// What the panel reads while the tree is being computed.
 const COMPUTING: &str = "Computing exclusive deps…";
@@ -119,7 +134,7 @@ impl ExclusivePanel {
             if view.key(cx).as_ref() == Some(&landed.key) {
                 view.redraw(cx);
             } else if view.target_key().as_ref() == Some(&landed.key) {
-                view.rehover(cx);
+                view.reselect(cx);
             }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
@@ -390,7 +405,7 @@ impl ExclusivePanel {
             if drawn.as_targets != as_targets {
                 drawn.as_targets = as_targets;
                 self.want(key, cx);
-                self.rehover(cx);
+                self.reselect(cx);
             }
             return;
         }
@@ -404,7 +419,7 @@ impl ExclusivePanel {
                 focus: None,
                 transition: None,
                 pointer: None,
-                hover: None,
+                selection: None,
                 press: None,
             });
             if self.shown {
@@ -450,20 +465,26 @@ impl ExclusivePanel {
         ));
     }
 
-    /// The cell a pointer at `at` is over, where the cells are drawn and at
-    /// rest.
-    fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
+    /// The cells drawn from the focus at rest, where they are laid out.
+    fn laid_out(&self) -> Option<Vec<Cell>> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
-        if drawn.transition.is_some() {
-            return None;
-        }
-        let cells = icicle::lay_out(
-            &*drawn.coloured.tree,
+        let tree = &*drawn.coloured.tree;
+        Some(icicle::lay_out(
+            tree,
             drawn.top(),
             frame.bounds,
             frame.row,
             MIN_CELL_WIDTH,
-        );
+        ))
+    }
+
+    /// The cell a pointer at `at` is over, where the cells are drawn and at
+    /// rest.
+    fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
+        if self.drawn.as_ref()?.transition.is_some() {
+            return None;
+        }
+        let cells = self.laid_out()?;
         cells.into_iter().find(|cell| cell.rect.contains(&at))
     }
 
@@ -493,7 +514,7 @@ impl ExclusivePanel {
         let tree = &*drawn.coloured.tree;
         drawn.transition = Transition::between(tree, from, drawn.top(), Instant::now());
         self.invalidate_canvas(cx);
-        self.rehover(cx);
+        self.reselect(cx);
     }
 
     /// Draws the icicle at rest once the last frame of `transition` is
@@ -505,18 +526,115 @@ impl ExclusivePanel {
         if drawn.transition.as_ref() == Some(transition) {
             drawn.transition = None;
             self.invalidate_canvas(cx);
-            self.rehover(cx);
+            self.reselect(cx);
         }
     }
 
-    /// Describes the cell under the pointer afresh.
-    fn rehover(&mut self, cx: &mut Context<Self>) {
+    /// Selects and describes afresh: where the keys selected, the cell they
+    /// selected wherever it is still drawn and the cell on top where it is
+    /// not, and otherwise the cell under the pointer.
+    fn reselect(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        drawn.hover = None;
-        if let Some(at) = drawn.pointer {
-            self.hover_at(at, cx);
+        let (selected, pointer) = (drawn.selection.take(), drawn.pointer);
+        match selected {
+            Some(Selection {
+                cell,
+                by: Picked::Keys,
+                ..
+            }) => {
+                let cells = self.laid_out().unwrap_or_default();
+                let kept = cells.iter().find(|drawn| drawn.holds == cell.holds);
+                match kept.or(cells.first()) {
+                    Some(&kept) => self.select(kept, Picked::Keys, cx),
+                    None => cx.notify(),
+                }
+            }
+            _ => match pointer {
+                Some(at) => self.hover_at(at, cx),
+                None => cx.notify(),
+            },
+        }
+    }
+
+    /// Selects `cell` as `by` picked it, describing it unless it is the cell
+    /// selected already.
+    fn select(&mut self, cell: Cell, by: Picked, cx: &mut Context<Self>) {
+        let as_targets = self
+            .target_key()
+            .and_then(|key| self.model.read(cx).dominators(&key).cloned());
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        let focus = drawn.focused();
+        match &mut drawn.selection {
+            Some(selection) if selection.cell == cell => selection.by = by,
+            selection => {
+                *selection = Some(Selection {
+                    cell,
+                    by,
+                    lines: describe(&drawn.coloured, as_targets.as_deref(), cell.holds, focus),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Selects no cell.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        if let Some(drawn) = &mut self.drawn
+            && drawn.selection.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// Takes the selection a `step` through the cells drawn, or selects the
+    /// cell on top where none is selected.
+    fn step(&mut self, step: Step, cx: &mut Context<Self>) {
+        let (Some(drawn), Some(cells)) = (&self.drawn, self.laid_out()) else {
+            return;
+        };
+        let selected = drawn.selection.as_ref().and_then(|selection| {
+            let holds = selection.cell.holds;
+            cells.iter().find(|cell| cell.holds == holds)
+        });
+        let to = match selected {
+            Some(from) => selection::stepped(&cells, from, step, &*drawn.coloured.tree),
+            None => cells.first().copied(),
+        };
+        if let Some(to) = to {
+            self.select(to, Picked::Keys, cx);
+        }
+    }
+
+    /// Focuses what a click on the selected cell asks for.
+    fn focus_selected(&mut self, cx: &mut Context<Self>) {
+        let selected = self
+            .drawn
+            .as_ref()
+            .and_then(|drawn| drawn.selection.as_ref());
+        if let Some(holds) = selected.map(|selection| selection.cell.holds) {
+            self.click_cell(holds, cx);
+        }
+    }
+
+    /// Shows the graph's drawing of the point selected, where a point is.
+    fn show_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        if let Some(Selection {
+            cell: Cell {
+                holds: Holds::Node(node),
+                ..
+            },
+            ..
+        }) = drawn.selection
+        {
+            let id = drawn.coloured.tree.id(node);
+            self.model.update(cx, |model, cx| model.reveal(id, cx));
         }
     }
 
@@ -595,38 +713,27 @@ impl ExclusivePanel {
         }
     }
 
-    /// Follows the pointer to the cell it is over, describing the cell afresh
-    /// only where the pointer has moved onto another.
+    /// Selects the cell the pointer at `at` is over; a pointer over none lets
+    /// go of a cell it selected.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
-        let as_targets = self
-            .target_key()
-            .and_then(|key| self.model.read(cx).dominators(&key).cloned());
         let Some(drawn) = &mut self.drawn else {
             return;
         };
         drawn.pointer = Some(at);
-        let focus = drawn.focused();
-        match (&mut drawn.hover, cell) {
-            (Some(hover), Some(cell)) if hover.cell == cell => hover.at = at,
-            (None, None) => return,
-            (hover, cell) => {
-                *hover = cell.map(|cell| Hover {
-                    cell,
-                    at,
-                    lines: describe(&drawn.coloured, as_targets.as_deref(), cell.holds, focus),
-                });
-            }
+        match cell {
+            Some(cell) => self.select(cell, Picked::Pointer, cx),
+            None if drawn.picked_by_pointer() => self.deselect(cx),
+            None => {}
         }
-        cx.notify();
     }
 
-    /// Drops the tooltip, which names the cell under a pointer that has left.
+    /// Lets go of the cell the pointer selected, which has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
         if let Some(drawn) = &mut self.drawn {
             drawn.pointer = None;
-            if drawn.hover.take().is_some() {
-                cx.notify();
+            if drawn.picked_by_pointer() {
+                self.deselect(cx);
             }
         }
     }
@@ -805,12 +912,22 @@ struct Drawn {
     transition: Option<Transition>,
     /// Where the pointer rests over the icicle, while it does.
     pointer: Option<Point<Pixels>>,
-    hover: Option<Hover>,
+    selection: Option<Selection>,
     /// Where the first press of the last click landed.
     press: Option<Press>,
 }
 
 impl Drawn {
+    fn picked_by_pointer(&self) -> bool {
+        matches!(
+            self.selection,
+            Some(Selection {
+                by: Picked::Pointer,
+                ..
+            })
+        )
+    }
+
     fn focused(&self) -> Option<Focused> {
         self.focus.as_ref().map(|focus| focus.on)
     }
@@ -878,11 +995,7 @@ impl Focused {
 
     /// The points of `tree` this stands over.
     fn weight(self, tree: &Dominators) -> u32 {
-        match self {
-            Self::Shared => tree.shared_weight(),
-            Self::Node(node) => tree.weight(node),
-            Self::Run(run) => run.weight(),
-        }
+        self.holds().weight(tree)
     }
 
     /// How a tooltip or the breadcrumb names this in `tree`, whose roots
@@ -988,12 +1101,20 @@ enum Press {
     },
 }
 
-/// The cell the pointer rests on, described once as the pointer reaches it,
-/// so a pointer moving within the cell only moves the tooltip.
-struct Hover {
+/// The cell ringed and described in the tooltip, described once as it is
+/// selected, so a pointer moving within the cell only moves the tooltip.
+struct Selection {
     cell: Cell,
-    at: Point<Pixels>,
+    by: Picked,
     lines: Vec<String>,
+}
+
+/// What selected a cell.
+#[derive(Clone, Copy, PartialEq)]
+enum Picked {
+    /// The pointer, where it rests.
+    Pointer,
+    Keys,
 }
 
 /// What the cells' layout turns on besides the tree drawn, so a pointer is
@@ -1370,6 +1491,14 @@ impl Render for ExclusivePanel {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|view, _: &ShowWholeBuild, _, cx| view.focus_on(None, cx)))
             .on_action(cx.listener(|view, _: &FocusUp, _, cx| view.focus_up(cx)))
+            .on_action(cx.listener(|view, _: &SelectPrevious, _, cx| {
+                view.step(Step::Previous, cx);
+            }))
+            .on_action(cx.listener(|view, _: &SelectNext, _, cx| view.step(Step::Next, cx)))
+            .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
+            .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
+            .on_action(cx.listener(|view, _: &FocusSelected, _, cx| view.focus_selected(cx)))
+            .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -1441,7 +1570,7 @@ impl Render for ExclusivePanel {
                 .min_h(px(0.))
                 .child(cached_layer(self.canvas.clone()))
                 .child(hover_layer(cx.entity(), palette))
-                .when(drawn.hover.is_some(), |icicle| icicle.cursor_pointer())
+                .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
@@ -1602,10 +1731,11 @@ fn separator() -> AnyElement {
     "›".into_any_element()
 }
 
-/// The layer over the cells that rings and describes the one under the
-/// pointer, painted apart from the cells so that neither repaints any of them.
-/// Its layout records where the cells lie for the pointer handlers, and lets
-/// go of a cell laid out elsewhere.
+/// The layer over the cells that rings and describes the one selected,
+/// painted apart from the cells so that neither repaints any of them, and
+/// only while they are at rest. Its layout records where the cells lie for
+/// the pointer handlers and the keys, and lets go of a cell the pointer
+/// selected where they are laid out elsewhere.
 fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
@@ -1615,21 +1745,29 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                 row: paint::row_height(window),
             };
             view.update(cx, |view, _| {
-                if view.frame != Some(frame) {
-                    view.frame = Some(frame);
-                    if let Some(drawn) = &mut view.drawn {
-                        drawn.hover = None;
-                    }
+                if view.frame == Some(frame) {
+                    return;
+                }
+                view.frame = Some(frame);
+                let cells = view.laid_out().unwrap_or_default();
+                if let Some(drawn) = &mut view.drawn {
+                    let moved = drawn.selection.take().and_then(|selection| {
+                        let holds = selection.cell.holds;
+                        let cell = *cells.iter().find(|cell| cell.holds == holds)?;
+                        (selection.by == Picked::Keys).then_some(Selection { cell, ..selection })
+                    });
+                    drawn.selection = moved;
                 }
             });
         }
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
         let panel = view.read(cx);
-        let Some((drawn, Hover { cell, at, lines })) = panel
+        let Some((drawn, Selection { cell, by, lines })) = panel
             .drawn
             .as_ref()
-            .and_then(|drawn| Some((drawn, drawn.hover.as_ref()?)))
+            .filter(|drawn| drawn.transition.is_none())
+            .and_then(|drawn| Some((drawn, drawn.selection.as_ref()?)))
         else {
             return;
         };
@@ -1638,12 +1776,33 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         let reveals = panel.model.read(cx).reveals();
         let gesture = gesture(cell.holds, drawn.top(), reveals);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
-        let (cell, at) = (*cell, *at);
+        let (cell, by, pointer) = (*cell, *by, drawn.pointer);
+        let place = |extent: Size<Pixels>| match (by, pointer) {
+            (Picked::Pointer, Some(at)) => beside_anchor(at, extent, bounds),
+            (Picked::Pointer, None) | (Picked::Keys, _) => beside_cell(cell.rect, extent, bounds),
+        };
         paint::paint_ring(&cell, &palette, window);
         let tooltip = TooltipColors::from_colors(&palette.colors);
-        paint_tooltip_box(&lines, at, bounds, tooltip, window, cx);
+        paint_tooltip(&lines, place, tooltip, window, cx);
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
+}
+
+/// Where a tooltip of `extent` describing the cell at `rect` goes inside
+/// `bounds`: beside the middle of the cell's bottom edge, or of its top edge
+/// where there is no room below, so that it covers neither the cell nor its
+/// ring.
+fn beside_cell(
+    rect: Bounds<Pixels>,
+    extent: Size<Pixels>,
+    bounds: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let x = rect.center().x;
+    let below = beside_anchor(point(x, rect.bottom()), extent, bounds);
+    match below.y >= rect.bottom() {
+        true => below,
+        false => beside_anchor(point(x, rect.top()), extent, bounds),
+    }
 }
 
 /// The layer the cells are drawn in, cached across frames that leave the tree
@@ -1703,6 +1862,20 @@ impl Render for IcicleCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::size;
+
+    /// A tooltip for a cell with no room below it stands above the cell
+    /// rather than over it.
+    #[test]
+    fn a_cell_s_tooltip_stands_below_it_or_above_where_there_is_no_room() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let extent = size(px(120.), px(60.));
+        let high = Bounds::new(point(px(100.), px(20.)), size(px(80.), px(20.)));
+        assert!(beside_cell(high, extent, bounds).y >= high.bottom());
+        let low = Bounds::new(point(px(100.), px(270.)), size(px(80.), px(20.)));
+        let placed = beside_cell(low, extent, bounds);
+        assert!(placed.y + extent.height <= low.top(), "{placed:?}");
+    }
 
     #[test]
     fn the_status_counts_the_points_outside_only_where_there_are_any() {

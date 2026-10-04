@@ -172,6 +172,13 @@ pub(crate) fn spans(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
     inner.left() >= outer.left() - EDGE_SLACK && inner.right() <= outer.right() + EDGE_SLACK
 }
 
+/// Whether `below` lies in the row under `above`, which [`lay_out`] lays out
+/// a row's height apart.
+pub(crate) fn row_under(above: Bounds<Pixels>, below: Bounds<Pixels>) -> bool {
+    let row = above.size.height;
+    (below.top() - above.bottom()).abs() < row / 2.
+}
+
 /// The narrowest a cell is drawn at all.
 pub(crate) const VISIBLE_WIDTH: Pixels = px(1.);
 
