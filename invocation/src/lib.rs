@@ -19,7 +19,7 @@ const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 
 /// A wall-clock instant, in microseconds since the Unix epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochMicros(i64);
 
 impl EpochMicros {
@@ -38,6 +38,12 @@ impl EpochMicros {
 
     pub const fn micros(self) -> i64 {
         self.0
+    }
+
+    /// The instant `micros` microseconds after this one (before it for a
+    /// negative count), saturating at the representable range.
+    pub const fn plus_micros(self, micros: i64) -> EpochMicros {
+        EpochMicros(self.0.saturating_add(micros))
     }
 }
 
@@ -202,6 +208,16 @@ mod tests {
         assert_eq!(EpochMicros::from_secs_f64(-0.000_001_6).micros(), -2);
         assert_eq!(EpochMicros::from_secs_f64(f64::INFINITY).micros(), i64::MAX);
         assert_eq!(EpochMicros::from_secs_f64(f64::NAN).micros(), 0);
+    }
+
+    #[test]
+    fn an_offset_moves_an_instant_in_order_and_saturates() {
+        let origin = EpochMicros::from_millis(1_781_439_245_231);
+        let later = origin.plus_micros(1_500);
+        assert_eq!(later.micros() - origin.micros(), 1_500);
+        assert!(origin < later && origin.plus_micros(-1) < origin);
+        assert_eq!(later.max(origin), later);
+        assert_eq!(origin.plus_micros(i64::MAX).micros(), i64::MAX);
     }
 
     #[test]
