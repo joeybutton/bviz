@@ -16,6 +16,7 @@ pub(crate) trait Tree {
     fn shared_weight(&self) -> u32;
     fn children(&self, node: u32) -> Range<u32>;
     fn weight(&self, node: u32) -> u32;
+    fn parent(&self, node: u32) -> Parent;
 }
 
 impl Tree for Dominators {
@@ -42,6 +43,14 @@ impl Tree for Dominators {
     fn weight(&self, node: u32) -> u32 {
         Dominators::weight(self, node)
     }
+
+    fn parent(&self, node: u32) -> Parent {
+        match Dominators::parent(self, node) {
+            Some(parent) => Parent::Node(parent),
+            None if Dominators::shared_tops(self).contains(&node) => Parent::Shared,
+            None => Parent::Build,
+        }
+    }
 }
 
 /// What a cell of the icicle stands for.
@@ -56,6 +65,46 @@ pub(crate) enum Holds {
     Rest(Run),
 }
 
+impl Holds {
+    /// The points of `tree` the cell holding this stands over.
+    pub(crate) fn weight(self, tree: &impl Tree) -> u32 {
+        match self {
+            Holds::Build => tree.total(),
+            Holds::Shared => tree.shared_weight(),
+            Holds::Node(node) => tree.weight(node),
+            Holds::Rest(run) => run.weight,
+        }
+    }
+
+    /// What the cell holding this stands under in `tree`; none for the whole
+    /// build.
+    pub(crate) fn parent(self, tree: &impl Tree) -> Option<Holds> {
+        match self {
+            Holds::Build => None,
+            Holds::Shared => Some(Holds::Build),
+            Holds::Node(node) => Some(tree.parent(node).into()),
+            Holds::Rest(run) => Some(run.parent.into()),
+        }
+    }
+
+    /// Whether the cell holding this stands directly under the one holding
+    /// `over` in `tree`, or is gathered by it where that is a rest cell.
+    pub(crate) fn stands_under(self, over: Holds, tree: &impl Tree) -> bool {
+        match (over, self) {
+            (Holds::Rest(run), Holds::Node(node)) => {
+                tree.parent(node) == run.parent && run.siblings().contains(&node)
+            }
+            (Holds::Rest(run), Holds::Rest(within)) => {
+                within.parent == run.parent
+                    && run.siblings().start <= within.first
+                    && within.siblings().end <= run.siblings().end
+            }
+            (Holds::Rest(_), Holds::Build | Holds::Shared) => false,
+            (over, holds) => holds.parent(tree) == Some(over),
+        }
+    }
+}
+
 /// What a row of siblings stands under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Parent {
@@ -65,6 +114,16 @@ pub(crate) enum Parent {
     Shared,
     /// Over its children.
     Node(u32),
+}
+
+impl From<Parent> for Holds {
+    fn from(parent: Parent) -> Self {
+        match parent {
+            Parent::Build => Holds::Build,
+            Parent::Shared => Holds::Shared,
+            Parent::Node(node) => Holds::Node(node),
+        }
+    }
 }
 
 /// The siblings from `first` to the last under `parent`, which a row of the
@@ -103,8 +162,18 @@ pub(crate) struct Cell {
     pub(crate) holds: Holds,
 }
 
-/// The narrowest a run of siblings too narrow to draw apart is drawn at all.
-const VISIBLE_WIDTH: Pixels = px(1.);
+/// How far a cell's edge may stray from its parent's by the sums laying
+/// siblings side by side and still lie within it.
+const EDGE_SLACK: Pixels = px(0.01);
+
+/// Whether `inner` lies across no more than `outer` does, as a cell [`lay_out`]
+/// lays out does under each cell above it.
+pub(crate) fn spans(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
+    inner.left() >= outer.left() - EDGE_SLACK && inner.right() <= outer.right() + EDGE_SLACK
+}
+
+/// The narrowest a cell is drawn at all.
+pub(crate) const VISIBLE_WIDTH: Pixels = px(1.);
 
 /// How much of the row beneath a run on top its own rest cell takes, where
 /// the run's siblings are too many to draw apart at once.
@@ -253,6 +322,45 @@ pub(crate) fn lay_out(
     cells
 }
 
+/// The left edge and width [`lay_out`] gives the cell holding `child` by its
+/// weight among its siblings under `parent`, or among those `parent` gathers
+/// where it is a rest cell, whether or not it is wide enough to be drawn
+/// apart.
+pub(crate) fn share_of(
+    tree: &impl Tree,
+    parent: Cell,
+    child: Holds,
+    min_width: Pixels,
+) -> (Pixels, Pixels) {
+    let Cell { rect, holds } = parent;
+    let (siblings, weight, span) = match holds {
+        Holds::Build => {
+            let shared = tree.shared_weight();
+            let (roots, beyond) = split(rect.size.width, shared, tree.total(), min_width);
+            if child == Holds::Shared {
+                return (rect.right() - beyond, beyond);
+            }
+            (tree.roots(), tree.total() - shared, roots)
+        }
+        Holds::Shared => (tree.shared_tops(), tree.shared_weight(), rect.size.width),
+        Holds::Node(node) => (tree.children(node), tree.weight(node), rect.size.width),
+        Holds::Rest(run) => (run.siblings(), run.weight, rect.size.width),
+    };
+    let first = match child {
+        Holds::Node(node) => node,
+        Holds::Rest(run) => run.first,
+        Holds::Build | Holds::Shared => siblings.start,
+    };
+    let before: u32 = (siblings.start..first)
+        .map(|sibling| tree.weight(sibling))
+        .sum();
+    let per_point = span / weight as f32;
+    (
+        rect.left() + per_point * before as f32,
+        per_point * child.weight(tree) as f32,
+    )
+}
+
 /// How a row `width` wide under the whole build, which weighs `weight`, is
 /// divided between its roots and the cell of the shared tops,
 /// which weigh `shared`, as the width of each: by weight, but with neither
@@ -300,13 +408,13 @@ fn heaviest_page(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// A tree laid out as [`Dominators`] lays one out: each node's children
     /// consecutive, heaviest first, and the tops ahead of every other node,
     /// the roots first.
-    struct Laid {
+    pub(in crate::exclusive) struct Laid {
         roots: u32,
         weights: Vec<u32>,
         /// By node, where its children start, and past the last node the node
@@ -316,15 +424,18 @@ mod tests {
 
     /// A node by its weight and its children.
     #[derive(Clone)]
-    struct Spec(u32, Vec<Spec>);
+    pub(in crate::exclusive) struct Spec(
+        pub(in crate::exclusive) u32,
+        pub(in crate::exclusive) Vec<Spec>,
+    );
 
     impl Laid {
         /// A tree whose tops are all roots.
-        fn of(roots: &[Spec]) -> Self {
+        pub(in crate::exclusive) fn of(roots: &[Spec]) -> Self {
             Self::sharing(roots, &[])
         }
 
-        fn sharing(roots: &[Spec], shared: &[Spec]) -> Self {
+        pub(in crate::exclusive) fn sharing(roots: &[Spec], shared: &[Spec]) -> Self {
             let mut order: Vec<&Spec> = roots.iter().chain(shared).collect();
             let mut bounds = Vec::new();
             let mut at = 0;
@@ -366,15 +477,25 @@ mod tests {
         fn weight(&self, node: u32) -> u32 {
             self.weights[node as usize]
         }
+
+        fn parent(&self, node: u32) -> Parent {
+            let holding =
+                (0..self.weights.len() as u32).find(|&p| self.children(p).contains(&node));
+            match holding {
+                Some(parent) => Parent::Node(parent),
+                None if self.shared_tops().contains(&node) => Parent::Shared,
+                None => Parent::Build,
+            }
+        }
     }
 
-    fn leaf(weight: u32) -> Spec {
+    pub(in crate::exclusive) fn leaf(weight: u32) -> Spec {
         Spec(weight, Vec::new())
     }
 
-    const ROW: Pixels = px(10.);
+    pub(in crate::exclusive) const ROW: Pixels = px(10.);
 
-    fn area(width: f32, rows: f32) -> Bounds<Pixels> {
+    pub(in crate::exclusive) fn area(width: f32, rows: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(0.), px(0.)), size(px(width), ROW * rows))
     }
 

@@ -5,6 +5,7 @@
 mod icicle;
 mod paint;
 mod roots;
+mod transition;
 
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
@@ -37,6 +38,8 @@ use paint::{
 use roots::{Found, Within};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
+use transition::Transition;
 
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.
@@ -399,6 +402,8 @@ impl ExclusivePanel {
                 coloured: Arc::clone(coloured),
                 as_targets,
                 focus: None,
+                transition: None,
+                pointer: None,
                 hover: None,
                 press: None,
             });
@@ -445,9 +450,13 @@ impl ExclusivePanel {
         ));
     }
 
-    /// The cell a pointer at `at` is over, where the cells are drawn.
+    /// The cell a pointer at `at` is over, where the cells are drawn and at
+    /// rest.
     fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
+        if drawn.transition.is_some() {
+            return None;
+        }
         let cells = icicle::lay_out(
             &*drawn.coloured.tree,
             drawn.top(),
@@ -471,21 +480,43 @@ impl ExclusivePanel {
     }
 
     /// Draws the icicle from `focus`, or from the whole build where there is
-    /// none, and describes the cell that brings under the pointer.
+    /// none, and describes the cell that brings under the pointer. A move
+    /// under way ends at once on the focus it was making for, and the move to
+    /// `focus` starts from there, so a key held or pressed again mid-move
+    /// goes a step further each time.
     fn refocus(&mut self, focus: Option<Focus>, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
+        let from = drawn.top();
         drawn.focus = focus;
+        let tree = &*drawn.coloured.tree;
+        drawn.transition = Transition::between(tree, from, drawn.top(), Instant::now());
         self.invalidate_canvas(cx);
         self.rehover(cx);
     }
 
+    /// Draws the icicle at rest once the last frame of `transition` is
+    /// painted, where that is still the move under way.
+    fn settle(&mut self, transition: &Transition, cx: &mut Context<Self>) {
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        if drawn.transition.as_ref() == Some(transition) {
+            drawn.transition = None;
+            self.invalidate_canvas(cx);
+            self.rehover(cx);
+        }
+    }
+
     /// Describes the cell under the pointer afresh.
     fn rehover(&mut self, cx: &mut Context<Self>) {
-        let hover = self.drawn.as_mut().and_then(|drawn| drawn.hover.take());
-        if let Some(hover) = hover {
-            self.hover_at(hover.at, cx);
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        drawn.hover = None;
+        if let Some(at) = drawn.pointer {
+            self.hover_at(at, cx);
         }
     }
 
@@ -536,6 +567,9 @@ impl ExclusivePanel {
             return;
         };
         match e.click_count {
+            // The cell under a press while the icicle moves is not the one
+            // the reader aimed at.
+            1 if drawn.transition.is_some() => drawn.press = None,
             1 => {
                 drawn.press = match cell.map(|cell| cell.holds) {
                     None => Some(Press::Clear),
@@ -571,6 +605,7 @@ impl ExclusivePanel {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
+        drawn.pointer = Some(at);
         let focus = drawn.focused();
         match (&mut drawn.hover, cell) {
             (Some(hover), Some(cell)) if hover.cell == cell => hover.at = at,
@@ -588,10 +623,11 @@ impl ExclusivePanel {
 
     /// Drops the tooltip, which names the cell under a pointer that has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawn) = &mut self.drawn
-            && drawn.hover.take().is_some()
-        {
-            cx.notify();
+        if let Some(drawn) = &mut self.drawn {
+            drawn.pointer = None;
+            if drawn.hover.take().is_some() {
+                cx.notify();
+            }
         }
     }
 
@@ -765,6 +801,10 @@ struct Drawn {
     /// The [`Rooting::as_targets`] of the roots the tree is drawn from.
     as_targets: Option<TreeKey>,
     focus: Option<Focus>,
+    /// The move to `focus` from the focus before it, while it is under way.
+    transition: Option<Transition>,
+    /// Where the pointer rests over the icicle, while it does.
+    pointer: Option<Point<Pixels>>,
     hover: Option<Hover>,
     /// Where the first press of the last click landed.
     press: Option<Press>,
@@ -879,11 +919,7 @@ impl Crumb {
     fn parent(self, tree: &Dominators) -> Parent {
         match self {
             Self::Shared => Parent::Build,
-            Self::Node(node) => match tree.parent(node) {
-                Some(parent) => Parent::Node(parent),
-                None if tree.shared_tops().contains(&node) => Parent::Shared,
-                None => Parent::Build,
-            },
+            Self::Node(node) => icicle::Tree::parent(tree, node),
         }
     }
 }
@@ -1629,6 +1665,7 @@ impl Render for IcicleCanvas {
                 tree: Arc::clone(&drawn.coloured.tree),
                 by: drawn.coloured.by(),
                 top: drawn.top(),
+                transition: drawn.transition.clone(),
                 above: drawn.focus.as_ref().map_or_else(Vec::new, |focus| {
                     let above = focus.above.iter().map(|&above| Focused::from(above));
                     above.filter_map(Focused::node).collect()
@@ -1637,11 +1674,25 @@ impl Render for IcicleCanvas {
                 palette,
             })
         });
+        let parent = self.parent.clone();
         canvas(
             |_, _, _| {},
             move |bounds: Bounds<Pixels>, (), window, cx| {
-                if let Some(scene) = scene {
-                    paint::paint_icicle(&scene, bounds, window, cx);
+                let Some(scene) = scene else {
+                    return;
+                };
+                let now = Instant::now();
+                paint::paint_icicle(&scene, bounds, now, window, cx);
+                match scene.transition {
+                    Some(transition) if transition.ended(now) => {
+                        window.on_next_frame(move |_, cx| {
+                            let settled =
+                                parent.update(cx, |panel, cx| panel.settle(&transition, cx));
+                            settled.ok();
+                        });
+                    }
+                    Some(_) => window.request_animation_frame(),
+                    None => {}
                 }
             },
         )

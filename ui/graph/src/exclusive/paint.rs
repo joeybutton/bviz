@@ -2,6 +2,7 @@
 //! where it is wide enough to read.
 
 use super::icicle::{self, Cell, Holds, Parent, Run};
+use super::transition::{Placed, Transition};
 use super::{RootedBy, SEVERAL, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
 use crate::hints::hints_where_alike;
@@ -17,10 +18,12 @@ use bviz_ui_assets::shape_line;
 use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix, over};
 use gpui::{
-    App, BorderStyle, Bounds, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point, px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point,
+    px, quad, size,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Inset of a cell's name from its edges, above and below as at either side.
 const TEXT_PAD: f32 = 3.0;
@@ -107,6 +110,8 @@ pub(crate) struct Scene {
     pub(crate) colouring: Arc<Colouring>,
     /// What the cell spanning the top row holds.
     pub(crate) top: Holds,
+    /// The move to `top` from the focus before it, where it is under way.
+    pub(crate) transition: Option<Transition>,
     pub(crate) shared: Shared,
     /// The dominators the breadcrumb names above the cell on top, whose names
     /// the cells' are told apart from.
@@ -117,13 +122,37 @@ pub(crate) struct Scene {
     pub(crate) palette: Palette,
 }
 
-/// Paints the icicle of `scene` filling `bounds`.
+/// Paints the icicle of `scene` filling `bounds` as it stands at `now`.
 pub(crate) fn paint_icicle(
     scene: &Scene,
     bounds: Bounds<Pixels>,
+    now: Instant,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let row = row_height(window);
+    let tree = &*scene.tree;
+    let placed = match &scene.transition {
+        None => Placed::still(icicle::lay_out(
+            tree,
+            scene.top,
+            bounds,
+            row,
+            MIN_CELL_WIDTH,
+        )),
+        Some(transition) => {
+            let lowered = transition.lowered(now);
+            transition.cells(tree, bounds, row, MIN_CELL_WIDTH, lowered)
+        }
+    };
+    let mask = ContentMask { bounds };
+    window.with_content_mask(Some(mask), |window| {
+        paint_cells(scene, &placed, window, cx);
+    });
+}
+
+/// Paints `placed`, the cells of the icicle of `scene`.
+fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut App) {
     let palette = &scene.palette;
     let style = LabelBoxStyle {
         background: palette.background,
@@ -131,15 +160,14 @@ pub(crate) fn paint_icicle(
         label_min_px: f32::from(LABEL_MIN_WIDTH),
         text_pad: TEXT_PAD,
     };
-    let row = row_height(window);
-    let cells = icicle::lay_out(&*scene.tree, scene.top, bounds, row, MIN_CELL_WIDTH);
+    let cells: Vec<Cell> = placed.iter().map(|placed| placed.cell).collect();
     let hints = hints_among(&scene.tree, &scene.shared, &scene.above, &cells);
-    for (index, cell) in cells.into_iter().enumerate() {
+    for &Placed { cell, on_top } in placed {
         let fill = fill(scene, cell.holds);
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
-        let name = match (index, cell.holds) {
+        let name = match (on_top, cell.holds) {
             _ if cell.rect.size.width < LABEL_MIN_WIDTH => String::new(),
-            (0, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, scene.by, run),
+            (true, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, scene.by, run),
             (_, Holds::Rest(run)) => {
                 let (room, font_size) = style.label_room(rect);
                 let width = text_width(window, font_size, label);
