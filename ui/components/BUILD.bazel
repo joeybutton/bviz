@@ -22,6 +22,7 @@ rust_library(
         "//ui/console:__pkg__",
         "//ui/execlog:__pkg__",
         "//ui/graph:__pkg__",
+        "//ui/playback:__pkg__",
         "//ui/shell:__pkg__",
         "//ui/trace:__pkg__",
         "//ui/workspace:__pkg__",

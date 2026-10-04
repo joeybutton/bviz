@@ -1085,6 +1085,9 @@ name = "bviz_ui_playback"
 version = "0.1.0"
 dependencies = [
  "bviz_invocation",
+ "bviz_ui_assets",
+ "bviz_ui_components",
+ "bviz_ui_theme",
  "gpui",
 ]
 

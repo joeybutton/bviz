@@ -8,6 +8,9 @@ rust_library(
     visibility = ["//ui/workspace:__pkg__"],
     deps = [
         "//invocation",
+        "//ui/assets",
+        "//ui/components",
+        "//ui/theme",
         "@crates//:gpui",
     ],
 )
