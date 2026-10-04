@@ -1,0 +1,15 @@
+[package]
+name = "bviz_proto_field_numbers_gen"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bviz_proto_field_numbers_gen"
+path = "proto_field_numbers_gen.rs"
+
+[dependencies]
+heck = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }

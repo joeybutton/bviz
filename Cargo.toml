@@ -3,10 +3,12 @@ members = [
     "alloc",
     "bviz",
     "cli",
+    "execlog",
     "graph/layout",
     "invocation",
     "terminal",
     "tools/notices",
+    "tools/proto_field_numbers",
     "tools/scene_header",
     "trace/layout",
     "trace/profile",
@@ -40,6 +42,7 @@ crossbeam-utils = "0.8"
 fastrand = "2"
 flate2 = { version = "1", features = ["zlib-rs"] }
 hashbrown = { version = "0.16", default-features = false }
+heck = "0.5"
 libmimalloc-sys = "0.1"
 mimalloc = "0.1"
 num_cpus = "1"
@@ -50,6 +53,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 spdx = "0.13"
+zstd = { version = "0.14", default-features = false }
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-core = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-graph = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }

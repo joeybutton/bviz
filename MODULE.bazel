@@ -421,6 +421,18 @@ new_git_repository(
     ],
 )
 
+# spawn.proto, for reading `--execution_log_compact_file`.
+new_git_repository(
+    name = "bazel_spawn_proto",
+    build_file = "//3rd-party:bazel_spawn_proto.BUILD",
+    commit = "8220c6198837d5c13d53fea211cf3282aa12408a",  # 9.2.0
+    remote = "https://github.com/bazelbuild/bazel.git",
+    sparse_checkout_patterns = [
+        "/LICENSE",
+        "src/main/protobuf/spawn.proto",
+    ],
+)
+
 bazel_dep(name = "bazel_env.bzl", version = "0.7.2", dev_dependency = True)
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)
 bazel_dep(name = "rules_multitool", version = "1.11.1", dev_dependency = True)
