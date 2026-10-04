@@ -60,6 +60,9 @@ struct Table {
     accepted_texts: BTreeMap<String, BTreeMap<String, AcceptedText>>,
 }
 
+/// The licence a component is available under, where its own metadata names
+/// none, or leaves out alternatives its files are offered under; it lists
+/// every alternative the metadata names.
 #[derive(Deserialize)]
 struct DeclaredLicence {
     licence: String,
@@ -330,18 +333,37 @@ impl Catalogue<'_> {
         let title = title(&name, version.as_ref());
         let table = self.table_path.display();
 
-        let licence = if !licence.is_empty() {
-            Cow::Owned(licence)
-        } else {
-            let entry = self.table.declared_licences.get(&name).ok_or_else(|| {
-                vec![format!(
-                    "{title} declares no licence; record the one it is available under in {table}"
-                )]
-            })?;
-            Cow::Borrowed(entry.licence.as_str())
+        let parse = |licence: &str| {
+            expression::parse(licence)
+                .map_err(|e| vec![format!("{title}: licence {licence:?}: {e}")])
         };
-        let parsed = expression::parse(&licence)
-            .map_err(|e| vec![format!("{title}: licence {licence:?}: {e}")])?;
+        let parsed = match self.table.declared_licences.get(&name) {
+            Some(entry) => {
+                let recorded = parse(&entry.licence)?;
+                if !licence.is_empty() {
+                    let offered = expression::alternatives(&recorded);
+                    let missing: Vec<String> = expression::alternatives(&parse(&licence)?)
+                        .into_iter()
+                        .filter(|alternative| !offered.contains(alternative))
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(vec![format!(
+                            "{title}: the {table} entry no longer names the manifest's licence: \
+                             {licence:?} offers {}, which {:?} does not list as an alternative",
+                            missing.join(", "),
+                            entry.licence,
+                        )]);
+                    }
+                }
+                recorded
+            }
+            None if !licence.is_empty() => parse(&licence)?,
+            None => {
+                return Err(vec![format!(
+                    "{title} declares no licence; record the one it is available under in {table}"
+                )]);
+            }
+        };
         let declared = expression::canonical(&parsed);
         let elected_terms = expression::elect(
             &parsed,
@@ -801,6 +823,14 @@ mod tests {
 
     fn build(licence: &str, texts: Vec<(&str, String)>) -> Result<Component, Vec<String>> {
         let table = r#"{"declared_licences": {}, "copyright_holders": {}, "accepted_texts": {}}"#;
+        build_with(table, licence, texts)
+    }
+
+    fn build_with(
+        table: &str,
+        licence: &str,
+        texts: Vec<(&str, String)>,
+    ) -> Result<Component, Vec<String>> {
         Catalogue {
             corpus: spdx(),
             denied: &denied(),
@@ -943,6 +973,46 @@ mod tests {
         ];
         let component = build("MIT OR GPL-2.0-only", texts).unwrap();
         assert_eq!(component.texts.len(), 1);
+    }
+
+    #[test]
+    fn a_recorded_licence_names_the_alternatives_a_declaration_leaves_out() {
+        let table = r#"{
+            "declared_licences": {
+                "c": {"licence": "BSD-3-Clause OR GPL-2.0-only", "reason": "why"}
+            },
+            "copyright_holders": {},
+            "accepted_texts": {}
+        }"#;
+        let texts = || {
+            vec![
+                ("LICENSE", text(&["BSD-3-Clause"])),
+                ("COPYING", text(&["GPL-2.0-only"])),
+            ]
+        };
+        assert!(build("BSD-3-Clause", texts()).is_err());
+        let component = build_with(table, "BSD-3-Clause", texts()).unwrap();
+        assert_eq!(component.declared, "BSD-3-Clause OR GPL-2.0-only");
+        assert_eq!(component.elected, "BSD-3-Clause");
+        assert_eq!(component.texts.len(), 1);
+    }
+
+    #[test]
+    fn a_recorded_licence_must_still_name_the_manifest_licence() {
+        let table = r#"{
+            "declared_licences": {
+                "c": {"licence": "BSD-3-Clause OR GPL-2.0-only", "reason": "why"}
+            },
+            "copyright_holders": {},
+            "accepted_texts": {}
+        }"#;
+        let texts = || vec![("LICENSE", text(&["MIT"]))];
+        let errors = build_with(table, "MIT", texts()).err().unwrap();
+        assert!(
+            errors[0].contains("no longer names the manifest's licence"),
+            "{errors:?}"
+        );
+        assert!(build_with(table, "BSD-3-Clause OR MIT", texts()).is_err());
     }
 
     #[test]

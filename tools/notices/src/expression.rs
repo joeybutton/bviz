@@ -41,21 +41,28 @@ fn fold<'e, T>(
 /// The expression with canonical identifiers and operators, bracketed only
 /// where precedence requires.
 pub fn canonical(expression: &Expression) -> String {
-    let (text, _alternation) = fold(
+    alternatives(expression).join(" OR ")
+}
+
+/// The expression's top-level `OR` operands, each in canonical form.
+pub fn alternatives(expression: &Expression) -> Vec<String> {
+    fold(
         expression,
-        |req| (req.to_string(), false),
-        |op, left, right| match op {
-            Operator::Or => (format!("{} OR {}", left.0, right.0), true),
+        |req| vec![req.to_string()],
+        |op, mut left, right| match op {
+            Operator::Or => {
+                left.extend(right);
+                left
+            }
             Operator::And => {
-                let operand = |(text, alternation): (String, bool)| match alternation {
-                    true => format!("({text})"),
-                    false => text,
+                let operand = |alternatives: Vec<String>| match alternatives.len() {
+                    1 => alternatives.join(""),
+                    _ => format!("({})", alternatives.join(" OR ")),
                 };
-                (format!("{} AND {}", operand(left), operand(right)), false)
+                vec![format!("{} AND {}", operand(left), operand(right))]
             }
         },
-    );
-    text
+    )
 }
 
 /// The terms the work is taken under, among the alternatives that name no
@@ -142,6 +149,20 @@ mod tests {
             assert_eq!(printed, expected);
             assert_eq!(canonical(&parse(&printed).unwrap()), printed);
         }
+    }
+
+    #[test]
+    fn alternatives_split_only_the_top_level_disjunction() {
+        let split = |text: &str| alternatives(&parse(text).unwrap());
+        assert_eq!(split("MIT"), ["MIT"]);
+        assert_eq!(
+            split("MIT OR Apache-2.0 AND Zlib"),
+            ["MIT", "Apache-2.0 AND Zlib"]
+        );
+        assert_eq!(
+            split("(MIT OR Apache-2.0) AND Zlib"),
+            ["(MIT OR Apache-2.0) AND Zlib"]
+        );
     }
 
     #[test]
