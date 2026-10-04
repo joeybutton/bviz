@@ -116,6 +116,8 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("down", exclusive::SelectChild, outside_roots),
         KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
         KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
+        KeyBinding::new("alt-left", exclusive::FocusBack, outside_roots),
+        KeyBinding::new("alt-right", exclusive::FocusForward, outside_roots),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,

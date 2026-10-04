@@ -3,6 +3,7 @@
 //! drawn as an icicle.
 
 mod cell_menu;
+mod history;
 mod icicle;
 mod paint;
 mod roots;
@@ -31,10 +32,11 @@ use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use cell_menu::{Offer, PointFacts};
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, Render, Rgba, SharedString, Size, Subscription, Task, WeakEntity, Window, anchored,
-    canvas, deferred, div, point, prelude::*, px, relative,
+    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
+    WeakEntity, Window, anchored, canvas, deferred, div, point, prelude::*, px, relative,
 };
+use history::History;
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
     HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,
@@ -65,6 +67,8 @@ gpui::actions!(
         SelectChild,
         FocusSelected,
         ShowSelected,
+        FocusBack,
+        FocusForward,
     ]
 );
 
@@ -423,7 +427,7 @@ impl ExclusivePanel {
             self.drawn = Some(Drawn {
                 coloured: Arc::clone(coloured),
                 as_targets,
-                focus: None,
+                history: History::new(None),
                 transition: None,
                 pointer: None,
                 selection: None,
@@ -508,16 +512,37 @@ impl ExclusivePanel {
     }
 
     /// Draws the icicle from `focus`, or from the whole build where there is
-    /// none, and describes the cell that brings under the pointer. A move
-    /// under way ends at once on the focus it was making for, and the move to
-    /// `focus` starts from there, so a key held or pressed again mid-move
-    /// goes a step further each time.
+    /// none, as the step after the focus drawn.
     fn refocus(&mut self, focus: Option<Focus>, cx: &mut Context<Self>) {
+        self.travel(|history| history.push(focus), cx);
+    }
+
+    /// Draws the icicle from the focus it was drawn from before the one
+    /// drawn, where there was one.
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        self.travel(|history| _ = history.back(), cx);
+    }
+
+    /// Draws the icicle from the focus gone back from last, where there is
+    /// one.
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        self.travel(|history| _ = history.forward(), cx);
+    }
+
+    /// Takes the foci drawn a `step`, moving the icicle from the focus drawn
+    /// to the one that makes current, and selects afresh. A move under way
+    /// ends at once on the focus it was making for, and the next starts from
+    /// there, so a key held or pressed again mid-move goes a step further
+    /// each time.
+    fn travel(&mut self, step: impl FnOnce(&mut History<Option<Focus>>), cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
         let from = drawn.top();
-        drawn.focus = focus;
+        step(&mut drawn.history);
+        if drawn.top() == from {
+            return;
+        }
         let tree = &*drawn.coloured.tree;
         drawn.transition = Transition::between(tree, from, drawn.top(), Instant::now());
         self.invalidate_canvas(cx);
@@ -1016,8 +1041,11 @@ struct Drawn {
     coloured: Arc<Coloured>,
     /// The [`Rooting::as_targets`] of the roots the tree is drawn from.
     as_targets: Option<TreeKey>,
-    focus: Option<Focus>,
-    /// The move to `focus` from the focus before it, while it is under way.
+    /// The foci the icicle has been drawn from, the current one drawn; none
+    /// for the whole build.
+    history: History<Option<Focus>>,
+    /// The move to the focus drawn from the one drawn before, while it is
+    /// under way.
     transition: Option<Transition>,
     /// Where the pointer rests over the icicle, while it does.
     pointer: Option<Point<Pixels>>,
@@ -1037,8 +1065,12 @@ impl Drawn {
         )
     }
 
+    fn focus(&self) -> Option<&Focus> {
+        self.history.current().as_ref()
+    }
+
     fn focused(&self) -> Option<Focused> {
-        self.focus.as_ref().map(|focus| focus.on)
+        self.focus().map(|focus| focus.on)
     }
 
     /// What the cell on top holds.
@@ -1049,7 +1081,7 @@ impl Drawn {
     /// Whether a cell the icicle draws from its top can stand for a root
     /// the build also reaches as a dependency.
     fn draws_reached(&self) -> bool {
-        match &self.focus {
+        match self.focus() {
             None => self.coloured.reached,
             Some(focus) => focus.reached,
         }
@@ -1157,7 +1189,7 @@ impl From<Crumb> for Focused {
 
 /// Where the icicle is drawn from, with what is read of the tree for it
 /// taken once as the focus is set.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Focus {
     on: Focused,
     /// Top first, those nearest `on` at most [`CRUMBS`] of them.
@@ -1617,6 +1649,16 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
             .on_action(cx.listener(|view, _: &FocusSelected, _, cx| view.focus_selected(cx)))
             .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
+            .on_action(cx.listener(|view, _: &FocusBack, _, cx| view.go_back(cx)))
+            .on_action(cx.listener(|view, _: &FocusForward, _, cx| view.go_forward(cx)))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|view, _: &MouseDownEvent, _, cx| view.go_back(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|view, _: &MouseDownEvent, _, cx| view.go_forward(cx)),
+            )
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -1792,7 +1834,7 @@ const LEGEND_SWATCH: Pixels = px(8.);
 /// cut short only once they are gone. A name reading alike with another
 /// crumb's is followed by what tells it apart.
 fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) -> Option<Div> {
-    let focus = drawn.focus.as_ref()?;
+    let focus = drawn.focus()?;
     let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
     let by = drawn.coloured.by();
     // A row whose steps shrink to fit it.
@@ -1975,7 +2017,7 @@ impl Render for IcicleCanvas {
                 by: drawn.coloured.by(),
                 top: drawn.top(),
                 transition: drawn.transition.clone(),
-                above: drawn.focus.as_ref().map_or_else(Vec::new, |focus| {
+                above: drawn.focus().map_or_else(Vec::new, |focus| {
                     let above = focus.above.iter().map(|&above| Focused::from(above));
                     above.filter_map(Focused::node).collect()
                 }),
