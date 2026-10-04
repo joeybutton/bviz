@@ -57,6 +57,12 @@ impl QueryField {
         self.input.read(cx).content()
     }
 
+    /// Replaces what the field holds, which settles as an edit typed does.
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_content(text, cx));
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.set_content("", cx));
     }
