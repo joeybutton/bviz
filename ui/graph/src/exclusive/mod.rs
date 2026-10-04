@@ -427,7 +427,7 @@ impl ExclusivePanel {
                 transition: None,
                 pointer: None,
                 selection: None,
-                press: None,
+                pressed_clear: false,
             });
             if self.shown {
                 self.want(key, cx);
@@ -684,40 +684,25 @@ impl ExclusivePanel {
     }
 
     /// Acts on a press: the first of a click on a cell focuses as
-    /// [`Self::click_cell`] does, and the second of a double click on the cell
-    /// of a point puts back the focus the first replaced and shows the graph's
-    /// drawing of the point, or returns to the whole build where the first
-    /// landed clear of every cell.
+    /// [`Self::click_cell`] does, and the second of a double click whose first
+    /// landed clear of every cell returns to the whole build. A later press of
+    /// a click begun on a cell does nothing, the cell under it being whatever
+    /// the first press moved there.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let cell = self.cell_at(e.position);
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        match e.click_count {
-            // The cell under a press while the icicle moves is not the one
-            // the reader aimed at.
-            1 if drawn.transition.is_some() => drawn.press = None,
-            1 => {
-                drawn.press = match cell.map(|cell| cell.holds) {
-                    None => Some(Press::Clear),
-                    Some(Holds::Node(node)) => Some(Press::Point {
-                        id: drawn.coloured.tree.id(node),
-                        replaced: drawn.focus.clone(),
-                    }),
-                    Some(Holds::Build | Holds::Shared | Holds::Rest(_)) => None,
-                };
-                if let Some(cell) = cell {
-                    self.click_cell(cell.holds, cx);
-                }
-            }
-            DOUBLE_CLICK => match drawn.press.take() {
-                Some(Press::Clear) => self.focus_on(None, cx),
-                Some(Press::Point { id, replaced }) => {
-                    self.refocus(replaced, cx);
-                    self.model.update(cx, |model, cx| model.reveal(id, cx));
-                }
-                None => {}
-            },
+        let pressed_clear = std::mem::take(&mut drawn.pressed_clear);
+        // The cell under a press while the icicle moves is not the one the
+        // reader aimed at.
+        if drawn.transition.is_some() {
+            return;
+        }
+        match (cell, e.click_count) {
+            (Some(cell), 1) => self.click_cell(cell.holds, cx),
+            (None, 1) => drawn.pressed_clear = true,
+            (None, DOUBLE_CLICK) if pressed_clear => self.focus_on(None, cx),
             _ => {}
         }
     }
@@ -1037,8 +1022,8 @@ struct Drawn {
     /// Where the pointer rests over the icicle, while it does.
     pointer: Option<Point<Pixels>>,
     selection: Option<Selection>,
-    /// Where the first press of the last click landed.
-    press: Option<Press>,
+    /// Whether the last press landed clear of every cell, starting a click.
+    pressed_clear: bool,
 }
 
 impl Drawn {
@@ -1211,18 +1196,6 @@ impl Focus {
             reached,
         }
     }
-}
-
-/// Where the first press of a click landed, as far as a second press
-/// completing a double click acts on it.
-enum Press {
-    Clear,
-    /// On the cell of the point `id`, while the icicle was drawn from
-    /// `replaced`.
-    Point {
-        id: Id,
-        replaced: Option<Focus>,
-    },
 }
 
 /// The cell ringed and described in the tooltip, described once as it is
@@ -1529,19 +1502,19 @@ fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> St
 /// The most roots a tooltip names as reaching a top.
 const NAMED_ROOTS: usize = 3;
 
-/// What a click on the cell holding `holds` under `top` does, and a double
-/// click where it holds a point and a graph panel `reveals` it; absent where a
-/// click does nothing.
-fn gesture(holds: Holds, top: Holds, reveals: bool) -> Option<String> {
+/// What a click on the cell holding `holds` under `top` does, and where its
+/// menu offers `more` than the click that it does; absent where a click does
+/// nothing.
+fn gesture(holds: Holds, top: Holds, more: bool) -> Option<String> {
     let click = match holds {
         Holds::Build => return None,
         _ if holds == top => FOCUS_UP,
         Holds::Node(_) => FOCUS,
         Holds::Shared | Holds::Rest(_) => OPEN,
     };
-    Some(match (holds, reveals) {
-        (Holds::Node(_), true) => format!("{click} · {REVEAL}"),
-        _ => click.to_owned(),
+    Some(match more {
+        true => format!("{click} · {MORE}"),
+        false => click.to_owned(),
     })
 }
 
@@ -1553,7 +1526,9 @@ const WHOLE_BUILD: &str = "the whole build";
 const FOCUS: &str = "click to focus";
 const OPEN: &str = "click to open";
 const FOCUS_UP: &str = "click or Backspace to go up a level";
-const REVEAL: &str = "double-click to show in the graph";
+
+/// Says that a cell's menu offers more than a click does.
+const MORE: &str = "right-click for more";
 
 /// What share of `whole` `part` is, as a percentage.
 fn share(part: u32, whole: u32) -> String {
@@ -1942,10 +1917,8 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         else {
             return;
         };
-        // Read as it is painted, since a graph panel opening or closing
-        // repaints the tooltip without the pointer moving.
-        let reveals = panel.model.read(cx).reveals();
-        let gesture = gesture(cell.holds, drawn.top(), reveals);
+        let more = panel.offers(cell.holds, cx).len() > 1;
+        let gesture = gesture(cell.holds, drawn.top(), more);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, by, pointer) = (*cell, *by, drawn.pointer);
         paint::paint_ring(&cell, &palette, window);
