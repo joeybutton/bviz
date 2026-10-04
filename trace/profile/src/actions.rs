@@ -52,6 +52,7 @@ impl Evidence {
             | "waiting for response from worker"
             | "copying outputs from worker" => Evidence::Of(Worker),
             "local action execution" | "Local execution process wall time" => Evidence::Of(Local),
+            "Sandbox execution process wall time" => Evidence::Of(Sandboxed),
             "remote action cache check" => Evidence::Of(cache_hit),
             "general information" => Evidence::Named,
             _ => Evidence::Silent,
@@ -287,6 +288,19 @@ mod tests {
             ("general information", "subprocess.run", 10, 50),
         ];
         assert_eq!(runner(true, &nested), Runner::Sandboxed);
+    }
+
+    #[test]
+    fn a_sandboxed_process_is_sandboxed_and_its_subprocess_adds_no_time() {
+        let nested = [
+            ACTION_EXECUTE,
+            ("Sandbox execution process wall time", "Genrule", 10, 60),
+            ("general information", "subprocess.run", 11, 58),
+        ];
+        let actions = profile(false, &[(Some("bazel-out/o"), &nested)]).actions();
+        let mut spawns = Spawns::default();
+        spawns.ran(Runner::Sandboxed, Duration::from_micros(60));
+        assert_eq!(actions[0].spawns, spawns);
     }
 
     #[test]
