@@ -658,9 +658,11 @@ impl Count {
         matches!(self, Count::Estimated(_))
     }
 
-    fn less(self, n: u32) -> Self {
+    /// The count with `n` of what it counts left out, and zero where `n`
+    /// exceeds it.
+    pub fn less(self, n: u32) -> Self {
         match self {
-            Count::Exact(m) => Count::Exact(m - n),
+            Count::Exact(m) => Count::Exact(m.saturating_sub(n)),
             Count::Estimated(m) => Count::Estimated(m.saturating_sub(n)),
         }
     }
@@ -799,22 +801,58 @@ pub(crate) struct Condensation {
 impl Condensation {
     /// Condenses the graph `succ` holds over the indices `0..succ.len()`.
     pub(crate) fn new(succ: &[Vec<u32>]) -> Self {
-        let of = components(succ);
+        let mut pred: Vec<Vec<u32>> = vec![Vec::new(); succ.len()];
+        for (u, forward) in succ.iter().enumerate() {
+            for &w in forward {
+                pred[w as usize].push(u as u32);
+            }
+        }
+        Self::with_reverse(succ, &pred)
+    }
+
+    /// [`Condensation::new`] of the graph `succ` holds, for a caller holding
+    /// the same graph's edges reversed as `pred`.
+    pub(crate) fn with_reverse(succ: &[Vec<u32>], pred: &[Vec<u32>]) -> Self {
+        let of = components(succ, pred);
         let count = of.iter().copied().max().map_or(0, |c| c as usize + 1);
-        let mut seen: FxHashSet<(u32, u32)> = FxHashSet::with_capacity_and_hasher(
-            succ.iter().map(Vec::len).sum(),
-            Default::default(),
-        );
+        // The indices grouped by component, in ascending order within each,
+        // and by component where its group ends.
+        let mut end = vec![0usize; count];
+        for &c in &of {
+            end[c as usize] += 1;
+        }
+        let mut filled = 0;
+        for group in &mut end {
+            filled += std::mem::replace(group, filled);
+        }
+        let mut members = vec![0u32; of.len()];
+        for (u, &c) in of.iter().enumerate() {
+            members[end[c as usize]] = u as u32;
+            end[c as usize] += 1;
+        }
+
+        /// Stands for a component no edge has been found into.
+        const UNENTERED: u32 = u32::MAX;
+
+        // By component, the last component an edge into it was found from: all
+        // the edges out of one component are read together, so a second edge
+        // between two components finds the first one's mark still standing.
+        let mut entered_from = vec![UNENTERED; count];
         let mut condensed: Vec<Vec<u32>> = vec![Vec::new(); count];
         let mut indeg: Vec<u32> = vec![0; count];
-        for (u, forward) in succ.iter().enumerate() {
-            for &v in forward {
-                let (a, b) = (of[u], of[v as usize]);
-                if a != b && seen.insert((a, b)) {
-                    condensed[a as usize].push(b);
-                    indeg[b as usize] += 1;
+        let mut start = 0;
+        for (a, &end) in end.iter().enumerate() {
+            let a = a as u32;
+            for &u in &members[start..end] {
+                for &v in &succ[u as usize] {
+                    let b = of[v as usize];
+                    if a != b && std::mem::replace(&mut entered_from[b as usize], a) != a {
+                        condensed[a as usize].push(b);
+                        indeg[b as usize] += 1;
+                    }
                 }
             }
+            start = end;
         }
         let order = topo_order(&condensed, indeg).expect("a condensation holds no cycle");
         Self {
@@ -825,9 +863,10 @@ impl Condensation {
     }
 }
 
-/// The strongly connected component each index belongs to — two indices share
-/// one exactly when each reaches the other — numbered densely from zero.
-fn components(succ: &[Vec<u32>]) -> Vec<u32> {
+/// The strongly connected component each index of the graph `succ` belongs to
+/// — two indices share one exactly when each reaches the other — numbered
+/// densely from zero. `pred` holds the same graph's edges reversed.
+pub(crate) fn components(succ: &[Vec<u32>], pred: &[Vec<u32>]) -> Vec<u32> {
     let n = succ.len();
     // The order the search finishes with each index, which is the order the
     // second walk has to reach them in, reversed.
@@ -851,13 +890,6 @@ fn components(succ: &[Vec<u32>]) -> Vec<u32> {
                 }
                 None => finished.push(u),
             }
-        }
-    }
-
-    let mut pred: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for (u, forward) in succ.iter().enumerate() {
-        for &w in forward {
-            pred[w as usize].push(u as u32);
         }
     }
 
@@ -892,6 +924,13 @@ mod tests {
     use crate::intern::Names;
     use fastrand::Rng;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_count_less_more_than_it_holds_is_zero() {
+        assert_eq!(Count::Exact(3).less(2), Count::Exact(1));
+        assert_eq!(Count::Exact(2).less(3), Count::Exact(0));
+        assert_eq!(Count::Estimated(2).less(3), Count::Estimated(0));
+    }
 
     fn build(edges: &[(&str, &str)]) -> (Graph, Names) {
         let mut g = Graph::new();

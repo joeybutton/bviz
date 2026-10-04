@@ -8,6 +8,9 @@ use gpui::{App, Context, Entity, Pixels, Point, Window};
 /// counts as a drag rather than a click.
 pub(crate) const CLICK_SLOP: f32 = 4.0;
 
+/// The `click_count` of the press completing a double click.
+pub(crate) const DOUBLE_CLICK: usize = 2;
+
 /// The pointer gesture the view is in the middle of.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum Drag {

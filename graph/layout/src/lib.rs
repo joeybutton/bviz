@@ -9,6 +9,7 @@
 pub mod aquery;
 pub mod capability;
 pub mod cquery;
+pub mod dominators;
 pub mod facets;
 pub mod filter;
 pub mod graph;
@@ -28,6 +29,7 @@ pub mod repo;
 pub mod select;
 mod sketch;
 pub mod streamed_proto;
+pub mod target_set;
 pub mod transition;
 
 #[cfg(test)]

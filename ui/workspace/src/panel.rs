@@ -50,13 +50,23 @@ pub struct PanelKind {
 }
 
 /// A view a [`Workspace`] can host. It renders its own body; the workspace draws
-/// the window chrome around it from the title, status and icon asked for here.
+/// the window chrome around it from the title, description, status and icon
+/// asked for here.
 pub trait Panel: Render + Focusable + EventEmitter<PanelEvent> {
     fn kind() -> PanelKind
     where
         Self: Sized;
 
     fn title(&self, cx: &App) -> SharedString;
+
+    /// A line saying what panels of this kind show, for a reader the title
+    /// alone leaves guessing.
+    fn description() -> Option<&'static str>
+    where
+        Self: Sized,
+    {
+        None
+    }
 
     fn status(&self, _cx: &App) -> Option<SharedString> {
         None
@@ -119,6 +129,10 @@ impl AnyPanel {
     /// as one string.
     pub fn display_title(&self, cx: &App) -> SharedString {
         numbered(self.plain_title(cx), self.ordinal)
+    }
+
+    pub fn description(&self) -> Option<&'static str> {
+        self.panel.description()
     }
 
     pub fn status(&self, cx: &App) -> Option<SharedString> {
@@ -358,6 +372,7 @@ fn numbered(name: SharedString, ordinal: Option<NonZeroUsize>) -> SharedString {
 trait PanelOps {
     fn view_kind(&self) -> ViewKind;
     fn title(&self, cx: &App) -> SharedString;
+    fn description(&self) -> Option<&'static str>;
     fn status(&self, cx: &App) -> Option<SharedString>;
     fn icon(&self, cx: &App) -> Option<&'static str>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
@@ -375,6 +390,10 @@ impl<T: Panel> PanelOps for Entity<T> {
 
     fn title(&self, cx: &App) -> SharedString {
         self.read(cx).title(cx)
+    }
+
+    fn description(&self) -> Option<&'static str> {
+        T::description()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

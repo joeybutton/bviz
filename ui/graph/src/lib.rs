@@ -34,7 +34,10 @@ mod derive;
 mod drag;
 mod duration;
 mod emphasis;
+mod exclusive;
 mod framing;
+mod hints;
+mod hue;
 mod legend;
 mod missing;
 mod mode;
@@ -43,6 +46,7 @@ mod morph;
 mod neighborhood;
 mod paint;
 mod pins;
+mod point;
 mod preset;
 mod relation;
 mod report;
@@ -55,6 +59,7 @@ mod status;
 mod timecard;
 mod timing;
 mod toolbar;
+mod unit_picker;
 mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
@@ -63,6 +68,7 @@ use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{Drag, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
+pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
@@ -88,6 +94,12 @@ pub fn register_keys(cx: &mut App) {
     let outside_search = Some(predicate.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
+    let exclusive = format!(
+        "{} && !{}",
+        exclusive::KEY_CONTEXT,
+        exclusive::ROOTS_KEY_CONTEXT
+    );
+    let outside_roots = Some(exclusive.as_str());
     cx.bind_keys([
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
@@ -96,6 +108,21 @@ pub fn register_keys(cx: &mut App) {
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
+        KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
+        KeyBinding::new("left", exclusive::SelectPrevious, outside_roots),
+        KeyBinding::new("right", exclusive::SelectNext, outside_roots),
+        KeyBinding::new("up", exclusive::SelectParent, outside_roots),
+        KeyBinding::new("down", exclusive::SelectChild, outside_roots),
+        KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
+        KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
+        KeyBinding::new("alt-left", exclusive::FocusBack, outside_roots),
+        KeyBinding::new("alt-right", exclusive::FocusForward, outside_roots),
+        KeyBinding::new(
+            "escape",
+            exclusive::LeaveRoots,
+            Some(exclusive::ROOTS_KEY_CONTEXT),
+        ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),
@@ -385,10 +412,7 @@ impl GraphPanel {
                 checklist::choose_presets(view, event, cx);
             });
         let search = Search::new(cx);
-        // The field notifies on every repaint it makes, so what it holds is
-        // compared with what the search last took up rather than taken for an
-        // edit.
-        let search_typing = cx.observe(search.field(), |view, _, cx| search::typed(view, cx));
+        let search_typing = cx.subscribe(search.field(), search::typed);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas { parent });
         let changed = cx.observe(&model, |view, _, cx| {
@@ -1025,10 +1049,14 @@ pub fn open(
         let (label, model) = (label.clone(), model.clone());
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
     });
-    let scatter = ViewSpec::new(move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx)));
+    let scatter = ViewSpec::new({
+        let model = model.clone();
+        move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx))
+    });
+    let exclusive = ViewSpec::new(move |cx| cx.new(|cx| ExclusivePanel::new(model.clone(), cx)));
     Member::new(
         label,
-        PanelGroup::tabs(graph, vec![scatter]).with_weight(Weight::CHART),
+        PanelGroup::tabs(graph, vec![scatter, exclusive]).with_weight(Weight::CHART),
     )
 }
 

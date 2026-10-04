@@ -1,11 +1,11 @@
 use crate::drop::Band;
 use crate::{AnyPanel, PanelEvent};
-use bviz_ui_components::Button;
+use bviz_ui_components::{Button, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Div, ElementId, EntityId, EventEmitter, IntoElement,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, Subscription, Window, div,
-    prelude::*, px,
+    AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, EntityId, EventEmitter,
+    IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, Subscription,
+    Window, div, prelude::*, px,
 };
 use std::cmp::Ordering;
 
@@ -519,6 +519,9 @@ impl Pane {
             .on_click(cx.listener(|pane, event: &ClickEvent, _, cx| {
                 pane.maximize_on_second_click(event, cx);
             }))
+            .when_some(description_tooltip(&panel, colors), |handle, tooltip| {
+                handle.tooltip(tooltip)
+            })
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(HANDLE_ICON_SIZE)
@@ -576,6 +579,9 @@ impl Pane {
                 pane.activate(index, window, cx);
                 pane.maximize_on_second_click(event, cx);
             }))
+            .when_some(description_tooltip(&panel, colors), |tab, tooltip| {
+                tab.tooltip(tooltip)
+            })
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(TAB_ICON_SIZE)
@@ -690,6 +696,19 @@ fn band_laid_out(
             window.on_next_frame(move |_, cx| pane.update(cx, |_, cx| cx.notify()));
         }
     }
+}
+
+/// The tooltip a tab or handle naming `panel` shows, if its kind describes
+/// itself.
+fn description_tooltip(
+    panel: &AnyPanel,
+    colors: &ThemeColors,
+) -> Option<impl Fn(&mut Window, &mut App) -> AnyView + 'static> {
+    let description = panel.description()?;
+    Some(TextTooltip::builder(
+        description.into(),
+        TooltipColors::from_colors(colors),
+    ))
 }
 
 /// A panel's name as the pane holding it puts it up: cut short where there is

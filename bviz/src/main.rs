@@ -126,6 +126,7 @@ mod tests {
         let panels = [
             view_kind::<bviz_ui_graph::GraphPanel>(),
             view_kind::<bviz_ui_graph::ScatterPanel>(),
+            view_kind::<bviz_ui_graph::ExclusivePanel>(),
             view_kind::<bviz_ui_trace::TracePanel>(),
             view_kind::<bviz_ui_trace::FlamePanel>(),
             view_kind::<bviz_ui_trace::StatsPanel>(),

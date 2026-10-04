@@ -11,23 +11,27 @@ mod plot;
 
 use crate::Palette;
 use crate::colour;
-use crate::drag::CLICK_SLOP;
+use crate::drag::{CLICK_SLOP, DOUBLE_CLICK};
+use crate::hue::{Hue, Swatch, legend_strip};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
+use crate::point::{
+    configuration_readings, identify, mnemonic, point_label, primary_output, unit_names,
+};
 use crate::timing::{NodeTimes, Untimed};
+use crate::toolbar::{busy, group};
+use crate::unit_picker::UnitPicker;
 use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
-use bviz_graph_layout::facets::Tri;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
-use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
+use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
     Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
-    menu_chrome, paint_tooltip, paint_tooltip_box, spinner, tooltip_extent, track_drag,
+    menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -36,7 +40,7 @@ use gpui::{
     Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
     Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
 };
-use hue::{ColourBy, Colouring, Hue};
+use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
 use pick::{Extents, PickList, PickRow};
 use placed::Placed;
@@ -116,8 +120,8 @@ impl ScatterPanel {
             }
         });
         let metrics_landed = cx.subscribe(&model, |view, _, landed: &MetricsLanded, cx| {
-            let (scope, reference) = view.scopes().unzip();
-            if [scope, reference].contains(&Some(landed.scope)) {
+            let (scope, reference) = view.scopes(cx).unzip();
+            if [scope, reference].contains(&Some(landed.key)) {
                 view.replot(cx);
             }
         });
@@ -149,31 +153,27 @@ impl ScatterPanel {
 
     /// The scope the plot measures in, and the scope of its unit over every
     /// input loaded that it is scaled to, once the graph is read.
-    fn scopes(&self) -> Option<(Scope, Scope)> {
-        self.choice
-            .as_ref()
-            .map(|choice| (choice.scope, choice.reference()))
+    fn scopes(&self, cx: &App) -> Option<(Scope, Scope)> {
+        self.choice.as_ref().map(|choice| choice.scopes(cx))
     }
 
     /// Has the graph measured in the chosen scope and the one it is scaled to,
     /// and brings the plot up to date where it already is.
     fn measure(&mut self, cx: &mut Context<Self>) {
         self.close_pick(cx);
-        if let Some((scope, reference)) = self.scopes() {
+        if let Some((scope, reference)) = self.scopes(cx) {
             self.model
                 .update(cx, |model, cx| model.want_metrics(&[scope, reference], cx));
         }
         self.replot(cx);
     }
 
-    /// Measures the graph's points in `unit` over the inputs last enabled for
-    /// it.
-    fn choose_unit(&mut self, unit: Unit, cx: &mut Context<Self>) {
-        let Some(choice) = &mut self.choice else {
-            return;
-        };
-        choice.choose(unit);
-        choice.name_colourings(cx);
+    /// Measures the graph's points in the unit chosen, over the inputs last
+    /// enabled for it.
+    fn choose_unit(&mut self, cx: &mut Context<Self>) {
+        if let Some(choice) = &self.choice {
+            choice.name_colourings(cx);
+        }
         self.measure(cx);
         cx.notify();
     }
@@ -226,15 +226,14 @@ impl ScatterPanel {
         let Some(choice) = &mut self.choice else {
             return;
         };
-        let inputs = choice.scope.inputs();
+        let inputs = choice.picker.chosen(cx).inputs();
         let inputs = match inputs.contains(input) {
             true => inputs.without(input),
             false => Some(inputs.with(input)),
         };
-        let Some(scope) = inputs.and_then(|inputs| Scope::new(choice.scope.unit(), inputs)) else {
+        if !inputs.is_some_and(|inputs| choice.picker.draw_over(inputs, cx)) {
             return;
-        };
-        choice.scope = scope;
+        }
         self.measure(cx);
         cx.notify();
     }
@@ -251,7 +250,7 @@ impl ScatterPanel {
         if !self.shown || self.plotting.is_some() {
             return;
         }
-        let Some((_, reference)) = self.scopes() else {
+        let Some((_, reference)) = self.scopes(cx) else {
             return;
         };
         let model = self.model.read(cx);
@@ -262,7 +261,7 @@ impl ScatterPanel {
         if let Some(timed) = timed {
             self.offer_times(timed, cx);
         }
-        let Some(((scope, reference), choice)) = self.scopes().zip(self.choice.as_ref()) else {
+        let Some(((scope, reference), choice)) = self.scopes(cx).zip(self.choice.as_ref()) else {
             return;
         };
         let (axes, colour) = (choice.axes, choice.colour);
@@ -521,7 +520,7 @@ impl ScatterPanel {
             .iter()
             .map(|(_, mnemonic, label)| (*mnemonic, label.as_str()))
             .collect();
-        let hints = pick::hints(&keys, readings);
+        let hints = crate::hints::hints(&keys, readings);
         let mut rows: Vec<PickRow> = named
             .iter()
             .zip(hints)
@@ -614,19 +613,11 @@ impl ScatterPanel {
     }
 }
 
-/// What the plot measures, and the picker choosing its unit among those the
-/// graph's inputs describe. Each unit keeps the inputs enabled for it while
-/// another is plotted.
+/// The choice of what the plot measures, which the strip offers.
 struct Choice {
-    scope: Scope,
-    /// The scope of each unit offered but the one plotted.
-    others: Vec<Scope>,
     /// The inputs the graph was read from.
     loaded: InputSet,
-    /// Finest first, in the picker's order.
-    units: Vec<Unit>,
-    picker: Entity<Dropdown>,
-    _picked: Subscription,
+    picker: UnitPicker,
     axes: Axes,
     /// Whether any point of the unit plotted has an action time, which the
     /// choices reading it are offered by.
@@ -649,27 +640,7 @@ impl Choice {
         // Until the unit is measured, whether any of its points is timed is
         // taken from whether any node of the graph is.
         let timed = loaded.times().is_ok();
-        let mut scopes = Unit::ALL
-            .into_iter()
-            .filter_map(|unit| Scope::new(unit, inputs));
-        let scope = scopes.next()?;
-        let others: Vec<Scope> = scopes.collect();
-        let units: Vec<Unit> = std::iter::once(scope)
-            .chain(others.iter().copied())
-            .map(Scope::unit)
-            .collect();
-        let names = units.iter().map(|&unit| unit_names(unit).many);
-        let picker = cx.new(|cx| Dropdown::new("scatter-unit", names, 0, cx));
-        let picked = cx.subscribe(&picker, |view, _, event, cx| {
-            let DropdownEvent::Changed(index) = event;
-            let unit = view
-                .choice
-                .as_ref()
-                .and_then(|c| c.units.get(*index).copied());
-            if let Some(unit) = unit {
-                view.choose_unit(unit, cx);
-            }
-        });
+        let picker = UnitPicker::new("scatter-unit", inputs, None, ScatterPanel::choose_unit, cx)?;
         let axes = Axes::OPENING;
         let names = Axis::ALL.map(Axis::name);
         let across_picker =
@@ -687,7 +658,8 @@ impl Choice {
                 view.choose_axes(|axes| axes.up(axis), cx);
             }
         });
-        let names = ColourBy::ALL.map(|by| by.label(scope.unit()));
+        let unit = picker.chosen(cx).unit();
+        let names = ColourBy::ALL.map(|by| by.label(unit));
         let colour_picker = cx.new(|cx| Dropdown::new("scatter-colour", names, 0, cx));
         let colour_picked = cx.subscribe(&colour_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
@@ -696,12 +668,8 @@ impl Choice {
             }
         });
         let mut choice = Self {
-            scope,
-            others,
             loaded: inputs,
-            units,
             picker,
-            _picked: picked,
             axes,
             across_picker,
             _across_picked: across_picked,
@@ -719,7 +687,7 @@ impl Choice {
     /// Names each colouring the picker offers as it reads for the unit
     /// plotted.
     fn name_colourings(&self, cx: &mut Context<ScatterPanel>) {
-        let unit = self.scope.unit();
+        let unit = self.picker.chosen(cx).unit();
         self.colour_picker.update(cx, |picker, cx| {
             for by in ColourBy::ALL {
                 picker.set_label(by.index(), by.label(unit), cx);
@@ -769,32 +737,11 @@ impl Choice {
         axes_fall || colour_falls
     }
 
-    /// The scope's unit over every loaded input describing it, whose measure
-    /// the plot is scaled to.
-    fn reference(&self) -> Scope {
-        self.scope.widened(self.loaded)
-    }
-
-    /// Plots `unit`, one of those offered, in the scope it was left in.
-    fn choose(&mut self, unit: Unit) {
-        if let Some(other) = self.others.iter_mut().find(|other| other.unit() == unit) {
-            std::mem::swap(&mut self.scope, other);
-        }
-    }
-
-    /// How the toggle for the loaded input `input` stands.
-    fn toggle(&self, input: Input) -> Toggle {
-        let unit = self.scope.unit();
-        let inputs = self.scope.inputs();
-        if !unit.inputs().contains(input) {
-            Toggle::Ignored
-        } else if !inputs.contains(input) {
-            Toggle::Off
-        } else if inputs.without(input).is_none() {
-            Toggle::Lone
-        } else {
-            Toggle::On
-        }
+    /// The scope the plot measures in, and that scope's unit over every loaded
+    /// input describing it, whose measure the plot is scaled to.
+    fn scopes(&self, cx: &App) -> (Scope, Scope) {
+        let scope = self.picker.chosen(cx);
+        (scope, scope.widened(self.loaded))
     }
 }
 
@@ -809,6 +756,24 @@ enum Toggle {
     Ignored,
 }
 
+impl Toggle {
+    /// How the toggle for the loaded input `input` stands against a plot
+    /// measuring in `scope`.
+    fn of(scope: Scope, input: Input) -> Self {
+        let unit = scope.unit();
+        let inputs = scope.inputs();
+        if !unit.inputs().contains(input) {
+            Toggle::Ignored
+        } else if !inputs.contains(input) {
+            Toggle::Off
+        } else if inputs.without(input).is_none() {
+            Toggle::Lone
+        } else {
+            Toggle::On
+        }
+    }
+}
+
 fn input_name(input: Input) -> &'static str {
     match input {
         Input::Query => "query",
@@ -816,9 +781,6 @@ fn input_name(input: Input) -> &'static str {
         Input::Aquery => "aquery",
     }
 }
-
-/// The `click_count` of the press completing a double click.
-const DOUBLE_CLICK: usize = 2;
 
 /// The measured points as drawn, and what among them the pointer is on.
 struct Plot {
@@ -882,16 +844,6 @@ fn drawn_status(plotted: &Plotted, unit: Unit) -> String {
     }
 }
 
-/// How a reader names one point of `unit`, and several.
-fn unit_names(unit: Unit) -> KindNames {
-    let (one, many) = match unit {
-        Unit::Action => ("action", "actions"),
-        Unit::ConfiguredTarget => ("configured target", "configured targets"),
-        Unit::Target => ("target", "targets"),
-    };
-    KindNames { one, many }
-}
-
 /// What the tooltip over `mark`, a point of `unit` drawn in `plotted`, reads,
 /// where a pick naming it covers `others` points besides: what the point is,
 /// then its measures.
@@ -903,37 +855,8 @@ fn describe(
     loaded: &Loaded,
 ) -> Vec<String> {
     let (point, time) = (&mark.target, mark.time);
-    let shared = &loaded.shared;
-    let facets = &shared.facets;
-    let label = point_label(point.id, loaded);
     let mut lines = Vec::with_capacity(TOOLTIP_LINES);
-    match unit {
-        Unit::Action => {
-            lines.extend([mnemonic(point.id, loaded).to_owned(), format!("of {label}")]);
-            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
-            let aspects = facets.aspects().values(point.id);
-            if !aspects.is_empty() {
-                let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
-                lines.push(format!("via {}", aspects.collect::<Vec<_>>().join(", ")));
-            }
-            let output = primary_output(point.id, loaded);
-            lines.extend(output.map(|output| format!("writes {output}")));
-        }
-        Unit::ConfiguredTarget => {
-            lines.push(label);
-            lines.extend(configuration(point.id, loaded).map(|name| format!("in {name}")));
-        }
-        Unit::Target => {
-            let repo = match facets.repo(point.id) {
-                Some(repo) => match shared.labels.repos().written(repo) {
-                    "" => MAIN_REPO,
-                    written => written,
-                },
-                None => UNKNOWN_REPO,
-            };
-            lines.extend([label, format!("{} in {repo}", kind_names(point.kind).one)]);
-        }
-    }
+    identify(point.id, point.kind, unit, &loaded.shared, &mut lines);
     lines.push(plotted.axes.readings(point, time));
     lines.extend(plotted.axes.unplaced(point, time));
     if let Hue::Ran(ran) = mark.hue {
@@ -960,80 +883,38 @@ fn describe(
 /// What a row of the list of points under a click reads for `point`, a point
 /// of `unit` — for an action its mnemonic, and the label of its target — and
 /// each reading that could tell it apart from points whose rows read alike,
-/// most compact first: for an action, the name of the file it writes, its
-/// configuration, that file's path in its configuration's output tree, and the
-/// whole path; for a configured target, its configuration.
+/// most compact first: for an action, the name of the file it writes, the
+/// readings of its configuration, that file's path in its configuration's
+/// output tree, and the whole path; for a configured target, the readings of
+/// its configuration.
 fn pick_reading<'a>(
     point: &Metrics,
     unit: Unit,
     loaded: &'a Loaded,
 ) -> (Option<&'a str>, String, Vec<Option<String>>) {
-    let label = point_label(point.id, loaded);
-    let configuration = configuration(point.id, loaded);
+    let shared = &loaded.shared;
+    let label = point_label(point.id, shared);
+    let [short, whole] = configuration_readings(point.id, shared);
     match unit {
         Unit::Action => {
-            let output = primary_output(point.id, loaded);
+            let output = primary_output(point.id, shared);
             let file = output.map(|output| output.rsplit('/').next().unwrap_or(output));
             let readings = vec![
                 file.map(str::to_owned),
-                configuration,
+                short,
+                whole,
                 output.map(|output| pick::in_output_tree(output).to_owned()),
                 output.map(str::to_owned),
             ];
-            (Some(mnemonic(point.id, loaded)), label, readings)
+            (Some(mnemonic(point.id, shared)), label, readings)
         }
-        Unit::ConfiguredTarget => (None, label, vec![configuration]),
+        Unit::ConfiguredTarget => (None, label, vec![short, whole]),
         Unit::Target => (None, label, Vec::new()),
     }
 }
 
-/// The label of the target the node `id` is or belongs to, where one is
-/// carried, and its name otherwise.
-fn point_label(id: Id, loaded: &Loaded) -> String {
-    let shared = &loaded.shared;
-    match carried_label(&shared.names, &shared.facets, id) {
-        Some(label) => shared.labels.written(label).into_owned(),
-        None => shared.names.resolve(id).to_owned(),
-    }
-}
-
-/// The mnemonic of the action `id`.
-fn mnemonic(id: Id, loaded: &Loaded) -> &str {
-    let facets = &loaded.shared.facets;
-    let mnemonic = facets.mnemonic(id);
-    mnemonic.map_or("action", |m| facets.strings().resolve(m))
-}
-
-/// The path of the file the action `id` writes first.
-fn primary_output(id: Id, loaded: &Loaded) -> Option<&str> {
-    let shared = &loaded.shared;
-    // The base graph holds each node at the position of its id.
-    let output = shared.facets.primary_output(id)?;
-    let node = shared.base.nodes.get(output.0 as usize)?;
-    Some(&node.label)
-}
-
-/// The configuration the node `id` is built in, by its mnemonic where it has
-/// one, and marked where it builds a tool the build runs.
-fn configuration(id: Id, loaded: &Loaded) -> Option<String> {
-    let facets = &loaded.shared.facets;
-    let config = facets.config(id)?;
-    let entry = facets.config_entry(config);
-    let name = entry
-        .and_then(|entry| entry.mnemonic)
-        .unwrap_or(config.sym());
-    let name = facets.strings().resolve(name);
-    Some(match entry.map(|entry| entry.is_tool) {
-        Some(Tri::Yes) => format!("{name} (exec)"),
-        _ => name.to_owned(),
-    })
-}
-
 /// The most lines a tooltip reads.
 const TOOLTIP_LINES: usize = 10;
-
-const MAIN_REPO: &str = "the main repository";
-const UNKNOWN_REPO: &str = "an unnamed repository";
 
 impl EventEmitter<PanelEvent> for ScatterPanel {}
 
@@ -1111,20 +992,20 @@ impl Render for ScatterPanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
-        let root = root.children(self.choice.as_ref().map(|choice| {
+        let scope = self.choice.as_ref().map(|choice| choice.picker.chosen(cx));
+        let root = root.children(self.choice.as_ref().zip(scope).map(|(choice, scope)| {
             let measuring = self
                 .plot
                 .as_ref()
-                .is_some_and(|plot| plot.scope != choice.scope || plot.plotted.axes != choice.axes);
+                .is_some_and(|plot| plot.scope != scope || plot.plotted.axes != choice.axes);
             let times = model
                 .loaded()
                 .map_or(Err(Untimed::NoProfile), Loaded::times);
-            strip(choice, times, measuring, &palette, cx)
+            strip(choice, scope, times, measuring, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
-        let dropped = self.choice.as_ref().zip(capabilities);
-        let dropped =
-            dropped.and_then(|(choice, capabilities)| dropped_edges(choice, capabilities));
+        let dropped = scope.zip(capabilities);
+        let dropped = dropped.and_then(|(scope, capabilities)| dropped_edges(scope, capabilities));
         let root = root.children(dropped.map(|dropped| notice(dropped, &palette)));
         let reveals = model.reveals();
         let row = menu_chrome::row_height(window);
@@ -1547,27 +1428,6 @@ fn pick_row(
         )
 }
 
-/// How a reader names one target of a kind, and several.
-struct KindNames {
-    one: &'static str,
-    many: &'static str,
-}
-
-fn kind_names(kind: Kind) -> KindNames {
-    let (one, many) = match kind {
-        Kind::Action => ("action", "actions"),
-        Kind::ConfiguredTarget => ("configured target", "configured targets"),
-        Kind::Source => ("source file", "source files"),
-        Kind::Artifact => ("generated file", "generated files"),
-        Kind::TargetGroup => (
-            "package or environment group",
-            "package and environment groups",
-        ),
-        _ => ("rule target", "rule targets"),
-    };
-    KindNames { one, many }
-}
-
 /// Opacity of a legend swatch, firmer than a mark's so that a lone swatch still
 /// shows the hue a cluster of marks builds up to.
 const SWATCH_ALPHA: f32 = 0.7;
@@ -1578,41 +1438,34 @@ const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 /// What the legend reads while the plot shows part of an axis.
 const ZOOMED: &str = "double-click empty space or press 0 to show all";
 
-/// The strip choosing what the plot measures, which reads `measuring` while a
-/// new choice is measured over the plot drawn for the last.
+/// The strip choosing what the plot measures, now `scope`, which reads
+/// `measuring` while a new choice is measured over the plot drawn for the last.
 fn strip(
     choice: &Choice,
+    scope: Scope,
     times: Result<&NodeTimes, Untimed>,
     measuring: bool,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
-    let group = |name: &'static str| {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .text_sm()
-            .text_color(palette.label)
-            .child(name)
-    };
-    let unit = group("points").child(choice.picker.clone());
+    let unit = group("points", palette).child(choice.picker.dropdown());
     let tip = TooltipColors::from_colors(&palette.colors);
     let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
-        let note = times_note(times, choice.timed, choice.scope.unit(), read);
+        let note = times_note(times, choice.timed, scope.unit(), read);
         div()
             .id(id)
             .tooltip(TextTooltip::builder(note, tip))
             .child(picker.clone())
     };
     let time_axis = "place points by their action time";
-    let across = group("across").child(timed_picker(
+    let across = group("across", palette).child(timed_picker(
         "scatter-across-why",
         &choice.across_picker,
         time_axis,
     ));
-    let up = group("up").child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
-    let colour = group("colour").child(timed_picker(
+    let up =
+        group("up", palette).child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
+    let colour = group("colour", palette).child(timed_picker(
         "scatter-colour-why",
         &choice.colour_picker,
         "colour points by where their actions ran",
@@ -1620,9 +1473,9 @@ fn strip(
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
-        .map(|input| input_toggle(input, choice, palette, cx))
+        .map(|input| input_toggle(input, scope, palette, cx))
         .collect();
-    let inputs = group("inputs").children(toggles);
+    let inputs = group("inputs", palette).children(toggles);
     Toolbar::new()
         .child(unit)
         .child(across)
@@ -1630,16 +1483,7 @@ fn strip(
         .child(colour)
         .child(inputs)
         .when(measuring, |bar| {
-            bar.trailing(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(palette.label)
-                    .child(spinner("scatter-measuring", px(14.), palette.label))
-                    .child("measuring…"),
-            )
+            bar.trailing(busy("scatter-measuring", "measuring…", palette))
         })
 }
 
@@ -1658,12 +1502,11 @@ fn notice(text: String, palette: &Palette) -> Div {
         .child(text)
 }
 
-/// What a measure of configured targets over cquery says of the cquery edges
-/// it leaves out: those a cquery run without the configuration of each
-/// dependency links only to the dependency's target, which no configured
-/// target holds.
-fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String> {
-    let scope = choice.scope;
+/// What a measure in `scope` of configured targets over cquery says of the
+/// cquery edges it leaves out: those a cquery run without the configuration
+/// of each dependency links only to the dependency's target, which no
+/// configured target holds.
+fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
     if scope.unit() != Unit::ConfiguredTarget || !scope.inputs().contains(Input::Cquery) {
         return None;
     }
@@ -1677,17 +1520,17 @@ fn dropped_edges(choice: &Choice, capabilities: &Capabilities) -> Option<String>
     ))
 }
 
-/// Turns the loaded `input`'s share in the measure on and off, and says why
-/// where it cannot.
+/// Turns the loaded `input`'s share in the measure in `scope` on and off, and
+/// says why where it cannot.
 fn input_toggle(
     input: Input,
-    choice: &Choice,
+    scope: Scope,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Stateful<Div> {
     let name = input_name(input);
-    let toggle = choice.toggle(input);
-    let many = unit_names(choice.scope.unit()).many;
+    let toggle = Toggle::of(scope, input);
+    let many = unit_names(scope.unit()).many;
     let why = match toggle {
         Toggle::On | Toggle::Off => None,
         Toggle::Lone => Some(format!(
@@ -1768,79 +1611,20 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom. The names wrap onto as many
-/// rows as they take, and one too long for a row is cut short; the hints wrap
-/// beneath the names where both do not fit.
+/// mark's size stands for, and how to leave a zoom.
 fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
-    let entry = |(name, hue): &(SharedString, Hue)| {
-        let color = Rgba {
-            a: SWATCH_ALPHA,
-            ..hue.color(palette)
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w_0()
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(SWATCH_DIAMETER))
-                    .rounded_full()
-                    .bg(color),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(LEGEND_NAME_WIDTH))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(name.clone()),
-            )
+    let swatch = Swatch {
+        alpha: SWATCH_ALPHA,
+        diameter: px(SWATCH_DIAMETER),
     };
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_start()
-        .gap_x_4()
-        .px_3()
-        .py_1()
-        .text_sm()
-        .text_color(palette.label)
-        .border_b_1()
-        .border_color(palette.border)
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_4()
-                .flex_1()
-                .min_w(px(LEGEND_NAMES_MIN_WIDTH))
-                .children(plot.legend.iter().map(entry)),
-        )
-        .child(
-            div()
-                .ml_auto()
-                .flex()
-                .flex_wrap()
-                .justify_end()
-                .gap_x_4()
-                .text_color(palette.colors.text_muted)
-                .when(zoom != Zoom::WHOLE, |hints| hints.child(ZOOMED))
-                .children(unplaced(plot))
-                .child(sizing_name(plot.plotted.sizing)),
-        )
+    let zoomed = (zoom != Zoom::WHOLE).then_some(ZOOMED);
+    let hints = zoomed
+        .into_iter()
+        .map(SharedString::from)
+        .chain(unplaced(plot).map(SharedString::from))
+        .chain([sizing_name(plot.plotted.sizing).into()]);
+    legend_strip(&plot.legend, swatch, hints, palette)
 }
-
-/// The widest a legend entry's name is drawn before it is cut short, which a
-/// mnemonic or kind is well within.
-const LEGEND_NAME_WIDTH: f32 = 220.0;
-
-/// The narrowest the legend's names are squeezed to beside its hints, which
-/// move to a row of their own where the two do not fit side by side.
-const LEGEND_NAMES_MIN_WIDTH: f32 = 160.0;
 
 /// The layer the points are drawn in, cached across frames that leave the
 /// plot and zoom unchanged.

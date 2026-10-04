@@ -235,6 +235,15 @@ impl<'a> Package<'a> {
         Package { repo, path }
     }
 
+    /// The repository part, sigil and all.
+    pub(crate) fn repo(self) -> &'a str {
+        self.repo
+    }
+
+    pub(crate) fn path(self) -> &'a str {
+        self.path
+    }
+
     /// Whether `text` occurs in this package's own label, `{repo}//{path}`,
     /// read part by part so that testing a rule against a box builds no label
     /// to hold it.
@@ -265,15 +274,15 @@ fn ends_the_repository(repo: &str, head: &str) -> bool {
 }
 
 /// A canonical label split into the parts a pattern matches one by one.
-struct Parts<'a> {
-    package: Package<'a>,
-    name: &'a str,
+pub(crate) struct Parts<'a> {
+    pub(crate) package: Package<'a>,
+    pub(crate) name: &'a str,
 }
 
 impl<'a> Parts<'a> {
     /// `None` for a string that is no label, a label naming both a package and,
     /// after a colon, a target.
-    fn of(label: &'a str) -> Option<Self> {
+    pub(crate) fn of(label: &'a str) -> Option<Self> {
         let (repo, rest) = label.split_once("//")?;
         let (path, name) = rest.split_once(':')?;
         Some(Parts {
@@ -290,13 +299,13 @@ fn names_package(written: &str, package: &[Segment], named: Package<'_>) -> bool
         && segments_match(package, &components(named.path))
 }
 
-fn strip_sigil(repo: &str) -> &str {
+pub(crate) fn strip_sigil(repo: &str) -> &str {
     repo.trim_start_matches('@')
 }
 
 /// Whether the repository part `written` of a pattern names the repository
 /// whose canonical name is `canonical`.
-fn repo_matches(written: &str, canonical: &str) -> bool {
+pub(crate) fn repo_matches(written: &str, canonical: &str) -> bool {
     written == canonical || module_name(canonical) == Some(written)
 }
 
