@@ -4,11 +4,14 @@ use bviz_invocation::{
     Attempt, Attempts, ConfiguredTarget, Phase, Profiled, Runner, Spawns, Timings, Venue,
 };
 
-use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, TimeSpan};
+use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, Str, TimeSpan};
 
 /// One action span the profile records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
+    /// What Bazel's `describe()` says the action does, the span's name.
+    pub description: Str,
+    pub mnemonic: OptStr,
     /// The action's primary output (see [`crate::SliceDetail::out`]).
     pub out: OptStr,
     pub target: OptStr,
@@ -269,7 +272,9 @@ impl Profile {
                 if phases.is_empty() {
                     phases.saw(Phase::Running(Venue::Local), slice.start_us);
                 }
-                let action = Action {
+                started.push(Action {
+                    description: slice.name,
+                    mnemonic: detail.mnemonic,
                     out: detail.out,
                     target: detail.target,
                     configuration: detail.configuration,
@@ -279,8 +284,7 @@ impl Profile {
                     },
                     spawns,
                     phases,
-                };
-                started.push(action);
+                });
             }
         }
         started.sort_by_key(|action| action.span.start_us);
@@ -386,7 +390,7 @@ mod tests {
         for ((out, nested), tid) in actions.iter().zip(ACTION_TIDS.into_iter().cycle()) {
             let out = out.map_or(String::new(), |out| format!(r#","out":"{out}""#));
             events.push(format!(
-                r#"{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":{at},"dur":100,"tid":{tid}{out},"args":{{"target":"//p:t","configuration":"c"}}}}"#
+                r#"{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":{at},"dur":100,"tid":{tid}{out},"args":{{"target":"//p:t","configuration":"c","mnemonic":"M"}}}}"#
             ));
             for (cat, name, ts, dur) in *nested {
                 events.push(format!(
@@ -567,6 +571,10 @@ mod tests {
         assert_eq!(
             (p.opt_str(a.target), p.opt_str(a.configuration), a.wall()),
             (Some("//p:t"), Some("c"), Duration::from_micros(100))
+        );
+        assert_eq!(
+            (p.str(a.description), p.opt_str(a.mnemonic)),
+            ("a", Some("M"))
         );
     }
 
