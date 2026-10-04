@@ -1,9 +1,10 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
+use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
-use crate::status::{Nodes, Statuses};
+use crate::status::{Landings, Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
@@ -17,6 +18,7 @@ use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Na
 use bviz_invocation::{Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
+use bviz_ui_playback::{Clock, DocumentClock};
 use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -124,6 +126,12 @@ pub(crate) struct Loaded {
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
     targets: Prepared<TargetIndex>,
+    /// Where the execution attempts the invocation's profile recorded stood
+    /// at each instant, placed on the graph's nodes; `None` where none lands.
+    states: Option<NodeStates>,
+    /// Which of its session's attempts `states` is read from, as
+    /// [`taken_up`](Self::taken_up) is for outcomes.
+    attempted: Revision,
 }
 
 impl Loaded {
@@ -145,6 +153,8 @@ impl Loaded {
             timed: Revision::default(),
             dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
+            states: None,
+            attempted: Revision::default(),
         }
     }
 
@@ -178,13 +188,34 @@ impl Loaded {
         &self.timecard
     }
 
+    pub(crate) fn states(&self) -> Option<&NodeStates> {
+        self.states.as_ref()
+    }
+
     /// Takes up what the build and the profile of `session` report of the
     /// graph's nodes, and says whether that changed anything a view of the
     /// graph shows. Each is read again only once it is reported anew.
     fn report(&mut self, session: &Session) -> bool {
         let outcomes = self.take_up_outcomes(session);
         let timings = self.take_up_timings(session);
-        outcomes || timings
+        let attempts = self.take_up_attempts(session);
+        outcomes || timings || attempts
+    }
+
+    fn take_up_attempts(&mut self, session: &Session) -> bool {
+        let revision = session.attempts_revision();
+        if self.attempted == revision {
+            return false;
+        }
+        self.attempted = revision;
+        let attempts = session.attempts();
+        let owners = attempts.actions().len() + attempts.by_owner().count();
+        let base = &self.shared.base;
+        let landings = Landings::new(base, &self.shared.names, owners);
+        let states = NodeStates::resolve(&landings, base, attempts);
+        let changed = self.states != states;
+        self.states = states;
+        changed
     }
 
     fn take_up_timings(&mut self, session: &Session) -> bool {
@@ -507,6 +538,9 @@ pub(crate) struct GraphModel {
     /// open.
     deferred: Option<Deferred>,
     joined: Option<Joined>,
+    /// The playback clock of the document the graph is opened in, where that
+    /// document plays back.
+    clock: Option<DocumentClock>,
 }
 
 /// The invocation a graph is opened as part of.
@@ -530,6 +564,7 @@ impl GraphModel {
     pub(crate) fn reading(
         load: Pending<Read>,
         session: Option<Entity<Session>>,
+        clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
         // The build's outcomes can land on either side of the graph, so they
@@ -566,6 +601,7 @@ impl GraphModel {
         );
         Self {
             joined,
+            clock,
             ..Self::new(work)
         }
     }
@@ -625,6 +661,7 @@ impl GraphModel {
             _placing: Task::ready(()),
             deferred: None,
             joined: None,
+            clock: None,
         }
     }
 
@@ -776,6 +813,10 @@ impl GraphModel {
         }
     }
 
+    pub(crate) fn clock(&self) -> Option<&Entity<Clock>> {
+        self.clock.as_ref().map(DocumentClock::clock)
+    }
+
     pub(crate) fn source(&self) -> &Source {
         &self.source
     }
@@ -803,7 +844,7 @@ mod tests {
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
     use bviz_invocation::{
-        BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
+        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
     };
     use std::time::Duration;
 
@@ -923,6 +964,31 @@ mod tests {
         assert_eq!(loaded.taken_up, taken_up);
         assert_eq!(loaded.times, Err(Untimed::Unplaced));
         assert_ne!(loaded.statuses, Statuses::default());
+    }
+
+    /// Attempts are taken up apart from timings, and once per report of them.
+    #[test]
+    fn a_graph_takes_up_the_attempts_its_session_holds_once_per_report_of_them() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        assert!(!loaded.report(&session));
+        assert!(loaded.states().is_none());
+
+        let mut attempts = Attempts::default();
+        let attempt = crate::playback::tests::attempt(0, 10, &[]);
+        attempts.record(Some("bazel-out/bin/app/bin"), None, attempt);
+        session.report_attempts(attempts);
+        assert!(loaded.report(&session));
+        assert!(loaded.states().is_some());
+        assert!(!loaded.report(&session));
+
+        session.report_timings(timing("bazel-out/bin/app/bin"));
+        assert!(loaded.report(&session));
+        assert!(loaded.states().is_some());
+
+        session.report_attempts(Attempts::default());
+        assert!(loaded.report(&session));
+        assert!(loaded.states().is_none());
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.

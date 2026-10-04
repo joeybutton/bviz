@@ -1,6 +1,7 @@
 //! What the fill of a box says, and the toolbar control choosing it.
 
 use crate::GraphPanel;
+use crate::model::GraphModel;
 use crate::timing::{NodeTimes, Untimed};
 use bviz_ui_components::{Dropdown, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
@@ -16,17 +17,21 @@ pub(crate) enum Colouring {
     Time,
     /// Where those actions ran.
     Runner,
+    /// Where the execution attempts of those actions stand at the document's
+    /// playback time.
+    Playback,
 }
 
 impl Colouring {
     /// Every colouring, in the order the picker offers them.
-    pub(crate) const ALL: [Self; 3] = [Self::Kind, Self::Time, Self::Runner];
+    pub(crate) const ALL: [Self; 4] = [Self::Kind, Self::Time, Self::Runner, Self::Playback];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Kind => "colour: kind",
             Self::Time => "colour: time",
             Self::Runner => "colour: runner",
+            Self::Playback => "colour: playback",
         }
     }
 
@@ -40,9 +45,34 @@ impl Colouring {
         Self::ALL.get(index).copied()
     }
 
-    /// Whether the colouring reads the actions placed on the graph's nodes.
-    fn timed(self) -> bool {
-        !matches!(self, Self::Kind)
+    /// Whether a graph carrying what `offered` says can be coloured so.
+    fn available(self, offered: Offered) -> bool {
+        match self {
+            Self::Kind => true,
+            Self::Time | Self::Runner => offered.timed,
+            Self::Playback => offered.playable,
+        }
+    }
+}
+
+/// What the loaded graph carries that a colouring reads.
+#[derive(Clone, Copy)]
+pub(crate) struct Offered {
+    /// Its nodes carry the time of the actions landing on them.
+    timed: bool,
+    /// Its document plays back, and its nodes carry the execution attempts
+    /// landing on them.
+    playable: bool,
+}
+
+impl Offered {
+    pub(crate) fn by(model: &GraphModel) -> Self {
+        let loaded = model.loaded();
+        Offered {
+            timed: loaded.is_some_and(|loaded| loaded.times().is_ok()),
+            playable: model.clock().is_some()
+                && loaded.is_some_and(|loaded| loaded.states().is_some()),
+        }
     }
 }
 
@@ -76,23 +106,19 @@ pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedStri
 /// falls back to colouring by kind where the one chosen is no longer among
 /// them.
 pub(crate) fn sync(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let timed = view
-        .model
-        .read(cx)
-        .loaded()
-        .is_some_and(|loaded| loaded.times().is_ok());
+    let offered = Offered::by(view.model.read(cx));
     view.colour_picker
-        .update(cx, |picker, cx| offer(picker, timed, cx));
-    if !timed && view.colouring.timed() {
+        .update(cx, |picker, cx| offer(picker, offered, cx));
+    if !view.colouring.available(offered) {
         set(view, Colouring::Kind, cx);
     }
 }
 
-/// Makes `picker` offer the colourings by time only where the graph is
-/// `timed`.
-pub(crate) fn offer(picker: &mut Dropdown, timed: bool, cx: &mut Context<Dropdown>) {
+/// Makes `picker` offer the colourings a graph carrying what `offered` says
+/// can be coloured by.
+pub(crate) fn offer(picker: &mut Dropdown, offered: Offered, cx: &mut Context<Dropdown>) {
     for colouring in Colouring::ALL {
-        picker.set_available(colouring.index(), timed || !colouring.timed(), cx);
+        picker.set_available(colouring.index(), colouring.available(offered), cx);
     }
 }
 

@@ -10,6 +10,7 @@ use bviz_ui_components::{
     cached_layer, overlay_canvas,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
+use bviz_ui_playback::{Clock, DocumentClock};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
@@ -46,6 +47,7 @@ mod morph;
 mod neighborhood;
 mod paint;
 mod pins;
+mod playback;
 mod point;
 mod preset;
 mod relation;
@@ -257,6 +259,9 @@ pub struct GraphPanel {
     _search_typing: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
+    /// Repaints the drawing, and only it, as a gesture moves the document's
+    /// clock while the boxes are coloured by playback.
+    _clock_moved: Option<Subscription>,
     /// Derives what the selected mode draws as the read lands: a derivation
     /// asked for while the graph was still being read could not start.
     _source_replaced: Subscription,
@@ -359,10 +364,7 @@ impl GraphPanel {
             }
         });
         let colouring = Colouring::default();
-        let timed = model
-            .read(cx)
-            .loaded()
-            .is_some_and(|loaded| loaded.times().is_ok());
+        let offered = colour::Offered::by(model.read(cx));
         let colour_picker = cx.new(|cx| {
             let mut picker = Dropdown::new(
                 "colouring",
@@ -370,7 +372,7 @@ impl GraphPanel {
                 colouring.index(),
                 cx,
             );
-            colour::offer(&mut picker, timed, cx);
+            colour::offer(&mut picker, offered, cx);
             picker
         });
         let colour_choices = cx.subscribe(&colour_picker, |view, _, event, cx| {
@@ -419,6 +421,13 @@ impl GraphPanel {
             colour::sync(view, cx);
             view.invalidate_canvas(cx);
         });
+        let clock_moved = model.read(cx).clock().cloned().map(|clock| {
+            cx.observe(&clock, |view, _, cx| {
+                if view.colouring == Colouring::Playback {
+                    view.canvas.update(cx, |_, cx| cx.notify());
+                }
+            })
+        });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
             checklist::adopt(view, cx);
@@ -461,6 +470,7 @@ impl GraphPanel {
             search,
             _search_typing: search_typing,
             _changed: changed,
+            _clock_moved: clock_moved,
             _source_replaced: source_replaced,
             _map_placed: map_placed,
             _reveal_requested: reveal_requested,
@@ -529,6 +539,7 @@ impl GraphPanel {
                 colouring: self.colouring,
                 times: loaded.times().ok(),
                 timed: loaded.timed(),
+                states: loaded.states(),
             };
             self.legend
                 .card(&drawn, zoom, statuses, resolved, coloured, &palette)
@@ -836,6 +847,10 @@ impl Render for GraphCanvas {
         let Some(drawn) = view.drawn() else {
             return div().into_any_element();
         };
+        let clock = view.model.read(cx).clock();
+        let at = clock.and_then(|clock| clock.read(cx).now());
+        let playing = clock.filter(|_| view.colouring == Colouring::Playback);
+        Clock::keep_pace(playing, window, cx);
         let content = drawn.content();
         let recenter_target = match view.view_zoom(&drawn).and_then(|zoom| drawn.view(zoom)) {
             None => Target::Pending,
@@ -849,6 +864,7 @@ impl Render for GraphCanvas {
             selected: view.selection.node(),
             highlight: view.emphasis.highlight(),
             colouring: view.colouring,
+            at,
             drawn,
         };
         let prepaint = build_prepaint(parent.clone(), content, recenter_target);
@@ -1039,12 +1055,13 @@ fn title(source: &GraphSource) -> SharedString {
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
+    clock: Option<DocumentClock>,
     _window: &mut Window,
     cx: &mut App,
 ) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| GraphModel::reading(load.built, session, cx));
+    let model = cx.new(|cx| GraphModel::reading(load.built, session, clock, cx));
     let graph = ViewSpec::new({
         let (label, model) = (label.clone(), model.clone());
         move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
@@ -1085,7 +1102,7 @@ pub fn run() {
         size(px(1280.), px(820.)),
         Load::from(source),
         Vec::new(),
-        |load: Load, window, cx| open(load, None, window, cx).into(),
+        |load: Load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );
 }

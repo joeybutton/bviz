@@ -3,6 +3,7 @@ use crate::colour::Colouring;
 use crate::derive::{Drawn, ViewKey};
 use crate::duration::lasted;
 use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
+use crate::playback::NodeStates;
 use crate::status::{Status, Statuses};
 use crate::timing::{Extent, NodeTimes, Ran};
 use bviz_graph_layout::transition::Transition;
@@ -118,14 +119,14 @@ fn kind_name(kind: Kind) -> &'static str {
     }
 }
 
-/// How the boxes are filled, and the times they are filled from: the
-/// times placed on the graph's nodes, read from the session's timings at
-/// `timed`.
+/// How a view's boxes are filled, and what they are filled from. `timed` is
+/// the revision of the session's timings `times` was read from.
 #[derive(Clone, Copy)]
 pub(crate) struct Coloured<'a> {
     pub(crate) colouring: Colouring,
     pub(crate) times: Option<&'a NodeTimes>,
     pub(crate) timed: Revision,
+    pub(crate) states: Option<&'a NodeStates>,
 }
 
 /// What the fills of a view's boxes say beyond each box's kind.
@@ -159,8 +160,8 @@ impl Reading {
                 .iter()
                 .any(|b| !b.compound && times.get(b.id).is_none())
         };
-        match Fills::of(coloured.colouring, coloured.times) {
-            Fills::Kind => Reading::Kinds,
+        match Fills::of(coloured.colouring, coloured.times, coloured.states) {
+            Fills::Kind | Fills::Playback(_) => Reading::Kinds,
             Fills::Time(times) => {
                 let mut kinds: Vec<Kind> = g
                     .boxes
@@ -425,6 +426,7 @@ mod tests {
             colouring: Colouring::Kind,
             times: None,
             timed: Revision::default(),
+            states: None,
         }
     }
 
@@ -610,6 +612,7 @@ mod tests {
             colouring,
             times: Some(times),
             timed,
+            states: None,
         };
         let found = legend.found(
             drawn,
@@ -675,6 +678,7 @@ mod tests {
             colouring: Colouring::Runner,
             times: None,
             timed: untimed,
+            states: None,
         };
         let found = legend.found(
             &drawn,

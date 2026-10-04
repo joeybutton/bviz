@@ -134,18 +134,19 @@ impl Ran {
     }
 }
 
-/// A node's place in [`NodeTimes::timed`].
+/// A node's place in a table holding what only some nodes of a graph carry,
+/// such as [`NodeTimes::timed`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Slot(NonZeroU32);
+pub(crate) struct Slot(NonZeroU32);
 
 impl Slot {
-    /// The slot of `timed[index]`. Only nodes are timed, so `index` is
+    /// The slot of `table[index]`. Only nodes take a slot, so `index` is
     /// below the node ids, which fit a `u32`.
-    fn at(index: usize) -> Self {
+    pub(crate) fn at(index: usize) -> Self {
         Slot(NonZeroU32::MIN.saturating_add(index as u32))
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0.get() as usize - 1
     }
 }

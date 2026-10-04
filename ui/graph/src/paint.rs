@@ -3,6 +3,7 @@ use crate::colour::Colouring;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::playback::{NodeState, NodeStates, Running, Stage};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::status::{Status, Statuses};
@@ -11,7 +12,7 @@ use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
-use bviz_invocation::Runner;
+use bviz_invocation::{Done, EpochMicros, Runner, Venue};
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
@@ -201,6 +202,60 @@ const REMOTE_CACHE_HIT_BLEND: f32 = 0.375;
 const DISK_CACHE_HIT_BLEND: f32 = 0.575;
 const NO_SPAWN_RECORDED_BLEND: f32 = 0.525;
 
+/// How a playback state's fill is made from its slot: carried `blend` toward
+/// the canvas, then `lift` away from it in perceptual lightness, toward it
+/// where negative. Each state's pair is as far as sets it apart from the other
+/// states within the bounds every fill is held to.
+#[derive(Clone, Copy)]
+struct StateTint {
+    blend: f32,
+    lift: f32,
+}
+
+const PENDING_TINT: StateTint = StateTint {
+    blend: 0.445,
+    lift: 0.015,
+};
+const PREPARING_TINT: StateTint = StateTint {
+    blend: 0.65,
+    lift: -0.06,
+};
+const CHECKING_CACHE_TINT: StateTint = StateTint {
+    blend: 0.633,
+    lift: -0.018,
+};
+const SCHEDULING_TINT: StateTint = StateTint {
+    blend: 0.59,
+    lift: 0.008,
+};
+const RUNNING_LOCALLY_TINT: StateTint = StateTint {
+    blend: 0.2625,
+    lift: -0.18,
+};
+const RUNNING_TINT: StateTint = StateTint {
+    blend: 0.0125,
+    lift: -0.28,
+};
+const RUNNING_REMOTELY_TINT: StateTint = StateTint {
+    blend: 0.2625,
+    lift: -0.2,
+};
+const EXECUTED_TINT: StateTint = StateTint {
+    blend: 0.632,
+    lift: 0.0,
+};
+const CACHED_TINT: StateTint = StateTint {
+    blend: 0.441,
+    lift: -0.146,
+};
+
+/// How far a playback state's slot is carried from the first of the two slots
+/// it lies between toward the second.
+const PREPARING_HUE: f32 = 0.88;
+const RUNNING_HUE: f32 = 0.4;
+const RUNNING_REMOTELY_HUE: f32 = 0.05;
+const CACHED_HUE: f32 = 0.26;
+
 /// How far the neutral slot is carried toward the canvas to fill a box whose
 /// actions ran on a mix of runners.
 const MIXED_BLEND: f32 = 0.4;
@@ -251,6 +306,9 @@ pub(crate) struct Scene {
     /// The emphasized box and the alpha its highlight paints at.
     pub(crate) highlight: Option<(Id, f32)>,
     pub(crate) colouring: Colouring,
+    /// The document's playback time, which a colouring by playback reads;
+    /// `None` where the document does not play back.
+    pub(crate) at: Option<EpochMicros>,
 }
 
 impl Scene {
@@ -373,7 +431,7 @@ pub(crate) fn canvas_body(
             return;
         };
         let statuses = loaded.statuses();
-        let fills = Fills::of(scene.colouring, loaded.times().ok());
+        let fills = Fills::of(scene.colouring, loaded.times().ok(), loaded.states());
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -612,6 +670,39 @@ impl Palette {
         }
     }
 
+    /// Fill for a box standing at `state`. A box yet to start keeps to the
+    /// neutral slot; one on its way to running deepens through blues, one
+    /// running warms to the amber of a construction site (an action locally
+    /// toward orange and remotely toward yellow, a container between them),
+    /// and one done settles to a green low in chroma, a cache hit nearer the
+    /// canvas and toward cyan.
+    pub(crate) fn state_fill(&self, state: NodeState) -> Rgba {
+        let d = &self.data;
+        let between = bviz_ui_theme::mix;
+        let (slot, tint) = match state {
+            NodeState::Pending => (d.neutral.into(), PENDING_TINT),
+            NodeState::In(Stage::Preparing) => {
+                (between(d.cyan, d.blue, PREPARING_HUE), PREPARING_TINT)
+            }
+            NodeState::In(Stage::CheckingCache) => (d.blue.into(), CHECKING_CACHE_TINT),
+            NodeState::In(Stage::Scheduling) => (d.blue.into(), SCHEDULING_TINT),
+            NodeState::In(Stage::Running(Running::Container)) => {
+                (between(d.orange, d.yellow, RUNNING_HUE), RUNNING_TINT)
+            }
+            NodeState::In(Stage::Running(Running::Action(Venue::Local))) => {
+                (d.orange.into(), RUNNING_LOCALLY_TINT)
+            }
+            NodeState::In(Stage::Running(Running::Action(Venue::Remote))) => (
+                between(d.yellow, d.orange, RUNNING_REMOTELY_HUE),
+                RUNNING_REMOTELY_TINT,
+            ),
+            NodeState::Done(Done::Executed) => (d.green.into(), EXECUTED_TINT),
+            NodeState::Done(Done::Cached) => (between(d.green, d.cyan, CACHED_HUE), CACHED_TINT),
+        };
+        let carried = bviz_ui_theme::mix(slot, self.background, tint.blend);
+        bviz_ui_theme::lighten(carried, tint.lift * self.mark_lift().signum())
+    }
+
     /// Fill for a box no time lands on: a container keeps the fill it wears
     /// by kind, and a leaf takes the [slot](Self::ran_slot) of no time at all.
     pub(crate) fn untimed_fill(&self, kind: Kind, compound: bool) -> Rgba {
@@ -700,20 +791,28 @@ pub(crate) enum Fills<'a> {
     Kind,
     Time(&'a NodeTimes),
     Runner(&'a NodeTimes),
+    Playback(&'a NodeStates),
 }
 
 impl<'a> Fills<'a> {
     /// The fills `colouring` gives the boxes of a graph whose nodes carry
-    /// `times`. A colouring by time over a graph carrying none fills by kind.
-    pub(crate) fn of(colouring: Colouring, times: Option<&'a NodeTimes>) -> Self {
-        match (colouring, times) {
-            (Colouring::Time, Some(times)) => Fills::Time(times),
-            (Colouring::Runner, Some(times)) => Fills::Runner(times),
+    /// `times` and `states`. A colouring by what the graph does not carry
+    /// fills by kind.
+    pub(crate) fn of(
+        colouring: Colouring,
+        times: Option<&'a NodeTimes>,
+        states: Option<&'a NodeStates>,
+    ) -> Self {
+        match (colouring, times, states) {
+            (Colouring::Time, Some(times), _) => Fills::Time(times),
+            (Colouring::Runner, Some(times), _) => Fills::Runner(times),
+            (Colouring::Playback, _, Some(states)) => Fills::Playback(states),
             _ => Fills::Kind,
         }
     }
 
-    fn fill(&self, b: &bviz_graph_layout::Box, palette: &Palette) -> Rgba {
+    /// The fill of `b`, where a playback stands at `at`.
+    fn fill(&self, b: &bviz_graph_layout::Box, at: Option<EpochMicros>, palette: &Palette) -> Rgba {
         match self {
             Fills::Kind => palette.kind_fill(b.kind, b.compound),
             Fills::Time(times) => match times.get(b.id).zip(times.extent(b.kind)) {
@@ -728,6 +827,10 @@ impl<'a> Fills<'a> {
                     let fill = palette.ran_fill(Ran::of(&timed.held));
                     palette.held_fill(b.kind, b.compound, fill)
                 }
+                None => palette.untimed_fill(b.kind, b.compound),
+            },
+            Fills::Playback(states) => match at.and_then(|at| states.at(b.id, at)) {
+                Some(state) => palette.held_fill(b.kind, b.compound, palette.state_fill(state)),
                 None => palette.untimed_fill(b.kind, b.compound),
             },
         }
@@ -802,7 +905,7 @@ impl<'a> PaintBox<'a> {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
         let alpha = alpha * receded(marks.strength(marked), scene.filter_strength(b.id));
-        let fill = fills.fill(b, &scene.palette);
+        let fill = fills.fill(b, scene.at, &scene.palette);
         let toggled = match scene.highlight {
             Some((id, alpha)) if id == b.id => alpha,
             _ => 0.0,
@@ -2668,12 +2771,19 @@ mod colors {
             .collect()
     }
 
-    /// Every fill a closed box coloured by time or by runner wears.
+    /// Every fill a closed box coloured by playback wears.
+    fn state_fills(p: &Palette) -> Vec<Rgba> {
+        NodeState::ALL.map(|state| p.state_fill(state)).into()
+    }
+
+    /// Every fill a closed box coloured by time, by runner or by playback
+    /// wears.
     fn readings(p: &Palette) -> Vec<Rgba> {
         RAMP_PLACES
             .map(|place| p.time_fill(place))
             .into_iter()
             .chain(ran_fills(p))
+            .chain(state_fills(p))
             .collect()
     }
 
@@ -2791,6 +2901,79 @@ mod colors {
                 for (j, other) in fills.iter().enumerate().skip(i + 1) {
                     let apart = distance(*fill, *other);
                     assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {i}/{j}: {apart}");
+                }
+            }
+        }
+    }
+
+    /// A box further along reads as further along: each stage its attempts
+    /// enter is deeper in chroma than the one before it, so running stands
+    /// out most, and an ended attempt is not as deep as one waiting on its
+    /// turn to run.
+    #[test]
+    fn an_attempt_deepens_in_chroma_as_it_moves_on_and_settles_once_ended() {
+        let running = [
+            Running::Container,
+            Running::Action(Venue::Local),
+            Running::Action(Venue::Remote),
+        ]
+        .map(Stage::Running);
+        for (theme, p) in palettes() {
+            let chroma = |state| oklch(p.state_fill(state)).chroma;
+            let under_way = [Stage::Preparing, Stage::CheckingCache, Stage::Scheduling];
+            let mut before = chroma(NodeState::Pending);
+            for stage in under_way {
+                let deeper = chroma(NodeState::In(stage));
+                assert!(
+                    deeper > before,
+                    "{theme} {stage:?}: {deeper} after {before}"
+                );
+                before = deeper;
+            }
+            for stage in running {
+                let deeper = chroma(NodeState::In(stage));
+                assert!(
+                    deeper > before,
+                    "{theme} {stage:?}: {deeper} after {before}"
+                );
+            }
+            let scheduling = chroma(NodeState::In(Stage::Scheduling));
+            for settled in [
+                NodeState::Done(Done::Executed),
+                NodeState::Done(Done::Cached),
+            ] {
+                let settles = chroma(settled);
+                assert!(
+                    settles < scheduling,
+                    "{theme} {settled:?}: {settles} against {scheduling}"
+                );
+            }
+        }
+    }
+
+    /// A box's state is read off its fill, so no two states may be taken for
+    /// each other or for a box no attempt lands on.
+    #[test]
+    fn every_state_is_told_from_the_others_and_from_a_box_no_attempt_lands_on() {
+        for (theme, p) in palettes() {
+            let fills = state_fills(&p);
+            for (state, fill) in NodeState::ALL.iter().zip(&fills) {
+                for untimed in [
+                    p.untimed_fill(Kind::Action, false),
+                    p.untimed_fill(Kind::Target, true),
+                    p.untimed_fill(Kind::Package, true),
+                ] {
+                    let apart = distance(*fill, untimed);
+                    assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {state:?}: {apart}");
+                }
+            }
+            for (i, (state, fill)) in NodeState::ALL.iter().zip(&fills).enumerate() {
+                for (other, other_fill) in NodeState::ALL.iter().zip(&fills).skip(i + 1) {
+                    let apart = distance(*fill, *other_fill);
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{theme} {state:?}/{other:?}: {apart}"
+                    );
                 }
             }
         }
