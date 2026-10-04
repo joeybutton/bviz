@@ -1,7 +1,7 @@
 //! A menu of labelled rows standing over the window at the point it was asked
 //! for, some of its rows opening a submenu beside them.
 
-use crate::menu_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING};
+use crate::menu_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING, opened};
 use crate::{TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -620,32 +620,6 @@ fn in_face<R>(window: &mut Window, measure: impl FnOnce(&mut Window) -> R) -> R 
     window.with_text_style(Some(face()), measure)
 }
 
-/// Where a list of `extent` opens for a menu asked at `from`: down and to the
-/// right of it, flipped back across `back` on an axis where it would otherwise
-/// hang over the window of `viewport`, and held against the window's near edge
-/// where it fits neither way.
-fn opened(
-    from: Point<Pixels>,
-    back: Point<Pixels>,
-    extent: Size<Pixels>,
-    viewport: Size<Pixels>,
-) -> Bounds<Pixels> {
-    let along = |from: Pixels, back: Pixels, extent: Pixels, room: Pixels| {
-        let placed = match from + extent <= room {
-            true => from,
-            false => back - extent,
-        };
-        placed.clamp(px(0.), (room - extent).max(px(0.)))
-    };
-    Bounds::new(
-        point(
-            along(from.x, back.x, extent.width, viewport.width),
-            along(from.y, back.y, extent.height, viewport.height),
-        ),
-        extent,
-    )
-}
-
 /// Where the submenu the row at `row` opens is laid out: beside the list
 /// `frame` lays that row out in, level with the row itself, each row of that
 /// list standing `row_height` tall and `scrolled` giving how far the list has
@@ -663,7 +637,7 @@ fn beside(
         point(frame.right(), top),
         point(frame.left(), top + row_height),
         extent,
-        viewport,
+        Bounds::new(Point::default(), viewport),
     )
 }
 
@@ -680,7 +654,12 @@ impl Render for Menu {
             ),
             list_height(self.items.len(), row_height, viewport),
         );
-        let frame = opened(self.at, self.at, extent, viewport);
+        let frame = opened(
+            self.at,
+            self.at,
+            extent,
+            Bounds::new(Point::default(), viewport),
+        );
         let open = self.aim.on_menu().and_then(|under| {
             let items = self.submenu(under)?;
             let extent = size(
@@ -764,7 +743,7 @@ mod tests {
     /// Where a menu asked for at (`x`, `y`) of `WINDOW` opens a `LIST`.
     fn at(x: f32, y: f32) -> Bounds<Pixels> {
         let asked = point(px(x), px(y));
-        opened(asked, asked, LIST, WINDOW)
+        opened(asked, asked, LIST, Bounds::new(Point::default(), WINDOW))
     }
 
     /// A menu opens down and to the right of the point it was asked for, so it
@@ -790,7 +769,7 @@ mod tests {
     #[test]
     fn a_list_ending_exactly_at_the_edge_opens_where_it_was_asked_for() {
         let exact = point(WINDOW.width - LIST.width, WINDOW.height - LIST.height);
-        let opened = opened(exact, exact, LIST, WINDOW);
+        let opened = opened(exact, exact, LIST, Bounds::new(Point::default(), WINDOW));
         assert_eq!(opened.origin, exact);
         assert_eq!(opened.right(), WINDOW.width);
         assert_eq!(opened.bottom(), WINDOW.height);
@@ -806,7 +785,12 @@ mod tests {
             assert!(extent.height < ROW * rows as f32, "{viewport:?}");
             assert!(extent.height <= viewport.height, "{viewport:?}");
             let asked = point(px(10.), px(10.));
-            let opened = opened(asked, asked, extent, viewport);
+            let opened = opened(
+                asked,
+                asked,
+                extent,
+                Bounds::new(Point::default(), viewport),
+            );
             assert!(opened.top() >= px(0.), "{viewport:?}");
             assert!(opened.bottom() <= viewport.height, "{viewport:?}");
         }

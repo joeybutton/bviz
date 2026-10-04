@@ -1,11 +1,11 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
-//! opens beneath it.
+//! opens from it.
 
 use crate::menu_chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, Pixels, Render,
-    SharedString, Subscription, Window, deferred, div, prelude::*,
+    SharedString, Subscription, Window, div, prelude::*,
 };
 
 /// Emitted when the user picks a different option. Programmatic
@@ -162,8 +162,7 @@ impl Dropdown {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)))
             .child(div().whitespace_nowrap().child(option.label.clone()))
         });
-        // Defer the menu so it paints over the content below the trigger.
-        deferred(menu_chrome::sheet(colors).children(rows))
+        menu_chrome::under_trigger(menu_chrome::sheet(colors).children(rows))
     }
 }
 
