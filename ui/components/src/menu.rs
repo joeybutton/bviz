@@ -2,6 +2,7 @@
 //! for, some of its rows opening a submenu beside them.
 
 use crate::menu_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING};
+use crate::{TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement, Keystroke,
@@ -25,6 +26,7 @@ pub struct MenuItem {
     label: SharedString,
     opens: Opens,
     keys: Option<SharedString>,
+    tooltip: Option<SharedString>,
 }
 
 enum Opens {
@@ -44,6 +46,7 @@ impl MenuItem {
             label: label.into(),
             opens: Opens::Nothing(Rc::new(chosen)),
             keys: None,
+            tooltip: None,
         }
     }
 
@@ -53,6 +56,7 @@ impl MenuItem {
             label: label.into(),
             opens: Opens::Disabled,
             keys: None,
+            tooltip: None,
         }
     }
 
@@ -62,12 +66,19 @@ impl MenuItem {
             label: label.into(),
             opens: Opens::Submenu(items),
             keys: None,
+            tooltip: None,
         }
     }
 
     /// The row naming `keys` as what its choice answers to outside the menu.
     pub fn keys(mut self, keys: impl Into<SharedString>) -> Self {
         self.keys = Some(keys.into());
+        self
+    }
+
+    /// The row explaining itself by `tooltip`.
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 }
@@ -364,6 +375,10 @@ impl Menu {
             .when(laid.disabled, |row| {
                 row.text_color(colors.text_muted).cursor_default()
             })
+            .when_some(laid.tooltip, |row, tooltip| {
+                let tip = TooltipColors::from_colors(colors);
+                row.tooltip(TextTooltip::builder(tooltip.clone(), tip))
+            })
             .justify_between()
             .flex_none()
             .gap(LABEL_GAP)
@@ -390,6 +405,7 @@ impl Menu {
 struct Laid<'a> {
     label: &'a SharedString,
     keys: Option<&'a SharedString>,
+    tooltip: Option<&'a SharedString>,
     opens_submenu: bool,
     disabled: bool,
     aim: Aim,
@@ -685,6 +701,7 @@ impl Render for Menu {
             .map(|(row, item)| Laid {
                 label: &item.label,
                 keys: item.keys.as_ref(),
+                tooltip: item.tooltip.as_ref(),
                 opens_submenu: matches!(item.opens, Opens::Submenu(_)),
                 disabled: matches!(item.opens, Opens::Disabled),
                 aim: Aim::Row(row),
@@ -698,6 +715,7 @@ impl Render for Menu {
                 .map(|(row, item)| Laid {
                     label: &item.label,
                     keys: None,
+                    tooltip: None,
                     opens_submenu: false,
                     disabled: false,
                     aim: Aim::Under { under, row },
