@@ -90,10 +90,24 @@ pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &
 /// The label of the target the node `id` is or belongs to, where one is
 /// carried, and its name otherwise.
 pub(crate) fn point_label(id: Id, shared: &Shared) -> String {
-    match carried_label(&shared.names, &shared.facets, id) {
-        Some(label) => shared.labels.written(label).into_owned(),
-        None => shared.names.resolve(id).to_owned(),
-    }
+    target_label(id, shared).unwrap_or_else(|| shared.names.resolve(id).to_owned())
+}
+
+/// The label of the target the node `id` is or belongs to, where one is
+/// carried.
+pub(crate) fn target_label(id: Id, shared: &Shared) -> Option<String> {
+    let label = carried_label(&shared.names, &shared.facets, id)?;
+    Some(shared.labels.written(label).into_owned())
+}
+
+/// Whether the node `id` is built in a configuration of a tool the build
+/// runs.
+pub(crate) fn built_for_tool(id: Id, shared: &Shared) -> bool {
+    let facets = &shared.facets;
+    let entry = facets
+        .config(id)
+        .and_then(|config| facets.config_entry(config));
+    entry.is_some_and(|entry| entry.is_tool == Tri::Yes)
 }
 
 /// The mnemonic of the action `id`.

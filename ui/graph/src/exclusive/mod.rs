@@ -2,6 +2,7 @@
 //! targets or targets: the dominator tree of the graph's points of one unit,
 //! drawn as an icicle.
 
+mod cell_menu;
 mod icicle;
 mod paint;
 mod roots;
@@ -12,7 +13,9 @@ use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
-use crate::point::{KindNames, configuration, identify, unit_names};
+use crate::point::{
+    KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
+};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use bviz_graph_layout::Id;
@@ -21,15 +24,16 @@ use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::{
-    QueryField, QueryFieldEvent, Toolbar, TooltipColors, beside_anchor, cached_layer,
-    centered_notice, centered_spinner, load_in_background, paint_tooltip,
+    Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar, TooltipColors, beside_anchor,
+    cached_layer, centered_notice, centered_spinner, load_in_background, paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use cell_menu::{Offer, PointFacts};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    Rgba, SharedString, Size, Subscription, Task, WeakEntity, Window, canvas, div, point,
-    prelude::*, px, relative,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    Point, Render, Rgba, SharedString, Size, Subscription, Task, WeakEntity, Window, anchored,
+    canvas, deferred, div, point, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -107,6 +111,8 @@ pub struct ExclusivePanel {
     coloured: HashMap<TreeKey, Arc<Coloured>>,
     /// Colours a tree landed, absent while none is being coloured.
     drawing: Option<Task<()>>,
+    /// The menu a right press put up over a cell, while it stands.
+    menu: Option<CellMenu>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -167,6 +173,7 @@ impl ExclusivePanel {
             failed: None,
             coloured: HashMap::new(),
             drawing: None,
+            menu: None,
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
@@ -638,14 +645,16 @@ impl ExclusivePanel {
         }
     }
 
+    /// Whether `tree` is the tree drawn, which a gesture begun over another
+    /// names none of the nodes of.
+    fn draws(&self, tree: &Arc<Dominators>) -> bool {
+        (self.drawn.as_ref()).is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
+    }
+
     /// Focuses `on` of `tree` as [`Self::focus_on`] does, where `tree` is
     /// still the tree drawn.
     fn focus_on_in(&mut self, tree: &Arc<Dominators>, on: Option<Focused>, cx: &mut Context<Self>) {
-        if self
-            .drawn
-            .as_ref()
-            .is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
-        {
+        if self.draws(tree) {
             self.focus_on(on, cx);
         }
     }
@@ -710,6 +719,121 @@ impl ExclusivePanel {
                 None => {}
             },
             _ => {}
+        }
+    }
+
+    /// Selects the cell under a right press and puts up the menu of what can
+    /// be done with it, opening where the press landed.
+    fn open_menu(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cell) = self.cell_at(e.position) else {
+            return;
+        };
+        self.select(cell, Picked::Menu, cx);
+        let items = self.menu_items(cell.holds, cx);
+        if items.is_empty() {
+            return;
+        }
+        let menu = cx.new(|cx| Menu::new(items, e.position, window, cx));
+        let dismissed = cx.subscribe_in(&menu, window, |view, _, event: &MenuEvent, window, cx| {
+            let MenuEvent::Dismissed { holding_focus } = event;
+            view.menu = None;
+            if *holding_focus {
+                view.focus_handle.focus(window, cx);
+            }
+            view.reselect(cx);
+        });
+        self.menu = Some(CellMenu {
+            menu,
+            _dismissed: dismissed,
+        });
+        cx.notify();
+    }
+
+    /// What the menu of the cell holding `holds` offers.
+    fn offers(&self, holds: Holds, cx: &App) -> Vec<Offer> {
+        let Some(drawn) = &self.drawn else {
+            return Vec::new();
+        };
+        let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
+        let targets = drawn.coloured.targets.as_ref();
+        let facts = |node: u32| {
+            let id = tree.id(node);
+            PointFacts {
+                labelled: target_label(id, shared).is_some(),
+                copies: targets.map_or(1, |targets| targets.copies(node)),
+                for_tool: built_for_tool(id, shared),
+            }
+        };
+        let reveals = self.model.read(cx).reveals();
+        cell_menu::offered(holds, drawn.top(), tree.scope().unit(), reveals, facts)
+    }
+
+    /// The rows of the menu of the cell holding `holds`.
+    fn menu_items(&self, holds: Holds, cx: &Context<Self>) -> Vec<MenuItem> {
+        let Some(drawn) = &self.drawn else {
+            return Vec::new();
+        };
+        let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
+        let offers = self.offers(holds, cx);
+        let label = |node: u32| point_label(tree.id(node), shared);
+        let panel = cx.weak_entity();
+        let deed = |deed: Deed| {
+            let (panel, tree) = (panel.clone(), Arc::clone(tree));
+            move |_: &mut Window, cx: &mut App| {
+                let done = panel.update(cx, |view, cx| view.take(&deed, &tree, cx));
+                done.ok();
+            }
+        };
+        let items = offers.into_iter().map(|offer| {
+            let name = offer.label();
+            let item = match offer {
+                Offer::Focus | Offer::Open | Offer::Up => {
+                    MenuItem::new(name, deed(Deed::Click(holds)))
+                }
+                Offer::Show { can: false, .. } => MenuItem::disabled(name),
+                Offer::Show { node, can: true } => MenuItem::new(name, deed(Deed::Reveal(node))),
+                Offer::Root { node, caveat } => {
+                    let label = label(node);
+                    let explained = caveat.map(|caveat| caveat.explain(&label));
+                    let item = MenuItem::new(name, deed(Deed::Root(label.into())));
+                    match explained {
+                        Some(explained) => item.tooltip(explained),
+                        None => item,
+                    }
+                }
+                Offer::CopyLabel { node } => {
+                    let label = label(node);
+                    MenuItem::new(name, move |_, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
+                    })
+                }
+            };
+            match offer.keys() {
+                Some(keys) => item.keys(keys),
+                None => item,
+            }
+        });
+        items.collect()
+    }
+
+    /// Carries out `deed`, chosen from the menu of a cell of `tree`, where
+    /// that is still the tree drawn.
+    fn take(&mut self, deed: &Deed, tree: &Arc<Dominators>, cx: &mut Context<Self>) {
+        if !self.draws(tree) {
+            return;
+        }
+        match deed {
+            Deed::Click(holds) => self.click_cell(*holds, cx),
+            &Deed::Reveal(node) => {
+                let id = tree.id(node);
+                self.model.update(cx, |model, cx| model.reveal(id, cx));
+            }
+            Deed::Root(label) => {
+                let label = label.clone();
+                self.roots_field
+                    .update(cx, |field, cx| field.set_text(label, cx));
+                self.reroot(cx);
+            }
         }
     }
 
@@ -1115,6 +1239,25 @@ enum Picked {
     /// The pointer, where it rests.
     Pointer,
     Keys,
+    /// A right press, whose menu stands over the cell until it closes, the
+    /// pointer leaving the cell for the menu letting go of nothing.
+    Menu,
+}
+
+/// A menu put up over a cell, let go of once it closes.
+struct CellMenu {
+    menu: Entity<Menu>,
+    _dismissed: Subscription,
+}
+
+/// What a row of a cell's menu does to the panel.
+enum Deed {
+    /// What a click on the cell holding this does.
+    Click(Holds),
+    /// Shows the graph's drawing of the node.
+    Reveal(u32),
+    /// Roots the tree at the target set naming this label.
+    Root(SharedString),
 }
 
 /// What the cells' layout turns on besides the tree drawn, so a pointer is
@@ -1562,30 +1705,58 @@ impl Render for ExclusivePanel {
             .then(|| reached_key(unit, drawn.coloured.by(), key_fill, &palette));
         let legend = (!hues.is_empty() || key.is_some())
             .then(|| legend_strip(hues, swatch, key.into_iter().flatten(), &palette));
-        root.children(legend).child(
-            div()
-                .id("exclusive-icicle")
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .child(cached_layer(self.canvas.clone()))
-                .child(hover_layer(cx.entity(), palette))
-                .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
-                )
-                .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                    view.hover_at(e.position, cx);
-                }))
-                .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                    if !hovered {
-                        view.clear_hover(cx);
-                    }
-                })),
-        )
+        root.children(legend)
+            .child(
+                div()
+                    .id("exclusive-icicle")
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(cached_layer(self.canvas.clone()))
+                    .child(hover_layer(cx.entity(), palette))
+                    .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|view, e: &MouseDownEvent, window, cx| {
+                            view.open_menu(e, window, cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
+                        view.hover_at(e.position, cx);
+                    }))
+                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                        if !hovered {
+                            view.clear_hover(cx);
+                        }
+                    })),
+            )
+            .children(
+                self.menu
+                    .as_ref()
+                    .map(|open| over_window(&open.menu, window)),
+            )
     }
 }
+
+/// `menu` standing over the whole window, drawn above whatever else the
+/// window draws.
+fn over_window(menu: &Entity<Menu>, window: &Window) -> impl IntoElement {
+    let viewport = window.viewport_size();
+    let whole = div()
+        .w(viewport.width)
+        .h(viewport.height)
+        .child(menu.clone());
+    let origin = point(px(0.), px(0.));
+    deferred(anchored().position(origin).child(whole)).with_priority(MENU_PRIORITY)
+}
+
+/// The priority a menu is deferred at, above that of any other deferred
+/// element the panel draws.
+const MENU_PRIORITY: usize = 1;
 
 /// The strip choosing the unit drawn and the roots `field`, followed by
 /// `crumbs`, which reads `computing` while the roots of a new choice are
@@ -1777,11 +1948,17 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         let gesture = gesture(cell.holds, drawn.top(), reveals);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, by, pointer) = (*cell, *by, drawn.pointer);
-        let place = |extent: Size<Pixels>| match (by, pointer) {
-            (Picked::Pointer, Some(at)) => beside_anchor(at, extent, bounds),
-            (Picked::Pointer, None) | (Picked::Keys, _) => beside_cell(cell.rect, extent, bounds),
-        };
         paint::paint_ring(&cell, &palette, window);
+        let at = match (by, pointer) {
+            // The menu stands in for the cell's description.
+            (Picked::Menu, _) => return,
+            (Picked::Pointer, Some(at)) => Some(at),
+            (Picked::Pointer, None) | (Picked::Keys, _) => None,
+        };
+        let place = |extent: Size<Pixels>| match at {
+            Some(at) => beside_anchor(at, extent, bounds),
+            None => beside_cell(cell.rect, extent, bounds),
+        };
         let tooltip = TooltipColors::from_colors(&palette.colors);
         paint_tooltip(&lines, place, tooltip, window, cx);
     };
