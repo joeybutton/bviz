@@ -5,7 +5,10 @@ rust_library(
     name = "playback",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_ui_playback",
-    visibility = ["//ui/workspace:__pkg__"],
+    visibility = [
+        "//bviz:__pkg__",
+        "//ui/workspace:__pkg__",
+    ],
     deps = [
         "//invocation",
         "//ui/assets",

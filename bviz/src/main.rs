@@ -5,6 +5,7 @@ mod group;
 
 use bviz_cli::{Cli, Source, Sources};
 use bviz_invocation::Session;
+use bviz_ui_playback::Clock;
 use bviz_ui_workspace::{Document, Member};
 use clap::Parser;
 use gpui::{App, AppContext, Entity, Pixels, Size, Window, px};
@@ -79,10 +80,21 @@ impl Load {
 }
 
 /// The document `opening` is shown as: a file's own, or an invocation's files
-/// joined under a label naming it.
+/// joined under a label naming it. A build's console replay plays back alone;
+/// a profile or a graph alone has nothing to play back with. Every invocation
+/// carries a clock; one whose files give it no time to play, such as an
+/// execution log with a graph, shows no playback bar.
 fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
     match opening {
-        Opening::Alone(load) => load.open(None, window, cx).into(),
+        Opening::Alone(load) => {
+            let plays_back = matches!(load, Load::Console(_));
+            let document = Document::from(load.open(None, window, cx));
+            if plays_back {
+                document.with_clock(cx.new(|_| Clock::default()))
+            } else {
+                document
+            }
+        }
         Opening::Invocation {
             id,
             first,
@@ -97,6 +109,7 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
                 others.push(load.open(Some(&session), window, cx));
             }
             Document::join(group::label(&id).into(), first, second, others)
+                .with_clock(cx.new(|_| Clock::default()))
         }
     }
 }
