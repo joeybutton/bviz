@@ -388,21 +388,28 @@ impl SparseFacetBuilder {
         self.pairs.push((id, value));
     }
 
-    /// The facet the collected pairs make, sorted into the order it is read
-    /// in. A node carries each of its values once, however many times it was
-    /// given one.
+    /// The facet the collected pairs make, its nodes sorted into the order
+    /// they are looked up in and each one's values kept in the order it was
+    /// given them. A node carries each of its values once, however many times
+    /// it was given one.
     pub fn seal(mut self) -> SparseFacet {
-        self.pairs.sort_unstable();
-        self.pairs.dedup();
+        self.pairs.sort_by_key(|&(id, _)| id);
         let carrying = |a: &(Id, Sym), b: &(Id, Sym)| a.0 == b.0;
         let rows = self.pairs.chunk_by(carrying).count();
         let mut ids = Vec::with_capacity(rows);
         let mut starts = Vec::with_capacity(rows + 1);
-        let mut values = Vec::with_capacity(self.pairs.len());
+        let mut values: Vec<Sym> = Vec::with_capacity(self.pairs.len());
         starts.push(0);
         for row in self.pairs.chunk_by(carrying) {
             ids.push(row[0].0);
-            values.extend(row.iter().map(|&(_, value)| value));
+            let start = values.len();
+            for &(_, value) in row {
+                // A row holds the few values one node states, which a scan
+                // checks faster than a set would.
+                if !values[start..].contains(&value) {
+                    values.push(value);
+                }
+            }
             starts.push(u32::try_from(values.len()).expect("more than u32::MAX facet values"));
         }
         SparseFacet {
@@ -1157,14 +1164,13 @@ mod tests {
         builder.set_tags(Id(1), ["local"]);
 
         let (facets, _) = builder.seal();
-        let mut tags: Vec<&str> = facets
+        let tags: Vec<&str> = facets
             .tags()
             .values(Id(1))
             .iter()
             .map(|&tag| facets.strings().resolve(tag))
             .collect();
-        tags.sort_unstable();
-        assert_eq!(tags, ["flaky", "manual"]);
+        assert_eq!(tags, ["manual", "flaky"]);
     }
 
     /// Ids past the first 64 exercise the word a node's fill bit sits in.
@@ -1541,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn sealing_puts_the_nodes_carrying_a_value_in_ascending_order() {
+    fn sealing_sorts_the_nodes_and_keeps_each_ones_values_in_the_order_given() {
         let (facet, strings) = sparse();
 
         let read: Vec<(Id, Vec<&str>)> = facet
@@ -1555,7 +1561,7 @@ mod tests {
             .collect();
         assert_eq!(
             read,
-            [(Id(0), vec!["manual"]), (Id(2), vec!["flaky", "local"])]
+            [(Id(0), vec!["manual"]), (Id(2), vec!["local", "flaky"])]
         );
     }
 
@@ -1586,7 +1592,7 @@ mod tests {
             .rows()
             .map(|(id, values)| (id, values.to_vec()))
             .collect();
-        assert_eq!(read, [(Id(1), vec![flaky, local]), (Id(2), vec![manual])]);
+        assert_eq!(read, [(Id(1), vec![local, flaky]), (Id(2), vec![manual])]);
     }
 
     #[test]

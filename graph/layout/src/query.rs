@@ -248,16 +248,10 @@ mod tests {
         }
     }
 
-    /// The tags `facets` records for `node`, in a stable order.
+    /// The tags `facets` records for `node`.
     fn tags_of(facets: &Facets, node: Id) -> Vec<&str> {
-        let mut tags: Vec<&str> = facets
-            .tags()
-            .values(node)
-            .iter()
-            .map(|&tag| facets.strings().resolve(tag))
-            .collect();
-        tags.sort_unstable();
-        tags
+        let tags = facets.tags().values(node).iter();
+        tags.map(|&tag| facets.strings().resolve(tag)).collect()
     }
 
     fn source(name: &str) -> Target {
@@ -368,7 +362,7 @@ mod tests {
         let rule_class = facets.rule_class(node).unwrap();
         assert_eq!(facets.strings().resolve(rule_class.sym()), "cc_test");
         assert_eq!(facets.rule_category(rule_class), Some(RuleCategory::Test));
-        assert_eq!(tags_of(&facets, node), ["flaky", "manual"]);
+        assert_eq!(tags_of(&facets, node), ["manual", "flaky"]);
         assert_eq!(facets.testonly(node), Tri::Yes);
         assert_eq!(facets.package(node), names.get("pkg:foo"));
         assert_eq!(facets.label(node), Some(node));
