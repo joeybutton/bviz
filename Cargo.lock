@@ -1053,6 +1053,7 @@ dependencies = [
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_execlog_args",
+ "bviz_ui_spawn_phase",
  "bviz_ui_theme",
  "bviz_ui_workspace",
  "clap",
@@ -1110,6 +1111,15 @@ dependencies = [
  "bviz_ui_theme",
  "gpui",
  "gpui_platform",
+]
+
+[[package]]
+name = "bviz_ui_spawn_phase"
+version = "0.1.0"
+dependencies = [
+ "bviz_invocation",
+ "bviz_ui_theme",
+ "gpui",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ members = [
     "ui/graph/args",
     "ui/playback",
     "ui/shell",
+    "ui/spawn_phase",
     "ui/theme",
     "ui/trace",
     "ui/trace/args",

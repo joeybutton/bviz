@@ -1,4 +1,4 @@
-use crate::format::{duration, exact_duration, phase_name, share};
+use crate::format::{duration, exact_duration, share};
 use crate::model::ExecLogModel;
 use crate::model::Source;
 use crate::palette::Palette;
@@ -7,6 +7,7 @@ use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar,
 };
+use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
