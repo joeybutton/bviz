@@ -108,8 +108,10 @@ impl CompressedSparseRows {
 }
 
 /// A graph's adjacency and containment, by node id.
-pub(crate) struct Index<'g> {
-    graph: &'g Graph,
+pub(crate) struct Index {
+    /// The ends of each edge, dependency first, by position in the graph's
+    /// edge list.
+    ends: Vec<[u32; 2]>,
     parent: Vec<Option<Id>>,
     kind: Vec<Option<Kind>>,
     level: Vec<Option<Level>>,
@@ -122,10 +124,10 @@ pub(crate) struct Index<'g> {
     incoming: CompressedSparseRows,
 }
 
-impl<'g> Index<'g> {
+impl Index {
     /// The index of `graph`, spanning `named` too where the graph mentions none
     /// of them, so that each stands as a node with nothing around it.
-    pub(crate) fn new(graph: &'g Graph, named: &[Id]) -> Self {
+    pub(crate) fn new(graph: &Graph, named: &[Id]) -> Self {
         let ids = named
             .iter()
             .map(|id| id.0 as usize + 1)
@@ -165,8 +167,10 @@ impl<'g> Index<'g> {
                 .filter(|(_, e)| e.kind != EdgeKind::Transitive)
                 .map(|(i, e)| (e.to.0 as usize, i as u32))
         });
+        let mut ends: Vec<[u32; 2]> = Vec::with_capacity(graph.edges.len());
+        ends.extend(graph.edges.iter().map(|e| [e.from.0, e.to.0]));
         Index {
-            graph,
+            ends,
             parent,
             kind,
             level,
@@ -250,7 +254,7 @@ impl<'g> Index<'g> {
         match toward {
             Toward::Dependents => {
                 for &edge in self.outgoing.of(id) {
-                    let to = self.graph.edges[edge as usize].to.0 as usize;
+                    let to = self.ends[edge as usize][1] as usize;
                     moves.push(Move::over(State::arrived(to), edge, to));
                 }
                 if let Some(parent) = self.parent[id] {
@@ -263,7 +267,7 @@ impl<'g> Index<'g> {
             Toward::Dependencies => {
                 if arrival {
                     for &edge in self.incoming.of(id) {
-                        let from = self.graph.edges[edge as usize].from.0 as usize;
+                        let from = self.ends[edge as usize][0] as usize;
                         moves.push(Move::over(State::arrived(from), edge, id));
                         moves.push(Move::over(State::lifted(from), edge, id));
                     }
