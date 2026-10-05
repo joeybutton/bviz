@@ -136,6 +136,9 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
                 }
                 outcomes::action(&mut report, id, a);
             }
+            Some(Payload::TestResult(result)) => {
+                attempts.test(id.as_ref(), &result, began, Position(frame));
+            }
             Some(Payload::TestSummary(s)) => {
                 if began.took(epoch_opt(s.first_start_time)) {
                     record(&mut anchors, frame, epoch_opt(s.last_stop_time));
