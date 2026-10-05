@@ -2,7 +2,9 @@
 //! a package -> target -> configured-target hierarchy: each rule label is a
 //! target container holding one configured-target leaf per configuration it is
 //! built in, labeled by that configuration's mnemonic. Source and generated
-//! files stay as leaves under their package.
+//! files stay as boxes under their package, a generated file holding a
+//! configured-target box per configuration it is built in, with the id the
+//! aquery builder gives a labeled output's, so the two merge in a joint graph.
 //!
 //! Each edge runs from a dependency to the configured target that consumes it,
 //! matching the direction the aquery and query builders use. It reaches the
@@ -10,7 +12,9 @@
 //! that dependency's configuration, which cquery emits only under
 //! `--transitions=lite` (or `full`); without it the edge falls back to the
 //! label-only `rule_input` and lands on the dependency's target container, since
-//! the configuration of each dependency is then unknown.
+//! the configuration of each dependency is then unknown. A generated file
+//! depends on the configured target of the rule generating it, in the file's
+//! own configuration (`LabelVisitationUtils.visitTarget`).
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -194,7 +198,10 @@ fn build_nodes(
             };
             nodes.add_rule_nodes(target, &rule.name, ct.configuration_id);
         } else if let Some((label, kind)) = label_and_kind(target) {
-            nodes.add_leaf_node(target, label, kind);
+            let leaf = nodes.add_leaf_node(target, label, kind);
+            if kind == Kind::Artifact && ct.configuration_id != 0 {
+                nodes.add_configured(label, leaf, ct.configuration_id);
+            }
         }
     }
 
@@ -227,6 +234,13 @@ impl Nodes<'_, '_> {
             self.index.target_box.insert(label.to_string(), id);
         }
         let container = self.index.target_box[label.as_ref()];
+        self.add_configured(written, container, config_id);
+    }
+
+    /// Creates the configured-target box of the target `written` held by
+    /// `container` the first time it is seen built in `config_id`.
+    fn add_configured(&mut self, written: &str, container: Id, config_id: u32) {
+        let label = self.b.canonical(written);
         let key = self.b.config_key(config_id);
         if self.index.ct_ids.insert((label.to_string(), key.clone())) {
             let mnemonic = self.b.config_mnemonic(config_id);
@@ -241,23 +255,26 @@ impl Nodes<'_, '_> {
         }
     }
 
-    /// Creates the leaf a non-rule target becomes, the first time its label is
+    /// The box a non-rule target becomes, created the first time its label is
     /// seen. `written` is the label as the input printed it.
-    fn add_leaf_node(&mut self, target: &Target, written: &str, kind: Kind) {
+    fn add_leaf_node(&mut self, target: &Target, written: &str, kind: Kind) -> Id {
         let label = self.b.canonical(written);
-        if !self.index.leaf_id.contains_key(label.as_ref()) {
-            let parent = self.hierarchy.package_box(&label);
-            let id = self.b.names.intern(&label::target_node_id(&label));
-            self.b
-                .graph
-                .add_node(Node::new(id, label::target_label(&label), kind, parent));
-            query::describe_target(self.b.facets, target, id, parent, &label);
-            self.index.leaf_id.insert(label.into_owned(), id);
+        if let Some(&id) = self.index.leaf_id.get(label.as_ref()) {
+            return id;
         }
+        let parent = self.hierarchy.package_box(&label);
+        let id = self.b.names.intern(&label::target_node_id(&label));
+        self.b
+            .graph
+            .add_node(Node::new(id, label::target_label(&label), kind, parent));
+        query::describe_target(self.b.facets, target, id, parent, &label);
+        self.index.leaf_id.insert(label.into_owned(), id);
+        id
     }
 }
 
-/// Pass 2: the edges into each rule's configured target.
+/// Pass 2: the edges into each rule's configured target and each generated
+/// file.
 fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
     let mut edges = Edges {
         b,
@@ -268,16 +285,19 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
         let Some(target) = ct.target.as_ref() else {
             continue;
         };
-        if !matches!(
-            Discriminator::try_from(target.r#type),
-            Ok(Discriminator::Rule)
-        ) {
-            continue;
+        match Discriminator::try_from(target.r#type) {
+            Ok(Discriminator::Rule) => {
+                if let Some(rule) = target.rule.as_ref() {
+                    edges.wire_rule(rule, ct.configuration_id);
+                }
+            }
+            Ok(Discriminator::GeneratedFile) => {
+                if let Some(file) = target.generated_file.as_ref() {
+                    edges.wire_generated(&file.name, &file.generating_rule, ct.configuration_id);
+                }
+            }
+            _ => {}
         }
-        let Some(rule) = target.rule.as_ref() else {
-            continue;
-        };
-        edges.wire_rule(rule, ct.configuration_id);
     }
 }
 
@@ -318,6 +338,20 @@ impl Edges<'_, '_> {
                     self.add_edge(dep, consumer);
                 }
             }
+        }
+    }
+
+    /// An edge to the generated file `name` in `config_id` from the configured
+    /// target of the rule `generating` it in that configuration, or from the
+    /// rule's target container where the graph holds no such configured target.
+    fn wire_generated(&mut self, name: &str, generating: &str, config_id: u32) {
+        let file = self.b.canonical(name).into_owned();
+        let Some(file) = self.configured_dep(&file, Some(config_id)) else {
+            return;
+        };
+        let rule = self.b.canonical(generating).into_owned();
+        if let Some(rule) = self.configured_dep(&rule, Some(config_id)) {
+            self.add_edge(rule, file);
         }
     }
 
@@ -374,7 +408,7 @@ impl Edges<'_, '_> {
 mod tests {
     use super::*;
     use crate::facets::{RuleCategory, Tri};
-    use crate::test_support::{edges, find};
+    use crate::test_support::{edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
         Attribute, ConfiguredRuleInput, GeneratedFile, Rule, SourceFile,
         attribute::Discriminator as AttributeType,
@@ -452,15 +486,21 @@ mod tests {
     }
 
     fn generated_ct(name: &str) -> ConfiguredTarget {
+        generated_by_ct(name, "", 0)
+    }
+
+    fn generated_by_ct(name: &str, rule: &str, config_id: u32) -> ConfiguredTarget {
         ConfiguredTarget {
             target: Some(Target {
                 r#type: Discriminator::GeneratedFile as i32,
                 generated_file: Some(GeneratedFile {
                     name: name.to_string(),
+                    generating_rule: rule.to_string(),
                     ..Default::default()
                 }),
                 ..Default::default()
             }),
+            configuration_id: config_id,
             ..Default::default()
         }
     }
@@ -695,6 +735,52 @@ mod tests {
             Kind::Artifact
         );
         assert!(edges(&graph, &names).contains(&("target://foo:gen.out", "ct://foo:app#ck1")));
+    }
+
+    #[test]
+    fn a_generated_file_depends_on_its_rule_in_its_own_configuration() {
+        let (graph, names, _) = build(&[result(
+            vec![
+                rule_ct("//foo:gen", 1),
+                rule_ct("//foo:gen", 2),
+                generated_by_ct("//foo:gen.out", "//foo:gen", 2),
+                generated_by_ct("//foo:lone.out", "//foo:lone", 1),
+                rule_ct("//foo:lone", 2),
+            ],
+            vec![config(1, "target"), config(2, "exec")],
+        )]);
+
+        assert_eq!(
+            parent_of(&graph, &names, "ct://foo:gen.out#ck2"),
+            Some("target://foo:gen.out"),
+            "the id aquery gives a labeled output's configured copy"
+        );
+        let wired = edges(&graph, &names);
+        assert!(wired.contains(&("ct://foo:gen#ck2", "ct://foo:gen.out#ck2")));
+        assert!(!wired.iter().any(|&(from, _)| from == "ct://foo:gen#ck1"));
+        assert!(
+            wired.contains(&("target://foo:lone", "ct://foo:lone.out#ck1")),
+            "the rule's container where its configuration is absent"
+        );
+    }
+
+    /// A consumer naming a generated file in a configuration reaches the file's
+    /// configured copy in that configuration.
+    #[test]
+    fn a_configured_dependency_on_a_generated_file_keeps_its_configuration() {
+        let (graph, names, _) = build(&[result(
+            vec![
+                with_inputs(rule_ct("//foo:app", 1), &[], &[("//foo:gen.out", Some(2))]),
+                generated_by_ct("//foo:gen.out", "//foo:gen", 2),
+                generated_by_ct("//foo:gen.out", "//foo:gen", 1),
+                rule_ct("//foo:gen", 2),
+            ],
+            vec![config(1, "target"), config(2, "exec")],
+        )]);
+
+        let wired = edges(&graph, &names);
+        assert!(wired.contains(&("ct://foo:gen.out#ck2", "ct://foo:app#ck1")));
+        assert!(!wired.contains(&("ct://foo:gen.out#ck1", "ct://foo:app#ck1")));
     }
 
     #[test]

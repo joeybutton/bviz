@@ -1,7 +1,9 @@
 //! Builds a compound graph from `bazel query --output=streamed_proto` output:
 //! one leaf node per target, grouped under its package container, with edges
-//! from each rule's inputs to the rule. An input naming a target absent from the
-//! stream is left unwired rather than synthesizing a phantom node.
+//! from each rule's inputs to the rule and from each generating rule to the
+//! files it generates, the dependencies `deps` follows
+//! (`LabelVisitationUtils.visitTarget`). A label naming a target absent from
+//! the stream is left unwired, with no phantom node made up for it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -95,18 +97,20 @@ pub(crate) fn build_with_packages(
         node_by_label.insert(label.into_owned(), node_id);
     }
 
-    // Pass 2: edges from each rule's inputs (dependency -> dependent).
+    // Pass 2: edges from each target's dependencies (dependency -> dependent).
+    let node = |label: &str| node_by_label.get(repos.canonicalize_label(label).as_ref());
     let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
     for target in targets {
-        let Some(rule) = target.rule.as_ref() else {
+        let (name, dependencies): (&str, &[String]) = match (&target.rule, &target.generated_file) {
+            (Some(rule), _) => (&rule.name, &rule.rule_input),
+            (None, Some(file)) => (&file.name, std::slice::from_ref(&file.generating_rule)),
+            (None, None) => continue,
+        };
+        let Some(&to) = node(name) else {
             continue;
         };
-        let Some(&to) = node_by_label.get(repos.canonicalize_label(&rule.name).as_ref()) else {
-            continue;
-        };
-        for input_label in &rule.rule_input {
-            let Some(&from) = node_by_label.get(repos.canonicalize_label(input_label).as_ref())
-            else {
+        for dependency in dependencies {
+            let Some(&from) = node(dependency) else {
                 continue;
             };
             if seen_edge.insert((from, to)) {
@@ -268,10 +272,15 @@ mod tests {
     }
 
     fn generated(name: &str) -> Target {
+        generated_by(name, "")
+    }
+
+    fn generated_by(name: &str, rule: &str) -> Target {
         Target {
             r#type: Discriminator::GeneratedFile as i32,
             generated_file: Some(GeneratedFile {
                 name: name.to_string(),
+                generating_rule: rule.to_string(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -310,6 +319,25 @@ mod tests {
         let (graph, names, _) = build(&[source("//foo:in.c"), rule("//foo:app", &["//foo:in.c"])]);
 
         assert!(edges(&graph, &names).contains(&("target://foo:in.c", "target://foo:app")));
+    }
+
+    #[test]
+    fn a_generated_file_depends_on_the_rule_generating_it() {
+        let (graph, names, _) = build(&[
+            rule("//foo:gen", &["//foo:in.c"]),
+            source("//foo:in.c"),
+            generated_by("//foo:out.o", "//foo:gen"),
+            rule("//foo:app", &["//foo:out.o"]),
+        ]);
+
+        assert_eq!(
+            edges(&graph, &names),
+            HashSet::from([
+                ("target://foo:gen", "target://foo:out.o"),
+                ("target://foo:in.c", "target://foo:gen"),
+                ("target://foo:out.o", "target://foo:app"),
+            ])
+        );
     }
 
     #[test]
