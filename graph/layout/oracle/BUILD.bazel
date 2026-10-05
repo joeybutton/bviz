@@ -4,7 +4,10 @@ load("@rules_rs//rs:rust_test.bzl", "rust_test")
 java_binary(
     name = "query_oracle",
     testonly = True,
-    srcs = ["java/bviz/oracle/QueryOracle.java"],
+    srcs = [
+        "java/bviz/oracle/ProtoQueryEnvironment.java",
+        "java/bviz/oracle/QueryOracle.java",
+    ],
     main_class = "bviz.oracle.QueryOracle",
     deps = ["@bazel_server_jar//:server"],
 )
@@ -12,13 +15,18 @@ java_binary(
 rust_test(
     name = "query_oracle_test",
     size = "small",
-    srcs = ["query_oracle_test.rs"],
+    srcs = [
+        "evaluation.rs",
+        "query_oracle_test.rs",
+    ],
     crate_name = "bviz_query_oracle_test",
     data = [":query_oracle"],
     env = {"QUERY_ORACLE": "$(rlocationpath :query_oracle)"},
     deps = [
         "//graph/layout",
+        "@bazel_query_proto//:bazel_query_rust_proto",
         "@crates//:fastrand",
+        "@crates//:prost",
         "@rules_rs_rules_rust//rust/runfiles",
     ],
 )

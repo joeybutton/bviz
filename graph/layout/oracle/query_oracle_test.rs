@@ -1,16 +1,32 @@
-//! Checks bviz's query parser against Bazel's own, run as `query_oracle`, on
-//! expressions drawn at random: each must parse to the same tree, which both
-//! print the same way, or fail with the same message.
+//! Checks bviz's query language against Bazel's own query engine, run as
+//! `query_oracle`, on expressions drawn at random: each must parse to the same
+//! tree, which both print the same way, or fail with the same message; and over
+//! graphs drawn at random, each must name the same targets or fail alike.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use bviz_graph_layout::query_lang::{ArgType, Function, parse};
 use fastrand::Rng;
 
+mod evaluation;
+
 /// The seeds expressions are drawn from, unless `QUERY_ORACLE_SEEDS` lists
 /// others, comma-separated.
 const SEEDS: &[u64] = &[1, 2, 3, 5, 8, 13, 21, 34];
+
+/// The seeds listed in the environment variable `name`, comma-separated, or
+/// `default` where it lists none.
+fn seeds(name: &str, default: &[u64]) -> Vec<u64> {
+    match std::env::var(name) {
+        Ok(list) => list
+            .split(',')
+            .map(|seed| seed.trim().parse().expect("a seed is an integer"))
+            .collect(),
+        Err(_) => default.to_vec(),
+    }
+}
 const EXPRESSIONS_PER_SEED: usize = 1500;
 /// How deeply drawn expressions nest.
 const MAX_DEPTH: u32 = 3;
@@ -87,13 +103,7 @@ const NOISE: &[&str] = &["(", ")", ",", "=", "'", "\"", " ", "+", "let", "in", "
 
 #[test]
 fn parses_as_bazel_does() {
-    let seeds: Vec<u64> = match std::env::var("QUERY_ORACLE_SEEDS") {
-        Ok(list) => list
-            .split(',')
-            .map(|seed| seed.trim().parse().expect("a seed is an integer"))
-            .collect(),
-        Err(_) => SEEDS.to_vec(),
-    };
+    let seeds = seeds("QUERY_ORACLE_SEEDS", SEEDS);
     let cases: Vec<(u64, String)> = seeds
         .iter()
         .flat_map(|&seed| {
@@ -102,7 +112,7 @@ fn parses_as_bazel_does() {
         })
         .collect();
 
-    let answers = ask_bazel(cases.iter().map(|(_, expr)| expr.as_str()));
+    let answers = ask_bazel(None, cases.iter().map(|(_, expr)| expr.as_str()));
     assert_eq!(
         answers.len(),
         cases.len(),
@@ -140,11 +150,13 @@ fn parses_as_bazel_does() {
     );
 }
 
-/// Bazel's answer to each expression, one record apiece.
-fn ask_bazel<'a>(expressions: impl Iterator<Item = &'a str>) -> Vec<String> {
+/// Bazel's answer to each expression, one record apiece: how it parses, or
+/// with the streamed_proto dump at `graph`, what it names there.
+fn ask_bazel<'a>(graph: Option<&Path>, expressions: impl Iterator<Item = &'a str>) -> Vec<String> {
     let runfiles = runfiles::Runfiles::create().unwrap();
     let oracle = runfiles::rlocation!(runfiles, std::env::var("QUERY_ORACLE").unwrap()).unwrap();
     let mut child = Command::new(oracle)
+        .args(graph)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
