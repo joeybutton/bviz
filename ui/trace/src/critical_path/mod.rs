@@ -9,7 +9,8 @@ use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
 use crate::stats_panel::table_cell;
 use crate::theme::Palette;
 use crate::{
-    STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE, profile_status,
+    ChooseNextStep, ChoosePreviousStep, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
+    STATS_TEXT_SIZE, UnchooseStep, profile_status,
 };
 use bviz_critical_path::{Coverage, CriticalPath, Part, Phase, Spawned, Step};
 use bviz_ui_components::{
@@ -20,12 +21,12 @@ use by_height::ByHeight;
 use fills::{Fills, outside};
 use gpui::{
     App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Subscription, Window, div,
-    prelude::*, px, relative, uniform_list,
+    MouseButton, MouseDownEvent, Pixels, Render, ScrollStrategy, SharedString, Stateful,
+    Subscription, Window, div, prelude::*, px, relative, uniform_list,
 };
 use std::time::Duration;
 
-const KEY_CONTEXT: &str = "TraceCriticalPath";
+pub(crate) const KEY_CONTEXT: &str = "TraceCriticalPath";
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
@@ -140,6 +141,36 @@ impl CriticalPathPanel {
         }
     }
 
+    /// Chooses step `index`, keeping its row in view.
+    fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.model
+            .update(cx, |model, cx| model.choose_step(index, cx));
+        self.scroll
+            .uniform_handle()
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Chooses the step `by` rows from the chosen one, or the first where
+    /// none is chosen, stopping at either end of the table.
+    fn choose_by(&mut self, by: isize, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        let steps = match model.critical_path() {
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => path.steps().len(),
+            _ => return,
+        };
+        let Some(last) = steps.checked_sub(1) else {
+            return;
+        };
+        let index = match model.chosen_step() {
+            Some((chosen, _)) => chosen.saturating_add_signed(by).min(last),
+            None => 0,
+        };
+        self.choose(index, cx);
+    }
+
     /// The path in sum over its table of steps.
     fn body(
         &self,
@@ -234,8 +265,10 @@ impl CriticalPathPanel {
                 };
                 let whole = path.path();
                 let logged = Logged::of(path);
+                let chosen = model.chosen_step().map(|(index, _)| index);
                 range
                     .map(|index| {
+                        let entity = entity.clone();
                         step_row(
                             index,
                             &path.steps()[index],
@@ -245,6 +278,16 @@ impl CriticalPathPanel {
                             &palette,
                             &fills,
                         )
+                        .when(chosen == Some(index), |row| {
+                            row.bg(palette.selection)
+                                .hover(|row| row.bg(palette.picked_hover()))
+                        })
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |panel, cx| {
+                                panel.focus.focus(window, cx);
+                                panel.choose(index, cx)
+                            })
+                        })
                     })
                     .collect()
             }
@@ -785,6 +828,11 @@ impl Render for CriticalPathPanel {
         let panel = div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|panel, _: &ChoosePreviousStep, _, cx| panel.choose_by(-1, cx)))
+            .on_action(cx.listener(|panel, _: &ChooseNextStep, _, cx| panel.choose_by(1, cx)))
+            .on_action(cx.listener(|panel, _: &UnchooseStep, _, cx| {
+                panel.model.update(cx, |model, cx| model.unchoose_step(cx));
+            }))
             .flex()
             .flex_col()
             .size_full()

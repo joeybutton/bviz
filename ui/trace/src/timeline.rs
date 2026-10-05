@@ -1,7 +1,7 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_count};
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
-use crate::model::{TraceModel, WorkingLanesDerived};
+use crate::model::{StepChosen, TraceModel, WorkingLanesDerived, step_slices, step_time};
 use crate::regions::{CountersStrip, Regions, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
@@ -15,7 +15,7 @@ use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
     visible_slices,
 };
-use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
+use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
 use bviz_ui_playback::Clock;
 use gpui::{
@@ -356,6 +356,9 @@ pub(crate) struct Timeline {
     /// first paint, when the viewport size is first known.
     fitted: bool,
     follow: Follow,
+    /// A stretch of time asked to be shown before the first paint, which that
+    /// paint's fit frames in place of the whole profile.
+    framed_on_fit: Option<TimeSpan>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Option<SliceDrawCache>,
     /// The cursor position while it hovers the flame lanes, anchoring the slice
@@ -381,6 +384,7 @@ pub(crate) struct Timeline {
     /// Repaints the overlay, which draws the playhead, as a gesture moves the
     /// document's clock, and follows the playhead again from there.
     _clock_changed: Option<Subscription>,
+    _step_chosen: Subscription,
 }
 
 impl Timeline {
@@ -406,6 +410,9 @@ impl Timeline {
             .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
                 timeline.invalidate_canvas(cx)
             });
+        let step_chosen = cx.subscribe(&model, |timeline, _, _: &StepChosen, cx| {
+            timeline.reveal_chosen_step(cx)
+        });
         Self {
             content_focus,
             model,
@@ -419,6 +426,7 @@ impl Timeline {
             viewport: Bounds::default(),
             fitted: false,
             follow: Follow::Playhead,
+            framed_on_fit: None,
             slice_draw: None,
             hover: None,
             crosshair: None,
@@ -429,7 +437,39 @@ impl Timeline {
             _session_observer: session_observer,
             _working_lanes_derived: working_lanes_derived,
             _clock_changed: clock_changed,
+            _step_chosen: step_chosen,
         }
+    }
+
+    /// Frames the chosen critical-path step's time and scrolls the lanes to
+    /// the rows its drawn slices stand in, the action span's ahead of the
+    /// step's own.
+    fn reveal_chosen_step(&mut self, cx: &mut Context<Self>) {
+        let (time, span, rows) = {
+            let model = self.model.read(cx);
+            let (Some(profile), Some(layout), Some((_, step))) =
+                (model.profile(), model.lane_layout(), model.chosen_step())
+            else {
+                return;
+            };
+            let rows: Vec<Row> = step_slices(step)
+                .filter_map(|at| {
+                    let lane = layout.lanes.iter().find(|lane| lane.track == at.track())?;
+                    Some(Row::of(lane.top, profile.slice(at).depth))
+                })
+                .collect();
+            (step_time(profile, step), profile.span(), rows)
+        };
+        let regions = self.regions(cx);
+        match self.fitted {
+            true => self.view = framing(time, span, regions.time_w),
+            false => self.framed_on_fit = Some(time),
+        }
+        self.follow = Follow::Released;
+        if let Some(y) = scroll_revealing_rows(&rows, self.lane_scroll(cx), regions.flame_h()) {
+            self.scroll_to(y, cx);
+        }
+        self.invalidate_canvas(cx);
     }
 
     /// Rebuilds the slice scene along with the overlay; every change to what the
@@ -481,6 +521,7 @@ impl Timeline {
     /// survives the swap still pointing into the old profile.
     pub(crate) fn reset_for_new_profile(&mut self) {
         self.slice_draw = None;
+        self.framed_on_fit = None;
         self.scroll = RowAnchor::Start;
         self.counter_scroll_held = 0.0;
         self.drag = TimelineDrag::None;
@@ -717,10 +758,8 @@ impl Timeline {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let backed_out = self.drag.cancel_region()
-            || self.model.update(cx, |m, cx| {
-                m.set_time_selection(TimeSelection::default(), cx)
-            });
+        let backed_out =
+            self.drag.cancel_region() || self.model.update(cx, |m, cx| m.clear_time_selection(cx));
         if backed_out {
             cx.notify();
         }
@@ -1143,7 +1182,10 @@ fn fit_prepaint(
         parent.update(cx, |timeline, _| {
             timeline.viewport = bounds;
             if !timeline.fitted {
-                timeline.view = TimeView::fit(span, time_w, EDGE_MARGIN_PX);
+                timeline.view = match timeline.framed_on_fit.take() {
+                    Some(time) => framing(time, span, time_w),
+                    None => TimeView::fit(span, time_w, EDGE_MARGIN_PX),
+                };
                 timeline.fitted = true;
             } else if old_bounds.size.width > px(0.) && (old_time_w - time_w).abs() > f32::EPSILON {
                 timeline
@@ -1158,6 +1200,126 @@ fn fit_prepaint(
             timeline.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         });
     }
+}
+
+/// Share of the time column left clear on each side of a revealed stretch of
+/// time, so what ran around it stays in view.
+const REVEAL_MARGIN_SHARE: f32 = 0.1;
+
+/// The view showing `time` across a time column `width_px` wide, clear of its
+/// sides by [`REVEAL_MARGIN_SHARE`], held within the zoom range and the pan
+/// bounds of the profile's whole `span`. Where the zoom ceiling holds `time`
+/// narrower than that, it stands centred.
+fn framing(time: TimeSpan, span: TimeSpan, width_px: f32) -> TimeView {
+    let mut view = TimeView::fit(time, width_px, width_px * REVEAL_MARGIN_SHARE);
+    let bounded = view
+        .px_per_us
+        .clamp(fit_px_per_us(span, width_px, EDGE_MARGIN_PX), MAX_PX_PER_US);
+    if bounded != view.px_per_us {
+        let centre_us = (time.start_us as f64 + time.end_us as f64) / 2.0;
+        view = TimeView {
+            start_us: centre_us - f64::from(width_px) / 2.0 / bounded,
+            px_per_us: bounded,
+        };
+    }
+    view.clamp_to(span, width_px, EDGE_MARGIN_PX);
+    view
+}
+
+/// A row of slices in the chart, down from the top of the lanes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Row {
+    top: f32,
+    bottom: f32,
+}
+
+impl Row {
+    /// The row slices `depth` deep stand in on the lane whose top is
+    /// `lane_top`.
+    fn of(lane_top: f32, depth: u32) -> Row {
+        let top = lane_top + METRICS.header_height + depth as f32 * METRICS.row_height;
+        Row {
+            top,
+            bottom: top + METRICS.row_height,
+        }
+    }
+}
+
+/// Where to scroll lanes standing `scroll` pixels down the chart in a region
+/// `view_h` tall to show `rows`: every one where the band they span fits in
+/// the region, else the first. `None` where that shows already.
+fn scroll_revealing_rows(rows: &[Row], scroll: f32, view_h: f32) -> Option<f32> {
+    let first = rows.first()?;
+    let top = rows.iter().map(|row| row.top).fold(first.top, f32::min);
+    let bottom = rows
+        .iter()
+        .map(|row| row.bottom)
+        .fold(first.bottom, f32::max);
+    match bottom - top <= view_h {
+        true => scroll_revealing(top, bottom - top, scroll, view_h),
+        false => scroll_revealing(first.top, first.bottom - first.top, scroll, view_h),
+    }
+}
+
+/// Where to scroll lanes standing `scroll` pixels down the chart in a region
+/// `view_h` tall so that the band `height` tall at `top` shows in full, moving
+/// them no further than that takes; its top where it is taller than the
+/// region. `None` where it shows in full already.
+fn scroll_revealing(top: f32, height: f32, scroll: f32, view_h: f32) -> Option<f32> {
+    let bottom = top + height;
+    if top >= scroll && bottom <= scroll + view_h {
+        return None;
+    }
+    match top < scroll || height > view_h {
+        true => Some(top),
+        false => Some(bottom - view_h),
+    }
+}
+
+/// Width of the line around each slice standing for the chosen critical-path
+/// step, drawn outside the slice so its fill and label stay whole.
+const CHOSEN_OUTLINE_PX: f32 = 2.0;
+
+/// Outlines the slices standing for the chosen critical-path step that
+/// `drawn` holds, within the flame region of `regions`.
+fn paint_chosen_slices(
+    chosen: &[SliceAt],
+    drawn: &[VisibleSlice],
+    regions: Regions,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let flame = Bounds::new(
+        point(px(regions.content_left), px(regions.flame_top)),
+        size(
+            px(regions.time_right - regions.content_left),
+            px(regions.flame_h()),
+        ),
+    );
+    window.with_content_mask(Some(ContentMask { bounds: flame }), |window| {
+        for v in drawn {
+            if !chosen
+                .iter()
+                .any(|at| at.track() == v.track && at.slice() == v.slice)
+            {
+                continue;
+            }
+            let around = Bounds::new(
+                point(
+                    px(regions.content_left + v.x - CHOSEN_OUTLINE_PX),
+                    px(regions.flame_top + v.y - CHOSEN_OUTLINE_PX),
+                ),
+                size(
+                    px(v.w + 2.0 * CHOSEN_OUTLINE_PX),
+                    px(v.h + 2.0 * CHOSEN_OUTLINE_PX),
+                ),
+            );
+            window.paint_quad(
+                gpui::outline(around, palette.label, gpui::BorderStyle::Solid)
+                    .border_widths(px(CHOSEN_OUTLINE_PX)),
+            );
+        }
+    });
 }
 
 /// The timeline's culled draw list, reusing the [`SliceDrawCache`] in `cache`
@@ -1651,10 +1813,10 @@ fn paint_playhead(
     }
 }
 
-/// The overlay's paint closure: the time selection, the playhead, the
-/// crosshair, the hover tooltip, and — while a drag runs — the window-global
-/// drag handlers, from the selection, clock, crosshair, hover, and drag state
-/// it reads through `parent`.
+/// The overlay's paint closure: the time selection, the chosen step's
+/// outlines, the playhead, the crosshair, the hover tooltip, and — while a drag
+/// runs — the window-global drag handlers, from the selection, choice, clock,
+/// crosshair, hover, and drag state it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
@@ -1663,6 +1825,19 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = track_count(&profile);
+        let chosen_drawn = {
+            let timeline = parent.read(cx);
+            let chosen: Vec<SliceAt> = timeline
+                .model
+                .read(cx)
+                .chosen_step()
+                .map(|(_, step)| step_slices(step).collect())
+                .unwrap_or_default();
+            match (&timeline.slice_draw, chosen.is_empty()) {
+                (Some(cache), false) => Some((chosen, cache.slices.clone())),
+                _ => None,
+            }
+        };
         let (
             tv,
             counters,
@@ -1700,6 +1875,9 @@ fn overlay_paint(
         let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
         let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
+        if let Some((chosen, drawn)) = chosen_drawn {
+            paint_chosen_slices(&chosen, &drawn, regions, &palette, window);
+        }
         if let Some(at_us) = playhead {
             paint_playhead(at_us, tv, regions, show_counters, &palette, window);
         }
@@ -1737,6 +1915,80 @@ fn overlay_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A profile's whole time, long enough for every framing below to zoom in.
+    const WHOLE: TimeSpan = TimeSpan {
+        start_us: 0,
+        end_us: 1_000_000,
+    };
+
+    #[test]
+    fn a_revealed_stretch_spans_the_time_column_clear_of_its_sides() {
+        let width = 1000.0;
+        let time = TimeSpan {
+            start_us: 400_000,
+            end_us: 410_000,
+        };
+        let view = framing(time, WHOLE, width);
+        let margin = width * REVEAL_MARGIN_SHARE;
+        assert!((view.x_of(time.start_us) - margin).abs() < 0.01);
+        assert!((view.x_of(time.end_us) - (width - margin)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_stretch_too_short_for_the_zoom_ceiling_stands_centred_at_it() {
+        let width = 1000.0;
+        let instant = TimeSpan {
+            start_us: 500_000,
+            end_us: 500_000,
+        };
+        let view = framing(instant, WHOLE, width);
+        assert_eq!(view.px_per_us, MAX_PX_PER_US);
+        assert!((view.x_of(instant.start_us) - width / 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_stretch_at_the_profile_s_start_keeps_the_pan_within_bounds() {
+        let width = 1000.0;
+        let first = TimeSpan {
+            start_us: 0,
+            end_us: 10,
+        };
+        let view = framing(first, WHOLE, width);
+        let mut bounded = view;
+        bounded.clamp_to(WHOLE, width, EDGE_MARGIN_PX);
+        assert_eq!(view, bounded);
+    }
+
+    #[test]
+    fn lanes_scroll_only_as_far_as_showing_a_lane_in_full_takes() {
+        // Region 100 tall, scrolled 200 down.
+        assert_eq!(scroll_revealing(220.0, 30.0, 200.0, 100.0), None);
+        assert_eq!(scroll_revealing(150.0, 30.0, 200.0, 100.0), Some(150.0));
+        assert_eq!(scroll_revealing(290.0, 30.0, 200.0, 100.0), Some(220.0));
+        assert_eq!(scroll_revealing(400.0, 300.0, 200.0, 100.0), Some(400.0));
+    }
+
+    #[test]
+    fn a_step_s_rows_show_together_where_they_fit_and_else_its_span_s_row() {
+        let view_h = 10.0 * METRICS.row_height;
+        let step = Row::of(0.0, 0);
+        // On a lane far taller than the region, its slice deep in it.
+        let span = Row::of(5.0 * view_h, 40);
+        let y = scroll_revealing_rows(&[span, step], 0.0, view_h).expect("a scroll");
+        assert!(
+            span.top >= y && span.bottom <= y + view_h,
+            "the span's row shows"
+        );
+
+        let near = Row::of(step.bottom + METRICS.lane_gap, 2);
+        let y = scroll_revealing_rows(&[near, step], 5.0 * view_h, view_h).expect("a scroll");
+        for row in [near, step] {
+            assert!(row.top >= y && row.bottom <= y + view_h, "both rows show");
+        }
+        assert_eq!(scroll_revealing_rows(&[near, step], 0.0, view_h), None);
+        assert_eq!(scroll_revealing_rows(&[], 0.0, view_h), None);
+    }
     use bviz_invocation::Session;
     use bviz_trace_layout::lay_out_lanes;
 

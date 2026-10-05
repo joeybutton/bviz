@@ -5,13 +5,14 @@ use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
-use bviz_critical_path::CriticalPath;
+use bviz_critical_path::{CriticalPath, Step, Work};
 use bviz_invocation::spawn::LoggedSpawns;
 use bviz_invocation::{Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
+    span_between,
 };
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, SliceAt, TimeSpan};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
 use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
@@ -42,6 +43,54 @@ pub(crate) struct WorkingLanesDerived;
 /// The loaded profile's critical path is derived. Carried as an event because
 /// it concerns only the panel showing the path.
 pub(crate) struct CriticalPathDerived;
+
+/// A step of the critical path was chosen. Carried as an event because the
+/// timeline moves its view to the step once, on the choice, and not on every
+/// notification after it.
+pub(crate) struct StepChosen;
+
+/// Where the action span that ran `step` stands, where the path joined one.
+fn step_span(step: &Step) -> Option<SliceAt> {
+    match step.work() {
+        Work::Spanned(split) => Some(split.at),
+        Work::Unspanned(_) | Work::ChangePruned => None,
+    }
+}
+
+/// The slices standing for `step` in the profile: the action span that ran
+/// it, where the path joined one, then its own on the critical-path lane.
+pub(crate) fn step_slices(step: &Step) -> impl Iterator<Item = SliceAt> {
+    step_span(step).into_iter().chain([step.at()])
+}
+
+/// From the first start to the last end of the slices standing for `step`.
+pub(crate) fn step_time(profile: &Profile, step: &Step) -> TimeSpan {
+    let own = profile.slice(step.at());
+    step_span(step)
+        .map(|at| profile.slice(at))
+        .into_iter()
+        .fold(
+            TimeSpan {
+                start_us: own.start_us,
+                end_us: own.end_us(),
+            },
+            |time, slice| TimeSpan {
+                start_us: time.start_us.min(slice.start_us),
+                end_us: time.end_us.max(slice.end_us()),
+            },
+        )
+}
+
+/// The time selection standing for `step`: its own slice's time, or none for
+/// a step of no length.
+fn step_selection(profile: &Profile, step: &Step) -> TimeSelection {
+    let own = profile.slice(step.at());
+    let mut selection = TimeSelection::default();
+    if let Some(region) = span_between(own.start_us, own.end_us()) {
+        selection.set(region);
+    }
+    selection
+}
 
 /// A loaded profile with what is derived from it once for every reader of it.
 pub(crate) struct LoadedProfile {
@@ -316,6 +365,10 @@ pub(crate) struct TraceModel {
     /// The profile time the flame graph and stats aggregate over, intersected
     /// with the selected tracks.
     time_selection: TimeSelection,
+    /// The step of the critical path chosen in its panel, by its place among
+    /// the path's steps, which tracing the path again with other spawns
+    /// leaves as it is.
+    chosen_step: Option<usize>,
     /// Which lane-class groups are collapsed in the chart, indexed by
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
@@ -323,6 +376,9 @@ pub(crate) struct TraceModel {
     /// Which groups draw every lane rather than a sample, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
+    /// The track the chosen step's slices are shown on, which its group's
+    /// sample keeps for as long as the step stays chosen.
+    kept_in_sample: Option<usize>,
     /// The order every group stands its tracks in.
     track_sort: TrackSort,
     flame_mode: FlameMode,
@@ -359,6 +415,7 @@ impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 impl EventEmitter<CriticalPathDerived> for TraceModel {}
+impl EventEmitter<StepChosen> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
@@ -417,8 +474,10 @@ impl TraceModel {
             shared_track_names: Vec::new(),
             selected_tracks: Vec::new(),
             time_selection: TimeSelection::default(),
+            chosen_step: None,
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
+            kept_in_sample: None,
             track_sort: TrackSort::default(),
             flame_mode: FlameMode::default(),
             aggregate_key: 0,
@@ -517,6 +576,114 @@ impl TraceModel {
         }
     }
 
+    /// The traced path's steps; none while it is traced or where the profile
+    /// records no path.
+    fn steps(&self) -> &[Step] {
+        match self.critical_path() {
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => path.steps(),
+            _ => &[],
+        }
+    }
+
+    /// The chosen step of the critical path and its place among the steps.
+    pub(crate) fn chosen_step(&self) -> Option<(usize, &Step)> {
+        let index = self.chosen_step?;
+        Some((index, self.steps().get(index)?))
+    }
+
+    /// Chooses step `index` of the critical path, selects its time and has
+    /// the timeline show it.
+    pub(crate) fn choose_step(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(selection) = self.adopt_chosen_step(index) else {
+            return;
+        };
+        self.set_time_selection(selection, cx);
+        cx.emit(StepChosen);
+        cx.notify();
+    }
+
+    /// Takes step `index` as the chosen one, opening the lane the timeline
+    /// shows it on, and returns the time selection standing for it. `None`
+    /// where the path holds no such step.
+    fn adopt_chosen_step(&mut self, index: usize) -> Option<TimeSelection> {
+        let profile = self.profile()?.clone();
+        let step = self.steps().get(index)?;
+        let selection = step_selection(&profile, step);
+        let shown_on = step_slices(step).next().map(SliceAt::track);
+        self.chosen_step = Some(index);
+        if let Some(track) = shown_on {
+            self.open_lane_of(&profile, track);
+        }
+        Some(selection)
+    }
+
+    /// Has the chart draw the lane of `track`: kept in its group's sample,
+    /// and the group expanded where it is collapsed. A track the reader hid
+    /// stays hidden.
+    fn open_lane_of(&mut self, profile: &Profile, track: usize) {
+        self.keep_in_sample(Some(track));
+        let drawn = self
+            .lane_layout()
+            .is_some_and(|layout| layout.lanes.iter().any(|lane| lane.track == track));
+        if drawn || !self.visible_tracks.get(track).copied().unwrap_or(false) {
+            return;
+        }
+        let class = profile.threads()[track].lane_class;
+        if let Some(group) = GROUP_ORDER.iter().position(|&g| g == class)
+            && self.collapsed_groups[group]
+        {
+            self.collapsed_groups[group] = false;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    fn keep_in_sample(&mut self, track: Option<usize>) {
+        if self.kept_in_sample != track {
+            self.kept_in_sample = track;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    /// Lets go of the chosen step, and of its time where that is still the
+    /// time selection. Says whether a step was chosen.
+    pub(crate) fn unchoose_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(selected) = self.release_chosen_step() else {
+            return false;
+        };
+        if selected {
+            self.set_time_selection(TimeSelection::default(), cx);
+        }
+        cx.notify();
+        true
+    }
+
+    /// Lets go of the chosen step and says whether its time is still the
+    /// time selection; `None` where no step is chosen.
+    fn release_chosen_step(&mut self) -> Option<bool> {
+        let selection = self.chosen_selection()?;
+        self.chosen_step = None;
+        self.keep_in_sample(None);
+        Some(self.time_selection == selection)
+    }
+
+    /// The time selection standing for the chosen step, where one is chosen.
+    fn chosen_selection(&self) -> Option<TimeSelection> {
+        let (_, step) = self.chosen_step()?;
+        Some(step_selection(self.profile()?, step))
+    }
+
+    /// Widens the time selection back to the whole timeline, letting go of
+    /// the chosen step as well where the selection is still the step's. Says
+    /// whether anything changed.
+    pub(crate) fn clear_time_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.chosen_selection().as_ref() == Some(&self.time_selection) {
+            return self.unchoose_step(cx);
+        }
+        self.set_time_selection(TimeSelection::default(), cx)
+    }
+
     pub(crate) fn visible_tracks(&self) -> &[bool] {
         &self.visible_tracks
     }
@@ -559,15 +726,23 @@ impl TraceModel {
     /// selection (whose instants address the old profile's timeline) and, for a
     /// loaded profile, seeding the default track selection.
     pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
-        self.lanes.borrow_mut().take();
-        self.visible_lanes.borrow_mut().take();
-        self.invalidate_aggregates();
-        self.time_selection.clear();
-        self.source = source;
+        self.replace_source(source);
         cx.emit(SourceReplaced);
         if let Some(profile) = self.profile().cloned() {
             self.init_tracks(&profile, cx);
         }
+    }
+
+    /// Takes `source` in place of the document, dropping what was derived
+    /// from or chosen in the one it replaces.
+    fn replace_source(&mut self, source: Source) {
+        self.lanes.borrow_mut().take();
+        self.visible_lanes.borrow_mut().take();
+        self.invalidate_aggregates();
+        self.time_selection.clear();
+        self.chosen_step = None;
+        self.kept_in_sample = None;
+        self.source = source;
     }
 
     /// The default track selection for a freshly loaded profile: every
@@ -639,6 +814,7 @@ impl TraceModel {
                 visible: &self.visible_tracks,
                 collapsed: &self.collapsed_groups,
                 show_all: &self.group_show_all,
+                kept: self.kept_in_sample,
                 sort: self.track_sort,
             },
         );
@@ -960,13 +1136,19 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Derivations, LoadedProfile, TraceModel, TracedPath, Tracing, clock_source};
-    use crate::Source;
+    use super::{
+        Derivations, LoadedProfile, TraceModel, TracedPath, Tracing, clock_source, step_slices,
+    };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
+    use crate::groups::GROUP_ORDER;
     use crate::track_order::TrackSort;
+    use crate::{Source, TOP_N_PER_GROUP};
+    use bviz_critical_path::CriticalPath;
     use bviz_invocation::spawn::LoggedSpawns;
     use bviz_invocation::{Revision, Session};
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer};
+    use bviz_trace_layout::{
+        FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer, span_between,
+    };
     use bviz_trace_profile::Profile;
     use gpui::Task;
     use std::sync::Arc;
@@ -1103,6 +1285,108 @@ mod tests {
         ));
         assert!(!model.adopt_critical_path(loaded.profile(), unlogged, None));
         assert!(model.adopt_critical_path(loaded.profile(), logged, None));
+    }
+
+    /// The action span running the first step of [`traced`]'s path, on an
+    /// execution thread too idle for its group's sample.
+    const IDLE_TID: usize = TOP_N_PER_GROUP + 1;
+
+    /// A loaded profile whose critical path is traced: a link of
+    /// `[100, 1100)` run on [`IDLE_TID`], then a step of no length, every
+    /// track shown.
+    fn traced() -> TraceModel {
+        let mut events = vec![
+            r#"{"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}}"#
+                .to_owned(),
+            r#"{"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":100,"dur":1000,"tid":0}"#.to_owned(),
+            r#"{"cat":"critical path component","name":"action 'Linking a'","ph":"i","ts":2000,"tid":0}"#.to_owned(),
+        ];
+        for tid in 1..=IDLE_TID {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#
+            ));
+        }
+        for tid in 1..IDLE_TID {
+            for ts in [0, 10, 20] {
+                events.push(format!(
+                    r#"{{"cat":"general information","name":"busy","ph":"X","ts":{ts},"dur":5,"tid":{tid}}}"#
+                ));
+            }
+        }
+        events.push(format!(
+            r#"{{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":{IDLE_TID}}}"#
+        ));
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let path = CriticalPath::of(&profile, None);
+        let loaded = Arc::new(TrackFlamer::new(&Arc::new(profile)));
+        let mut model = model();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(model.adopt_critical_path(loaded.profile(), Revision::default(), path));
+        let tracks = loaded.profile().threads().len();
+        model.visible_tracks = vec![true; tracks];
+        model.selected_tracks = vec![true; tracks];
+        model
+    }
+
+    /// Whether the chart draws a lane of `track`.
+    fn drawn(model: &TraceModel, track: usize) -> bool {
+        let layout = model.lane_layout().expect("a laid-out chart");
+        layout.lanes.iter().any(|lane| lane.track == track)
+    }
+
+    #[test]
+    fn a_chosen_step_selects_its_own_time_and_opens_the_lane_its_action_ran_on() {
+        let mut model = traced();
+        let step = model.steps().first().expect("a step");
+        let [span, own] = step_slices(step).collect::<Vec<_>>()[..] else {
+            panic!("a step joined to its span")
+        };
+        assert_eq!(own, step.at());
+        assert!(drawn(&model, own.track()));
+        assert!(!drawn(&model, span.track()), "left out of the sample");
+
+        let selection = model.adopt_chosen_step(0).expect("a step to choose");
+        assert_eq!(
+            selection.spans(),
+            [span_between(100, 1100).expect("a region")]
+        );
+        assert_eq!(model.chosen_step().map(|(index, _)| index), Some(0));
+        assert!(drawn(&model, span.track()));
+        assert_eq!(model.group_show_all, [false; GROUP_ORDER.len()]);
+
+        model.time_selection = selection;
+        assert_eq!(model.release_chosen_step(), Some(true));
+        assert_eq!(model.chosen_step().map(|(index, _)| index), None);
+        assert!(!drawn(&model, span.track()), "back out of the sample");
+        assert_eq!(model.release_chosen_step(), None);
+    }
+
+    #[test]
+    fn a_step_let_go_of_after_another_time_was_selected_leaves_that_time() {
+        let mut model = traced();
+        model.adopt_chosen_step(0).expect("a step to choose");
+        assert_eq!(model.release_chosen_step(), Some(false));
+    }
+
+    #[test]
+    fn a_replaced_document_holds_no_chosen_step() {
+        let mut model = traced();
+        model.adopt_chosen_step(0).expect("a step to choose");
+        model.replace_source(Source::Loading);
+        assert_eq!(model.chosen_step, None);
+        assert_eq!(model.kept_in_sample, None);
+    }
+
+    #[test]
+    fn a_step_of_no_length_selects_no_time_and_a_step_past_the_path_is_not_chosen() {
+        let mut model = traced();
+        let selection = model.adopt_chosen_step(1).expect("a step to choose");
+        assert!(selection.is_empty());
+        assert_eq!(model.chosen_step().map(|(index, _)| index), Some(1));
+
+        assert_eq!(model.adopt_chosen_step(2), None);
+        assert_eq!(model.chosen_step().map(|(index, _)| index), Some(1));
     }
 
     #[test]

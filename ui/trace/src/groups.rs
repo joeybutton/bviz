@@ -328,6 +328,9 @@ pub(crate) struct GroupLayoutState<'a> {
     pub(crate) visible: &'a [bool],
     pub(crate) collapsed: &'a [bool; GROUP_ORDER.len()],
     pub(crate) show_all: &'a [bool; GROUP_ORDER.len()],
+    /// A track its group's sample keeps whatever it would otherwise leave
+    /// out.
+    pub(crate) kept: Option<usize>,
     pub(crate) sort: TrackSort,
 }
 
@@ -373,9 +376,21 @@ pub(crate) fn build_grouped_layout(
             chrome.rows.reserve(pools.len());
             chrome.families.reserve(pools.len());
             if !state.show_all[group] {
+                let unsampled = state
+                    .kept
+                    .filter(|kept| tracks.contains(kept))
+                    .map(|kept| (kept, tracks.clone()));
                 state
                     .sort
                     .sample(profile, threads, &mut tracks, TOP_N_PER_GROUP);
+                if let Some((kept, unsampled)) = unsampled
+                    && !tracks.contains(&kept)
+                {
+                    tracks = unsampled
+                        .into_iter()
+                        .filter(|t| *t == kept || tracks.contains(t))
+                        .collect();
+                }
             }
             shown = tracks.len();
             for run in pool_runs(profile, threads, state.sort, &pools, &tracks, shows) {
@@ -587,6 +602,7 @@ mod tests {
                 visible,
                 collapsed,
                 show_all: &[false; GROUP_ORDER.len()],
+                kept: None,
                 sort,
             },
         )
@@ -1137,6 +1153,7 @@ mod tests {
                 visible: &visible,
                 collapsed: &[false; GROUP_ORDER.len()],
                 show_all: &every_lane,
+                kept: None,
                 sort: TrackSort::Name,
             },
         );
@@ -1263,6 +1280,7 @@ mod tests {
                 visible: &visible,
                 collapsed: &expanded,
                 show_all: &every_lane,
+                kept: None,
                 sort: TrackSort::Name,
             },
         );
@@ -1318,6 +1336,7 @@ mod tests {
                 visible,
                 collapsed: &[false; GROUP_ORDER.len()],
                 show_all: &[true; GROUP_ORDER.len()],
+                kept: None,
                 sort,
             },
         )
