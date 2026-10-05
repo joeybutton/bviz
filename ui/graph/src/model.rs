@@ -16,7 +16,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{Configurations, EpochMicros, Folded, Known, Revision, Session};
+use bviz_invocation::{Attempted, Configurations, EpochMicros, Folded, Known, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -139,6 +139,9 @@ pub(crate) struct Loaded {
     /// instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
     states_read: StatesRead,
+    /// Which of its session's reports the states last asked for are read
+    /// from, which `states_read` reaches once they land.
+    states_asked: StatesRead,
 }
 
 impl Loaded {
@@ -165,6 +168,7 @@ impl Loaded {
             scope_graphs: HashMap::new(),
             states: None,
             states_read: StatesRead::default(),
+            states_asked: StatesRead::default(),
         }
     }
 
@@ -220,8 +224,7 @@ impl Loaded {
     fn report(&mut self, session: &Session) -> bool {
         let outcomes = self.take_up_outcomes(session);
         let timings = self.take_up_timings(session);
-        let states = self.take_up_states(session);
-        outcomes || timings || states
+        outcomes || timings
     }
 
     /// Takes the playback clock's time to be `now`, `None` where it has none.
@@ -236,33 +239,26 @@ impl Loaded {
         self.take_up_outcomes(session)
     }
 
-    fn take_up_states(&mut self, session: &Session) -> bool {
+    /// What the states of the graph's nodes are to be resolved from where
+    /// `session` reports their attempts or analysis anew, and which of its
+    /// reports those are; `None` where the states asked for last read them.
+    fn states_wanted(&mut self, session: &Session) -> Option<(StatesRead, Attempted)> {
         let read = StatesRead::of(session);
-        if self.states_read == read {
-            return false;
+        if self.states_asked == read {
+            return None;
+        }
+        self.states_asked = read;
+        Some((read, session.attempted()))
+    }
+
+    /// Takes up the states resolved from the reports `read`; states read from
+    /// reports other than those asked for last are passed over.
+    fn land_states(&mut self, read: StatesRead, states: Option<NodeStates>) {
+        if self.states_asked != read {
+            return;
         }
         self.states_read = read;
-        let attempts = session.attempts();
-        let Shared {
-            base,
-            names,
-            facets,
-            ..
-        } = &self.shared;
-        let described = DescribedActions::new(base, names, facets, attempts.described());
-        let resolved = attempts.resolve(|action| described.output(action));
-        let attempts = attempts.resolved(&resolved);
-        let landings = Landings::new(base, names, attempts.held());
-        let states = NodeStates::resolve(
-            &landings,
-            base,
-            &attempts,
-            session.analysing(),
-            session.analysed(),
-        );
-        let changed = self.states != states;
         self.states = states;
-        changed
     }
 
     fn take_up_timings(&mut self, session: &Session) -> bool {
@@ -350,6 +346,29 @@ impl OutcomesShown {
             known: None,
         }
     }
+}
+
+/// Where the attempts and analysis `attempted` holds stand on the nodes of
+/// `shared`'s graph at each instant; `None` where none lands.
+fn resolve_states(shared: &Shared, attempted: &Attempted) -> Option<NodeStates> {
+    let attempts = attempted.attempts();
+    let Shared {
+        base,
+        names,
+        facets,
+        ..
+    } = shared;
+    let described = DescribedActions::new(base, names, facets, attempts.described());
+    let resolved = attempts.resolve(|action| described.output(action));
+    let attempts = attempts.resolved(&resolved);
+    let landings = Landings::new(base, names, attempts.held());
+    NodeStates::resolve(
+        &landings,
+        base,
+        &attempts,
+        attempted.analysing(),
+        attempted.analysed(),
+    )
 }
 
 /// The mnemonic `facets` gives each configuration, by its checksum. A
@@ -618,6 +637,9 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
+    /// The resolution of the loaded graph's states asked for last, which
+    /// dropping gives up.
+    _resolving_states: Task<()>,
     /// The graph panel opened, shown or filtered last, for as long as it is
     /// open.
     deferred: Option<Deferred>,
@@ -704,6 +726,28 @@ impl GraphModel {
                 cx.notify();
             }
         }
+        self.resolve_states(cx);
+    }
+
+    /// Resolves off the UI thread the states of the loaded graph's nodes
+    /// where the session reports their attempts or analysis anew.
+    fn resolve_states(&mut self, cx: &mut Context<Self>) {
+        let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source) else {
+            return;
+        };
+        let Some((read, attempted)) = loaded.states_wanted(joined.session.read(cx)) else {
+            return;
+        };
+        let shared = loaded.shared.clone();
+        self._resolving_states = load_in_background(
+            cx,
+            move || resolve_states(&shared, &attempted),
+            move |model, states, _| {
+                if let Source::Loaded(loaded) = &mut model.source {
+                    loaded.land_states(read, states);
+                }
+            },
+        );
     }
 
     /// Takes up the outcomes the session's build had reported by the
@@ -762,6 +806,7 @@ impl GraphModel {
             source: Source::Loading,
             _work: work,
             _placing: Task::ready(()),
+            _resolving_states: Task::ready(()),
             deferred: None,
             joined: None,
             clock: None,
@@ -1075,24 +1120,51 @@ mod tests {
     fn a_graph_takes_up_the_attempts_its_session_holds_once_per_report_of_them() {
         let mut loaded = loaded();
         let mut session = Session::default();
-        assert!(!loaded.report(&session));
+        let take_up = |loaded: &mut Loaded, session: &Session| {
+            let Some((read, attempted)) = loaded.states_wanted(session) else {
+                return false;
+            };
+            loaded.land_states(read, resolve_states(&loaded.shared, &attempted));
+            true
+        };
+        assert!(!take_up(&mut loaded, &session));
         assert!(loaded.states().is_none());
 
         let mut attempts = Attempts::default();
         let attempt = crate::playback::tests::attempt(0, 10, &[]);
         attempts.record(Some("bazel-out/bin/app/bin"), None, attempt);
         session.report_attempts(AttemptSource::Profile, attempts);
-        assert!(loaded.report(&session));
+        assert!(take_up(&mut loaded, &session));
         assert!(loaded.states().is_some());
-        assert!(!loaded.report(&session));
+        assert!(!take_up(&mut loaded, &session));
 
         session.report_timings(timing("bazel-out/bin/app/bin"));
-        assert!(loaded.report(&session));
+        assert!(!take_up(&mut loaded, &session));
         assert!(loaded.states().is_some());
 
         session.report_attempts(AttemptSource::Profile, Attempts::default());
-        assert!(loaded.report(&session));
+        assert!(take_up(&mut loaded, &session));
         assert!(loaded.states().is_none());
+    }
+
+    /// States resolved from reports the session has since replaced land
+    /// nothing, so a slow resolution cannot stand over a later one.
+    #[test]
+    fn states_resolved_from_superseded_reports_land_nothing() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let mut attempts = Attempts::default();
+        let attempt = crate::playback::tests::attempt(0, 10, &[]);
+        attempts.record(Some("bazel-out/bin/app/bin"), None, attempt);
+        session.report_attempts(AttemptSource::Profile, attempts);
+        let (stale, attempted) = loaded.states_wanted(&session).expect("newly reported");
+        session.report_attempts(AttemptSource::Profile, Attempts::default());
+        let (read, _) = loaded.states_wanted(&session).expect("reported anew");
+
+        loaded.land_states(stale, resolve_states(&loaded.shared, &attempted));
+        assert!(loaded.states().is_none());
+        loaded.land_states(read, None);
+        assert_eq!(loaded.states_read(), read);
     }
 
     /// A build that dated its outcomes is shown as far as the time a graph

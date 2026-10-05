@@ -247,17 +247,50 @@ impl<T> Reported<T> {
     }
 }
 
+/// A session's attempts and analysis, as [`Session::attempted`] holds them.
+#[derive(Clone)]
+pub struct Attempted {
+    attempts: [Option<Arc<Attempts>>; AttemptSource::ALL.len()],
+    analysing: Arc<Analysing>,
+    analysed: Arc<Analysed>,
+}
+
+impl Attempted {
+    pub fn attempts(&self) -> MergedAttempts<'_> {
+        merged(&self.attempts)
+    }
+
+    pub fn analysing(&self) -> &Analysing {
+        &self.analysing
+    }
+
+    pub fn analysed(&self) -> &Analysed {
+        &self.analysed
+    }
+}
+
+/// The attempts each source that reported any reports, by
+/// [`AttemptSource::index`] in `by_source`, read together.
+fn merged(by_source: &[Option<Arc<Attempts>>; AttemptSource::ALL.len()]) -> MergedAttempts<'_> {
+    MergedAttempts::new(
+        AttemptSource::ALL
+            .into_iter()
+            .zip(by_source)
+            .filter_map(|(source, reported)| Some((source, &**reported.as_ref()?))),
+    )
+}
+
 /// What the views of one invocation's outputs share. Each output's reader adds
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
     /// By [`AttemptSource::index`]: each source reports attempts of its own, which
     /// stand in place only of those it reported before; `None` until it reports.
-    attempts: Reported<[Option<Attempts>; AttemptSource::ALL.len()]>,
+    attempts: Reported<[Option<Arc<Attempts>>; AttemptSource::ALL.len()]>,
     configurations: Configurations,
     outcomes: Reported<HeldOutcomes>,
-    analysed: Reported<Analysed>,
-    analysing: Reported<Analysing>,
+    analysed: Reported<Arc<Analysed>>,
+    analysing: Reported<Arc<Analysing>>,
     timings: Reported<Timings>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
@@ -317,7 +350,7 @@ impl Session {
     }
 
     pub fn report_analysed(&mut self, reported: Analysed) {
-        self.analysed.replace(reported);
+        self.analysed.replace(Arc::new(reported));
     }
 
     /// When the invocation's build was analysing each target, where its
@@ -331,7 +364,7 @@ impl Session {
     }
 
     pub fn report_analysing(&mut self, reported: Analysing) {
-        self.analysing.replace(reported);
+        self.analysing.replace(Arc::new(reported));
     }
 
     /// What the invocation's profile recorded of its actions.
@@ -350,12 +383,7 @@ impl Session {
     /// When the invocation's actions were executed and how each ended, as
     /// every source reporting them tells together.
     pub fn attempts(&self) -> MergedAttempts<'_> {
-        MergedAttempts::new(
-            AttemptSource::ALL
-                .into_iter()
-                .zip(&self.attempts.value)
-                .filter_map(|(source, reported)| Some((source, reported.as_ref()?))),
-        )
+        merged(&self.attempts.value)
     }
 
     /// The same for as long as no source reports attempts anew.
@@ -366,7 +394,19 @@ impl Session {
     /// Takes `reported` for the attempts `source` tells of.
     pub fn report_attempts(&mut self, source: AttemptSource, reported: Attempts) {
         self.attempts
-            .revise(|by_source| by_source[source.index()] = Some(reported));
+            .revise(|by_source| by_source[source.index()] = Some(Arc::new(reported)));
+    }
+
+    /// The [attempts](Self::attempts), and when the build was
+    /// [analysing](Self::analysing) and had [analysed](Self::analysed) each
+    /// target, held apart from the session so they can be read off the UI
+    /// thread.
+    pub fn attempted(&self) -> Attempted {
+        Attempted {
+            attempts: self.attempts.value.clone(),
+            analysing: Arc::clone(&self.analysing.value),
+            analysed: Arc::clone(&self.analysed.value),
+        }
     }
 
     /// The spawns the invocation's execution log records, `None` until one
