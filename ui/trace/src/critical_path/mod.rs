@@ -27,6 +27,8 @@ const KEY_CONTEXT: &str = "TraceCriticalPath";
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
+/// How many levers the summary names.
+const LEVERS_SHOWN: usize = 3;
 /// A step's bar of parts where a strip of spawn phases may stand beneath it.
 const TIER_HEIGHT: Pixels = px(8.);
 const TIER_GAP: Pixels = px(2.);
@@ -241,9 +243,32 @@ fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
         .px_3()
         .py_2()
         .child(div().text_base().child(words::headline(path)))
+        .child(levers(path, palette))
         .child(path_bar.w_full())
         .child(legend_row(palette).children(legend))
         .children(spawned)
+}
+
+/// The levers acting on the most of the path's time, each hovered for what
+/// pulling it involves.
+fn levers(path: &CriticalPath, palette: &Palette) -> Div {
+    let levers = path
+        .levers()
+        .into_iter()
+        .take(LEVERS_SHOWN)
+        .enumerate()
+        .map(|(i, (lever, time))| {
+            div()
+                .id(("critical-path-lever", i))
+                .tooltip(TextTooltip::builder(
+                    words::lever_tip(lever).into(),
+                    palette.tooltip,
+                ))
+                .child(words::lever(lever, time))
+        });
+    legend_row(palette)
+        .child(div().text_color(palette.label).child(words::LEVERS))
+        .children(levers)
 }
 
 /// The time the actions of the steps `coverage` holds spent in each spawn

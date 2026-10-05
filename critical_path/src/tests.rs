@@ -726,3 +726,106 @@ fn a_change_pruned_step_is_joined_to_no_spawn() {
     assert_eq!(path.steps()[0].work(), Work::ChangePruned);
     assert_eq!(path.coverage().map(|c| c.steps()), Some(0));
 }
+
+/// A remote compile, then a link run in a local sandbox after a wait, then
+/// a step with neither span nor spawn; the profile starts 1000µs before the
+/// first step.
+fn levered_profile() -> Profile {
+    profile(
+        10_000,
+        &[
+            event(STEP_COMPILE, 1000, 3000).with_out("bazel-out/a.o"),
+            event(STEP_LINK, 5000, 2000).with_out("bazel-out/a"),
+            event("action 'Compiling b.c'", 7000, 500),
+        ],
+        &[
+            event(COMPILE, 1000, 3001).with_out("bazel-out/a.o"),
+            event(LINK, 5000, 2001).with_out("bazel-out/a"),
+        ],
+    )
+}
+
+/// The local link of [`levered_profile`].
+fn local_link<'a>() -> LogSpawn<'a> {
+    logged(
+        "linux-sandbox",
+        &["bazel-out/a"],
+        2000,
+        &[
+            (Phase::Setup, 100),
+            (Phase::Queue, 50),
+            (Phase::Execute, 1850),
+        ],
+    )
+}
+
+#[test]
+fn levers_rank_what_would_shorten_the_path() {
+    let p = levered_profile();
+    let spawns = log(&[
+        logged(
+            "remote",
+            &["bazel-out/a.o"],
+            3000,
+            &[
+                (Phase::Queue, 400),
+                (Phase::Upload, 300),
+                (Phase::Fetch, 200),
+                (Phase::Execute, 2100),
+            ],
+        ),
+        local_link(),
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_eq!(
+        path.levers(),
+        [
+            (Lever::Execution, us(3950)),
+            (Lever::LocalOnRemote, us(2000)),
+            (Lever::LeadIn, us(1000)),
+            (Lever::Waiting, us(1000)),
+            (Lever::CacheHitOverhead, us(500)),
+            (Lever::RemoteQueue, us(400)),
+            (Lever::Upload, us(300)),
+            (Lever::Fetch, us(200)),
+            (Lever::LocalSetup, us(100)),
+            (Lever::LocalQueue, us(50)),
+        ]
+    );
+}
+
+#[test]
+fn without_a_log_only_the_profile_s_levers_act() {
+    let alone = CriticalPath::of(&levered_profile(), None).expect("critical path");
+    let levers: Vec<Lever> = alone.levers().into_iter().map(|(lever, _)| lever).collect();
+    assert_eq!(levers, [Lever::LeadIn, Lever::Waiting]);
+}
+
+#[test]
+fn a_build_answered_remotely_only_from_the_cache_has_no_local_steps_to_move() {
+    let p = levered_profile();
+    let spawns = log(&[
+        LogSpawn {
+            cache_hit: true,
+            ..logged("remote cache hit", &["bazel-out/a.o"], 3000, &[])
+        },
+        local_link(),
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert!(
+        path.levers()
+            .iter()
+            .all(|&(lever, _)| lever != Lever::LocalOnRemote)
+    );
+}
+
+#[test]
+fn a_remote_execution_off_the_path_shows_local_steps_could_move() {
+    let p = levered_profile();
+    let spawns = log(&[
+        logged("remote", &["bazel-out/elsewhere.o"], 10, &[]),
+        local_link(),
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert!(path.levers().contains(&(Lever::LocalOnRemote, us(2000))));
+}

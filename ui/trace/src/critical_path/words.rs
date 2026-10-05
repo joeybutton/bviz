@@ -2,7 +2,8 @@
 
 use crate::chart::format_duration;
 use bviz_critical_path::{
-    Coverage, CriticalPath, Fit, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned, Step, Work,
+    Coverage, CriticalPath, Fit, Lever, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned, Step,
+    Work,
 };
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
@@ -188,6 +189,104 @@ pub(crate) fn folded(names: &[&str]) -> String {
         [] => String::new(),
         [name] => (*name).to_owned(),
         [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    }
+}
+
+/// What opens the line of levers.
+pub(crate) const LEVERS: &str = "Levers:";
+
+/// A lever with the time on the path it acts on, and what pulls it.
+pub(crate) fn lever(lever: Lever, time: Duration) -> String {
+    let (name, pull) = match lever {
+        Lever::LeadIn => ("lead-in", "warm server, fewer repository fetches"),
+        Lever::Waiting => ("waiting", "inputs off the path, more --jobs"),
+        Lever::RemoteQueue => ("remote queue", "more executor capacity"),
+        Lever::LocalQueue => ("local queue", "--local_resources"),
+        Lever::Parse => ("request building", "fewer inputs per action"),
+        Lever::Upload => ("uploads", "fewer locally built inputs"),
+        Lever::Network => ("remote-cache calls", "a closer cache, fewer inputs"),
+        Lever::RemoteSetup => ("remote setup", "fewer, smaller inputs"),
+        Lever::LocalSetup => ("local setup", "workers, a cheaper sandbox"),
+        Lever::Execution => ("execution", "a faster tool, or split the target"),
+        Lever::ProcessOutputs => ("output processing", "fewer, smaller outputs"),
+        Lever::Fetch => ("downloads", "--remote_download_minimal"),
+        Lever::LocalOnRemote => ("local on a remote build", "check strategies and tags"),
+        Lever::CacheHitOverhead => ("steps with neither span nor spawn", "output checking cost"),
+    };
+    format!("{name} {} → {pull}", duration(time))
+}
+
+/// What the time a lever acts on is, and how pulling it shortens the path.
+pub(crate) fn lever_tip(lever: Lever) -> &'static str {
+    match lever {
+        Lever::LeadIn => {
+            "Launching Bazel, loading, analysis and fetching repositories before the first \
+             step: a server kept running keeps its analysis cache, and repositories fetched \
+             or vendored ahead skip the fetch."
+        }
+        Lever::Waiting => {
+            "Steps waiting after the step before them finished: for inputs built off the \
+             path, or a free job slot. Cutting dependencies off the path or raising --jobs \
+             lets them start sooner."
+        }
+        Lever::RemoteQueue => {
+            "Spawns queued for a remote executor before a worker took them: more executor \
+             capacity, or fewer builds sharing it, shortens the queue."
+        }
+        Lever::LocalQueue => {
+            "Spawns waiting for Bazel's local resource manager to grant the CPU and memory \
+             they declare: more local resources (--local_resources), or actions declaring \
+             less, let more run at once."
+        }
+        Lever::Parse => {
+            "Spawns building their remote execution requests, mostly computing the input \
+             Merkle tree: fewer inputs per action build faster. Bazel 9.0 and later keep \
+             the trees of runfiles and directories across builds; earlier releases cache \
+             trees within a build under --experimental_remote_merkle_tree_cache."
+        }
+        Lever::Upload => {
+            "Spawns uploading inputs the remote cache lacked, beyond the time in calls to \
+             it: inputs built locally or not yet cached. Building those remotely too, or \
+             caching them, leaves less to upload."
+        }
+        Lever::Network => {
+            "Wall time with a call to the remote cache outstanding: action-cache lookups, \
+             checks for missing inputs, and the bytes of uploads and downloads. Lower \
+             latency to the cache, and fewer, smaller inputs per action, shorten it."
+        }
+        Lever::RemoteSetup => {
+            "Remote executors staging spawns' inputs between taking a spawn and running \
+             it: fewer or smaller inputs per action, or an executor caching inputs between \
+             actions, shortens it."
+        }
+        Lever::LocalSetup => {
+            "Bazel fetching spawns' inputs and setting up their sandboxes or workers: \
+             persistent workers, a cheaper sandbox, or fewer inputs to fetch shorten it."
+        }
+        Lever::Execution => {
+            "Spawns running their commands: a faster tool, or a target split so that less \
+             of it rebuilds and its parts run side by side."
+        }
+        Lever::ProcessOutputs => {
+            "Spawns' outputs moved out of where they ran: a remote executor uploading them \
+             to its cache, a local sandbox or worker copying them into place. Fewer, \
+             smaller outputs move faster."
+        }
+        Lever::Fetch => {
+            "Downloading spawns' outputs, beyond the time in calls to the cache: \
+             --remote_download_toplevel (the default from Bazel 7.0) or \
+             --remote_download_minimal fetches only the outputs needed locally."
+        }
+        Lever::LocalOnRemote => {
+            "Steps executed locally in a build whose execution log shows spawns executed \
+             remotely: a strategy or a no-remote tag may be keeping them off the remote \
+             executor."
+        }
+        Lever::CacheHitOverhead => {
+            "Steps with neither an action span nor a logged spawn, likely action-cache \
+             hits, that still took time: Bazel checking their inputs and outputs, which \
+             output-checking and digest settings bear on."
+        }
     }
 }
 
@@ -432,6 +531,14 @@ mod tests {
         assert_eq!(
             folded(&["parse", "network", "fetch"]),
             "parse, network and fetch"
+        );
+    }
+
+    #[test]
+    fn a_lever_says_its_time_and_what_pulls_it() {
+        assert_eq!(
+            lever(Lever::Fetch, ms(1500)),
+            "downloads 1.50s → --remote_download_minimal"
         );
     }
 

@@ -47,15 +47,22 @@ pub struct Coverage {
     own: Duration,
     phases: [Duration; Phase::ALL.len()],
     around: Duration,
+    /// Whether the log records a spawn executed remotely anywhere in the
+    /// build, on the path or off it: evidence that remote execution was
+    /// available to its actions.
+    remote_executed: bool,
 }
 
 impl Coverage {
-    fn none() -> Coverage {
+    fn new(log: &LoggedSpawns) -> Coverage {
         Coverage {
             steps: 0,
             own: Duration::ZERO,
             phases: [Duration::ZERO; Phase::ALL.len()],
             around: Duration::ZERO,
+            remote_executed: log
+                .iter()
+                .any(|spawn| spawn.ran_on() == SpawnRunner::RemoteExecution),
         }
     }
 
@@ -433,7 +440,7 @@ impl CriticalPath {
         let tail = cursor.left();
         let coverage = log.map(|log| {
             let tallies = logged::join(&steps, log);
-            let mut coverage = Coverage::none();
+            let mut coverage = Coverage::new(log);
             for (step, tally) in steps.iter_mut().zip(tallies) {
                 if let Some(tally) = tally {
                     step.work = step.work.with_spawns(&tally);
@@ -512,6 +519,135 @@ impl CriticalPath {
             .iter()
             .filter(|step| !step.gap.is_zero())
             .max_by_key(|step| step.gap)
+    }
+}
+
+/// What would shorten a critical path, each acting on a share of its time.
+/// Levers overlap: a local spawn's execution counts toward
+/// [`Execution`](Lever::Execution) and [`LocalOnRemote`](Lever::LocalOnRemote)
+/// alike. A phase whose cause differs between where a spawn ran is split
+/// into a lever for each, by what answered the step's action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lever {
+    /// The lead-in: loading, analysis and fetching repositories.
+    LeadIn,
+    /// Steps waiting on inputs off the path or for a free job slot.
+    Waiting,
+    /// Spawns queued for a remote executor.
+    RemoteQueue,
+    /// Spawns waiting for local resources to run on.
+    LocalQueue,
+    /// Spawns building their remote execution requests.
+    Parse,
+    /// Spawns uploading inputs the remote cache lacked.
+    Upload,
+    /// Spawns waiting on calls to the remote cache.
+    Network,
+    /// Remote executors staging spawns' inputs.
+    RemoteSetup,
+    /// Bazel fetching spawns' inputs and setting up their sandboxes or
+    /// workers.
+    LocalSetup,
+    /// Spawns running their commands.
+    Execution,
+    /// Spawns' outputs moved out of where they ran.
+    ProcessOutputs,
+    /// Spawns' outputs downloaded.
+    Fetch,
+    /// Steps executed locally in a build whose execution log shows spawns
+    /// executed remotely.
+    LocalOnRemote,
+    /// Steps with neither an action span nor a logged spawn, likely
+    /// action-cache hits, that still took time; only where an execution log
+    /// was given, without which a spawned step looks the same.
+    CacheHitOverhead,
+}
+
+impl Lever {
+    pub const ALL: [Lever; 14] = [
+        Lever::LeadIn,
+        Lever::Waiting,
+        Lever::RemoteQueue,
+        Lever::LocalQueue,
+        Lever::Parse,
+        Lever::Upload,
+        Lever::Network,
+        Lever::RemoteSetup,
+        Lever::LocalSetup,
+        Lever::Execution,
+        Lever::ProcessOutputs,
+        Lever::Fetch,
+        Lever::LocalOnRemote,
+        Lever::CacheHitOverhead,
+    ];
+}
+
+impl CriticalPath {
+    /// The levers that act on any of the path's time, the one acting on the
+    /// most first, and of equal times in the order of [`Lever::ALL`].
+    pub fn levers(&self) -> Vec<(Lever, Duration)> {
+        let mut levers: Vec<(Lever, Duration)> = Lever::ALL
+            .into_iter()
+            .map(|lever| (lever, self.acted_on(lever)))
+            .filter(|(_, time)| !time.is_zero())
+            .collect();
+        levers.sort_by_key(|&(_, time)| std::cmp::Reverse(time));
+        levers
+    }
+
+    /// The time on the path `lever` acts on.
+    fn acted_on(&self, lever: Lever) -> Duration {
+        let phase = |phase: Phase| {
+            self.coverage
+                .map_or(Duration::ZERO, |coverage| coverage.phase(phase))
+        };
+        let spawned = || {
+            self.steps
+                .iter()
+                .filter_map(|step| step.work().spawned().copied())
+        };
+        let phase_where = |phase: Phase, ran: fn(SpawnRunner) -> bool| -> Duration {
+            spawned()
+                .filter(|spawned| ran(spawned.runner()))
+                .map(|spawned| spawned.phase(phase))
+                .sum()
+        };
+        let remotely = |runner: SpawnRunner| runner == SpawnRunner::RemoteExecution;
+        let locally =
+            |runner: SpawnRunner| runner.executed() && runner != SpawnRunner::RemoteExecution;
+        let own_of = |pick: &dyn Fn(&Step) -> bool| -> Duration {
+            self.steps
+                .iter()
+                .filter(|step| pick(step))
+                .map(Step::own)
+                .sum()
+        };
+        match lever {
+            Lever::LeadIn => self.lead_in(),
+            Lever::Waiting => self.time_in(Part::Waiting),
+            Lever::RemoteQueue => phase_where(Phase::Queue, remotely),
+            Lever::LocalQueue => phase_where(Phase::Queue, locally),
+            Lever::Parse => phase(Phase::Parse),
+            Lever::Upload => phase(Phase::Upload),
+            Lever::Network => phase(Phase::Network),
+            Lever::RemoteSetup => phase_where(Phase::Setup, remotely),
+            Lever::LocalSetup => phase_where(Phase::Setup, locally),
+            Lever::Execution => phase(Phase::Execute),
+            Lever::ProcessOutputs => phase(Phase::ProcessOutputs),
+            Lever::Fetch => phase(Phase::Fetch),
+            Lever::LocalOnRemote => match self.coverage {
+                Some(coverage) if coverage.remote_executed => own_of(&|step| {
+                    step.work()
+                        .spawned()
+                        .is_some_and(|spawned| locally(spawned.runner()))
+                }),
+                _ => Duration::ZERO,
+            },
+            Lever::CacheHitOverhead => match self.coverage {
+                Some(_) => own_of(&|step| matches!(step.work(), Work::Unspanned(Ran::Unlogged(_)))),
+                None => Duration::ZERO,
+            },
+        }
     }
 }
 
