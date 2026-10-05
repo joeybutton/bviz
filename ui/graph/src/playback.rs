@@ -1,10 +1,12 @@
-//! Where the execution attempts a profile recorded stood at each instant,
-//! placed on the nodes of a graph.
+//! Where the execution attempts of an invocation stood at each instant, and
+//! how they ended, placed on the nodes of a graph.
 
 use crate::status::Landings;
 use crate::timing::Slot;
 use bviz_graph_layout::{Graph, Id, Kind};
-use bviz_invocation::{Attempt, Done, EpochMicros, MergedAttempts, Phase, Venue};
+use bviz_invocation::{
+    Attempt, Cache, Done, EpochMicros, MergedAttempts, Phase, SpawnCache, Venue,
+};
 
 /// Where a node stands at one instant, of the execution attempts landing on
 /// it and on everything it contains.
@@ -24,7 +26,7 @@ impl NodeState {
     const FIRST_DONE: usize = Self::FIRST_IN + Stage::COUNT;
 
     /// Every state, at its [`index`](Self::index).
-    pub(crate) const ALL: [NodeState; Self::FIRST_DONE + 2] = [
+    pub(crate) const ALL: [NodeState; Self::FIRST_DONE + Ended::COUNT] = [
         NodeState::Pending,
         NodeState::In(Stage::Preparing),
         NodeState::In(Stage::CheckingCache),
@@ -34,14 +36,15 @@ impl NodeState {
         NodeState::In(Stage::Running(Running::Action(Venue::Remote))),
         NodeState::Done(Ended::Executed),
         NodeState::Done(Ended::Cached),
+        NodeState::Done(Ended::UpToDate),
+        NodeState::Done(Ended::Failed),
     ];
 
     const fn index(self) -> usize {
         match self {
             NodeState::Pending => 0,
             NodeState::In(stage) => Self::FIRST_IN + stage.index(),
-            NodeState::Done(Ended::Executed) => Self::FIRST_DONE,
-            NodeState::Done(Ended::Cached) => Self::FIRST_DONE + 1,
+            NodeState::Done(ended) => Self::FIRST_DONE + ended.index(),
         }
     }
 
@@ -57,6 +60,8 @@ impl NodeState {
             NodeState::In(Stage::Running(Running::Action(Venue::Remote))) => "running remotely",
             NodeState::Done(Ended::Executed) => "done, executed",
             NodeState::Done(Ended::Cached) => "done, cached",
+            NodeState::Done(Ended::UpToDate) => "up to date",
+            NodeState::Done(Ended::Failed) => "failed",
         }
     }
 }
@@ -69,12 +74,61 @@ const _: () = {
     }
 };
 
-/// How the attempts a node holds ended, together.
+/// How the attempts a node holds ended, together, as [`roll_up`] combines
+/// their endings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Ended {
     Executed,
-    /// A cache answered every one.
+    /// A cache answered every one, a remote or disk cache at least one.
     Cached,
+    /// The action cache found every one up to date.
+    UpToDate,
+    Failed,
+}
+
+impl Ended {
+    const COUNT: usize = 4;
+
+    const fn index(self) -> usize {
+        match self {
+            Ended::Executed => 0,
+            Ended::Cached => 1,
+            Ended::UpToDate => 2,
+            Ended::Failed => 3,
+        }
+    }
+
+    fn of(done: Done) -> Self {
+        match done {
+            Done::Executed => Ended::Executed,
+            Done::Cached(Cache::Spawn(_)) => Ended::Cached,
+            Done::Cached(Cache::Action) => Ended::UpToDate,
+            Done::Failed => Ended::Failed,
+        }
+    }
+}
+
+/// How the actions of a box ended together where some ended as `one` says and
+/// the rest as `other` does: failed where either failed, otherwise executed where either
+/// executed, otherwise answered by a remote or disk cache where either was,
+/// naming a cache only where both name the same one, and otherwise up to
+/// date.
+fn roll_up(one: Done, other: Done) -> Done {
+    const fn weight(done: Done) -> u8 {
+        match done {
+            Done::Cached(Cache::Action) => 0,
+            Done::Cached(Cache::Spawn(_)) => 1,
+            Done::Executed => 2,
+            Done::Failed => 3,
+        }
+    }
+    match (one, other) {
+        (Done::Cached(Cache::Spawn(one)), Done::Cached(Cache::Spawn(other))) if one != other => {
+            Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk))
+        }
+        _ if weight(other) > weight(one) => other,
+        _ => one,
+    }
 }
 
 /// A set of [`NodeState`]s, a bit per [`NodeState::index`].
@@ -167,7 +221,7 @@ struct Life {
     entered: [Option<EpochMicros>; Phase::ALL.len()],
     /// By [`venue_slot`], the microseconds they spent running there.
     running: [i64; Venue::ALL.len()],
-    cached: bool,
+    done: Done,
 }
 
 impl Life {
@@ -188,11 +242,33 @@ impl Life {
             end: attempt.end(),
             entered: Phase::ALL.map(|phase| attempt.entered(phase)),
             running,
-            cached: matches!(attempt.done(), Done::Cached(_)),
+            done: attempt.done(),
         }
     }
 
+    /// What the attempts of one action add up to, `tried` in the order they
+    /// were made; `None` for none. The action ends as its last attempt does,
+    /// so one passing when retried has not failed.
+    fn of_action(tried: impl IntoIterator<Item = Attempt>) -> Option<Self> {
+        tried
+            .into_iter()
+            .map(|attempt| Life::of(&attempt))
+            .reduce(|mut life, later| {
+                life.cover(&later);
+                life.done = later.done;
+                life
+            })
+    }
+
+    /// What this and `other`, the attempts of another action, add up to
+    /// together, ending as [`roll_up`] combines them.
     fn absorb(&mut self, other: &Life) {
+        self.cover(other);
+        self.done = roll_up(self.done, other.done);
+    }
+
+    /// Takes in the time `other` spans and spends.
+    fn cover(&mut self, other: &Life) {
         self.start = self.start.min(other.start);
         self.end = self.end.max(other.end);
         for (earliest, then) in self.entered.iter_mut().zip(other.entered) {
@@ -204,7 +280,6 @@ impl Life {
         for (spent, more) in self.running.iter_mut().zip(other.running) {
             *spent += more;
         }
-        self.cached &= other.cached;
     }
 }
 
@@ -224,7 +299,7 @@ struct Held {
     checking_cache: Option<EpochMicros>,
     scheduling: Option<EpochMicros>,
     runs: Option<Runs>,
-    done: Ended,
+    done: Done,
 }
 
 impl Held {
@@ -245,10 +320,7 @@ impl Held {
             checking_cache: entered(Phase::CheckingCache),
             scheduling: entered(Phase::Scheduling),
             runs,
-            done: match life.cached {
-                true => Ended::Cached,
-                false => Ended::Executed,
-            },
+            done: life.done,
         }
     }
 
@@ -270,7 +342,7 @@ impl Held {
             return NodeState::Pending;
         }
         if at >= self.end {
-            return NodeState::Done(self.done);
+            return NodeState::Done(Ended::of(self.done));
         }
         let furthest = self
             .stages()
@@ -284,7 +356,7 @@ impl Held {
     fn reached(&self) -> States {
         let mut reached = States::default()
             .with(NodeState::Pending)
-            .with(NodeState::Done(self.done));
+            .with(NodeState::Done(Ended::of(self.done)));
         let mut until = self.end;
         for (entered, stage) in self.stages().rev() {
             if entered < until {
@@ -315,18 +387,17 @@ impl NodeStates {
         graph: &Graph,
         attempts: &MergedAttempts<'a>,
     ) -> Option<Self> {
-        let recorded = attempts
-            .actions()
-            .map(|(_, _, tried)| tried.len())
-            .sum::<usize>()
+        let recorded = attempts.actions().count()
             + attempts
                 .by_owner()
                 .map(|(_, tried)| tried.len())
                 .sum::<usize>();
         let mut landed: Vec<(Id, Life)> = Vec::with_capacity(recorded);
         for (primary_output, owner, tried) in attempts.actions() {
-            if let Some(node) = landings.action(primary_output, owner) {
-                landed.extend(tried.iter().map(|attempt| (node, Life::of(&attempt))));
+            if let Some(node) = landings.action(primary_output, owner)
+                && let Some(life) = Life::of_action(tried.iter())
+            {
+                landed.push((node, life));
             }
         }
         for (owner, tried) in attempts.by_owner() {
@@ -517,8 +588,7 @@ pub(crate) mod tests {
             let expected = match compile.state_at(at(t)) {
                 bviz_invocation::State::Pending => NodeState::Pending,
                 bviz_invocation::State::In(phase) => NodeState::In(action_stage(phase)),
-                bviz_invocation::State::Done(Done::Cached(_)) => NodeState::Done(Ended::Cached),
-                bviz_invocation::State::Done(_) => NodeState::Done(Ended::Executed),
+                bviz_invocation::State::Done(done) => NodeState::Done(Ended::of(done)),
             };
             assert_eq!(states.at(action, at(t)), Some(expected), "at {t}");
         }
@@ -605,6 +675,98 @@ pub(crate) mod tests {
         let built = Built::new(&[("bazel-out/a.o", &hit), ("bazel-out/b.o", &hit)]);
         let state = built.states().at(built.package, at(10));
         assert_eq!(state, Some(NodeState::Done(Ended::Cached)));
+    }
+
+    /// An attempt `start` to `end` that ran locally and ended as `done` says.
+    fn ended(start: i64, end: i64, done: Done) -> Attempt {
+        Attempt::ended(at(start), at(end), [(LOCAL, at(start))], done)
+    }
+
+    const UP_TO_DATE: Done = Done::Cached(Cache::Action);
+
+    fn spawn_hit(cache: SpawnCache) -> Done {
+        Done::Cached(Cache::Spawn(cache))
+    }
+
+    /// How the package holding actions whose attempts ended as each of
+    /// `endings` says ends.
+    fn rolled_up(endings: &[Done]) -> Option<NodeState> {
+        let outputs: Vec<String> = (0..endings.len())
+            .map(|i| format!("bazel-out/{i}.o"))
+            .collect();
+        let tried: Vec<[Attempt; 1]> = endings.iter().map(|&done| [ended(0, 10, done)]).collect();
+        let actions: Vec<(&str, &[Attempt])> = outputs
+            .iter()
+            .zip(&tried)
+            .map(|(output, tried)| (output.as_str(), &tried[..]))
+            .collect();
+        let built = Built::new(&actions);
+        built.states().at(built.package, at(10))
+    }
+
+    #[test]
+    fn a_container_fails_where_any_attempt_under_it_failed() {
+        let executed = Done::Executed;
+        for endings in [
+            &[Done::Failed][..],
+            &[executed, Done::Failed],
+            &[UP_TO_DATE, Done::Failed, spawn_hit(SpawnCache::Disk)],
+        ] {
+            assert_eq!(
+                rolled_up(endings),
+                Some(NodeState::Done(Ended::Failed)),
+                "{endings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_action_ends_as_its_last_attempt_does() {
+        let retried = [ended(0, 10, Done::Failed), ended(20, 30, Done::Executed)];
+        let failing = [ended(0, 10, Done::Executed), ended(20, 30, Done::Failed)];
+        let built = Built::new(&[("bazel-out/a.o", &retried), ("bazel-out/b.o", &failing)]);
+        let states = built.states();
+        let ended_at = |node| states.at(node, at(30));
+        assert_eq!(
+            ended_at(built.actions[0]),
+            Some(NodeState::Done(Ended::Executed))
+        );
+        assert_eq!(
+            ended_at(built.actions[1]),
+            Some(NodeState::Done(Ended::Failed))
+        );
+        assert_eq!(
+            ended_at(built.package),
+            Some(NodeState::Done(Ended::Failed))
+        );
+        let passing = Built::new(&[("bazel-out/a.o", &retried)]);
+        assert_eq!(
+            passing.states().at(passing.package, at(30)),
+            Some(NodeState::Done(Ended::Executed))
+        );
+    }
+
+    #[test]
+    fn a_container_is_up_to_date_only_where_every_attempt_was() {
+        let disk = spawn_hit(SpawnCache::Disk);
+        let done = |ended| Some(NodeState::Done(ended));
+        assert_eq!(rolled_up(&[UP_TO_DATE, UP_TO_DATE]), done(Ended::UpToDate));
+        assert_eq!(rolled_up(&[UP_TO_DATE, disk]), done(Ended::Cached));
+        assert_eq!(
+            rolled_up(&[UP_TO_DATE, Done::Executed]),
+            done(Ended::Executed)
+        );
+        assert_eq!(rolled_up(&[disk, Done::Executed]), done(Ended::Executed));
+    }
+
+    #[test]
+    fn caches_roll_up_to_the_one_they_all_name_or_to_either() {
+        let [remote, disk] = [SpawnCache::Remote, SpawnCache::Disk].map(spawn_hit);
+        assert_eq!(roll_up(disk, disk), disk);
+        assert_eq!(roll_up(UP_TO_DATE, disk), disk);
+        assert_eq!(roll_up(disk, UP_TO_DATE), disk);
+        assert_eq!(roll_up(remote, disk), spawn_hit(SpawnCache::RemoteOrDisk));
+        assert_eq!(roll_up(Done::Failed, Done::Executed), Done::Failed);
     }
 
     /// A container's actions each run on a venue of their own, so the

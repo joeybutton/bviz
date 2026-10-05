@@ -248,6 +248,32 @@ const CACHED_TINT: StateTint = StateTint {
     blend: 0.441,
     lift: -0.146,
 };
+const UP_TO_DATE_TINT: StateTint = StateTint {
+    blend: 0.575,
+    lift: -0.14,
+};
+
+/// A playback state's tint on a canvas that takes black text and on one that
+/// takes white, for a state no one tint holds within the bounds on both.
+#[derive(Clone, Copy)]
+struct PolarTint {
+    light: StateTint,
+    dark: StateTint,
+}
+
+/// A failed box is as deep in chroma as a running one, and stands off a
+/// transitive connector's red faded across it; on a dark canvas only a red
+/// deeper than a light canvas's does both.
+const FAILED_TINT: PolarTint = PolarTint {
+    light: StateTint {
+        blend: 0.125,
+        lift: -0.15,
+    },
+    dark: StateTint {
+        blend: 0.0,
+        lift: -0.28,
+    },
+};
 
 /// How far a playback state's slot is carried from the first of the two slots
 /// it lies between toward the second.
@@ -255,6 +281,7 @@ const PREPARING_HUE: f32 = 0.88;
 const RUNNING_HUE: f32 = 0.4;
 const RUNNING_REMOTELY_HUE: f32 = 0.05;
 const CACHED_HUE: f32 = 0.26;
+const UP_TO_DATE_HUE: f32 = 0.5;
 
 /// How far the neutral slot is carried toward the canvas to fill a box whose
 /// actions ran on a mix of runners.
@@ -674,8 +701,9 @@ impl Palette {
     /// neutral slot; one on its way to running deepens through blues, one
     /// running warms to the amber of a construction site (an action locally
     /// toward orange and remotely toward yellow, a container between them),
-    /// and one done settles to a green low in chroma, a cache hit nearer the
-    /// canvas and toward cyan.
+    /// and one done settles to a green low in chroma, a hit in a remote or
+    /// disk cache nearer the canvas and toward cyan, and one the action cache
+    /// found up to date toward yellow. One that failed is red.
     pub(crate) fn state_fill(&self, state: NodeState) -> Rgba {
         let d = &self.data;
         let between = bviz_ui_theme::mix;
@@ -698,6 +726,10 @@ impl Palette {
             ),
             NodeState::Done(Ended::Executed) => (d.green.into(), EXECUTED_TINT),
             NodeState::Done(Ended::Cached) => (between(d.green, d.cyan, CACHED_HUE), CACHED_TINT),
+            NodeState::Done(Ended::UpToDate) => {
+                (between(d.green, d.yellow, UP_TO_DATE_HUE), UP_TO_DATE_TINT)
+            }
+            NodeState::Done(Ended::Failed) => (d.red.into(), self.polar(FAILED_TINT)),
         };
         let carried = bviz_ui_theme::mix(slot, self.background, tint.blend);
         bviz_ui_theme::lighten(carried, tint.lift * self.mark_lift().signum())
@@ -758,6 +790,14 @@ impl Palette {
             Status::TestFailed | Status::Failed | Status::RootCause => self.colors.error,
         }
         .into()
+    }
+
+    /// Of `tint`, the one for this palette's canvas.
+    fn polar(&self, tint: PolarTint) -> StateTint {
+        match self.mark_lift() > 0.0 {
+            true => tint.dark,
+            false => tint.light,
+        }
     }
 
     /// [`MARK_LIFT`] signed to point away from the canvas: up on a theme dark
@@ -2941,12 +2981,52 @@ mod colors {
             for settled in [
                 NodeState::Done(Ended::Executed),
                 NodeState::Done(Ended::Cached),
+                NodeState::Done(Ended::UpToDate),
             ] {
                 let settles = chroma(settled);
                 assert!(
                     settles < scheduling,
                     "{theme} {settled:?}: {settles} against {scheduling}"
                 );
+            }
+        }
+    }
+
+    /// Failure is what a reader scans a build for, so a failed box stands out
+    /// at least as far as a running one.
+    #[test]
+    fn a_failed_box_is_as_deep_in_chroma_as_a_running_one() {
+        for (theme, p) in palettes() {
+            let chroma = |state| oklch(p.state_fill(state)).chroma;
+            let failed = chroma(NodeState::Done(Ended::Failed));
+            for running in [
+                Running::Container,
+                Running::Action(Venue::Local),
+                Running::Action(Venue::Remote),
+            ] {
+                let running = chroma(NodeState::In(Stage::Running(running)));
+                assert!(
+                    failed >= running,
+                    "{theme}: failed {failed}, running {running}"
+                );
+            }
+        }
+    }
+
+    /// A state is worn by a box that is drawn either way, so no state's fill
+    /// sinks into the canvas, or passes it to the side no other box fill
+    /// takes.
+    #[test]
+    fn every_state_stands_off_the_canvas_on_the_side_box_fills_take() {
+        for (theme, p) in palettes() {
+            let canvas = oklch(p.background).lightness;
+            let side = |fill| (oklch(fill).lightness - canvas).signum();
+            let boxes = side(p.untimed_fill(Kind::Action, false));
+            for state in NodeState::ALL {
+                let fill = p.state_fill(state);
+                let apart = distance(fill, p.background);
+                assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {state:?}: {apart}");
+                assert_eq!(side(fill), boxes, "{theme} {state:?}");
             }
         }
     }
