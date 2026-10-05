@@ -759,8 +759,20 @@ pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<G
 /// opens is not held to the caps sizing the opening view: the node must be
 /// drawn to be shown.
 pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    let mut opened = false;
+    for container in holders(view, id) {
+        opened |= view.derived.expanded.insert(container);
+    }
+    if opened {
+        request(view, cx);
+    }
+}
+
+/// The containers holding `id` in the layered layout's graph, innermost
+/// first.
+fn holders(view: &GraphPanel, id: Id) -> Vec<Id> {
     let Some(slice) = &view.derived.slice else {
-        return;
+        return Vec::new();
     };
     let nodes = &slice.base.nodes;
     let mut parents: HashMap<Id, Id> = HashMap::with_capacity(nodes.len());
@@ -770,13 +782,21 @@ pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPan
             .filter_map(|node| Some((node.id, node.parent?))),
     );
     let parent = |id: Id| parents.get(&id).copied();
-    let mut opened = false;
-    for container in std::iter::successors(parent(id), |&container| parent(container)) {
-        opened |= view.derived.expanded.insert(container);
-    }
-    if opened {
-        request(view, cx);
-    }
+    std::iter::successors(parent(id), |&container| parent(container)).collect()
+}
+
+/// The innermost box of the layered drawing on screen standing for `id`: its
+/// own, or else that of the innermost container holding it, opening none.
+/// `None` where the drawing holds neither, or is yet to be derived.
+pub(crate) fn drawn_holder(view: &GraphPanel, id: Id) -> Option<Id> {
+    let drawn = view.derived.drawn(LayoutMode::Layered)?;
+    let Drawn::Layered { view: laid, .. } = &drawn else {
+        return None;
+    };
+    let boxes: HashSet<Id> = laid.boxes.iter().map(|b| b.id).collect();
+    std::iter::once(id)
+        .chain(holders(view, id))
+        .find(|candidate| boxes.contains(candidate))
 }
 
 /// Flips whether the layered layout keeps every edge or only the transitive

@@ -126,6 +126,8 @@ pub(crate) struct Loaded {
     /// Where the steps of the invocation's critical path land.
     critical: CriticalNodes,
     traced: Revision,
+    /// Which of its session's choices of a critical-path step was last shown.
+    chosen: Revision,
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
@@ -155,6 +157,7 @@ impl Loaded {
             timed: Revision::default(),
             critical: CriticalNodes::default(),
             traced: Revision::default(),
+            chosen: Revision::default(),
             dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
             states: None,
@@ -237,6 +240,23 @@ impl Loaded {
         let changed = self.states != states;
         self.states = states;
         changed
+    }
+
+    /// Takes the choice of a critical-path step `session` holds as one
+    /// shown: one made before the graph landed is no choice to show it.
+    fn pass_over_chosen_step(&mut self, session: &Session) {
+        self.chosen = session.chosen_step_revision();
+    }
+
+    /// The node of the critical-path step `session` holds chosen, where it
+    /// was chosen since this last asked and lands on the graph.
+    fn take_up_chosen_step(&mut self, session: &Session) -> Option<Id> {
+        let revision = session.chosen_step_revision();
+        if self.chosen == revision {
+            return None;
+        }
+        self.chosen = revision;
+        self.critical.step(session.chosen_step()?)
     }
 
     fn take_up_critical_path(&mut self, session: &Session) -> bool {
@@ -456,6 +476,18 @@ pub(crate) struct MapPlaced;
 pub(crate) struct RevealRequested {
     pub(crate) panel: EntityId,
     pub(crate) node: Id,
+    pub(crate) reveal: Reveal,
+}
+
+/// How a node is revealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reveal {
+    /// The node's own box is drawn, opening what holds it, and the panel is
+    /// brought forward with its pane made the active one.
+    Activate,
+    /// The drawing stays as it is, the box standing for the node there being
+    /// the one shown, and so does the panel's place among its pane's.
+    InPlace,
 }
 
 /// The graph panel the graph's other views defer to.
@@ -617,8 +649,9 @@ impl GraphModel {
             },
             move |model, result: Result<(Read, Configurations), String>, cx| {
                 model.source = match result {
-                    Ok((read, described)) => {
+                    Ok((mut read, described)) => {
                         if let Some(joined) = &model.joined {
+                            read.loaded.pass_over_chosen_step(joined.session.read(cx));
                             joined.session.update(cx, |session, cx| {
                                 session.add_configurations(described);
                                 cx.notify();
@@ -642,11 +675,36 @@ impl GraphModel {
 
     /// Takes up what the session's build reports of the loaded graph.
     fn take_up(&mut self, cx: &mut Context<Self>) {
-        if let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source)
-            && loaded.report(joined.session.read(cx))
-        {
+        let Some(session) = self.joined.as_ref().map(|joined| joined.session.clone()) else {
+            return;
+        };
+        let (changed, reveal) = self.take_up_from(session.read(cx));
+        if changed {
             cx.notify();
         }
+        if let Some(reveal) = reveal {
+            cx.emit(reveal);
+        }
+    }
+
+    /// Takes up what `session` reports of the loaded graph, saying whether
+    /// that changed anything a view of it shows, and the reveal of the
+    /// critical-path step chosen since, which the panel the graph's other
+    /// views defer to shows in place.
+    fn take_up_from(&mut self, session: &Session) -> (bool, Option<RevealRequested>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return (false, None);
+        };
+        let changed = loaded.report(session);
+        let reveal = loaded
+            .take_up_chosen_step(session)
+            .zip(self.deferred.as_ref())
+            .map(|(node, deferred)| RevealRequested {
+                panel: deferred.panel,
+                node,
+                reveal: Reveal::InPlace,
+            });
+        (changed, reveal)
     }
 
     /// Waits on `placing` and lands the map it places through `landing`.
@@ -843,6 +901,7 @@ impl GraphModel {
             cx.emit(RevealRequested {
                 panel: deferred.panel,
                 node: id,
+                reveal: Reveal::Activate,
             });
         }
     }
@@ -1042,6 +1101,76 @@ mod tests {
         session.report_critical_path(vec![step("bazel-out/bin/app/other")]);
         assert!(loaded.report(&session));
         assert!(!loaded.critical().any());
+    }
+
+    /// Each choice of a step is shown once, the same step chosen again
+    /// included, and a step landing off the graph is shown as none.
+    #[test]
+    fn a_graph_shows_each_chosen_critical_path_step_once() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+        session.report_critical_path(vec![
+            step("bazel-out/bin/app/bin"),
+            step("bazel-out/bin/app/other"),
+        ]);
+        loaded.report(&session);
+        assert_eq!(loaded.take_up_chosen_step(&session), None);
+
+        assert!(session.choose_step(Some(0)));
+        let shown = loaded.take_up_chosen_step(&session);
+        assert!(shown.is_some());
+        assert_eq!(loaded.take_up_chosen_step(&session), None);
+        assert!(session.choose_step(Some(0)));
+        assert_eq!(loaded.take_up_chosen_step(&session), shown);
+
+        assert!(session.choose_step(Some(1)));
+        assert_eq!(loaded.take_up_chosen_step(&session), None);
+        assert!(session.choose_step(None));
+        assert_eq!(loaded.take_up_chosen_step(&session), None);
+    }
+
+    /// A step chosen before the graph landed is not shown on its landing.
+    #[test]
+    fn a_graph_passes_over_a_step_chosen_before_it_landed() {
+        let mut session = Session::default();
+        let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
+        session.report_critical_path(vec![step]);
+        assert!(session.choose_step(Some(0)));
+        let mut loaded = loaded();
+        loaded.pass_over_chosen_step(&session);
+        loaded.report(&session);
+        assert_eq!(loaded.take_up_chosen_step(&session), None);
+
+        assert!(session.choose_step(Some(0)));
+        assert!(loaded.take_up_chosen_step(&session).is_some());
+    }
+
+    /// A chosen step is revealed in place, in the panel the graph's other
+    /// views defer to.
+    #[test]
+    fn a_chosen_step_is_revealed_in_place_in_the_deferred_to_panel() {
+        let mut session = Session::default();
+        let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
+        session.report_critical_path(vec![step]);
+        let mut model = GraphModel::new(Task::ready(()));
+        model.source = Source::Loaded(loaded());
+        let panel = EntityId::from(1);
+        model.deferred = Some(Deferred {
+            panel,
+            filter: Filter::default(),
+            _released: Subscription::new(|| {}),
+        });
+        assert!(model.take_up_from(&session).1.is_none());
+
+        assert!(session.choose_step(Some(0)));
+        let (_, reveal) = model.take_up_from(&session);
+        let reveal = reveal.expect("a reveal");
+        assert_eq!((reveal.panel, reveal.reveal), (panel, Reveal::InPlace));
+        assert_eq!(
+            Some(reveal.node),
+            model.loaded().and_then(|l| l.critical().step(0))
+        );
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.

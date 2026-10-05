@@ -164,7 +164,7 @@ impl CriticalPathPanel {
         let Some(last) = steps.checked_sub(1) else {
             return;
         };
-        let index = match model.chosen_step() {
+        let index = match model.chosen_step(cx) {
             Some((chosen, _)) => chosen.saturating_add_signed(by).min(last),
             None => 0,
         };
@@ -265,7 +265,7 @@ impl CriticalPathPanel {
                 };
                 let whole = path.path();
                 let logged = Logged::of(path);
-                let chosen = model.chosen_step().map(|(index, _)| index);
+                let chosen = model.chosen_step(cx).map(|(index, _)| index);
                 range
                     .map(|index| {
                         let entity = entity.clone();

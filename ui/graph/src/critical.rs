@@ -66,6 +66,11 @@ impl CriticalNodes {
         !self.steps.is_empty()
     }
 
+    /// The node step `index` lands on, if it lands on the graph.
+    pub(crate) fn step(&self, index: usize) -> Option<Id> {
+        self.steps.get(index).copied().flatten()
+    }
+
     /// Whether the box drawing the node `id` stands for a step: the step's
     /// own node, or, drawn `closed` over what it contains, one holding a
     /// step's node. An open box leaves the mark to the boxes it draws inside
@@ -154,6 +159,11 @@ mod tests {
         assert!(nodes.marks(linked, false), "owns an action the graph lacks");
         assert!(!nodes.marks(compiled, false), "open over the step's action");
         assert!(nodes.marks(tested, false), "names no primary output");
+        assert_eq!(nodes.step(0), Some(compile));
+        assert_eq!(nodes.step(1), Some(linked));
+        assert_eq!(nodes.step(2), None);
+        assert_eq!(nodes.step(3), Some(tested));
+        assert_eq!(nodes.step(4), None);
     }
 
     #[test]

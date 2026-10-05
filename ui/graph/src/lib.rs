@@ -75,7 +75,7 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, RevealRequested, SourceReplaced};
+use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -441,7 +441,10 @@ impl GraphPanel {
         });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
-                reveal(view, event.node, cx);
+                match event.reveal {
+                    Reveal::Activate => reveal(view, event.node, cx),
+                    Reveal::InPlace => show_in_place(view, event.node, cx),
+                }
             }
         });
         let derived = Derived::new();
@@ -1023,6 +1026,22 @@ fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     }
     view.framing.request_frame(framing::Frame::Node(id));
     cx.emit(PanelEvent::Activate);
+    view.invalidate_canvas(cx);
+}
+
+/// Selects and frames the box standing for `id` in the drawing as it is: in
+/// a layered drawing the innermost drawn box holding it, which opens none and
+/// so lays nothing out afresh.
+fn show_in_place(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    let shown = match view.mode {
+        LayoutMode::Layered => derive::drawn_holder(view, id),
+        LayoutMode::Map => Some(id),
+    };
+    let Some(shown) = shown else {
+        return;
+    };
+    view.selection.select(shown);
+    view.framing.request_frame(framing::Frame::Node(shown));
     view.invalidate_canvas(cx);
 }
 

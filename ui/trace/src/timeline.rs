@@ -448,7 +448,7 @@ impl Timeline {
         let (time, span, rows) = {
             let model = self.model.read(cx);
             let (Some(profile), Some(layout), Some((_, step))) =
-                (model.profile(), model.lane_layout(), model.chosen_step())
+                (model.profile(), model.lane_layout(), model.chosen_step(cx))
             else {
                 return;
             };
@@ -1830,7 +1830,7 @@ fn overlay_paint(
             let chosen: Vec<SliceAt> = timeline
                 .model
                 .read(cx)
-                .chosen_step()
+                .chosen_step(cx)
                 .map(|(_, step)| step_slices(step).collect())
                 .unwrap_or_default();
             match (&timeline.slice_draw, chosen.is_empty()) {
