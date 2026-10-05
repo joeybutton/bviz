@@ -58,6 +58,15 @@ pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Visibility> {
     filter.pins.get(&node).copied()
 }
 
+/// The name `node` is listed under: the canonical label of the target it
+/// belongs to, and its node name where it belongs to none.
+pub(crate) fn name(names: &Names, facets: &Facets, node: Id) -> SharedString {
+    carried_label(names, facets, node)
+        .unwrap_or_else(|| names.resolve(node))
+        .to_string()
+        .into()
+}
+
 /// `filter` with every override dropped, leaving each node to the rules again.
 pub(crate) fn cleared(filter: &Filter) -> Filter {
     Filter {
@@ -83,8 +92,6 @@ impl Pins {
 /// One override in force.
 struct Held {
     node: Id,
-    /// The canonical label of the target the node belongs to, and its node name
-    /// where it belongs to none.
     label: SharedString,
     pin: Visibility,
 }
@@ -92,15 +99,10 @@ struct Held {
 /// The overrides `filter` holds, by the name each is listed under.
 fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
     let mut held: Vec<Held> = Vec::with_capacity(filter.pins.len());
-    held.extend(filter.pins.iter().map(|(&node, &pin)| {
-        Held {
-            node,
-            label: carried_label(names, facets, node)
-                .unwrap_or_else(|| names.resolve(node))
-                .to_string()
-                .into(),
-            pin,
-        }
+    held.extend(filter.pins.iter().map(|(&node, &pin)| Held {
+        node,
+        label: name(names, facets, node),
+        pin,
     }));
     held.sort_by(|one, other| (&one.label, one.node.0).cmp(&(&other.label, other.node.0)));
     held
