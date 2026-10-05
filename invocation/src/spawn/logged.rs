@@ -16,6 +16,9 @@ pub struct LoggedSpawns {
     records: Vec<Record>,
     /// Every spawn's outputs, each spawn's a run [`Record::outputs`] names.
     outputs: Paths,
+    /// Every digest hash end to end, each spawn's where [`Record::digest`]
+    /// names.
+    digests: String,
 }
 
 struct Record {
@@ -28,6 +31,7 @@ struct Record {
     start: Option<EpochMicros>,
     exit_code: i32,
     status: Option<usize>,
+    digest: Option<Range<usize>>,
 }
 
 /// Exec paths end to end, each named by its place in the order added.
@@ -173,6 +177,14 @@ impl<'a> LoggedSpawn<'a> {
     pub fn failed(&self) -> bool {
         self.record.status.is_some() || self.record.exit_code != 0
     }
+
+    /// The hash of the spawn's action digest, the key a remote executor and
+    /// the remote and disk caches know it by; `None` where Bazel computed
+    /// none, as it does only for a spawn one of those could answer.
+    pub fn digest(&self) -> Option<&'a str> {
+        let range = self.record.digest.clone()?;
+        Some(&self.log.digests[range])
+    }
 }
 
 /// One spawn as a reader of a log finds it, for [`Builder::push`].
@@ -199,6 +211,9 @@ pub struct Builder {
     /// What [`exited`](Self::exited) gave the spawn pushed next, its status
     /// interned.
     next_exit: (i32, Option<usize>),
+    digests: String,
+    /// Where the digest of the spawn pushed next lies in `digests`.
+    next_digest: Option<Range<usize>>,
 }
 
 impl Builder {
@@ -214,6 +229,8 @@ impl Builder {
             next_outputs: 0,
             next_start: None,
             next_exit: (0, None),
+            digests: String::new(),
+            next_digest: None,
         }
     }
 
@@ -235,8 +252,19 @@ impl Builder {
         self.next_exit = (exit_code, status.map(|status| self.statuses.intern(status)));
     }
 
-    /// Adds `spawn`, with the outputs added, and the start and exit given,
-    /// since the spawn before it.
+    /// Gives the spawn [`push`](Self::push) adds next the digest `hash`.
+    pub fn digest(&mut self, hash: &str) {
+        if self.digests.capacity() == 0 {
+            self.digests
+                .reserve(self.records.capacity().saturating_mul(SHA256_HEX_CHARS));
+        }
+        let start = self.digests.len();
+        self.digests.push_str(hash);
+        self.next_digest = Some(start..self.digests.len());
+    }
+
+    /// Adds `spawn`, with the outputs added, and the start, exit and digest
+    /// given, since the spawn before it.
     pub fn push(&mut self, spawn: Logged<'_>) {
         let outputs = self.next_outputs..self.outputs.len();
         self.next_outputs = outputs.end;
@@ -251,6 +279,7 @@ impl Builder {
             start: self.next_start.take(),
             exit_code,
             status,
+            digest: self.next_digest.take(),
         };
         self.records.push(record);
     }
@@ -264,9 +293,14 @@ impl Builder {
             statuses: self.statuses.into_vec(),
             records: self.records,
             outputs: self.outputs,
+            digests: self.digests,
         }
     }
 }
+
+/// The length of a digest hash in the hash function Bazel defaults to, which a
+/// log of a build keying spawns by digest is reserved room for per spawn.
+const SHA256_HEX_CHARS: usize = 64;
 
 /// Distinct strings, each named by its place in the order first seen.
 #[derive(Default)]
@@ -364,6 +398,19 @@ mod tests {
         assert_eq!(primary, [Some("bazel-out/a.o"), None, Some("bazel-out/c")]);
         let hits: Vec<bool> = log.iter().map(|s| s.cache_hit()).collect();
         assert_eq!(hits, [false, false, true]);
+    }
+
+    #[test]
+    fn each_spawn_keeps_the_digest_given_since_the_spawn_before_it() {
+        let mut builder = Builder::with_capacity(3, 0, 0);
+        builder.digest("9f86d081");
+        builder.push(logged("remote", "A"));
+        builder.push(logged("linux-sandbox", "B"));
+        builder.digest("60303ae2");
+        builder.push(logged("disk cache hit", "C"));
+        let log = builder.finish();
+        let digests: Vec<_> = log.iter().map(|s| s.digest()).collect();
+        assert_eq!(digests, [Some("9f86d081"), None, Some("60303ae2")]);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use prost::{DecodeError, Message};
 use rustc_hash::FxHashMap;
 
 use crate::frame::{first_message, for_each_message, for_each_message_pipelined};
-use crate::spawn_fields::exec_log_entry;
+use crate::spawn_fields::{digest, exec_log_entry};
 use crate::wire::{Value, int32, next_field, text};
 use crate::{ExecLog, LoadError};
 
@@ -209,6 +209,11 @@ impl Builder {
                 (exec_log_entry::spawn::CACHE_HIT, Value::Varint(hit)) => cache_hit = hit != 0,
                 (exec_log_entry::spawn::EXIT_CODE, Value::Varint(code)) => exit_code = int32(code),
                 (exec_log_entry::spawn::STATUS, Value::Bytes(bytes)) => status = Some(text(bytes)?),
+                (exec_log_entry::spawn::DIGEST, Value::Bytes(bytes)) => {
+                    if let Some(hash) = digest_hash(bytes)? {
+                        self.spawns.digest(hash);
+                    }
+                }
                 (exec_log_entry::spawn::METRICS, Value::Bytes(bytes)) => {
                     metrics = SpawnMetrics::decode(bytes)?;
                 }
@@ -252,6 +257,17 @@ fn output_path<'a>(paths: &'a Paths, mut output: &'a [u8]) -> Result<Option<&'a 
         }
     }
     Ok(path)
+}
+
+/// The hash of the digest encoded in `digest`, `None` where it holds none.
+fn digest_hash(mut digest: &[u8]) -> Result<Option<&str>, DecodeError> {
+    let mut hash = None;
+    while !digest.is_empty() {
+        if let (digest::HASH, Value::Bytes(bytes)) = next_field(&mut digest)? {
+            hash = Some(text(bytes)?).filter(|hash| !hash.is_empty());
+        }
+    }
+    Ok(hash)
 }
 
 struct Entry<'a> {
@@ -461,6 +477,25 @@ mod tests {
         assert_eq!(spawns[1].exit_code(), -1);
         assert_eq!(spawns[1].status(), Some("NON_ZERO_EXIT"));
         assert!(spawns[1].failed());
+    }
+
+    #[test]
+    fn reads_the_hash_of_each_spawn_s_digest() {
+        let mut keyed = spawn("remote", "M", metrics(1, &[]));
+        keyed.digest = Some(bazel_spawn_proto::tools::protos::Digest {
+            hash: "9f86d081".into(),
+            size_bytes: 142,
+            hash_function_name: String::new(),
+        });
+        let mut empty = spawn("remote", "M", metrics(1, &[]));
+        empty.digest = Some(Default::default());
+        let log = load(&[
+            entry(0, Type::Spawn(keyed)),
+            entry(0, Type::Spawn(spawn("linux-sandbox", "M", metrics(1, &[])))),
+            entry(0, Type::Spawn(empty)),
+        ]);
+        let digests: Vec<_> = log.spawns().map(|s| s.digest()).collect();
+        assert_eq!(digests, [Some("9f86d081"), None, None]);
     }
 
     #[test]
