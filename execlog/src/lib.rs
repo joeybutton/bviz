@@ -12,11 +12,11 @@ mod read;
 mod spawn_fields;
 #[cfg(test)]
 mod test_log;
-mod timing;
 mod wire;
 
+use bviz_invocation::spawn::{LoggedSpawn, LoggedSpawns};
+pub use bviz_invocation::spawn::{Phase, PhaseTiming};
 pub use read::probe_invocation_id;
-pub use timing::{Phase, Timing};
 
 #[derive(Debug)]
 pub enum LoadError {
@@ -56,19 +56,7 @@ impl From<prost::DecodeError> for LoadError {
 
 /// The spawns of one execution log.
 pub struct ExecLog {
-    /// Distinct runner names, which [`Record::runner`] indexes.
-    runners: Vec<Box<str>>,
-    /// Distinct mnemonics, which [`Record::mnemonic`] indexes.
-    mnemonics: Vec<Box<str>>,
-    records: Vec<Record>,
-}
-
-struct Record {
-    runner: usize,
-    mnemonic: usize,
-    target_label: Option<Box<str>>,
-    primary_output: Option<Box<str>>,
-    timing: Timing,
+    spawns: LoggedSpawns,
 }
 
 impl ExecLog {
@@ -77,37 +65,35 @@ impl ExecLog {
     }
 
     pub fn spawn_count(&self) -> usize {
-        self.records.len()
+        self.spawns.len()
     }
 
     /// Every spawn's time summed: spawns overlap, so this is no wall time.
-    pub fn timing(&self) -> Timing {
-        let mut sum = Timing::default();
-        for record in &self.records {
-            sum.add(&record.timing);
+    pub fn timing(&self) -> PhaseTiming {
+        let mut sum = PhaseTiming::default();
+        for spawn in self.spawns() {
+            sum.add(spawn.timing());
         }
         sum
     }
 
-    fn spawns(&self) -> impl ExactSizeIterator<Item = Spawn<'_>> {
-        self.records
-            .iter()
-            .map(|record| Spawn { log: self, record })
+    fn spawns(&self) -> impl ExactSizeIterator<Item = LoggedSpawn<'_>> {
+        self.spawns.iter()
     }
 
     /// The spawns of each runner, in descending order of summed total time.
     pub fn by_runner(&self) -> Vec<Group<'_>> {
-        self.group(&self.runners, |record| Some(record.runner))
+        self.group(self.spawns.runners(), |spawn| Some(spawn.runner_index()))
     }
 
     /// The spawns of each mnemonic among `runner`'s spawns, in descending
     /// order of summed total time.
     pub fn by_mnemonic(&self, runner: &str) -> Vec<Group<'_>> {
-        let Some(runner) = self.runners.iter().position(|r| **r == *runner) else {
+        let Some(runner) = self.spawns.runners().iter().position(|r| **r == *runner) else {
             return Vec::new();
         };
-        self.group(&self.mnemonics, |record| {
-            (record.runner == runner).then_some(record.mnemonic)
+        self.group(self.spawns.mnemonics(), |spawn| {
+            (spawn.runner_index() == runner).then_some(spawn.mnemonic_index())
         })
     }
 
@@ -116,21 +102,21 @@ impl ExecLog {
     fn group<'a>(
         &'a self,
         names: &'a [Box<str>],
-        key: impl Fn(&Record) -> Option<usize>,
+        key: impl Fn(&LoggedSpawn<'_>) -> Option<usize>,
     ) -> Vec<Group<'a>> {
         let mut groups: Vec<Group<'a>> = names
             .iter()
             .map(|name| Group {
                 name,
                 spawns: 0,
-                timing: Timing::default(),
+                timing: PhaseTiming::default(),
             })
             .collect();
-        for record in &self.records {
-            if let Some(index) = key(record) {
+        for spawn in self.spawns() {
+            if let Some(index) = key(&spawn) {
                 let group = &mut groups[index];
                 group.spawns += 1;
-                group.timing.add(&record.timing);
+                group.timing.add(spawn.timing());
             }
         }
         groups.retain(|group| group.spawns > 0);
@@ -142,13 +128,13 @@ impl ExecLog {
     /// out those that spent no time in it. Equal times go in order of target
     /// label, then of primary output, so the ranking does not depend on the
     /// order the log lists its spawns in.
-    pub fn top_spawns(&self, phase: Phase, n: usize) -> Vec<Spawn<'_>> {
-        let mut spawns: Vec<Spawn<'_>> = self
+    pub fn top_spawns(&self, phase: Phase, n: usize) -> Vec<LoggedSpawn<'_>> {
+        let mut spawns: Vec<LoggedSpawn<'_>> = self
             .spawns()
             .filter(|spawn| !spawn.timing().phase(phase).is_zero())
             .collect();
         fn key<'s>(
-            spawn: &Spawn<'s>,
+            spawn: &LoggedSpawn<'s>,
             phase: Phase,
         ) -> (Reverse<Duration>, Option<&'s str>, Option<&'s str>) {
             (
@@ -157,7 +143,7 @@ impl ExecLog {
                 spawn.primary_output(),
             )
         }
-        let rank = |a: &Spawn<'_>, b: &Spawn<'_>| key(a, phase).cmp(&key(b, phase));
+        let rank = |a: &LoggedSpawn<'_>, b: &LoggedSpawn<'_>| key(a, phase).cmp(&key(b, phase));
         if spawns.len() > n {
             spawns.select_nth_unstable_by(n, rank);
             spawns.truncate(n);
@@ -172,41 +158,7 @@ impl ExecLog {
 pub struct Group<'a> {
     pub name: &'a str,
     pub spawns: usize,
-    pub timing: Timing,
-}
-
-/// One spawn of an [`ExecLog`].
-#[derive(Clone, Copy)]
-pub struct Spawn<'a> {
-    log: &'a ExecLog,
-    record: &'a Record,
-}
-
-impl<'a> Spawn<'a> {
-    /// What answered the spawn: a strategy that executed it, such as `remote`
-    /// or `linux-sandbox`, or a cache, such as `disk cache hit`.
-    pub fn runner(&self) -> &'a str {
-        &self.log.runners[self.record.runner]
-    }
-
-    pub fn mnemonic(&self) -> &'a str {
-        &self.log.mnemonics[self.record.mnemonic]
-    }
-
-    /// The label of the target owning the spawn's action, `None` for an
-    /// action no target owns.
-    pub fn target_label(&self) -> Option<&'a str> {
-        self.record.target_label.as_deref()
-    }
-
-    /// The exec path of the spawn's first declared output.
-    pub fn primary_output(&self) -> Option<&'a str> {
-        self.record.primary_output.as_deref()
-    }
-
-    pub fn timing(&self) -> &'a Timing {
-        &self.record.timing
-    }
+    pub timing: PhaseTiming,
 }
 
 #[cfg(test)]
