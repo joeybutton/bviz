@@ -1,4 +1,4 @@
-use crate::{CloseWindow, Quit, Tab, TabPrev};
+use crate::{CloseWindow, KEY_CONTEXT, Quit, Tab, TabPrev};
 use bviz_ui_components::Button;
 use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
@@ -120,6 +120,7 @@ impl RenderOnce for Chrome {
         div()
             .id("window-backdrop")
             .font_family(bviz_ui_assets::UI)
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
