@@ -3,7 +3,7 @@
 use crate::chart::format_duration;
 use bviz_critical_path::{
     Coverage, CriticalPath, Fit, Lever, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned, Step,
-    Work,
+    StepModel, Work,
 };
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
@@ -420,9 +420,45 @@ pub(crate) fn step_tip(step: &Step, logged: bool) -> String {
     lines.join("\n")
 }
 
+/// What a step's Could save cell shows: its ceiling, nothing where the
+/// model holds no action of the step.
+pub(crate) fn could_save(step: &Step) -> String {
+    step.model()
+        .map_or(String::new(), |model| duration(model.ceiling))
+}
+
+/// The tooltip of a step's Could save cell, `None` where it shows nothing.
+pub(crate) fn could_save_tip(step: &Step) -> Option<String> {
+    let StepModel {
+        duration: modeled,
+        ceiling,
+    } = step.model()?;
+    if modeled.is_zero() {
+        return Some(
+            "Untimed in the model: the profile holds no span of this step's action, as of \
+             an action-cache hit, so the model takes it to last no time."
+                .to_owned(),
+        );
+    }
+    let mut tip = format!(
+        "Were this step to take no time, the modeled build would finish {} sooner.",
+        duration(ceiling)
+    );
+    let (modeled, ceiling) = (duration(modeled), duration(ceiling));
+    // A ceiling that reads the same as the duration shows the reader no bound.
+    if ceiling != modeled {
+        tip.push_str(&format!(
+            " The model times its action at {modeled}; shortening it by more than \
+             {ceiling} saves nothing, as another chain of actions then bounds the build."
+        ));
+    }
+    Some(tip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_invocation::ActionGraph;
     use bviz_trace_profile::Profile;
 
     /// A profile of 10 ms on its main thread whose critical path waits 1 ms,
@@ -528,6 +564,85 @@ mod tests {
             "Its action was run remotely: 1 spawn, 3.00ms as Bazel measured it. Their \
              phases add up past the action's time, so they are scaled to fill it."
         );
+    }
+
+    /// The primary outputs of the actions of [`modeled_path`]'s graph.
+    const MODELED_OUTPUTS: [&str; 5] = [
+        "bazel-out/a.h",
+        "bazel-out/a.o",
+        "bazel-out/b.o",
+        "bazel-out/a",
+        "bazel-out/c",
+    ];
+    /// Each pair of positions in [`MODELED_OUTPUTS`] of an action and one it
+    /// takes an input from.
+    const MODELED_DEPENDENCIES: [(usize, usize); 4] = [(1, 0), (3, 1), (3, 2), (4, 3)];
+
+    /// A path of a spanned compile and link and two unspanned steps after a
+    /// wait, the first naming its output and the second none, modeled from
+    /// the actions of `outputs`: the compile's 2 ms takes a generated
+    /// header's 0.3 ms before it, and is bounded by a 1.5 ms compile beside
+    /// them.
+    fn modeled_path(outputs: &[&str]) -> CriticalPath {
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}},
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"Main Thread"}},
+            {"name":"thread_name","ph":"M","tid":2,"args":{"name":"skyframe-evaluator-execution-0"}},
+            {"name":"thread_name","ph":"M","tid":3,"args":{"name":"skyframe-evaluator-execution-1"}},
+            {"cat":"general information","name":"buildTargets","ph":"X","ts":0,"dur":10000,"tid":1},
+            {"cat":"critical path component","name":"action 'Compiling a.c'","ph":"X","ts":1000,"dur":2000,"tid":0},
+            {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":3600,"dur":400,"tid":0},
+            {"cat":"critical path component","name":"action 'Writing c'","ph":"X","ts":4000,"dur":100,"tid":0,"out":"bazel-out/c"},
+            {"cat":"critical path component","name":"action 'Checking d'","ph":"X","ts":4200,"dur":100,"tid":0},
+            {"cat":"action processing","name":"Generating a.h","ph":"X","ts":500,"dur":300,"tid":3,"out":"bazel-out/a.h"},
+            {"cat":"action processing","name":"Compiling a.c","ph":"X","ts":1000,"dur":2000,"tid":2,"out":"bazel-out/a.o"},
+            {"cat":"action processing","name":"Compiling b.c","ph":"X","ts":1000,"dur":1500,"tid":3,"out":"bazel-out/b.o","args":{"mnemonic":"CppCompile","target":"//b"}},
+            {"cat":"action processing","name":"Linking a","ph":"X","ts":3600,"dur":400,"tid":2,"out":"bazel-out/a"}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let position = |out: &str| outputs.iter().position(|&kept| kept == out);
+        let dependencies = MODELED_DEPENDENCIES
+            .iter()
+            .filter_map(|&(dependent, dependency)| {
+                Some((
+                    position(MODELED_OUTPUTS[dependent])?,
+                    position(MODELED_OUTPUTS[dependency])?,
+                ))
+            })
+            .collect();
+        let graph = ActionGraph::new(
+            outputs.iter().map(|&out| Some(out.to_owned())).collect(),
+            dependencies,
+        );
+        CriticalPath::of(&profile, None, Some(&graph)).expect("path")
+    }
+
+    #[test]
+    fn a_step_says_what_it_could_save_and_when_another_chain_bounds_it() {
+        let modeled = modeled_path(&MODELED_OUTPUTS);
+        let [compile, link, written, checked] = modeled.steps() else {
+            panic!("four steps");
+        };
+        assert_eq!(could_save(compile), "800µs");
+        assert_eq!(
+            could_save_tip(compile).as_deref(),
+            Some(
+                "Were this step to take no time, the modeled build would finish 800µs \
+                 sooner. The model times its action at 2.00ms; shortening it by more than \
+                 800µs saves nothing, as another chain of actions then bounds the build."
+            )
+        );
+        assert_eq!(
+            could_save_tip(link).as_deref(),
+            Some("Were this step to take no time, the modeled build would finish 400µs sooner.")
+        );
+        assert_eq!(could_save(written), "0µs");
+        assert!(
+            could_save_tip(written)
+                .is_some_and(|tip| tip.starts_with("Untimed in the model: the profile holds"))
+        );
+        assert_eq!(could_save(checked), "");
+        assert_eq!(could_save_tip(checked), None);
     }
 
     #[test]

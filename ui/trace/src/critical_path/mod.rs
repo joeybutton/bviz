@@ -80,33 +80,29 @@ const MIN_STRIP_PHASE_WIDTH: f32 = 2.0;
 struct Column {
     title: &'static str,
     width: Option<f32>,
+    /// Shown only for a path held against a modeled build.
+    modeled: bool,
 }
 
-const COLUMNS: [Column; 6] = [
+const fn column(title: &'static str, width: Option<f32>) -> Column {
     Column {
-        title: "Step",
-        width: None,
-    },
+        title,
+        width,
+        modeled: false,
+    }
+}
+
+const COLUMNS: [Column; 7] = [
+    column("Step", None),
+    column("Start", Some(STATS_NUM_COL_WIDTH)),
+    column("Waited", Some(STATS_NUM_COL_WIDTH)),
+    column("Own", Some(STATS_NUM_COL_WIDTH)),
     Column {
-        title: "Start",
-        width: Some(STATS_NUM_COL_WIDTH),
+        modeled: true,
+        ..column("Could save", Some(STATS_NUM_COL_WIDTH))
     },
-    Column {
-        title: "Waited",
-        width: Some(STATS_NUM_COL_WIDTH),
-    },
-    Column {
-        title: "Own",
-        width: Some(STATS_NUM_COL_WIDTH),
-    },
-    Column {
-        title: "% of path",
-        width: Some(SHARE_WIDTH),
-    },
-    Column {
-        title: "Wait and own time",
-        width: Some(BAR_COLUMN_WIDTH),
-    },
+    column("% of path", Some(SHARE_WIDTH)),
+    column("Wait and own time", Some(BAR_COLUMN_WIDTH)),
 ];
 
 /// The critical path of the profile: the wall time partitioned along it, an
@@ -188,7 +184,7 @@ impl CriticalPathPanel {
                 .size_full()
                 .child(lead(path, legends, palette))
                 .child(self.summary(path, legends, palette, fills, cx))
-                .child(header_row(palette))
+                .child(header_row(path, palette))
                 .child(self.steps(path, palette, fills, cx))
                 .into_any_element()
         };
@@ -265,31 +261,27 @@ impl CriticalPathPanel {
                 else {
                     return Vec::new();
                 };
-                let whole = path.path();
-                let logged = Logged::of(path);
+                let against = Against {
+                    whole: path.path(),
+                    longest,
+                    logged: Logged::of(path),
+                    modeled: path.modeled().is_some(),
+                };
                 let chosen = model.chosen_step(cx).map(|(index, _)| index);
                 range
                     .map(|index| {
                         let entity = entity.clone();
-                        step_row(
-                            index,
-                            &path.steps()[index],
-                            whole,
-                            longest,
-                            logged,
-                            &palette,
-                            &fills,
-                        )
-                        .when(chosen == Some(index), |row| {
-                            row.bg(palette.selection)
-                                .hover(|row| row.bg(palette.picked_hover()))
-                        })
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |panel, cx| {
-                                panel.focus.focus(window, cx);
-                                panel.choose(index, cx)
+                        step_row(index, &path.steps()[index], against, &palette, &fills)
+                            .when(chosen == Some(index), |row| {
+                                row.bg(palette.selection)
+                                    .hover(|row| row.bg(palette.picked_hover()))
                             })
-                        })
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |panel, cx| {
+                                    panel.focus.focus(window, cx);
+                                    panel.choose(index, cx)
+                                })
+                            })
                     })
                     .collect()
             }
@@ -513,7 +505,8 @@ fn swatch(fill: Hsla, edge: Option<Hsla>) -> Div {
     }
 }
 
-fn header_row(palette: &Palette) -> Div {
+/// The header of the steps table of `path`.
+fn header_row(path: &CriticalPath, palette: &Palette) -> Div {
     div()
         .flex()
         .flex_row()
@@ -529,6 +522,7 @@ fn header_row(palette: &Palette) -> Div {
         .children(
             COLUMNS
                 .iter()
+                .filter(|column| path.modeled().is_some() || !column.modeled)
                 .map(|column| table_cell(column.width, [column.title])),
         )
 }
@@ -556,19 +550,34 @@ impl Logged {
     }
 }
 
-/// Row `index` of the steps table, showing `step`, its own time a share of
-/// the path's `whole` and its bar as long against `longest` as its wait and
-/// own time are.
+/// What every row of the steps table is drawn against.
+#[derive(Clone, Copy)]
+struct Against {
+    /// The path's own time, which a step's is a share of.
+    whole: Duration,
+    /// The longest wait and own time of any step, which a step's bar is as
+    /// long against as its own are.
+    longest: Duration,
+    logged: Logged,
+    /// Whether the path is held against a modeled build.
+    modeled: bool,
+}
+
+/// Row `index` of the steps table, showing `step`.
 fn step_row(
     index: usize,
     step: &Step,
-    whole: Duration,
-    longest: Duration,
-    logged: Logged,
+    against: Against,
     palette: &Palette,
     fills: &Fills,
 ) -> Stateful<Div> {
-    let [name, start, waited, own, share, bar_column] = &COLUMNS;
+    let Against {
+        whole,
+        longest,
+        logged,
+        modeled,
+    } = against;
+    let [name, start, waited, own, could_save, share, bar_column] = &COLUMNS;
     let ran: Vec<&str> = [step.mnemonic(), step.target()]
         .into_iter()
         .flatten()
@@ -642,6 +651,15 @@ fn step_row(
         .child(table_cell(start.width, [format_duration(step.start_us())]))
         .child(table_cell(waited.width, [words::waited(index, step.gap())]))
         .child(table_cell(own.width, [words::duration(step.own())]))
+        .when(modeled, |row| {
+            let saved = div()
+                .id(("critical-path-could-save", index))
+                .when_some(words::could_save_tip(step), |cell, tip| {
+                    cell.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+                })
+                .child(words::could_save(step));
+            row.child(table_cell(could_save.width, [saved]))
+        })
         .child(table_cell(share.width, [words::share(step.own(), whole)]))
         .child(table_cell(bar_column.width, [div().w_full().child(bar_of)]))
 }
