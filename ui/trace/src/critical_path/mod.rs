@@ -8,7 +8,7 @@ mod words;
 
 use crate::chart::format_duration;
 use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
-use crate::stats_panel::table_cell;
+use crate::stats_panel::{line, table_cell};
 use crate::theme::Palette;
 use crate::{
     ChooseNext, ChoosePrevious, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
@@ -1069,16 +1069,6 @@ fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette)
         .child(table_cell(name.width, [described]))
         .child(table_cell(took.width, [words::duration(action.duration)]))
         .child(table_cell(slack.width, [words::duration(action.slack)]))
-}
-
-/// A line of a cell, cut short where the cell runs out of room for it.
-fn line(text: impl Into<SharedString>) -> Div {
-    div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(text.into())
 }
 
 /// The spawn phases of a step's action under the step's bar of `parts`,

@@ -8,7 +8,7 @@ use crate::{
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, Toolbar,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip, Toolbar,
     centered_spinner, load_in_background, overlay_canvas, sort_header, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -196,6 +196,16 @@ pub(crate) fn table_cell(
     }
 }
 
+/// A line of a cell, cut short where the cell runs out of room for it.
+pub(crate) fn line(text: impl Into<SharedString>) -> Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(text.into())
+}
+
 /// What a left-button drag over the stats panel is currently moving.
 #[derive(Clone, Copy)]
 enum StatsDrag {
@@ -343,6 +353,7 @@ impl StatsPanel {
         let row_hover = palette.hover;
         let row_pick = palette.selection;
         let row_pick_hover = palette.picked_hover();
+        let tooltip = palette.tooltip;
         let picked = self.picked_row(&order);
         let version = order.aggregate_version;
         let entity = cx.entity();
@@ -363,14 +374,23 @@ impl StatsPanel {
                     let hover_fill = if is_picked { row_pick_hover } else { row_hover };
                     let cells = STATS_COLUMNS.iter().map(|spec| {
                         let text: SharedString = match spec.column {
-                            StatsColumn::Key => key.to_string().into(),
+                            StatsColumn::Key => {
+                                let key = SharedString::from(key.to_string());
+                                let named = div()
+                                    .id(("stats-key", index as usize))
+                                    .w_full()
+                                    .min_w_0()
+                                    .tooltip(TextTooltip::builder(key.clone(), tooltip))
+                                    .child(line(key));
+                                return table_cell(spec.width, [named.into_any_element()]);
+                            }
                             StatsColumn::Count => row.count.to_string().into(),
                             StatsColumn::SelfTime => format_duration(row.self_us).into(),
                             StatsColumn::Avg => format_duration(row.avg_us()).into(),
                             StatsColumn::Max => format_duration(row.max_us).into(),
                             StatsColumn::Percent => format!("{pct:.1}%").into(),
                         };
-                        table_cell(spec.width, [text])
+                        table_cell(spec.width, [text.into_any_element()])
                     });
                     // The row's fill runs under the reserved scroll-bar strip
                     // as well as under the cells, and only the cells take a
