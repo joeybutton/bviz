@@ -162,6 +162,8 @@ impl<T> Reported<T> {
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
+    /// Shared, as a derivation off the UI thread reads it.
+    action_graph: Reported<Option<Arc<ActionGraph>>>,
     attempts: Reported<Attempts>,
     /// By its place in `critical_path`.
     chosen_step: Reported<Option<usize>>,
@@ -238,6 +240,22 @@ impl Session {
 
     pub fn report_logged_spawns(&mut self, reported: LoggedSpawns) {
         self.logged_spawns.replace(Some(Arc::new(reported)));
+    }
+
+    /// The invocation's action graph, `None` until one is reported.
+    pub fn action_graph(&self) -> Option<&Arc<ActionGraph>> {
+        self.action_graph.value.as_ref()
+    }
+
+    pub fn action_graph_revision(&self) -> Revision {
+        self.action_graph.revision
+    }
+
+    /// Of several aqueries read as part of the invocation, the last read
+    /// stands for its graph, and goes on standing once its document is
+    /// closed.
+    pub fn report_action_graph(&mut self, reported: ActionGraph) {
+        self.action_graph.replace(Some(Arc::new(reported)));
     }
 
     /// The steps of the invocation's critical path in the order they
@@ -544,6 +562,29 @@ mod tests {
 
         session.report_logged_spawns(LoggedSpawns::default());
         assert_ne!(session.logged_spawns_revision(), logged);
+    }
+
+    #[test]
+    fn a_sessions_action_graph_is_revised_by_each_report_of_it_and_by_nothing_else() {
+        let mut session = Session::default();
+        let ungraphed = session.action_graph_revision();
+        assert!(session.action_graph().is_none());
+        session.report_logged_spawns(LoggedSpawns::default());
+        assert_eq!(session.action_graph_revision(), ungraphed);
+
+        session.report_action_graph(ActionGraph::new(
+            vec![Some("bazel-out/a.o".to_owned())],
+            Vec::new(),
+        ));
+        let graphed = session.action_graph_revision();
+        assert_ne!(graphed, ungraphed);
+        assert_eq!(session.action_graph().map(|graph| graph.len()), Some(1));
+        session.report_timings(Timings::default());
+        assert_eq!(session.action_graph_revision(), graphed);
+
+        session.report_action_graph(ActionGraph::default());
+        assert_ne!(session.action_graph_revision(), graphed);
+        assert!(session.action_graph().is_some_and(|graph| graph.is_empty()));
     }
 
     #[test]

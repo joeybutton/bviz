@@ -26,6 +26,7 @@ use gpui::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod actions;
 mod build;
 mod camera;
 mod checklist;

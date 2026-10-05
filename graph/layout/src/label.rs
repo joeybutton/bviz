@@ -234,6 +234,12 @@ impl<'a> Resolver<'a> {
         self.names.get(&action_node_id(primary_output))
     }
 
+    /// The exec path of the primary output of `node`, an action; `None` for
+    /// an action naming none and for any other node.
+    pub fn primary_output(&self, node: Id) -> Option<&'a str> {
+        action_primary_output(self.names.resolve(node))
+    }
+
     /// The node `node_id` forms from `label`, under whichever spelling of the
     /// label [`RepoMapping::canonicalize_label`] gave the graph: an apparent
     /// repository name stands in the graph either as written or canonical,

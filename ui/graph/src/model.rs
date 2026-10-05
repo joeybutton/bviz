@@ -1,4 +1,5 @@
 use crate::GraphPanel;
+use crate::actions::action_graph;
 use crate::build::{build_graph, loaded_inputs};
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
@@ -16,7 +17,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{Configurations, Revision, Session};
+use bviz_invocation::{ActionGraph, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -640,20 +641,30 @@ impl GraphModel {
             _changed: cx.observe(&session, |model, _, cx| model.take_up(cx)),
             session,
         });
+        let shares = joined.is_some();
         let work = load_in_background(
             cx,
             move || {
                 let read = load.join()?;
-                let described = configurations(&read.loaded.shared.facets);
-                Ok((read, described))
+                let shared = &read.loaded.shared;
+                let described = configurations(&shared.facets);
+                let actions = shares
+                    .then(|| action_graph(&shared.base, &shared.names))
+                    .flatten();
+                Ok((read, described, actions))
             },
-            move |model, result: Result<(Read, Configurations), String>, cx| {
+            move |model,
+                  result: Result<(Read, Configurations, Option<ActionGraph>), String>,
+                  cx| {
                 model.source = match result {
-                    Ok((mut read, described)) => {
+                    Ok((mut read, described, actions)) => {
                         if let Some(joined) = &model.joined {
                             read.loaded.pass_over_chosen_step(joined.session.read(cx));
                             joined.session.update(cx, |session, cx| {
                                 session.add_configurations(described);
+                                if let Some(actions) = actions {
+                                    session.report_action_graph(actions);
+                                }
                                 cx.notify();
                             });
                         }

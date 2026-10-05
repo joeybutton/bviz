@@ -967,6 +967,7 @@ mod tests {
     use super::*;
     use crate::facets::{RuleCategory, Tri};
     use crate::graph::Node;
+    use crate::label::Resolver;
     use crate::repo::RepoName;
     use crate::test_support::{edges, find, parent_of};
 
@@ -1221,6 +1222,125 @@ mod tests {
         let (graph, names, _) = build(&[container], true);
 
         assert_eq!(parent_of(&graph, &names, "source1"), None);
+    }
+
+    #[test]
+    fn an_action_depends_on_the_producer_of_each_output_it_reads() {
+        let (header, mut fragments) = generated_artifact(1, 100, "a.h");
+        let (object, more) = generated_artifact(2, 200, "a.o");
+        fragments.extend(more);
+        let (binary, more) = generated_artifact(3, 300, "a");
+        fragments.extend(more);
+        let (source, fragment) = source_artifact(4, "a.c");
+        fragments.push(fragment);
+        let writing = |target_id, mnemonic: &str, inputs: &[u32], output: u32| Action {
+            output_ids: vec![output],
+            primary_output_id: output,
+            ..action(target_id, mnemonic, inputs)
+        };
+        let container = ActionGraphContainer {
+            artifacts: vec![header, object, binary, source],
+            path_fragments: fragments,
+            // The link reads the header too, through the compile's depset.
+            dep_set_of_files: vec![dep_set(10, &[1, 4], &[]), dep_set(11, &[2], &[10])],
+            actions: vec![
+                writing(1, "Genrule", &[], 1),
+                writing(1, "CppCompile", &[10], 2),
+                writing(1, "CppLink", &[11], 3),
+            ],
+            targets: vec![target(1, "//a:a")],
+            ..Default::default()
+        };
+
+        let (h, o, a) = (bin("a.h"), bin("a.o"), bin("a"));
+        assert_eq!(
+            dependency_outputs(container),
+            [(a.clone(), h.clone()), (a, o.clone()), (o, h)],
+            "a source read has no producer"
+        );
+    }
+
+    fn bin(name: &str) -> String {
+        format!("bazel-out/k8-fastbuild/bin/{name}")
+    }
+
+    /// The primary outputs of each pair of actions of `container` where the
+    /// first takes an input from the second, sorted.
+    fn dependency_outputs(container: ActionGraphContainer) -> Vec<(String, String)> {
+        let joint = crate::build_joint(Some(&[container]), None, None, false);
+        let resolver = Resolver::new(&joint.names);
+        let found = crate::action_dependencies(&joint.graph);
+        let out = |position: usize| {
+            resolver
+                .primary_output(found.actions[position])
+                .expect("an action")
+                .to_owned()
+        };
+        let mut pairs: Vec<(String, String)> = found
+            .dependencies
+            .iter()
+            .map(|&(dependent, dependency)| (out(dependent), out(dependency)))
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn an_action_depends_on_the_producer_of_an_output_other_than_its_primary() {
+        let (header, mut fragments) = generated_artifact(1, 100, "a.h");
+        let (deps, more) = generated_artifact(2, 200, "a.d");
+        fragments.extend(more);
+        let (object, more) = generated_artifact(3, 300, "a.o");
+        fragments.extend(more);
+        let container = ActionGraphContainer {
+            artifacts: vec![header, deps, object],
+            path_fragments: fragments,
+            dep_set_of_files: vec![dep_set(10, &[2], &[])],
+            actions: vec![
+                Action {
+                    output_ids: vec![1, 2],
+                    primary_output_id: 1,
+                    ..action(1, "Genrule", &[])
+                },
+                Action {
+                    output_ids: vec![3],
+                    primary_output_id: 3,
+                    ..action(1, "CppCompile", &[10])
+                },
+            ],
+            targets: vec![target(1, "//a:a")],
+            ..Default::default()
+        };
+        assert_eq!(dependency_outputs(container), [(bin("a.o"), bin("a.h"))]);
+    }
+
+    /// Bazel shares an action between the targets that declare it alike, so
+    /// every sharer reads the same inputs.
+    #[test]
+    fn actions_sharing_a_primary_output_stand_as_one() {
+        let (header, mut fragments) = generated_artifact(1, 100, "a.h");
+        let (object, more) = generated_artifact(2, 200, "a.o");
+        fragments.extend(more);
+        let writing = |target_id, mnemonic: &str, inputs: &[u32], output: u32| Action {
+            output_ids: vec![output],
+            primary_output_id: output,
+            ..action(target_id, mnemonic, inputs)
+        };
+        let container = ActionGraphContainer {
+            artifacts: vec![header, object],
+            path_fragments: fragments,
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![
+                writing(1, "Genrule", &[], 1),
+                writing(1, "CppCompile", &[10], 2),
+                writing(2, "CppCompile", &[10], 2),
+            ],
+            targets: vec![target(1, "//a:a"), target(2, "//a:b")],
+            ..Default::default()
+        };
+        let joint = crate::build_joint(Some(std::slice::from_ref(&container)), None, None, false);
+        assert_eq!(crate::action_dependencies(&joint.graph).actions.len(), 2);
+        assert_eq!(dependency_outputs(container), [(bin("a.o"), bin("a.h"))]);
     }
 
     #[test]
