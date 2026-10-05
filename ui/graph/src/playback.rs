@@ -4,7 +4,7 @@
 use crate::status::Landings;
 use crate::timing::Slot;
 use bviz_graph_layout::{Graph, Id, Kind};
-use bviz_invocation::{Attempt, Attempts, Done, EpochMicros, Phase, Venue};
+use bviz_invocation::{Attempt, Done, EpochMicros, MergedAttempts, Phase, Venue};
 
 /// Where a node stands at one instant, of the execution attempts landing on
 /// it and on everything it contains.
@@ -308,12 +308,12 @@ pub(crate) struct NodeStates {
 }
 
 impl NodeStates {
-    /// Places the attempts `attempts` recorded on the nodes of `graph` that
+    /// Places the attempts `attempts` holds on the nodes of `graph` that
     /// `landings` lands them on; `None` where none lands.
     pub(crate) fn resolve<'a>(
         landings: &Landings<'a>,
         graph: &Graph,
-        attempts: &'a Attempts,
+        attempts: &MergedAttempts<'a>,
     ) -> Option<Self> {
         let recorded = attempts
             .actions()
@@ -326,7 +326,7 @@ impl NodeStates {
         let mut landed: Vec<(Id, Life)> = Vec::with_capacity(recorded);
         for (primary_output, owner, tried) in attempts.actions() {
             if let Some(node) = landings.action(primary_output, owner) {
-                landed.extend(tried.iter().map(|attempt| (node, Life::of(attempt))));
+                landed.extend(tried.iter().map(|attempt| (node, Life::of(&attempt))));
             }
         }
         for (owner, tried) in attempts.by_owner() {
@@ -405,6 +405,7 @@ pub(crate) mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{Kind, Names};
+    use bviz_invocation::{AttemptSource, Attempts};
 
     const ORIGIN_MS: i64 = 1_781_439_245_231;
     const LOCAL: Phase = Phase::Running(Venue::Local);
@@ -493,7 +494,8 @@ pub(crate) mod tests {
 
         fn states(&self) -> NodeStates {
             let landings = Landings::new(&self.graph, &self.names, 0);
-            NodeStates::resolve(&landings, &self.graph, &self.attempts).expect("landed")
+            let attempts = MergedAttempts::new([(AttemptSource::Profile, &self.attempts)]);
+            NodeStates::resolve(&landings, &self.graph, &attempts).expect("landed")
         }
     }
 
@@ -728,6 +730,7 @@ pub(crate) mod tests {
         let mut attempts = Attempts::default();
         attempts.record(Some("bazel-out/gone"), None, attempt(0, 10, &[]));
         let landings = Landings::new(&built.graph, &built.names, 0);
+        let attempts = MergedAttempts::new([(AttemptSource::Profile, &attempts)]);
         assert_eq!(
             NodeStates::resolve(&landings, &built.graph, &attempts),
             None

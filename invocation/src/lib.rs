@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod attempts;
+mod merged;
 mod outcomes;
 mod runner;
 pub mod spawn;
 mod timings;
 
-pub use attempts::{Attempt, Attempts, Cache, Done, Phase, SpawnCache, State, Venue};
+pub use attempts::{Attempt, Attempts, Cache, Done, HeldAction, Phase, SpawnCache, State, Venue};
+pub use merged::{ActionAttempts, AttemptSource, MergedAttempts};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
@@ -166,7 +168,11 @@ struct Reported<T> {
 
 impl<T> Reported<T> {
     fn replace(&mut self, value: T) {
-        self.value = value;
+        self.revise(|held| *held = value);
+    }
+
+    fn revise(&mut self, revise: impl FnOnce(&mut T)) {
+        revise(&mut self.value);
         self.revision.0 += 1;
     }
 }
@@ -175,7 +181,9 @@ impl<T> Reported<T> {
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
-    attempts: Reported<Attempts>,
+    /// By [`AttemptSource::index`]: each source reports attempts of its own, which
+    /// stand in place only of those it reported before; `None` until it reports.
+    attempts: Reported<[Option<Attempts>; AttemptSource::ALL.len()]>,
     configurations: Configurations,
     outcomes: Reported<Outcomes>,
     timings: Reported<Timings>,
@@ -221,18 +229,26 @@ impl Session {
         self.timings.replace(reported);
     }
 
-    /// When the invocation's actions were executed; none where its profile
-    /// cannot place them on the wall clock.
-    pub fn attempts(&self) -> &Attempts {
-        &self.attempts.value
+    /// When the invocation's actions were executed and how each ended, as
+    /// every source reporting them tells together.
+    pub fn attempts(&self) -> MergedAttempts<'_> {
+        MergedAttempts::new(
+            AttemptSource::ALL
+                .into_iter()
+                .zip(&self.attempts.value)
+                .filter_map(|(source, reported)| Some((source, reported.as_ref()?))),
+        )
     }
 
+    /// The same for as long as no source reports attempts anew.
     pub fn attempts_revision(&self) -> Revision {
         self.attempts.revision
     }
 
-    pub fn report_attempts(&mut self, reported: Attempts) {
-        self.attempts.replace(reported);
+    /// Takes `reported` for the attempts `source` tells of.
+    pub fn report_attempts(&mut self, source: AttemptSource, reported: Attempts) {
+        self.attempts
+            .revise(|by_source| by_source[source.index()] = Some(reported));
     }
 
     /// The spawns the invocation's execution log records, `None` until one
@@ -432,19 +448,55 @@ mod tests {
         let attempt = attempts::tests::attempt(0, 10, &[]);
         let mut attempts = Attempts::default();
         attempts.record(Some("bazel-out/a.o"), None, attempt);
-        session.report_attempts(attempts);
+        session.report_attempts(AttemptSource::Profile, attempts);
         let attempted = session.attempts_revision();
         assert_ne!(attempted, unattempted);
-        assert_eq!(
-            session.attempts().action("bazel-out/a.o"),
-            Some(&[attempt][..])
-        );
+        let held = |session: &Session| {
+            session
+                .attempts()
+                .action("bazel-out/a.o")
+                .map(|tried| tried.iter().collect::<Vec<_>>())
+        };
+        assert_eq!(held(&session), Some(vec![attempt]));
         session.report_timings(Timings::default());
         assert_eq!(session.attempts_revision(), attempted);
 
-        session.report_attempts(Attempts::default());
-        assert_ne!(session.attempts_revision(), attempted);
+        session.report_attempts(AttemptSource::ExecutionLog, Attempts::default());
+        let logged = session.attempts_revision();
+        assert_ne!(logged, attempted);
+        assert_eq!(
+            held(&session),
+            Some(vec![attempt]),
+            "another source's report"
+        );
+
+        session.report_attempts(AttemptSource::Profile, Attempts::default());
+        assert_ne!(session.attempts_revision(), logged);
         assert!(session.attempts().is_empty());
+    }
+
+    #[test]
+    fn a_session_merges_the_attempts_of_every_source() {
+        let mut session = Session::default();
+        let profiled = attempts::tests::attempt(0, 10, &[]);
+        let mut profile = Attempts::default();
+        profile.record(Some("bazel-out/a.o"), None, profiled);
+        session.report_attempts(AttemptSource::Profile, profile);
+        let mut log = Attempts::default();
+        let failed = Attempt::ended(profiled.start(), profiled.end(), [], Done::Failed);
+        log.record(Some("bazel-out/a.o"), None, failed);
+        log.record(Some("bazel-out/b.o"), None, failed);
+        session.report_attempts(AttemptSource::ExecutionLog, log);
+
+        let merged = session.attempts();
+        let a = merged.action("bazel-out/a.o").expect("held");
+        assert_eq!(a.source(), AttemptSource::Profile);
+        assert_eq!(
+            a.iter().map(|tried| tried.done()).collect::<Vec<_>>(),
+            [Done::Failed]
+        );
+        let b = merged.action("bazel-out/b.o").expect("held");
+        assert_eq!(b.source(), AttemptSource::ExecutionLog);
     }
 
     #[test]

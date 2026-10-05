@@ -79,6 +79,36 @@ pub enum Done {
     Failed,
 }
 
+impl Done {
+    /// How an action ended, told by two sources that each saw it end as one
+    /// of the two says: as the one [telling](Self::telling) more says,
+    /// `self` where they tell as much.
+    pub(crate) fn merge(self, other: Done) -> Done {
+        match other.telling() > self.telling() {
+            true => other,
+            false => self,
+        }
+    }
+
+    /// How much an ending tells of how the action came to its outputs, so
+    /// that a source telling more outweighs one telling less. A failure
+    /// outweighs every other ending, as any source seeing it saw the action
+    /// fail; a cache named outweighs one left unnamed, which outweighs an
+    /// execution, as a source seeing an attempt end without seeing the cache
+    /// answer it reads it executed. Up to date outweighs nothing: only an
+    /// action the action cache did not find up to date runs a spawn or ends
+    /// within Bazel, so a source seeing it do either refutes it.
+    const fn telling(self) -> u8 {
+        match self {
+            Done::Cached(Cache::Action) => 0,
+            Done::Executed => 1,
+            Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk)) => 2,
+            Done::Cached(Cache::Spawn(SpawnCache::Remote | SpawnCache::Disk)) => 3,
+            Done::Failed => 4,
+        }
+    }
+}
+
 /// The cache that answered an attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cache {
@@ -199,6 +229,11 @@ impl Attempt {
         self.done
     }
 
+    /// The attempt, ended as `done` says.
+    pub(crate) fn ending(self, done: Done) -> Attempt {
+        Attempt { done, ..self }
+    }
+
     /// Where the attempt is at `at`: it starts at its start, and has ended at
     /// its end.
     pub fn state_at(&self, at: EpochMicros) -> State {
@@ -221,6 +256,18 @@ impl Attempt {
 struct Attempted {
     owner: Option<ConfiguredTarget>,
     attempts: Vec<Attempt>,
+}
+
+/// An action known by its primary output: that output's exec path, the
+/// action's owner where named, and its attempts.
+pub type HeldAction<'a> = (&'a str, Option<ConfiguredTarget<&'a str>>, &'a [Attempt]);
+
+fn held_action<'a>(primary_output: &'a str, attempted: &'a Attempted) -> HeldAction<'a> {
+    (
+        primary_output,
+        attempted.owner.as_ref().map(ConfiguredTarget::borrowed),
+        attempted.attempts.as_slice(),
+    )
 }
 
 /// The execution attempts of a build's actions. An action is known by its
@@ -283,18 +330,31 @@ impl Attempts {
             .map(|attempted| attempted.attempts.as_slice())
     }
 
+    /// The action whose primary output has the exec path `primary_output`,
+    /// as [`actions`](Self::actions) yields it.
+    pub(crate) fn attempted(&self, primary_output: &str) -> Option<HeldAction<'_>> {
+        let (primary_output, attempted) = self.actions.get_key_value(primary_output)?;
+        Some(held_action(primary_output, attempted))
+    }
+
+    /// The attempts pooled under `owner`, of actions known by no primary
+    /// output.
+    pub(crate) fn owned(&self, owner: ConfiguredTarget<&str>) -> Option<&[Attempt]> {
+        self.by_owner.get(owner).map(Vec::as_slice)
+    }
+
+    /// How many actions known by primary output and owners pooling attempts
+    /// this holds.
+    pub(crate) fn held(&self) -> usize {
+        self.actions.len() + self.by_owner.iter().count()
+    }
+
     /// Each action known by its primary output, with that output's exec path,
     /// the action's owner where the profile named it, and its attempts.
-    pub fn actions(
-        &self,
-    ) -> impl ExactSizeIterator<Item = (&str, Option<ConfiguredTarget<&str>>, &[Attempt])> {
-        self.actions.iter().map(|(primary_output, attempted)| {
-            (
-                primary_output.as_str(),
-                attempted.owner.as_ref().map(ConfiguredTarget::borrowed),
-                attempted.attempts.as_slice(),
-            )
-        })
+    pub fn actions(&self) -> impl ExactSizeIterator<Item = HeldAction<'_>> {
+        self.actions
+            .iter()
+            .map(|(primary_output, attempted)| held_action(primary_output, attempted))
     }
 
     /// Each owner of actions known by no primary output, with their attempts.
@@ -417,6 +477,26 @@ pub(crate) mod tests {
         let up_to_date = Done::Cached(Cache::Action);
         let checked = Attempt::ended(at(0), at(1), [], up_to_date);
         assert_eq!(checked.state_at(at(1)), State::Done(up_to_date));
+    }
+
+    #[test]
+    fn a_failure_outweighs_every_ending_and_up_to_date_none() {
+        let spawn = |cache| Done::Cached(Cache::Spawn(cache));
+        let endings = [
+            Done::Cached(Cache::Action),
+            Done::Executed,
+            spawn(SpawnCache::RemoteOrDisk),
+            spawn(SpawnCache::Disk),
+            Done::Failed,
+        ];
+        for (i, &less) in endings.iter().enumerate() {
+            for &more in &endings[i + 1..] {
+                assert_eq!(less.merge(more), more, "{less:?} with {more:?}");
+                assert_eq!(more.merge(less), more, "{more:?} with {less:?}");
+            }
+        }
+        let remote = spawn(SpawnCache::Remote);
+        assert_eq!(remote.merge(spawn(SpawnCache::Disk)), remote);
     }
 
     #[test]

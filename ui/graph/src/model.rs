@@ -213,10 +213,9 @@ impl Loaded {
         }
         self.attempted = revision;
         let attempts = session.attempts();
-        let owners = attempts.actions().len() + attempts.by_owner().count();
         let base = &self.shared.base;
-        let landings = Landings::new(base, &self.shared.names, owners);
-        let states = NodeStates::resolve(&landings, base, attempts);
+        let landings = Landings::new(base, &self.shared.names, attempts.held());
+        let states = NodeStates::resolve(&landings, base, &attempts);
         let changed = self.states != states;
         self.states = states;
         changed
@@ -848,7 +847,8 @@ mod tests {
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
+        AttemptSource, Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner,
+        Spawns, Timings,
     };
     use std::time::Duration;
 
@@ -981,7 +981,7 @@ mod tests {
         let mut attempts = Attempts::default();
         let attempt = crate::playback::tests::attempt(0, 10, &[]);
         attempts.record(Some("bazel-out/bin/app/bin"), None, attempt);
-        session.report_attempts(attempts);
+        session.report_attempts(AttemptSource::Profile, attempts);
         assert!(loaded.report(&session));
         assert!(loaded.states().is_some());
         assert!(!loaded.report(&session));
@@ -990,7 +990,7 @@ mod tests {
         assert!(loaded.report(&session));
         assert!(loaded.states().is_some());
 
-        session.report_attempts(Attempts::default());
+        session.report_attempts(AttemptSource::Profile, Attempts::default());
         assert!(loaded.report(&session));
         assert!(loaded.states().is_none());
     }

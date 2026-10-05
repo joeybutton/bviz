@@ -456,8 +456,8 @@ mod tests {
     use bviz_graph_layout::reduce::transitive_reduction;
     use bviz_graph_layout::{Connector, Graph, Id, Kind, Names, map_layout};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Phase, Profiled, Session, Spawns,
-        Timings, Venue,
+        AttemptSource, Attempts, BuildOutcome, ConfiguredTarget, MergedAttempts, Outcomes, Phase,
+        Profiled, Session, Spawns, Timings, Venue,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -624,6 +624,7 @@ mod tests {
             let tried = attempt(0, millis * 1_000, &[(phase, 1)]);
             attempts.record(Some(primary_output), None, tried);
         }
+        let attempts = MergedAttempts::new([(AttemptSource::Profile, &attempts)]);
         let states = NodeStates::resolve(&landings, &graph, &attempts).expect("landed");
         let laid = |id: Id, kind, compound| bviz_graph_layout::Box {
             id,
@@ -801,7 +802,7 @@ mod tests {
         let (drawn, _, states) = timed();
         let mut session = Session::default();
         let unattempted = session.attempts_revision();
-        session.report_attempts(Attempts::default());
+        session.report_attempts(AttemptSource::Profile, Attempts::default());
         let attempted = session.attempts_revision();
         let mut legend = Legend::default();
         let mut reading = |states, attempted| played(&mut legend, &drawn, states, attempted);

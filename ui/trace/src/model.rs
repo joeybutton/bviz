@@ -5,7 +5,7 @@ use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
-use bviz_invocation::Session;
+use bviz_invocation::{AttemptSource, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
@@ -91,7 +91,8 @@ impl LoadedProfile {
                 session
                     .update(cx, |session, cx| {
                         session.report_timings(timings);
-                        session.report_attempts(attempts.unwrap_or_default());
+                        session
+                            .report_attempts(AttemptSource::Profile, attempts.unwrap_or_default());
                         cx.notify();
                     })
                     .ok();
