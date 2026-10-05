@@ -15,6 +15,7 @@ use bviz_execlog::ExecLog;
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
+use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -52,16 +53,18 @@ impl From<ExecLogSource> for Load {
 }
 
 /// The view of the spawn time the log `load` reads. Where it is opened as
-/// part of an invocation's `session`, the log's spawns are reported to it.
+/// part of an invocation's `session`, the log's spawns are reported to it;
+/// where its document plays back on `clock`, the log plays there.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
+    clock: Option<DocumentClock>,
     _window: &mut Window,
     cx: &mut App,
 ) -> Member {
     let load = load.into();
     let session = session.as_ref().map(Entity::downgrade);
-    let model = cx.new(|cx| ExecLogModel::reading(load.log, session, cx));
+    let model = cx.new(|cx| ExecLogModel::reading(load.log, session, clock, cx));
     let view = ViewSpec::new(move |cx| cx.new(|cx| SpawnTimePanel::new(model.clone(), cx)));
     Member::new(load.title, PanelGroup::one(view))
 }
@@ -88,7 +91,7 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, None, window, cx).into(),
+        |load, window, cx| open(load, None, None, window, cx).into(),
         &[],
     );
 }

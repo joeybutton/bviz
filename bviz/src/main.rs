@@ -81,7 +81,7 @@ impl Load {
             Self::Graph(load) => bviz_ui_graph::open(load, session, clock.cloned(), window, cx),
             Self::Trace(load) => bviz_ui_trace::open(load, session, clock.cloned(), window, cx),
             Self::Console(load) => bviz_ui_console::open(load, session, clock.cloned(), window, cx),
-            Self::ExecLog(load) => bviz_ui_execlog::open(load, session, window, cx),
+            Self::ExecLog(load) => bviz_ui_execlog::open(load, session, clock.cloned(), window, cx),
         }
     }
 }
@@ -89,8 +89,9 @@ impl Load {
 /// The document `opening` is shown as: a file's own, or an invocation's files
 /// joined under a label naming it. A build's console replay plays back alone;
 /// a profile or a graph alone has nothing to play back with. Every invocation
-/// carries a clock; one whose files give it no time to play, such as an
-/// execution log with a graph, shows no playback bar.
+/// carries a clock; one whose files give it no time to play, such as a graph
+/// with an execution log of spawns that all ran elsewhere, shows no playback
+/// bar.
 fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
     match opening {
         Opening::Alone(load @ Load::Console(_)) => {

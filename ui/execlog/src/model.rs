@@ -1,7 +1,8 @@
 use crate::summary::Summary;
-use bviz_invocation::spawn::{DatedSpawns, LoggedSpawns};
+use bviz_invocation::spawn::{DatedSpawns, LoggedSpawns, Placement};
 use bviz_invocation::{AttemptSource, Session};
 use bviz_ui_components::{Pending, load_in_background};
+use bviz_ui_playback::{DocumentClock, OnClock, Span};
 use gpui::{Context, Task, WeakEntity};
 
 pub(crate) type Source = bviz_ui_components::Source<Summary>;
@@ -16,6 +17,7 @@ pub(crate) struct Read {
 /// the panel can close and be shown again without the log being read afresh.
 pub(crate) struct ExecLogModel {
     source: Source,
+    on_clock: Option<OnClock>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
 }
@@ -23,15 +25,18 @@ pub(crate) struct ExecLogModel {
 impl ExecLogModel {
     /// The summary of the log `log` reads, its spawns, and the attempts they
     /// make where the log can be dated, reported to `session` where it is
-    /// read as one of an invocation's outputs.
+    /// read as one of an invocation's outputs, and played on `clock` where
+    /// its document plays back.
     pub(crate) fn reading(
         log: Pending<Read>,
         session: Option<WeakEntity<Session>>,
+        clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let dating = session.is_some();
+        let dating = session.is_some() || clock.is_some();
         Self {
             source: Source::Loading,
+            on_clock: clock.map(OnClock::new),
             _load: load_in_background(
                 cx,
                 move || {
@@ -41,20 +46,27 @@ impl ExecLogModel {
                     })
                 },
                 move |model, result, cx| {
-                    model.source = match result {
-                        Ok((Read { summary, spawns }, dated)) => {
-                            if let Some(session) = session {
-                                session
-                                    .update(cx, |session, cx| {
-                                        report(session, spawns, dated);
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            }
-                            Source::Loaded(summary)
+                    let (read, dated) = match result {
+                        Ok(read) => read,
+                        Err(why) => {
+                            model.source = Source::Failed(why);
+                            return;
                         }
-                        Err(why) => Source::Failed(why),
                     };
+                    let Read { summary, spawns } = read;
+                    let placement = dated.as_ref().map(|dated| dated.placement);
+                    if let Some(session) = session {
+                        session
+                            .update(cx, |session, cx| {
+                                report(session, spawns, dated);
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                    model.source = Source::Loaded(summary);
+                    if let Some(on_clock) = &mut model.on_clock {
+                        on_clock.place(placement.and_then(clock_source), cx);
+                    }
                 },
             ),
         }
@@ -63,6 +75,19 @@ impl ExecLogModel {
     pub(crate) fn source(&self) -> &Source {
         &self.source
     }
+}
+
+/// What a log whose spawns stand at `placement` gives a clock to play: their
+/// span, approximate where any spawn's time is interpolated; `None` where
+/// they take no time.
+fn clock_source(placement: Placement) -> Option<bviz_ui_playback::Source> {
+    let placed = placement.span();
+    let span = Span::new(placed.start(), placed.end())?;
+    let source = bviz_ui_playback::Source::new(span);
+    Some(match placement.interpolated() {
+        true => source.approximate(),
+        false => source,
+    })
 }
 
 /// Tells `session` of the spawns a log records and of the attempts they make
@@ -112,6 +137,12 @@ mod tests {
         let attempts = session.attempts();
         let action = attempts.action(OUTPUT).expect("the spawn's action");
         assert_eq!(action.source(), AttemptSource::ExecutionLog);
+    }
+
+    #[test]
+    fn a_dated_log_plays_for_as_long_as_its_spawns_took() {
+        let placement = sandboxed().dated().expect("a spawn ran here").placement;
+        assert!(clock_source(placement).is_some());
     }
 
     #[test]
