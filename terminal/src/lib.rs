@@ -11,6 +11,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 
+mod attempts;
 mod display;
 mod outcomes;
 mod output;
@@ -46,6 +47,7 @@ fn snapshot_rows(grid: &Grid<Cell>, lines: RangeInclusive<i32>, columns: usize) 
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
+pub use attempts::RecordedAttempts;
 pub use display::{CellPos, DisplaySource, SelectionSpan, Terminal, Url};
 pub use output::{BuildOutput, Position, parse, probe_invocation_id};
 pub use replay::{Dating, Replay};

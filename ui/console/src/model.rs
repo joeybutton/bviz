@@ -1,4 +1,6 @@
-use bviz_invocation::{Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Session};
+use bviz_invocation::{
+    AttemptSource, Attempts, Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Session,
+};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
@@ -12,6 +14,9 @@ pub(crate) struct Stream {
     configurations: Configurations,
     /// Dated where the replay of the stream stands on the wall clock.
     outcomes: HeldOutcomes,
+    /// Of the build's actions, those the stream records an attempt of, where
+    /// the replay stands on the wall clock.
+    attempts: Attempts,
 }
 
 impl Stream {
@@ -20,18 +25,26 @@ impl Stream {
             .map_err(|e| format!("cannot parse build event stream: {e}"))?;
         let configurations = std::mem::take(&mut output.configurations);
         let reports = std::mem::take(&mut output.reports);
+        let recorded = std::mem::take(&mut output.attempts);
         let replay = Replay::from_output(output);
-        let outcomes = match replay.dating() {
-            Some(dating) => HeldOutcomes::Dated(DatedOutcomes::new(
-                (reports.into_iter())
-                    .map(|(position, report)| (dating.instant_at(position), report)),
-            )),
-            None => HeldOutcomes::Undated(reports.into_iter().map(|(_, report)| report).collect()),
+        let (outcomes, attempts) = match replay.dating() {
+            Some(dating) => (
+                HeldOutcomes::Dated(DatedOutcomes::new(
+                    (reports.into_iter())
+                        .map(|(position, report)| (dating.instant_at(position), report)),
+                )),
+                recorded.dated(dating),
+            ),
+            None => (
+                HeldOutcomes::Undated(reports.into_iter().map(|(_, report)| report).collect()),
+                Attempts::default(),
+            ),
         };
         Ok(Self {
             replay,
             configurations,
             outcomes,
+            attempts,
         })
     }
 
@@ -41,6 +54,7 @@ impl Stream {
             HeldOutcomes::Undated(outcomes) => session.report_outcomes(outcomes),
             HeldOutcomes::Dated(dated) => session.report_dated_outcomes(dated),
         }
+        session.report_attempts(AttemptSource::BuildEvents, self.attempts);
         self.replay
     }
 }
@@ -225,6 +239,7 @@ mod tests {
         );
     }
     use bviz_invocation::{BuildOutcome, ConfiguredTarget};
+    use bviz_terminal::bep::timestamp_proto::google::protobuf::Timestamp;
 
     /// A build whose read has not finished, for exercising what a view reads
     /// off it before one has.
@@ -365,18 +380,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_stream_on_the_wall_clock_reports_when_each_outcome_became_known() {
-        use bviz_invocation::EpochMicros;
+    const STARTED: i64 = 1_790_952_715;
+    const TOOK: i64 = 10;
+
+    /// A stream started at [`STARTED`] and finished [`TOOK`] seconds later,
+    /// holding `events` between a first and a last progress frame.
+    fn on_the_wall_clock(events: &[Vec<u8>]) -> Vec<u8> {
         use bviz_terminal::bep::build_event_stream::{
             BuildEvent, BuildFinished, BuildStarted, build_event::Payload,
         };
-        use bviz_terminal::bep::timestamp_proto::google::protobuf::Timestamp;
         use prost::Message;
 
-        const STARTED: i64 = 1_790_952_715;
-        const TOOK: i64 = 10;
-        let at = |seconds| Some(Timestamp { seconds, nanos: 0 });
         let event = |payload| {
             BuildEvent {
                 payload: Some(payload),
@@ -384,20 +398,27 @@ mod tests {
             }
             .encode_length_delimited_to_vec()
         };
-        let stream = [
-            event(Payload::Started(BuildStarted {
-                start_time: at(STARTED),
-                ..Default::default()
-            })),
-            progress_event("Loading: \n"),
-            built_event("//app", CONFIGURATION),
-            progress_event("Built\n"),
-            event(Payload::Finished(BuildFinished {
-                finish_time: at(STARTED + TOOK),
-                ..Default::default()
-            })),
-        ]
-        .concat();
+        let started = event(Payload::Started(BuildStarted {
+            start_time: timestamp(STARTED),
+            ..Default::default()
+        }));
+        let finished = event(Payload::Finished(BuildFinished {
+            finish_time: timestamp(STARTED + TOOK),
+            ..Default::default()
+        }));
+        let mut stream = [started, progress_event("Loading: \n")].concat();
+        stream.extend(events.concat());
+        stream.extend([progress_event("Built\n"), finished].concat());
+        stream
+    }
+
+    fn timestamp(seconds: i64) -> Option<Timestamp> {
+        Some(Timestamp { seconds, nanos: 0 })
+    }
+
+    #[test]
+    fn a_stream_on_the_wall_clock_reports_when_each_outcome_became_known() {
+        let stream = on_the_wall_clock(&[built_event("//app", CONFIGURATION)]);
         let stream = Stream::parse(&stream).expect("the stream parses");
         let mut session = Session::default();
         stream.replay_telling(&mut session);
@@ -410,6 +431,42 @@ mod tests {
         };
         assert_eq!(known(STARTED + TOOK - 1), None);
         assert_eq!(known(STARTED + TOOK), Some(BuildOutcome::Built));
+    }
+
+    #[test]
+    fn a_stream_on_the_wall_clock_reports_the_attempts_it_records() {
+        use bviz_invocation::Done;
+        use bviz_terminal::bep::build_event_stream::{
+            ActionExecuted, BuildEvent, BuildEventId,
+            build_event::Payload,
+            build_event_id::{ActionCompletedId, Id},
+        };
+        use prost::Message;
+
+        const OUTPUT: &str = "bazel-out/k8-fastbuild/bin/app";
+        let executed = BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::ActionCompleted(ActionCompletedId {
+                    primary_output: OUTPUT.into(),
+                    ..Default::default()
+                })),
+            }),
+            payload: Some(Payload::Action(ActionExecuted {
+                start_time: timestamp(STARTED + 1),
+                end_time: timestamp(STARTED + 2),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+        let stream = Stream::parse(&on_the_wall_clock(&[executed])).expect("the stream parses");
+        let mut session = Session::default();
+        stream.replay_telling(&mut session);
+        let attempts = session.attempts();
+        let held = attempts.action(OUTPUT).expect("attempted");
+        assert_eq!(held.source(), AttemptSource::BuildEvents);
+        let ended: Vec<Done> = held.iter().map(|attempt| attempt.done()).collect();
+        assert_eq!(ended, [Done::Failed]);
     }
 
     /// A stream describing no configuration leaves a session knowing what it

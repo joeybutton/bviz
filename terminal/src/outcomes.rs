@@ -26,7 +26,7 @@ pub(crate) fn checksum(id: Option<ConfigurationId>) -> Option<String> {
         .filter(|id| !id.is_empty() && id != NULL_CONFIGURATION)
 }
 
-fn target(label: String, configuration: Option<ConfigurationId>) -> ConfiguredTarget {
+pub(crate) fn target(label: String, configuration: Option<ConfigurationId>) -> ConfiguredTarget {
     ConfiguredTarget::new(label, checksum(configuration))
 }
 

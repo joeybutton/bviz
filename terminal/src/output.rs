@@ -8,6 +8,7 @@ use std::path::Path;
 use bviz_invocation::{Configurations, InvocationId, Outcomes, Report};
 use prost::Message;
 
+use crate::attempts::RecordedAttempts;
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
@@ -20,6 +21,8 @@ pub struct BuildOutput {
     /// What the stream reports of the build's outcomes, in stream order, each
     /// where the stream reports it.
     pub reports: Vec<(Position, Report)>,
+    /// The attempts of the build's actions the stream records.
+    pub attempts: RecordedAttempts,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -77,6 +80,7 @@ impl BuildOutput {
         BuildOutput {
             configurations: Configurations::default(),
             reports: Vec::new(),
+            attempts: RecordedAttempts::default(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -97,6 +101,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut anchors = Vec::new();
     let mut configurations = Configurations::default();
     let mut reports = Vec::new();
+    let mut attempts = RecordedAttempts::default();
     let mut columns = None;
     let mut show_timestamps = false;
     let mut began = Began::default();
@@ -125,6 +130,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             }
             Some(Payload::Finished(f)) => record(&mut anchors, frame, epoch_opt(f.finish_time)),
             Some(Payload::Action(a)) => {
+                attempts.action(id.as_ref(), &a, began, Position(frame));
                 if began.took(epoch_opt(a.start_time)) {
                     record(&mut anchors, frame, epoch_opt(a.end_time));
                 }
@@ -157,6 +163,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     Ok(BuildOutput {
         configurations,
         reports,
+        attempts,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
@@ -224,13 +231,13 @@ fn read_length_delimiter(stream: &mut impl Read) -> Option<usize> {
 /// When the build began, in seconds since the Unix epoch; `None` for a stream
 /// that does not say.
 #[derive(Clone, Copy, Default)]
-struct Began(Option<f64>);
+pub(crate) struct Began(Option<f64>);
 
 impl Began {
     /// Whether a span the stream says began at `start` is one this build
     /// took. A cache answering an action or a test hands back the times of
     /// the run it recorded, which began before this build did.
-    fn took(self, start: Option<f64>) -> bool {
+    pub(crate) fn took(self, start: Option<f64>) -> bool {
         match (self.0, start) {
             (_, None) => false,
             (None, Some(_)) => true,
@@ -252,7 +259,7 @@ fn epoch(seconds: i64, nanos: i32) -> f64 {
     seconds as f64 + nanos as f64 / 1e9
 }
 
-fn epoch_opt(ts: Option<Timestamp>) -> Option<f64> {
+pub(crate) fn epoch_opt(ts: Option<Timestamp>) -> Option<f64> {
     ts.map(|t| epoch(t.seconds, t.nanos))
 }
 
