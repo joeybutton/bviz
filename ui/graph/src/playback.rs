@@ -404,14 +404,14 @@ impl NodeStates {
                 .sum::<usize>();
         let mut landed: Vec<(Id, Life)> = Vec::with_capacity(recorded);
         for (primary_output, owner, tried) in attempts.actions() {
-            if let Some(node) = landings.action(primary_output, owner)
+            if let Some(node) = landings.attempted_action(primary_output, owner)
                 && let Some(life) = Life::of_action(tried.iter())
             {
                 landed.push((node, life));
             }
         }
         for (owner, tried) in attempts.by_owner() {
-            if let Some(node) = landings.landing(owner).node() {
+            if let Some(node) = landings.owner(owner) {
                 landed.extend(tried.iter().map(|attempt| (node, Life::of(attempt))));
             }
         }

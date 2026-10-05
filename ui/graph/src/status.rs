@@ -174,19 +174,31 @@ impl Landing {
 /// found once, however many readers ask for it.
 pub(crate) struct Landings<'a> {
     resolver: Resolver<'a>,
-    /// By node id, whether the node holds a configured target.
-    configured: Vec<bool>,
+    /// By node id, the configured targets the node holds.
+    configured: Vec<Configured>,
     targets: RefCell<FxHashMap<ConfiguredTarget<&'a str>, Landing>>,
+}
+
+/// The configured targets a graph holds of one target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Configured {
+    None,
+    Once(Id),
+    Several,
 }
 
 impl<'a> Landings<'a> {
     /// The landings in `graph`, which `names` names, sized for reports naming
     /// `targets` configured targets.
     pub(crate) fn new(graph: &Graph, names: &'a Names, targets: usize) -> Self {
-        let mut configured = vec![false; names.len()];
+        let mut configured = vec![Configured::None; names.len()];
         for node in &graph.nodes {
             if let (Kind::ConfiguredTarget, Some(target)) = (node.kind, node.parent) {
-                configured[target.0 as usize] = true;
+                let held = &mut configured[target.0 as usize];
+                *held = match *held {
+                    Configured::None => Configured::Once(node.id),
+                    Configured::Once(_) | Configured::Several => Configured::Several,
+                };
             }
         }
         Self {
@@ -210,8 +222,8 @@ impl<'a> Landings<'a> {
         let landing = match (configured, self.resolver.target(label)) {
             (Some(configured), _) => Landing::On(configured),
             (None, Some(node)) => {
-                let elsewhere =
-                    target.configuration().is_some() && self.configured[node.0 as usize];
+                let elsewhere = target.configuration().is_some()
+                    && self.configured[node.0 as usize] != Configured::None;
                 match elsewhere {
                     true => Landing::Reconfigured(node),
                     false => Landing::On(node),
@@ -233,6 +245,33 @@ impl<'a> Landings<'a> {
         self.resolver
             .action(primary_output)
             .or_else(|| self.landing(owner?).node())
+    }
+
+    /// The node an attempt of an action `owner` owns lands on: its
+    /// [`landing`](Self::landing), except that an owner named in no
+    /// configuration lands on its configured target where the graph holds
+    /// the target in only one. That is the configuration the attempt ran in
+    /// unless the build configured the target in others the graph was not
+    /// read with.
+    pub(crate) fn owner(&self, owner: ConfiguredTarget<&'a str>) -> Option<Id> {
+        let node = self.landing(owner).node()?;
+        match (owner.configuration(), self.configured[node.0 as usize]) {
+            (None, Configured::Once(configured)) => Some(configured),
+            _ => Some(node),
+        }
+    }
+
+    /// The node an attempt of the action writing `primary_output` lands on:
+    /// the action, or where the graph holds no node for it, its
+    /// [`owner`](Self::owner).
+    pub(crate) fn attempted_action(
+        &self,
+        primary_output: &str,
+        owner: Option<ConfiguredTarget<&'a str>>,
+    ) -> Option<Id> {
+        self.resolver
+            .action(primary_output)
+            .or_else(|| self.owner(owner?))
     }
 
     /// The number of node ids of the graph, past which an id is none of its
@@ -485,6 +524,42 @@ mod tests {
         assert_eq!(landing("//app:bin", None), Landing::On(bin));
         assert_eq!(landing("//lib:lib", Some(CONFIG)), Landing::On(lib));
         assert_eq!(landing("//lib:other", Some(CONFIG)), Landing::Off);
+    }
+
+    #[test]
+    fn an_attempt_owned_in_no_configuration_lands_on_the_only_configured_target() {
+        let mut built = Built::default();
+        let (_, bin, configured) = built.target("app", "bin");
+        let (_, twice, _) = built.target("app", "twice");
+        built.node(
+            &format!("ct://app:twice#{OTHER_CONFIG}"),
+            Kind::ConfiguredTarget,
+            Some(twice),
+        );
+        let package = built.node("pkg:lib", Kind::Package, None);
+        let lib = built.node("target://lib:lib", Kind::Target, Some(package));
+        let action = built.action("bazel-out/k8/bin/app/bin.o", configured);
+        let landings = Landings::new(&built.graph, &built.names, 0);
+        let owner =
+            |label, configuration| landings.owner(ConfiguredTarget::new(label, configuration));
+
+        assert_eq!(owner("//app:bin", None), Some(configured));
+        assert_eq!(owner("//app:bin", Some(OTHER_CONFIG)), Some(bin));
+        assert_eq!(owner("//app:twice", None), Some(twice));
+        assert_eq!(owner("//lib:lib", None), Some(lib));
+        assert_eq!(owner("//lib:other", None), None);
+        let unconfigured = ConfiguredTarget::new("//app:bin", None);
+        assert_eq!(
+            landings.attempted_action("bazel-out/k8/bin/app/bin.o", None),
+            Some(action)
+        );
+        assert_eq!(
+            landings.attempted_action("bazel-out/k8/bin/app/gone.o", Some(unconfigured)),
+            Some(configured)
+        );
+        // A build's report on a target named in no configuration stays on the
+        // target.
+        assert_eq!(landings.landing(unconfigured), Landing::On(bin));
     }
 
     #[test]
