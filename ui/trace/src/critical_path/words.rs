@@ -2,8 +2,8 @@
 
 use crate::chart::format_duration;
 use bviz_critical_path::{
-    Coverage, CriticalPath, Fit, Lever, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned, Step,
-    StepModel, Work,
+    Coverage, CriticalPath, Fit, Lever, Modeled, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned,
+    Step, StepModel, Work,
 };
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
@@ -16,6 +16,9 @@ pub(crate) const OF_THE_ACTIONS: &str = "these actions' time";
 pub(crate) const AROUND_SPAWNS: &str = "around spawns";
 /// What a step's Waited cell shows where it waited no time.
 const NO_WAIT: &str = "—";
+/// The share of the profile's action spans under which so few match the
+/// action graph that the modeled build's tooltip says how they are matched.
+const FEW_MATCHED: f64 = 0.5;
 
 pub(crate) fn part_name(part: Part) -> &'static str {
     match part {
@@ -455,6 +458,75 @@ pub(crate) fn could_save_tip(step: &Step) -> Option<String> {
     Some(tip)
 }
 
+/// The modeled build against the time the observed path spent in action
+/// spans, the only time on it the model holds.
+pub(crate) fn modeled_line(path: &CriticalPath, modeled: &Modeled) -> String {
+    format!(
+        "Modeled with unlimited parallelism: {}, against {} of action spans on the observed \
+         path",
+        duration(modeled.length()),
+        duration(path.time_in(Part::Action))
+    )
+}
+
+/// What the model assumes, and how much of the build and the path it holds.
+pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
+    let steps = path.steps();
+    let found = steps.iter().filter(|step| step.model().is_some()).count();
+    let unnamed = steps
+        .iter()
+        .filter(|step| step.primary_output().is_none())
+        .count();
+    let missing = steps.len() - found - unnamed;
+    let outside_spans = path.path().saturating_sub(path.time_in(Part::Action));
+    let mut tip = format!(
+        "The build's action graph scheduled with no limit on jobs or executors and no \
+         wait between an action and its inputs, each action taking as long as its spans \
+         in this profile, and one with no span, such as an action-cache hit, no time. The \
+         observed path's {} of steps' time outside action spans and {} of waits between \
+         steps have no part in the model.\n{} of {} action spans found among the graph's \
+         {} actions; {found} of {} {} found in it",
+        duration(outside_spans),
+        duration(path.time_in(Part::Waiting)),
+        modeled.timed(),
+        modeled.spanned(),
+        modeled.actions(),
+        steps.len(),
+        if steps.len() == 1 { "step" } else { "steps" },
+    );
+    if unnamed > 0 {
+        tip.push_str(&format!(
+            "; {unnamed} name no output to match by, as a step with no action span does \
+             before Bazel 10.0"
+        ));
+    }
+    if missing > 0 {
+        tip.push_str(&format!("; {missing} not in it"));
+    }
+    tip.push('.');
+    if modeled.cyclic() > 0 {
+        tip.push_str(&format!(
+            " {} actions wait on a dependency cycle and are left out.",
+            modeled.cyclic()
+        ));
+    }
+    if fraction_of(modeled.timed(), modeled.spanned()) < FEW_MATCHED {
+        tip.push_str(
+            "\nSpans and steps match the graph's actions by exact output path, so an aquery \
+             of other targets, flags or configuration than the build's matches fewer.",
+        );
+    }
+    tip
+}
+
+/// `part` of `whole`, and of nothing all of it.
+fn fraction_of(part: usize, whole: usize) -> f64 {
+    match whole {
+        0 => 1.0,
+        _ => part as f64 / whole as f64,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +715,49 @@ mod tests {
         );
         assert_eq!(could_save(checked), "");
         assert_eq!(could_save_tip(checked), None);
+    }
+
+    #[test]
+    fn the_model_is_held_against_the_observed_path_s_action_spans() {
+        let path = modeled_path(&MODELED_OUTPUTS);
+        let modeled = path.modeled().expect("modeled");
+        assert_eq!(
+            modeled_line(&path, modeled),
+            "Modeled with unlimited parallelism: 2.70ms, against 2.40ms of action spans on \
+             the observed path"
+        );
+        let tip = modeled_tip(&path, modeled);
+        assert!(
+            tip.contains(
+                " The observed path's 200µs of steps' time outside action spans and 700µs of \
+                 waits between steps have no part in the model.\n"
+            ),
+            "{tip}"
+        );
+        assert!(
+            tip.ends_with(
+                "\n4 of 4 action spans found among the graph's 5 actions; 3 of 4 steps found \
+                 in it; 1 name no output to match by, as a step with no action span does \
+                 before Bazel 10.0."
+            ),
+            "{tip}"
+        );
+    }
+
+    #[test]
+    fn a_model_matching_few_spans_says_how_they_are_matched() {
+        let path = modeled_path(&["bazel-out/a.o"]);
+        let tip = modeled_tip(&path, path.modeled().expect("modeled"));
+        assert!(
+            tip.ends_with(
+                "\n1 of 4 action spans found among the graph's 1 actions; 1 of 4 steps found \
+                 in it; 1 name no output to match by, as a step with no action span does \
+                 before Bazel 10.0; 2 not in it.\nSpans and steps match the graph's actions \
+                 by exact output path, so an aquery of other targets, flags or configuration \
+                 than the build's matches fewer."
+            ),
+            "{tip}"
+        );
     }
 
     #[test]
