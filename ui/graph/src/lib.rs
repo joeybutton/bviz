@@ -41,6 +41,7 @@ mod exclusive;
 mod framing;
 mod hints;
 mod hue;
+mod jump;
 mod legend;
 mod missing;
 mod mode;
@@ -101,6 +102,8 @@ fn bindings() -> Vec<KeyBinding> {
     // bindings stand down inside one.
     let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let outside_text = Some(outside_text.as_str());
+    let graph = Some(KEY_CONTEXT);
+    let jumping = Some(jump::KEY_CONTEXT);
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
     let exclusive = format!(
@@ -113,6 +116,15 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("h", ToggleNeighborhood, outside_text),
         KeyBinding::new("r", ToggleReduce, outside_text),
         KeyBinding::new("escape", Dismiss, outside_text),
+        KeyBinding::new("cmd-f", jump::Open, graph),
+        KeyBinding::new("ctrl-f", jump::Open, graph),
+        KeyBinding::new("/", jump::Open, outside_text),
+        KeyBinding::new("up", jump::Previous, jumping),
+        KeyBinding::new("down", jump::Next, jumping),
+        KeyBinding::new("enter", jump::Go, jumping),
+        KeyBinding::new("escape", jump::Close, jumping),
+        KeyBinding::new("tab", jump::NextScope, jumping),
+        KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
@@ -262,6 +274,7 @@ pub struct GraphPanel {
     _preset_choices: Subscription,
     /// The label search, whose pattern shows or hides the nodes it names.
     search: Search,
+    jump: jump::Finder,
     /// Carries what is typed into the search field into the search.
     _search_typing: Subscription,
     /// Redraws as the graph is read.
@@ -482,6 +495,7 @@ impl GraphPanel {
             preset_filter,
             _preset_choices: preset_choices,
             search,
+            jump: jump::Finder::default(),
             _search_typing: search_typing,
             _changed: changed,
             _clock_moved: clock_moved,
@@ -535,7 +549,12 @@ impl GraphPanel {
     /// Frames the layer drawing the selected mode's layout, or a spinner while
     /// that layout is still being computed — the toolbar stays above either, so
     /// the picker remains reachable.
-    fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn viewport(
+        &mut self,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let laying_out = || bviz_ui_components::centered_spinner("Laying out…", &palette.colors);
         let Some(drawn) = self.drawn() else {
             let entity = cx.entity();
@@ -596,6 +615,7 @@ impl GraphPanel {
                     .foot(why::card(self, &palette, cx)),
             )
             .children(search::card(self, &palette, cx))
+            .children(jump::overlay(self, &palette, window, cx))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -649,9 +669,10 @@ impl GraphPanel {
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // The card occludes the canvas, so a press reaching here landed outside
-        // it.
+        // The card and the palette occlude the canvas, so a press reaching here
+        // landed outside them.
         search::dismiss(self, cx);
+        jump::dismiss(self, cx);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
         if let Some(axis) = scrollbar_hit(self, e.position) {
@@ -665,6 +686,7 @@ impl GraphPanel {
     /// drops the selection where the press lands on no box.
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         search::dismiss(self, cx);
+        jump::dismiss(self, cx);
         select_box_at(self, e.position, cx);
     }
 
@@ -817,6 +839,7 @@ impl Render for GraphPanel {
             )
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -857,7 +880,7 @@ impl Render for GraphPanel {
                             .flex_1()
                             .flex()
                             .overflow_hidden()
-                            .child(self.viewport(palette, cx)),
+                            .child(self.viewport(palette, window, cx)),
                     )
             }
         }
@@ -1181,6 +1204,7 @@ mod tests {
 
     const IN_PANEL: &[&str] = &[KEY_CONTEXT];
     const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_PALETTE: &[&str] = &[KEY_CONTEXT, jump::KEY_CONTEXT, text_input::KEY_CONTEXT];
     const IN_SEARCH: &[&str] = &[KEY_CONTEXT, search::KEY_CONTEXT, text_input::KEY_CONTEXT];
 
     /// A letter typed into any text field is text, not one of the panel's
@@ -1193,6 +1217,31 @@ mod tests {
             assert!(dispatched("h", field).is_none());
             assert!(dispatched("r", field).is_none());
         }
+    }
+
+    #[test]
+    fn slash_opens_the_palette_only_where_it_types_nothing() {
+        assert!(is(dispatched("/", IN_PANEL), jump::Open));
+        assert!(dispatched("/", IN_SEARCH).is_none());
+        assert!(dispatched("/", IN_PALETTE).is_none());
+        for find in ["ctrl-f", "cmd-f"] {
+            assert!(is(dispatched(find, IN_PANEL), jump::Open), "{find}");
+            assert!(is(dispatched(find, IN_SEARCH), jump::Open), "{find}");
+        }
+    }
+
+    /// A letter typed into the palette's field is text, and the keys moving
+    /// through its rows reach it before the panel's own.
+    #[test]
+    fn the_palette_takes_its_keys_before_the_panel() {
+        assert!(dispatched("h", IN_PALETTE).is_none());
+        assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
+        assert!(is(dispatched("escape", IN_PALETTE), jump::Close));
+        assert!(is(dispatched("escape", IN_PANEL), Dismiss));
+        assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
+        assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
+        assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
+        assert!(is(dispatched("shift-tab", IN_PALETTE), jump::PreviousScope));
     }
 
     #[test]

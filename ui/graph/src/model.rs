@@ -3,6 +3,7 @@ use crate::actions::action_graph;
 use crate::build::{build_graph, loaded_inputs};
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
+use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
@@ -134,6 +135,8 @@ pub(crate) struct Loaded {
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
     targets: Prepared<TargetIndex>,
+    /// The graph's nodes as the jump palette offers them.
+    candidates: Prepared<Candidates>,
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
@@ -146,8 +149,10 @@ impl Loaded {
             let labels = Arc::clone(&shared.labels);
             TargetIndex::of(labels, &shared.base, &shared.facets, &shared.capabilities)
         });
+        let candidates = Prepared::new(&shared, Candidates::of);
         Self {
             targets,
+            candidates,
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -373,8 +378,8 @@ impl<T> Prepared<T> {
     }
 
     /// What was prepared, prepared here where no reader has prepared it yet,
-    /// and waited for where another is preparing it; so read only off the UI
-    /// thread.
+    /// and waited for where another is preparing it; so read it off the UI
+    /// thread, or on it only once a read off it has returned.
     pub(crate) fn get(&self) -> &T {
         &self.0.prepared
     }
@@ -872,6 +877,10 @@ impl GraphModel {
     /// absent while the graph is still being read.
     pub(crate) fn targets(&self) -> Option<Prepared<TargetIndex>> {
         Some(self.loaded()?.targets.clone())
+    }
+
+    pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
+        Some(self.loaded()?.candidates.clone())
     }
 
     /// Runs the work `pass` makes of the loaded graph off the UI thread for

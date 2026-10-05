@@ -758,6 +758,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     crate::search::reset(view, cx);
     crate::why::reset(view);
     crate::reveal::reset(view);
+    crate::jump::reset(view);
     ensure_layout(view, cx);
 }
 
