@@ -8,11 +8,13 @@
 //! checked.
 
 mod logged;
+mod schedule;
 mod spans;
 
 use bviz_invocation::spawn::LoggedSpawns;
 pub use bviz_invocation::spawn::{Phase, SpawnRunner};
 use bviz_trace_profile::{LaneClass, OptStr, Profile, SliceAt, TimeSpan};
+pub use schedule::{Ceilings, Finish, Schedule};
 use spans::Spans;
 use std::borrow::Cow;
 use std::time::Duration;

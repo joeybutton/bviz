@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod actions;
 mod attempts;
 mod critical;
 mod outcomes;
@@ -12,6 +13,7 @@ mod runner;
 pub mod spawn;
 mod timings;
 
+pub use actions::{ActionGraph, ActionIndex};
 pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
 pub use critical::CriticalStep;
 pub use outcomes::{
