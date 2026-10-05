@@ -108,12 +108,33 @@ fn us(micros: u64) -> Duration {
     Duration::from_micros(micros)
 }
 
-fn split(before: u64, span: u64) -> Work {
-    Work::Spanned(SpanSplit {
+/// What a step's [`Work`] says of its time, apart from where its action span
+/// stands.
+#[derive(Debug, PartialEq, Eq)]
+enum Timed {
+    Split { before: Duration, span: Ran },
+    Unspanned(Ran),
+    ChangePruned,
+}
+
+/// A step's own time split around an action span.
+fn split(before: u64, span: u64) -> Timed {
+    Timed::Split {
         before: us(before),
         span: Ran::Unlogged(us(span)),
-    })
+    }
 }
+
+impl Work {
+    fn timed(self) -> Timed {
+        match self {
+            Work::Spanned(SpanSplit { before, span, .. }) => Timed::Split { before, span },
+            Work::Unspanned(ran) => Timed::Unspanned(ran),
+            Work::ChangePruned => Timed::ChangePruned,
+        }
+    }
+}
+
 /// The lead-in, each step's gap and own time, and the tail add up to the
 /// wall time, as do the parts.
 fn assert_partitions(path: &CriticalPath) {
@@ -164,7 +185,7 @@ fn a_step_is_joined_to_the_span_of_its_description_and_split_around_it() {
     assert_eq!(step.mnemonic(), Some("CppCompile"));
     assert_eq!(step.target(), Some("//a"));
     assert_eq!(step.primary_output(), Some("bazel-out/a.o"));
-    assert_eq!(step.work(), split(5, 995));
+    assert_eq!(step.work().timed(), split(5, 995));
     assert_eq!((path.lead_in(), path.tail()), (us(100), us(900)));
     assert_eq!(path.time_in(Part::BeforeAction), us(5));
     assert_eq!(path.time_in(Part::Action), us(995));
@@ -182,7 +203,7 @@ fn the_action_runs_until_its_step_ends_though_its_span_outlasts_it() {
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
-    assert_eq!(path.steps()[0].work(), split(250, 415_750));
+    assert_eq!(path.steps()[0].work().timed(), split(250, 415_750));
     assert_eq!(path.tail(), us(74_000));
 }
 
@@ -204,7 +225,7 @@ fn a_step_naming_its_primary_output_is_joined_by_it() {
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let step = &path.steps()[0];
-    assert_eq!(step.work(), split(20, 980));
+    assert_eq!(step.work().timed(), split(20, 980));
     assert_eq!(step.primary_output(), Some("bazel-out/b.o"));
     assert_eq!(step.target(), Some("//b"));
 }
@@ -221,7 +242,11 @@ fn steps_of_one_description_are_told_apart_by_when_their_spans_started() {
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
-    let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
+    let works: Vec<Timed> = path
+        .steps()
+        .iter()
+        .map(|step| step.work().timed())
+        .collect();
     assert_eq!(works, [split(4, 996), split(3, 997)]);
     assert_eq!(path.steps()[1].gap(), us(900));
     assert_eq!(path.longest_wait().map(Step::start_us), Some(2000));
@@ -263,7 +288,7 @@ fn a_runfiles_tree_is_joined_to_the_span_building_its_target_s_tree() {
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let step = &path.steps()[0];
-    assert_eq!(step.work(), split(69, 231));
+    assert_eq!(step.work().timed(), split(69, 231));
     assert_eq!(step.name(), RUNFILES_STEP);
     assert_eq!(step.target(), Some("//t:bin"));
     assert_eq!(step.mnemonic(), Some("RunfilesTree"));
@@ -271,6 +296,27 @@ fn a_runfiles_tree_is_joined_to_the_span_building_its_target_s_tree() {
         step.primary_output(),
         Some("bazel-out/k8-fastbuild/bin/t/bin.runfiles")
     );
+}
+
+#[test]
+fn a_step_stands_on_the_critical_path_lane_and_its_span_where_the_action_ran() {
+    let p = profile(
+        5000,
+        &[event(STEP_COMPILE, 100, 1000), event(STEP_LINK, 2000, 1000)],
+        &[event(LINK, 2003, 998), event(COMPILE, 104, 997)],
+    );
+    let path = CriticalPath::of(&p, None).expect("critical path");
+    for (step, (name, span)) in path
+        .steps()
+        .iter()
+        .zip([(STEP_COMPILE, COMPILE), (STEP_LINK, LINK)])
+    {
+        assert_eq!(p.str(p.slice(step.at()).name), name);
+        let Work::Spanned(split) = step.work() else {
+            panic!("{name} joined to its span")
+        };
+        assert_eq!(p.str(p.slice(split.at).name), span);
+    }
 }
 
 #[test]
@@ -282,7 +328,7 @@ fn a_runfiles_tree_is_joined_by_its_directory_where_spans_name_no_target() {
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     let step = &path.steps()[0];
-    assert_eq!(step.work(), split(69, 231));
+    assert_eq!(step.work().timed(), split(69, 231));
     assert_eq!(step.target(), Some("//t:bin"));
 }
 
@@ -326,10 +372,14 @@ fn of_two_spans_of_one_description_starting_within_a_step_the_earlier_is_its() {
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
-    let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
+    let works: Vec<Timed> = path
+        .steps()
+        .iter()
+        .map(|step| step.work().timed())
+        .collect();
     assert_eq!(
         works,
-        [split(2, 998), Work::Unspanned(Ran::Unlogged(us(1000)))]
+        [split(2, 998), Timed::Unspanned(Ran::Unlogged(us(1000)))]
     );
 }
 
@@ -342,8 +392,12 @@ fn a_step_of_no_length_was_change_pruned_and_claims_no_span() {
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
-    let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
-    assert_eq!(works, [Work::ChangePruned, split(5, 595)]);
+    let works: Vec<Timed> = path
+        .steps()
+        .iter()
+        .map(|step| step.work().timed())
+        .collect();
+    assert_eq!(works, [Timed::ChangePruned, split(5, 595)]);
     assert_eq!(path.steps()[1].gap(), us(500));
 }
 
@@ -364,7 +418,7 @@ fn a_step_starting_before_the_one_before_it_ends_adds_only_what_runs_past() {
     assert_eq!(steps[1].work(), Work::ChangePruned);
     assert_eq!((steps[2].gap(), steps[2].own()), (Duration::ZERO, us(300)));
     // The span starts in the time the step before already covers.
-    assert_eq!(steps[2].work(), split(0, 300));
+    assert_eq!(steps[2].work().timed(), split(0, 300));
     assert_eq!(path.path(), us(1300));
 }
 
@@ -387,8 +441,8 @@ fn a_step_the_one_before_it_covers_still_claims_its_span() {
     assert_partitions(&path);
     let steps = path.steps();
     assert_eq!(steps[1].own(), Duration::ZERO);
-    assert_eq!(steps[1].work(), split(0, 0));
-    assert_eq!(steps[2].work(), split(850, 50));
+    assert_eq!(steps[1].work().timed(), split(0, 0));
+    assert_eq!(steps[2].work().timed(), split(850, 50));
 }
 
 #[test]
@@ -698,13 +752,13 @@ fn without_a_log_no_step_is_joined_and_with_one_every_unjoined_step_says_so() {
     );
     let alone = CriticalPath::of(&p, None).expect("critical path");
     assert_eq!(alone.coverage(), None);
-    assert_eq!(alone.steps()[0].work(), split(10, 990));
+    assert_eq!(alone.steps()[0].work().timed(), split(10, 990));
 
     let unrelated = log(&[logged("remote", &["bazel-out/b.o"], 5, &[])]);
     let path = CriticalPath::of(&p, Some(&unrelated)).expect("critical path");
     let coverage = path.coverage().expect("a log was given");
     assert_eq!((coverage.steps(), coverage.own()), (0, Duration::ZERO));
-    assert_eq!(path.steps()[0].work(), split(10, 990));
+    assert_eq!(path.steps()[0].work().timed(), split(10, 990));
     assert_eq!(
         path,
         CriticalPath {

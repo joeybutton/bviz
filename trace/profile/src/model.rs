@@ -208,6 +208,26 @@ pub struct ThreadTrack {
     pub lane_class: LaneClass,
 }
 
+/// Where a slice stands in the profile that handed it out. Only a profile
+/// mints one, so a handle names a slice of the profile it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SliceAt {
+    pub(crate) track: usize,
+    pub(crate) slice: usize,
+}
+
+impl SliceAt {
+    /// The position of the slice's track in [`Profile::threads`].
+    pub fn track(self) -> usize {
+        self.track
+    }
+
+    /// The position of the slice in its track's [`Profile::slices`].
+    pub fn slice(self) -> usize {
+        self.slice
+    }
+}
+
 /// The hot per-slice record: only what culling, hit-testing, and painting read
 /// per frame, sized to fit two slices per cache line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1016,6 +1036,18 @@ impl Profile {
     /// contains.
     pub fn slices(&self, track: &ThreadTrack) -> &[Slice] {
         &self.slice_pool[track.slices.range()]
+    }
+
+    /// The slice standing `at`, which must come from this profile.
+    pub fn slice(&self, at: SliceAt) -> Slice {
+        self.slices(&self.threads[at.track])[at.slice]
+    }
+
+    /// Where each slice of the track at `track` in [`Profile::threads`]
+    /// stands, index-parallel to [`Profile::slices`]; none past the tracks.
+    pub fn slices_at(&self, track: usize) -> impl ExactSizeIterator<Item = SliceAt> + use<> {
+        let count = self.threads.get(track).map_or(0, |t| t.slices.len());
+        (0..count).map(move |slice| SliceAt { track, slice })
     }
 
     /// The details of a thread track's slices, index-parallel to

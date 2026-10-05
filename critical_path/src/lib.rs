@@ -12,7 +12,7 @@ mod spans;
 
 use bviz_invocation::spawn::LoggedSpawns;
 pub use bviz_invocation::spawn::{Phase, SpawnRunner};
-use bviz_trace_profile::{LaneClass, OptStr, Profile, TimeSpan};
+use bviz_trace_profile::{LaneClass, OptStr, Profile, SliceAt, TimeSpan};
 use spans::Spans;
 use std::borrow::Cow;
 use std::time::Duration;
@@ -109,6 +109,7 @@ pub struct Step {
     mnemonic: Option<String>,
     target: Option<String>,
     primary_output: Option<String>,
+    at: SliceAt,
     start_us: i64,
     gap: Duration,
     work: Work,
@@ -131,6 +132,8 @@ pub enum Work {
 /// A spanned step's own time, around the action span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpanSplit {
+    /// Where the action span stands in the profile.
+    pub at: SliceAt,
     /// From the step's start until the span starts: input discovery and the
     /// action-cache check.
     pub before: Duration,
@@ -228,7 +231,8 @@ impl Work {
     fn with_spawns(self, spawns: &logged::Tally) -> Work {
         let spawned = |ran: Ran| Ran::Spawned(Spawned::fitted(ran.time(), spawns));
         match self {
-            Work::Spanned(SpanSplit { before, span }) => Work::Spanned(SpanSplit {
+            Work::Spanned(SpanSplit { at, before, span }) => Work::Spanned(SpanSplit {
+                at,
                 before,
                 span: spawned(span),
             }),
@@ -360,6 +364,12 @@ impl Step {
         self.primary_output.as_deref()
     }
 
+    /// Where the step's own slice stands in the profile, on its critical-path
+    /// lane.
+    pub fn at(&self) -> SliceAt {
+        self.at
+    }
+
     /// When the step started, on the profile's clock: microseconds since
     /// Bazel began running the command.
     pub fn start_us(&self) -> i64 {
@@ -397,15 +407,17 @@ impl CriticalPath {
     /// to the spawns `log` records of its action where an execution log of
     /// the same invocation is given.
     pub fn of(profile: &Profile, log: Option<&LoggedSpawns>) -> Option<CriticalPath> {
-        let lane = profile
+        let (lane_at, lane) = profile
             .threads()
             .iter()
-            .find(|track| track.lane_class == LaneClass::CriticalPath)?;
+            .enumerate()
+            .find(|(_, track)| track.lane_class == LaneClass::CriticalPath)?;
         let recorded: Vec<RecordedStep> = profile
             .slices(lane)
             .iter()
             .zip(profile.details(lane))
-            .map(|(slice, detail)| {
+            .zip(profile.slices_at(lane_at))
+            .map(|((slice, detail), at)| {
                 let name = profile.str(slice.name);
                 let kind = match name.strip_prefix(RUNFILES_NAME_PREFIX) {
                     Some(label) => Recorded::Runfiles { name, label },
@@ -417,6 +429,7 @@ impl CriticalPath {
                     },
                 };
                 RecordedStep {
+                    at,
                     start_us: slice.start_us,
                     end_us: slice.end_us(),
                     mnemonic: detail.mnemonic,
@@ -683,6 +696,7 @@ impl Cursor {
 
 /// A step as the critical-path lane records it.
 struct RecordedStep<'p> {
+    at: SliceAt,
     start_us: i64,
     end_us: i64,
     mnemonic: OptStr,
@@ -733,6 +747,7 @@ impl<'p> RecordedStep<'p> {
             (Work::ChangePruned, None)
         } else if let Some(action) = spans.claim(self) {
             let split = SpanSplit {
+                at: action.at,
                 before: cursor.advance_to(action.span.start_us),
                 span: Ran::Unlogged(cursor.advance_to(self.end_us)),
             };
@@ -761,6 +776,7 @@ impl<'p> RecordedStep<'p> {
                 .primary_output
                 .or_else(|| profile.opt_str(span?.out))
                 .map(str::to_owned),
+            at: self.at,
             start_us: self.start_us,
             gap,
             work,

@@ -4,11 +4,12 @@ use bviz_invocation::{
     Attempt, Attempts, ConfiguredTarget, Phase, Profiled, Runner, Spawns, Timings, Venue,
 };
 
-use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, Str, TimeSpan};
+use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, SliceAt, Str, TimeSpan};
 
 /// One action span the profile records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
+    pub at: SliceAt,
     /// What Bazel's `describe()` says the action does, the span's name.
     pub description: Str,
     pub mnemonic: OptStr,
@@ -230,7 +231,7 @@ impl Profile {
             .map(|track| self.slices(track).iter().filter(|s| is_action(s)).count())
             .sum();
         let mut started = Vec::with_capacity(span_count);
-        for track in self.threads() {
+        for (track_at, track) in self.threads().iter().enumerate() {
             let slices = self.slices(track);
             for (i, (slice, detail)) in slices.iter().zip(self.details(track)).enumerate() {
                 if !is_action(slice) {
@@ -273,6 +274,10 @@ impl Profile {
                     phases.saw(Phase::Running(Venue::Local), slice.start_us);
                 }
                 started.push(Action {
+                    at: SliceAt {
+                        track: track_at,
+                        slice: i,
+                    },
                     description: slice.name,
                     mnemonic: detail.mnemonic,
                     out: detail.out,
