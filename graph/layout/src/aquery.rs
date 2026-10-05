@@ -572,6 +572,11 @@ impl Boxes<'_> {
             let mnemonic = self.facets.facets().intern_mnemonic(&action.mnemonic);
             self.facets.facets().set_mnemonic(node, Some(mnemonic));
         }
+        if !action.progress_message.is_empty() {
+            let facets = self.facets.facets();
+            let message = facets.intern_progress_message(&action.progress_message);
+            facets.set_progress_message(node, Some(message));
+        }
         // An action lists the aspects that produced it whether or not any did,
         // so every action carries the field the aspect axis reads.
         self.facets.observe(Axis::Aspect, true);
@@ -936,7 +941,7 @@ impl Paths<'_> {
 /// `--experimental_sibling_repository_layout` selects) or by an `external/<repo>/`
 /// prefix on the path below `bin/`. `None` when `path` is not a `bin` output.
 fn generated_bin_path(path: &str) -> Option<(&str, &str)> {
-    let derived = path.strip_prefix("bazel-out/")?;
+    let derived = path.strip_prefix(DERIVED_ROOT)?;
     let (first, after_first) = derived.split_once('/')?;
     let (sibling_repo, suffix) = match after_first.strip_prefix("bin/") {
         Some(suffix) => ("", suffix),
@@ -950,7 +955,59 @@ fn generated_bin_path(path: &str) -> Option<(&str, &str)> {
 
 /// Whether `path` names an output tree, which no source file lives in.
 fn is_derived(path: &str) -> bool {
-    path.starts_with("bazel-out/")
+    path.starts_with(DERIVED_ROOT)
+}
+
+/// The prefix of every derived artifact's exec path.
+const DERIVED_ROOT: &str = "bazel-out/";
+
+/// The directories a configuration roots its derived artifacts in.
+const OUTPUT_TREES: [&str; 3] = ["bin", "genfiles", "testlogs"];
+
+/// The most directories an output tree nests in below [`DERIVED_ROOT`]: its
+/// configuration's, and under `--experimental_sibling_repository_layout`
+/// its repository's above that.
+const OUTPUT_TREE_DEPTH: usize = 2;
+
+/// The description Bazel's `describe()` gives an action of `mnemonic` whose
+/// primary output lies at exec path `primary_output`: its progress message,
+/// or where it sets none its mnemonic and the path of that output below its
+/// root:
+/// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/actions/AbstractAction.java#L557-L560>
+/// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/actions/AbstractAction.java#L416-L418>
+pub fn description<'a>(
+    progress_message: Option<&'a str>,
+    mnemonic: &str,
+    primary_output: &str,
+) -> Cow<'a, str> {
+    match progress_message {
+        Some(message) => Cow::Borrowed(message),
+        None => Cow::Owned(format!("{mnemonic} {}", root_relative(primary_output))),
+    }
+}
+
+/// The part of exec path `path` below the root of the artifact it names: a
+/// configuration's output tree (`bazel-out/<config>/bin/`, or
+/// `bazel-out/<repo>/<config>/bin/` under
+/// `--experimental_sibling_repository_layout`), `bazel-out/` itself for an
+/// artifact of no configuration, and nothing for a source file.
+fn root_relative(path: &str) -> &str {
+    let Some(derived) = path.strip_prefix(DERIVED_ROOT) else {
+        return path;
+    };
+    let mut below = derived;
+    for _ in 0..OUTPUT_TREE_DEPTH {
+        let Some((_, rest)) = below.split_once('/') else {
+            break;
+        };
+        if let Some((tree, under)) = rest.split_once('/')
+            && OUTPUT_TREES.contains(&tree)
+        {
+            return under;
+        }
+        below = rest;
+    }
+    derived
 }
 
 /// The repository and repository-relative remainder of a path inside an external
@@ -2186,6 +2243,60 @@ mod tests {
         let external = parent_of(&graph, &names, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
         assert_eq!(find(&graph, &names, external).label, "@somerepo//foo");
+    }
+
+    #[test]
+    fn an_action_is_described_by_its_progress_message() {
+        let message = "Compiling a.cc [for tool]";
+        let output = "bazel-out/k8-opt-exec/bin/a.o";
+        assert_eq!(description(Some(message), "CppCompile", output), message);
+    }
+
+    #[test]
+    fn an_action_setting_no_progress_message_is_described_by_its_primary_output() {
+        let described = |output| description(None, "Symlink", output).into_owned();
+        assert_eq!(described("bazel-out/k8-fastbuild/bin/p/a"), "Symlink p/a");
+        assert_eq!(
+            described("bazel-out/k8-fastbuild/testlogs/p/t/test.log"),
+            "Symlink p/t/test.log"
+        );
+        assert_eq!(
+            described("bazel-out/k8-fastbuild/bin/external/r+/p/a"),
+            "Symlink external/r+/p/a"
+        );
+        assert_eq!(
+            described("bazel-out/r+/k8-fastbuild/bin/p/a"),
+            "Symlink p/a"
+        );
+        assert_eq!(
+            described("bazel-out/stable-status.txt"),
+            "Symlink stable-status.txt"
+        );
+        assert_eq!(described("p/a.txt"), "Symlink p/a.txt");
+    }
+
+    #[test]
+    fn an_actions_progress_message_facet_holds_what_the_query_states() {
+        let container = ActionGraphContainer {
+            targets: vec![target(1, "//p:t")],
+            actions: vec![
+                Action {
+                    progress_message: "Executing genrule //p:t".into(),
+                    ..action(1, "Genrule", &[])
+                },
+                action(1, "Genrule", &[]),
+            ],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let message = |node: &str| {
+            let message = facets.progress_message(names.get(node).unwrap())?;
+            Some(facets.strings().resolve(message))
+        };
+        assert_eq!(message("action0"), Some("Executing genrule //p:t"));
+        assert_eq!(message("action1"), None);
     }
 
     #[test]

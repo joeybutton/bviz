@@ -234,6 +234,12 @@ impl<'a> Resolver<'a> {
         self.names.get(&action_node_id(primary_output))
     }
 
+    /// The exec path of the primary output of `node`, an action; `None` for
+    /// an action naming none and for any other node.
+    pub fn primary_output(&self, node: Id) -> Option<&'a str> {
+        action_primary_output(self.names.resolve(node))
+    }
+
     /// The node `node_id` forms from `label`, under whichever spelling of the
     /// label [`RepoMapping::canonicalize_label`] gave the graph: an apparent
     /// repository name stands in the graph either as written or canonical,
@@ -554,6 +560,20 @@ mod tests {
         assert_ne!(action_node_id("pkg/a.o"), action_node_id("pkg/b.o"));
         assert_eq!(unnamed_action_node_id(7), "action7");
         assert_eq!(action_primary_output("action7"), None);
+    }
+
+    #[test]
+    fn a_resolver_finds_an_action_and_its_primary_output_from_each_other() {
+        let mut names = Names::default();
+        let action = names.intern(&action_node_id("bazel-out/k8/bin/a.o"));
+        let unnamed = names.intern(&unnamed_action_node_id(0));
+        let resolver = Resolver::new(&names);
+        assert_eq!(resolver.action("bazel-out/k8/bin/a.o"), Some(action));
+        assert_eq!(
+            resolver.primary_output(action),
+            Some("bazel-out/k8/bin/a.o")
+        );
+        assert_eq!(resolver.primary_output(unnamed), None);
     }
 
     #[test]

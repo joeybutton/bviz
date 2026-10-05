@@ -435,6 +435,7 @@ pub struct Facets {
     rule_class: Vec<Option<RuleClassRef>>,
     config: Vec<Option<ConfigRef>>,
     mnemonic: Vec<Option<Sym>>,
+    progress_message: Vec<Option<Sym>>,
     testonly: Vec<Tri>,
     package: Vec<Option<NodeRef>>,
     label: Vec<Option<NodeRef>>,
@@ -490,6 +491,12 @@ impl Facets {
     dense_facet! {
         /// The mnemonic of the action the node runs.
         mnemonic, set_mnemonic: Option<Sym>
+    }
+
+    dense_facet! {
+        /// The progress message of the action the node runs, where the action
+        /// sets one.
+        progress_message, set_progress_message: Option<Sym>
     }
 
     dense_facet! {
@@ -691,6 +698,11 @@ impl Facets {
         self.strings.intern(name)
     }
 
+    /// The handle for an action's progress message `message`.
+    pub fn intern_progress_message(&mut self, message: &str) -> Sym {
+        self.strings.intern(message)
+    }
+
     /// The handle for the rule class `name`, categorizing it by that name.
     pub fn intern_rule_class(&mut self, name: &str) -> RuleClassRef {
         let handle = RuleClassRef::of(self.strings.intern(name));
@@ -772,6 +784,7 @@ impl Facets {
         self.rule_class = permuted(&self.rule_class, remap);
         self.config = permuted(&self.config, remap);
         self.mnemonic = permuted(&self.mnemonic, remap);
+        self.progress_message = permuted(&self.progress_message, remap);
         self.testonly = permuted(&self.testonly, remap);
         self.package = permuted_nodes(&self.package, remap);
         self.label = permuted_nodes(&self.label, remap);
