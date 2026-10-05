@@ -7,7 +7,7 @@ use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_critical_path::{CriticalPath, Step, Work};
 use bviz_invocation::spawn::LoggedSpawns;
-use bviz_invocation::{ActionGraph, ConfiguredTarget, CriticalStep, Revision, Session};
+use bviz_invocation::{ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
     span_between,
@@ -105,34 +105,32 @@ fn critical_steps(steps: &[Step]) -> Vec<CriticalStep> {
         .collect()
 }
 
-/// Who holds the step of the critical path chosen in its panel, by its place
-/// among the path's steps.
-enum ChosenStep {
+/// Who holds what was chosen of the critical path in its panel.
+enum HeldChoice {
     /// The invocation's session, which shares the choice with the views of
     /// the invocation's other outputs and lets go of it where the path
     /// reported to it changes.
     InSession(Entity<Session>),
-    /// The model, for a profile opened alone; tracing the path again with
-    /// other spawns leaves the choice as it is.
-    Alone(Option<usize>),
+    /// The model, for a profile opened alone, whose path is traced once.
+    Alone(Option<Chosen>),
 }
 
-impl ChosenStep {
-    fn index(&self, cx: &App) -> Option<usize> {
+impl HeldChoice {
+    fn get(&self, cx: &App) -> Option<Chosen> {
         match self {
-            ChosenStep::InSession(session) => session.read(cx).chosen_step(),
-            ChosenStep::Alone(index) => *index,
+            HeldChoice::InSession(session) => session.read(cx).chosen(),
+            HeldChoice::Alone(chosen) => *chosen,
         }
     }
 
-    fn set(&mut self, index: Option<usize>, cx: &mut App) {
+    fn set(&mut self, chosen: Option<Chosen>, cx: &mut App) {
         match self {
-            ChosenStep::InSession(session) => session.update(cx, |session, cx| {
-                if session.choose_step(index) {
+            HeldChoice::InSession(session) => session.update(cx, |session, cx| {
+                if session.choose(chosen) {
                     cx.notify();
                 }
             }),
-            ChosenStep::Alone(chosen) => *chosen = index,
+            HeldChoice::Alone(held) => *held = chosen,
         }
     }
 }
@@ -430,7 +428,7 @@ pub(crate) struct TraceModel {
     /// The profile time the flame graph and stats aggregate over, intersected
     /// with the selected tracks.
     time_selection: TimeSelection,
-    chosen_step: ChosenStep,
+    chosen: HeldChoice,
     /// Which lane-class groups are collapsed in the chart, indexed by
     /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
@@ -528,9 +526,9 @@ impl TraceModel {
     }
 
     fn new(session: Option<Entity<Session>>, clock: Option<DocumentClock>, load: Task<()>) -> Self {
-        let chosen_step = match &session {
-            Some(session) => ChosenStep::InSession(session.clone()),
-            None => ChosenStep::Alone(None),
+        let chosen = match &session {
+            Some(session) => HeldChoice::InSession(session.clone()),
+            None => HeldChoice::Alone(None),
         };
         Self {
             source: Source::Loading,
@@ -541,7 +539,7 @@ impl TraceModel {
             shared_track_names: Vec::new(),
             selected_tracks: Vec::new(),
             time_selection: TimeSelection::default(),
-            chosen_step,
+            chosen,
             collapsed_groups: default_collapsed_groups(),
             group_show_all: [false; GROUP_ORDER.len()],
             kept_in_sample: None,
@@ -670,8 +668,14 @@ impl TraceModel {
 
     /// The chosen step of the critical path and its place among the steps.
     pub(crate) fn chosen_step(&self, cx: &App) -> Option<(usize, &Step)> {
-        let index = self.chosen_step.index(cx)?;
-        Some((index, self.steps().get(index)?))
+        self.step_of(self.chosen.get(cx)?)
+    }
+
+    /// The step `chosen` stands for, and its place among the steps.
+    fn step_of(&self, chosen: Chosen) -> Option<(usize, &Step)> {
+        match chosen {
+            Chosen::Step(index) => Some((index, self.steps().get(index)?)),
+        }
     }
 
     /// Chooses step `index` of the critical path, selects its time and has
@@ -680,7 +684,7 @@ impl TraceModel {
         let Some(selection) = self.adopt_chosen_step(index) else {
             return;
         };
-        self.chosen_step.set(Some(index), cx);
+        self.chosen.set(Some(Chosen::Step(index)), cx);
         self.set_time_selection(selection, cx);
         cx.emit(StepChosen);
         cx.notify();
@@ -733,7 +737,7 @@ impl TraceModel {
         let Some(selection) = self.chosen_selection(cx) else {
             return false;
         };
-        self.chosen_step.set(None, cx);
+        self.chosen.set(None, cx);
         if self.release_chosen_lane(&selection) {
             self.set_time_selection(TimeSelection::default(), cx);
         }
@@ -807,8 +811,8 @@ impl TraceModel {
     /// selection (whose instants address the old profile's timeline) and, for a
     /// loaded profile, seeding the default track selection.
     pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
-        if self.chosen_step.index(cx).is_some() {
-            self.chosen_step.set(None, cx);
+        if self.chosen.get(cx).is_some() {
+            self.chosen.set(None, cx);
         }
         self.replace_source(source);
         cx.emit(SourceReplaced);
@@ -818,14 +822,14 @@ impl TraceModel {
     }
 
     /// Takes `source` in place of the document, dropping what was derived
-    /// from the one it replaces and what was chosen in it, save the step a
+    /// from the one it replaces and what was chosen in it, save what a
     /// session holds chosen.
     fn replace_source(&mut self, source: Source) {
         self.lanes.borrow_mut().take();
         self.visible_lanes.borrow_mut().take();
         self.invalidate_aggregates();
         self.time_selection.clear();
-        if let ChosenStep::Alone(chosen) = &mut self.chosen_step {
+        if let HeldChoice::Alone(chosen) = &mut self.chosen {
             *chosen = None;
         }
         self.kept_in_sample = None;
@@ -1224,7 +1228,7 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChosenStep, Derivations, Joined, LoadedProfile, TraceModel, TracedPath, Tracing,
+        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, TraceModel, TracedPath, Tracing,
         clock_source, critical_steps, step_slices,
     };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
@@ -1506,9 +1510,9 @@ mod tests {
     fn a_replaced_document_holds_no_chosen_step() {
         let mut model = traced();
         model.adopt_chosen_step(0).expect("a step to choose");
-        model.chosen_step = ChosenStep::Alone(Some(0));
+        model.chosen = HeldChoice::Alone(Some(Chosen::Step(0)));
         model.replace_source(Source::Loading);
-        assert!(matches!(model.chosen_step, ChosenStep::Alone(None)));
+        assert!(matches!(model.chosen, HeldChoice::Alone(None)));
         assert_eq!(model.kept_in_sample, None);
     }
 

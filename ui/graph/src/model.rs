@@ -17,7 +17,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{ActionGraph, Configurations, Revision, Session};
+use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -127,7 +127,8 @@ pub(crate) struct Loaded {
     /// Where the steps of the invocation's critical path land.
     critical: CriticalNodes,
     traced: Revision,
-    /// Which of its session's choices of a critical-path step was last shown.
+    /// Which of its session's choices of what to show of the critical path
+    /// was last shown.
     chosen: Revision,
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
@@ -243,21 +244,23 @@ impl Loaded {
         changed
     }
 
-    /// Takes the choice of a critical-path step `session` holds as one
-    /// shown: one made before the graph landed is no choice to show it.
-    fn pass_over_chosen_step(&mut self, session: &Session) {
-        self.chosen = session.chosen_step_revision();
+    /// Takes the choice of the critical path `session` holds as one shown:
+    /// one made before the graph landed is no choice to show it.
+    fn pass_over_choice(&mut self, session: &Session) {
+        self.chosen = session.chosen_revision();
     }
 
-    /// The node of the critical-path step `session` holds chosen, where it
+    /// The node of what `session` holds chosen of the critical path, where it
     /// was chosen since this last asked and lands on the graph.
-    fn take_up_chosen_step(&mut self, session: &Session) -> Option<Id> {
-        let revision = session.chosen_step_revision();
+    fn take_up_choice(&mut self, session: &Session) -> Option<Id> {
+        let revision = session.chosen_revision();
         if self.chosen == revision {
             return None;
         }
         self.chosen = revision;
-        self.critical.step(session.chosen_step()?)
+        match session.chosen()? {
+            Chosen::Step(index) => self.critical.step(index),
+        }
     }
 
     fn take_up_critical_path(&mut self, session: &Session) -> bool {
@@ -659,7 +662,7 @@ impl GraphModel {
                 model.source = match result {
                     Ok((mut read, described, actions)) => {
                         if let Some(joined) = &model.joined {
-                            read.loaded.pass_over_chosen_step(joined.session.read(cx));
+                            read.loaded.pass_over_choice(joined.session.read(cx));
                             joined.session.update(cx, |session, cx| {
                                 session.add_configurations(described);
                                 if let Some(actions) = actions {
@@ -699,8 +702,8 @@ impl GraphModel {
     }
 
     /// Takes up what `session` reports of the loaded graph, saying whether
-    /// that changed anything a view of it shows, and the reveal of the
-    /// critical-path step chosen since, which the panel the graph's other
+    /// that changed anything a view of it shows, and the reveal of what was
+    /// chosen of the critical path since, which the panel the graph's other
     /// views defer to shows in place.
     fn take_up_from(&mut self, session: &Session) -> (bool, Option<RevealRequested>) {
         let Source::Loaded(loaded) = &mut self.source else {
@@ -708,7 +711,7 @@ impl GraphModel {
         };
         let changed = loaded.report(session);
         let reveal = loaded
-            .take_up_chosen_step(session)
+            .take_up_choice(session)
             .zip(self.deferred.as_ref())
             .map(|(node, deferred)| RevealRequested {
                 panel: deferred.panel,
@@ -948,8 +951,8 @@ mod tests {
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, CriticalStep, Outcomes, Profiled, Runner, Spawns,
-        Timings,
+        Attempts, BuildOutcome, Chosen, ConfiguredTarget, CriticalStep, Outcomes, Profiled, Runner,
+        Spawns, Timings,
     };
     use std::time::Duration;
 
@@ -1126,19 +1129,19 @@ mod tests {
             step("bazel-out/bin/app/other"),
         ]);
         loaded.report(&session);
-        assert_eq!(loaded.take_up_chosen_step(&session), None);
+        assert_eq!(loaded.take_up_choice(&session), None);
 
-        assert!(session.choose_step(Some(0)));
-        let shown = loaded.take_up_chosen_step(&session);
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let shown = loaded.take_up_choice(&session);
         assert!(shown.is_some());
-        assert_eq!(loaded.take_up_chosen_step(&session), None);
-        assert!(session.choose_step(Some(0)));
-        assert_eq!(loaded.take_up_chosen_step(&session), shown);
+        assert_eq!(loaded.take_up_choice(&session), None);
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert_eq!(loaded.take_up_choice(&session), shown);
 
-        assert!(session.choose_step(Some(1)));
-        assert_eq!(loaded.take_up_chosen_step(&session), None);
-        assert!(session.choose_step(None));
-        assert_eq!(loaded.take_up_chosen_step(&session), None);
+        assert!(session.choose(Some(Chosen::Step(1))));
+        assert_eq!(loaded.take_up_choice(&session), None);
+        assert!(session.choose(None));
+        assert_eq!(loaded.take_up_choice(&session), None);
     }
 
     /// A step chosen before the graph landed is not shown on its landing.
@@ -1147,14 +1150,14 @@ mod tests {
         let mut session = Session::default();
         let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
         session.report_critical_path(vec![step]);
-        assert!(session.choose_step(Some(0)));
+        assert!(session.choose(Some(Chosen::Step(0))));
         let mut loaded = loaded();
-        loaded.pass_over_chosen_step(&session);
+        loaded.pass_over_choice(&session);
         loaded.report(&session);
-        assert_eq!(loaded.take_up_chosen_step(&session), None);
+        assert_eq!(loaded.take_up_choice(&session), None);
 
-        assert!(session.choose_step(Some(0)));
-        assert!(loaded.take_up_chosen_step(&session).is_some());
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert!(loaded.take_up_choice(&session).is_some());
     }
 
     /// A chosen step is revealed in place, in the panel the graph's other
@@ -1174,7 +1177,7 @@ mod tests {
         });
         assert!(model.take_up_from(&session).1.is_none());
 
-        assert!(session.choose_step(Some(0)));
+        assert!(session.choose(Some(Chosen::Step(0))));
         let (_, reveal) = model.take_up_from(&session);
         let reveal = reveal.expect("a reveal");
         assert_eq!((reveal.panel, reveal.reveal), (panel, Reveal::InPlace));

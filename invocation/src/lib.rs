@@ -165,8 +165,7 @@ pub struct Session {
     /// Shared, as a derivation off the UI thread reads it.
     action_graph: Reported<Option<Arc<ActionGraph>>>,
     attempts: Reported<Attempts>,
-    /// By its place in `critical_path`.
-    chosen_step: Reported<Option<usize>>,
+    chosen: Reported<Option<Chosen>>,
     configurations: Configurations,
     /// In the order they started.
     critical_path: Reported<Vec<CriticalStep>>,
@@ -176,6 +175,14 @@ pub struct Session {
     logged_spawns: Reported<Option<Arc<LoggedSpawns>>>,
     outcomes: Reported<Outcomes>,
     timings: Reported<Timings>,
+}
+
+/// What a reader chose of an invocation's critical path in a view of one of
+/// its outputs, for the views of the others to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chosen {
+    /// A step, by its place among the path's steps.
+    Step(usize),
 }
 
 impl Session {
@@ -269,41 +276,43 @@ impl Session {
     }
 
     /// Says whether `reported` differs from the steps held: the same steps
-    /// again are no new report, and a new one lets go of the step chosen of
+    /// again are no new report, and a new one lets go of a step chosen of
     /// those held.
     pub fn report_critical_path(&mut self, reported: Vec<CriticalStep>) -> bool {
         let changed = self.critical_path.value != reported;
         if changed {
             self.critical_path.replace(reported);
-            if self.chosen_step.value.is_some() {
-                self.chosen_step.replace(None);
+            if matches!(self.chosen.value, Some(Chosen::Step(_))) {
+                self.chosen.replace(None);
             }
         }
         changed
     }
 
-    /// The step of the [critical path](Self::critical_path) a reader last
-    /// chose in a view of one of the invocation's outputs, for the views of
-    /// the others to show, by its place among the steps.
-    pub fn chosen_step(&self) -> Option<usize> {
-        self.chosen_step.value
+    /// What of the [critical path](Self::critical_path) a reader last chose,
+    /// always one the path holds.
+    pub fn chosen(&self) -> Option<Chosen> {
+        self.chosen.value
     }
 
-    /// Changes with every choice, of a step or of none, the same step chosen
-    /// again included, so that a view shows each choice once.
-    pub fn chosen_step_revision(&self) -> Revision {
-        self.chosen_step.revision
+    /// Changes with every choice, of something or of nothing, the same
+    /// chosen again included, so that a view shows each choice once.
+    pub fn chosen_revision(&self) -> Revision {
+        self.chosen.revision
     }
 
-    /// Takes `step`, a place among the critical path's steps, for the one a
-    /// reader chose, or no step for `None`. Says whether it took it: a place
-    /// past the steps holds none to choose.
-    pub fn choose_step(&mut self, step: Option<usize>) -> bool {
-        if step.is_some_and(|index| index >= self.critical_path.value.len()) {
-            return false;
+    /// Takes `chosen` for what a reader chose of the critical path, or
+    /// nothing for `None`. Says whether it took it: a place past the steps
+    /// holds none to choose.
+    pub fn choose(&mut self, chosen: Option<Chosen>) -> bool {
+        let held = match chosen {
+            Some(Chosen::Step(index)) => index < self.critical_path.value.len(),
+            None => true,
+        };
+        if held {
+            self.chosen.replace(chosen);
         }
-        self.chosen_step.replace(step);
-        true
+        held
     }
 }
 
@@ -317,10 +326,14 @@ mod tests {
         let steps = || vec![CriticalStep::new(Some("bazel-out/a.o"), None)];
         assert!(session.report_critical_path(steps()));
         let traced = session.critical_path_revision();
-        assert!(session.choose_step(Some(0)));
+        assert!(session.choose(Some(Chosen::Step(0))));
         assert!(!session.report_critical_path(steps()));
         assert_eq!(session.critical_path_revision(), traced);
-        assert_eq!(session.chosen_step(), Some(0), "still a step of the path");
+        assert_eq!(
+            session.chosen(),
+            Some(Chosen::Step(0)),
+            "still a step of the path"
+        );
         assert!(session.report_critical_path(Vec::new()));
         assert_ne!(session.critical_path_revision(), traced);
     }
@@ -329,28 +342,28 @@ mod tests {
     fn a_critical_path_reported_anew_holds_no_step_chosen_of_the_last() {
         let mut session = Session::default();
         session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/a.o"), None)]);
-        let unchosen = session.chosen_step_revision();
-        assert!(session.choose_step(Some(0)));
-        assert_eq!(session.chosen_step(), Some(0));
-        let chosen = session.chosen_step_revision();
+        let unchosen = session.chosen_revision();
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
+        let chosen = session.chosen_revision();
         assert_ne!(chosen, unchosen);
 
         session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/b.o"), None)]);
-        assert_eq!(session.chosen_step(), None);
-        assert_ne!(session.chosen_step_revision(), chosen);
+        assert_eq!(session.chosen(), None);
+        assert_ne!(session.chosen_revision(), chosen);
     }
 
     #[test]
     fn a_step_past_the_critical_path_is_not_chosen() {
         let mut session = Session::default();
         session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/a.o"), None)]);
-        assert!(session.choose_step(Some(0)));
-        let chosen = session.chosen_step_revision();
-        assert!(!session.choose_step(Some(1)));
-        assert_eq!(session.chosen_step(), Some(0));
-        assert_eq!(session.chosen_step_revision(), chosen);
-        assert!(session.choose_step(None));
-        assert_eq!(session.chosen_step(), None);
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let chosen = session.chosen_revision();
+        assert!(!session.choose(Some(Chosen::Step(1))));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
+        assert_eq!(session.chosen_revision(), chosen);
+        assert!(session.choose(None));
+        assert_eq!(session.chosen(), None);
     }
 
     #[test]
