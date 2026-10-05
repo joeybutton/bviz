@@ -11,7 +11,7 @@ use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
 use crate::reveal::{self, hidden_by};
-use crate::{GraphPanel, Palette};
+use crate::{GraphPanel, Palette, why};
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::text_input::TextEdited;
 use bviz_ui_components::{
@@ -37,7 +37,16 @@ use std::time::Duration;
 
 actions!(
     bviz_graph_jump,
-    [Open, Previous, Next, Go, Close, NextScope, PreviousScope]
+    [
+        Open,
+        Previous,
+        Next,
+        Go,
+        AskWhy,
+        Close,
+        NextScope,
+        PreviousScope
+    ]
 );
 
 /// The key context the palette carries, scoping the keys that move through
@@ -455,6 +464,15 @@ fn jump_to(view: &mut GraphPanel, id: Id, window: &mut Window, cx: &mut Context<
     reveal::reveal(view, id, cx);
 }
 
+/// Asks why the aimed row's node is in the build, closing the palette.
+fn ask_why(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
+    let Some(id) = view.jump.open.as_ref().and_then(aimed) else {
+        return;
+    };
+    put_away(view, window, cx);
+    why::ask_why(view, id, cx);
+}
+
 /// Closes the palette unpicked, returning the view to where it stood as the
 /// palette opened.
 fn close(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
@@ -527,6 +545,9 @@ pub(crate) fn overlay(
                     .on_action(cx.listener(|view, _: &Previous, _, cx| aim(view, -1, cx)))
                     .on_action(cx.listener(|view, _: &Next, _, cx| aim(view, 1, cx)))
                     .on_action(cx.listener(|view, _: &Go, window, cx| go(view, window, cx)))
+                    .on_action(
+                        cx.listener(|view, _: &AskWhy, window, cx| ask_why(view, window, cx)),
+                    )
                     .on_action(cx.listener(|view, _: &Close, window, cx| close(view, window, cx)))
                     .on_action(
                         cx.listener(|view, _: &NextScope, _, cx| cycle_scope(view, false, cx)),
@@ -656,7 +677,7 @@ fn footer(jump: &Jump, muted: Hsla) -> Div {
         .text_xs()
         .text_color(muted)
         .child(tally)
-        .child("↑↓ preview · enter jump · tab scope · esc back")
+        .child("↑↓ preview · enter jump · ctrl-enter why · tab scope · esc back")
 }
 
 /// One row: the node's text with the characters the query matched picked

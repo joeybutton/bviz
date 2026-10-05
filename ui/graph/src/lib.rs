@@ -122,6 +122,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", jump::Previous, jumping),
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
+        KeyBinding::new("ctrl-enter", jump::AskWhy, jumping),
         KeyBinding::new("escape", jump::Close, jumping),
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
@@ -1240,6 +1241,7 @@ mod tests {
         assert!(is(dispatched("escape", IN_PANEL), Dismiss));
         assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
         assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
+        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
         assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
         assert!(is(dispatched("shift-tab", IN_PALETTE), jump::PreviousScope));
     }
