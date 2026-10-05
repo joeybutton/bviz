@@ -30,6 +30,12 @@ pub(crate) enum Value<'a> {
     Fixed,
 }
 
+/// The value of an int32 field read as `varint`: a negative one is encoded
+/// sign-extended to 64 bits, so its low 32 bits are the value.
+pub(crate) fn int32(varint: u64) -> i32 {
+    varint as i32
+}
+
 /// The field number and value at the head of `message`, which it advances
 /// past the field.
 pub(crate) fn next_field<'a>(message: &mut &'a [u8]) -> Result<(u32, Value<'a>), DecodeError> {

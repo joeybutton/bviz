@@ -7,15 +7,15 @@ use std::time::Duration;
 use bazel_spawn_proto::duration_proto::google::protobuf::Duration as ProtoDuration;
 use bazel_spawn_proto::tools::protos::SpawnMetrics;
 use bazel_spawn_proto::tools::protos::exec_log_entry::Invocation;
-use bviz_invocation::InvocationId;
 use bviz_invocation::spawn::{self, Logged, PhaseTiming, REPORTED_PHASES};
+use bviz_invocation::{EpochMicros, InvocationId};
 use bviz_parallel::worker_count;
 use prost::{DecodeError, Message};
 use rustc_hash::FxHashMap;
 
 use crate::frame::{first_message, for_each_message, for_each_message_pipelined};
 use crate::spawn_fields::exec_log_entry;
-use crate::wire::{Value, next_field, text};
+use crate::wire::{Value, int32, next_field, text};
 use crate::{ExecLog, LoadError};
 
 /// Compressed log bytes per spawn, rounded down from the densest logs measured
@@ -191,6 +191,8 @@ impl Builder {
         let mut mnemonic = "";
         let mut runner = "";
         let mut cache_hit = false;
+        let mut exit_code = 0;
+        let mut status = None;
         let mut metrics = SpawnMetrics::default();
         while !spawn.is_empty() {
             match next_field(&mut spawn)? {
@@ -205,12 +207,19 @@ impl Builder {
                 (exec_log_entry::spawn::MNEMONIC, Value::Bytes(bytes)) => mnemonic = text(bytes)?,
                 (exec_log_entry::spawn::RUNNER, Value::Bytes(bytes)) => runner = text(bytes)?,
                 (exec_log_entry::spawn::CACHE_HIT, Value::Varint(hit)) => cache_hit = hit != 0,
+                (exec_log_entry::spawn::EXIT_CODE, Value::Varint(code)) => exit_code = int32(code),
+                (exec_log_entry::spawn::STATUS, Value::Bytes(bytes)) => status = Some(text(bytes)?),
                 (exec_log_entry::spawn::METRICS, Value::Bytes(bytes)) => {
                     metrics = SpawnMetrics::decode(bytes)?;
                 }
                 _ => {}
             }
         }
+        if let Some(start) = metrics.start_time {
+            self.spawns
+                .started(EpochMicros::from_timestamp(start.seconds, start.nanos));
+        }
+        self.spawns.exited(exit_code, status);
         self.spawns.push(Logged {
             runner,
             mnemonic,
@@ -340,6 +349,8 @@ mod tests {
     use bazel_spawn_proto::tools::protos::exec_log_entry::{self, Type};
 
     use super::*;
+    use bazel_spawn_proto::timestamp_proto::google::protobuf::Timestamp;
+
     use crate::Phase;
     use crate::test_log::*;
 
@@ -424,6 +435,32 @@ mod tests {
         let accounted: u64 = reported.iter().map(|&(_, millis)| millis).sum();
         assert_eq!(timing.phase(Phase::Other), ms(total - accounted));
         assert_eq!(timing.total(), ms(total));
+    }
+
+    #[test]
+    fn reads_when_each_spawn_started_and_how_it_exited() {
+        let mut started = metrics(1, &[]);
+        started.start_time = Some(Timestamp {
+            seconds: 1_781_439_245,
+            nanos: 231_456_789,
+        });
+        let mut failed = spawn("linux-sandbox", "Genrule", metrics(1, &[]));
+        failed.exit_code = -1;
+        failed.status = "NON_ZERO_EXIT".into();
+        let log = load(&[
+            entry(0, Type::Spawn(spawn("linux-sandbox", "Genrule", started))),
+            entry(0, Type::Spawn(failed)),
+        ]);
+        let spawns: Vec<_> = log.spawns().collect();
+        assert_eq!(
+            spawns[0].start(),
+            Some(EpochMicros::from_micros(1_781_439_245_231_456))
+        );
+        assert!(!spawns[0].failed());
+        assert_eq!(spawns[1].start(), None);
+        assert_eq!(spawns[1].exit_code(), -1);
+        assert_eq!(spawns[1].status(), Some("NON_ZERO_EXIT"));
+        assert!(spawns[1].failed());
     }
 
     #[test]

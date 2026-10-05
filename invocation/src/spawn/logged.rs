@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use super::PhaseTiming;
+use crate::EpochMicros;
 
 /// The spawns an execution log records of an invocation.
 #[derive(Default)]
@@ -10,6 +11,8 @@ pub struct LoggedSpawns {
     runners: Vec<Box<str>>,
     /// Distinct mnemonics, which [`Record::mnemonic`] indexes.
     mnemonics: Vec<Box<str>>,
+    /// Distinct failure statuses, which [`Record::status`] indexes.
+    statuses: Vec<Box<str>>,
     records: Vec<Record>,
     /// Every spawn's outputs, each spawn's a run [`Record::outputs`] names.
     outputs: Paths,
@@ -22,6 +25,9 @@ struct Record {
     outputs: Range<usize>,
     cache_hit: bool,
     timing: PhaseTiming,
+    start: Option<EpochMicros>,
+    exit_code: i32,
+    status: Option<usize>,
 }
 
 /// Exec paths end to end, each named by its place in the order added.
@@ -142,6 +148,31 @@ impl<'a> LoggedSpawn<'a> {
     pub fn timing(&self) -> &'a PhaseTiming {
         &self.record.timing
     }
+
+    /// When the spawn started to execute, on the clock of whatever executed
+    /// it: a remote executor's for a remote execution, and for a cache hit
+    /// the execution that wrote the entry, however long before the build.
+    /// `None` where the log names no instant.
+    pub fn start(&self) -> Option<EpochMicros> {
+        self.record.start
+    }
+
+    /// The spawn's exit code, whose meaning depends on its
+    /// [`status`](Self::status).
+    pub fn exit_code(&self) -> i32 {
+        self.record.exit_code
+    }
+
+    /// Why the spawn failed, as Bazel names its `SpawnResult.Status`, such as
+    /// `NON_ZERO_EXIT` or `TIMEOUT`; `None` for a spawn that succeeded.
+    pub fn status(&self) -> Option<&'a str> {
+        self.record.status.map(|status| &*self.log.statuses[status])
+    }
+
+    /// Whether the spawn failed: it has a status, or a non-zero exit code.
+    pub fn failed(&self) -> bool {
+        self.record.status.is_some() || self.record.exit_code != 0
+    }
 }
 
 /// One spawn as a reader of a log finds it, for [`Builder::push`].
@@ -158,10 +189,16 @@ pub struct Logged<'a> {
 pub struct Builder {
     runners: Names,
     mnemonics: Names,
+    statuses: Names,
     records: Vec<Record>,
     outputs: Paths,
     /// Where the outputs of the spawn pushed next start in `outputs`.
     next_outputs: usize,
+    /// What [`started`](Self::started) gave the spawn pushed next.
+    next_start: Option<EpochMicros>,
+    /// What [`exited`](Self::exited) gave the spawn pushed next, its status
+    /// interned.
+    next_exit: (i32, Option<usize>),
 }
 
 impl Builder {
@@ -171,9 +208,12 @@ impl Builder {
         Builder {
             runners: Names::default(),
             mnemonics: Names::default(),
+            statuses: Names::default(),
             records: Vec::with_capacity(spawns),
             outputs: Paths::with_capacity(outputs, output_bytes),
             next_outputs: 0,
+            next_start: None,
+            next_exit: (0, None),
         }
     }
 
@@ -182,10 +222,25 @@ impl Builder {
         self.outputs.push(path);
     }
 
-    /// Adds `spawn`, with the outputs added since the spawn before it.
+    /// Gives the spawn [`push`](Self::push) adds next the
+    /// [start](LoggedSpawn::start) `at`.
+    pub fn started(&mut self, at: EpochMicros) {
+        self.next_start = Some(at);
+    }
+
+    /// Gives the spawn [`push`](Self::push) adds next its
+    /// [exit code](LoggedSpawn::exit_code) and [status](LoggedSpawn::status);
+    /// one given none of either succeeded.
+    pub fn exited(&mut self, exit_code: i32, status: Option<&str>) {
+        self.next_exit = (exit_code, status.map(|status| self.statuses.intern(status)));
+    }
+
+    /// Adds `spawn`, with the outputs added, and the start and exit given,
+    /// since the spawn before it.
     pub fn push(&mut self, spawn: Logged<'_>) {
         let outputs = self.next_outputs..self.outputs.len();
         self.next_outputs = outputs.end;
+        let (exit_code, status) = std::mem::take(&mut self.next_exit);
         let record = Record {
             runner: self.runners.intern(spawn.runner),
             mnemonic: self.mnemonics.intern(spawn.mnemonic),
@@ -193,6 +248,9 @@ impl Builder {
             outputs,
             cache_hit: spawn.cache_hit,
             timing: spawn.timing,
+            start: self.next_start.take(),
+            exit_code,
+            status,
         };
         self.records.push(record);
     }
@@ -203,6 +261,7 @@ impl Builder {
         LoggedSpawns {
             runners: self.runners.into_vec(),
             mnemonics: self.mnemonics.into_vec(),
+            statuses: self.statuses.into_vec(),
             records: self.records,
             outputs: self.outputs,
         }
@@ -305,5 +364,31 @@ mod tests {
         assert_eq!(primary, [Some("bazel-out/a.o"), None, Some("bazel-out/c")]);
         let hits: Vec<bool> = log.iter().map(|s| s.cache_hit()).collect();
         assert_eq!(hits, [false, false, true]);
+    }
+
+    #[test]
+    fn a_spawn_fails_by_its_status_or_its_exit_code() {
+        let started = EpochMicros::from_micros(1_781_439_245_231_000);
+        let mut builder = Builder::with_capacity(4, 0, 0);
+        builder.started(started);
+        builder.push(logged("linux-sandbox", "A"));
+        builder.exited(1, Some("NON_ZERO_EXIT"));
+        builder.push(logged("linux-sandbox", "A"));
+        builder.exited(0, Some("TIMEOUT"));
+        builder.push(logged("linux-sandbox", "A"));
+        builder.exited(2, None);
+        builder.push(logged("linux-sandbox", "A"));
+        let log = builder.finish();
+        let starts: Vec<_> = log.iter().map(|s| s.start()).collect();
+        assert_eq!(starts, [Some(started), None, None, None]);
+        let statuses: Vec<_> = log.iter().map(|s| s.status()).collect();
+        assert_eq!(
+            statuses,
+            [None, Some("NON_ZERO_EXIT"), Some("TIMEOUT"), None]
+        );
+        let exits: Vec<_> = log.iter().map(|s| s.exit_code()).collect();
+        assert_eq!(exits, [0, 1, 0, 2]);
+        let failed: Vec<_> = log.iter().map(|s| s.failed()).collect();
+        assert_eq!(failed, [false, true, true, true]);
     }
 }

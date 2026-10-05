@@ -21,7 +21,9 @@ pub use timings::{Profiled, Share, Spent, Timing, Timings};
 use spawn::LoggedSpawns;
 
 const MICROS_PER_MILLI: i64 = 1_000;
-const MICROS_PER_SECOND: f64 = 1e6;
+const MICROS_PER_WHOLE_SECOND: i64 = 1_000_000;
+const MICROS_PER_SECOND: f64 = MICROS_PER_WHOLE_SECOND as f64;
+const NANOS_PER_MICRO: i32 = 1_000;
 
 /// A wall-clock instant, in microseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -32,6 +34,21 @@ impl EpochMicros {
     /// the representable range.
     pub const fn from_millis(millis: i64) -> EpochMicros {
         EpochMicros(millis.saturating_mul(MICROS_PER_MILLI))
+    }
+
+    pub const fn from_micros(micros: i64) -> EpochMicros {
+        EpochMicros(micros)
+    }
+
+    /// The instant `seconds` and `nanos` nanoseconds after the Unix epoch, as
+    /// a protobuf `Timestamp` gives one, to the microsecond below and
+    /// saturating at the representable range.
+    pub const fn from_timestamp(seconds: i64, nanos: i32) -> EpochMicros {
+        EpochMicros(
+            seconds
+                .saturating_mul(MICROS_PER_WHOLE_SECOND)
+                .saturating_add((nanos / NANOS_PER_MICRO) as i64),
+        )
     }
 
     /// The instant `seconds` seconds after the Unix epoch, placed as
