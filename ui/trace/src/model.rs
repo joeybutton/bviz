@@ -43,10 +43,11 @@ pub(crate) struct WorkingLanesDerived;
 /// it concerns only the panel showing the path.
 pub(crate) struct CriticalPathDerived;
 
-/// A step of the critical path was chosen. Carried as an event because the
-/// timeline moves its view to the step once, on the choice, and not on every
-/// notification after it.
-pub(crate) struct StepChosen;
+/// A step of the critical path was chosen, or the chosen one let go of.
+/// Carried as an event because the timeline moves its view to a chosen step
+/// once, on the choice, and not on every notification after it, and redraws
+/// its lanes, which the chosen step's keeps in its group's sample.
+pub(crate) struct ChosenStepChanged;
 
 /// Where the action span that ran `step` stands, where the path joined one.
 fn step_span(step: &Step) -> Option<SliceAt> {
@@ -464,7 +465,7 @@ impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 impl EventEmitter<CriticalPathDerived> for TraceModel {}
-impl EventEmitter<StepChosen> for TraceModel {}
+impl EventEmitter<ChosenStepChanged> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
@@ -641,8 +642,10 @@ impl TraceModel {
     }
 
     /// Tells the session the steps of the traced path, which tracing the
-    /// path again with other spawns mostly leaves as they were.
-    fn report_critical_path(&self, cx: &mut Context<Self>) {
+    /// path again with other spawns mostly leaves as they were, and lets the
+    /// lane of a step the session let go of with them fall back to its
+    /// group's sample.
+    fn report_critical_path(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -652,6 +655,10 @@ impl TraceModel {
                 cx.notify();
             }
         });
+        if self.chosen.get(cx).is_none() && self.kept_in_sample.is_some() {
+            self.release_chosen_lane();
+            cx.emit(ChosenStepChanged);
+        }
     }
 
     /// The chosen step of the critical path and its place among the steps.
@@ -671,7 +678,7 @@ impl TraceModel {
     pub(crate) fn choose_step(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.adopt_chosen_step(index) {
             self.chosen.set(Some(Chosen::Step(index)), cx);
-            cx.emit(StepChosen);
+            cx.emit(ChosenStepChanged);
             cx.notify();
         }
     }
@@ -726,6 +733,7 @@ impl TraceModel {
         }
         self.chosen.set(None, cx);
         self.release_chosen_lane();
+        cx.emit(ChosenStepChanged);
         cx.notify();
         true
     }

@@ -1,7 +1,7 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_count};
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
-use crate::model::{StepChosen, TraceModel, WorkingLanesDerived, step_slices, step_time};
+use crate::model::{ChosenStepChanged, TraceModel, WorkingLanesDerived, step_slices, step_time};
 use crate::regions::{CountersStrip, Regions, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
@@ -384,7 +384,7 @@ pub(crate) struct Timeline {
     /// Repaints the overlay, which draws the playhead, as a gesture moves the
     /// document's clock, and follows the playhead again from there.
     _clock_changed: Option<Subscription>,
-    _step_chosen: Subscription,
+    _chosen_step_changed: Subscription,
 }
 
 impl Timeline {
@@ -410,8 +410,9 @@ impl Timeline {
             .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
                 timeline.invalidate_canvas(cx)
             });
-        let step_chosen = cx.subscribe(&model, |timeline, _, _: &StepChosen, cx| {
-            timeline.reveal_chosen_step(cx)
+        let chosen_step_changed = cx.subscribe(&model, |timeline, _, _: &ChosenStepChanged, cx| {
+            timeline.reveal_chosen_step(cx);
+            timeline.invalidate_canvas(cx);
         });
         Self {
             content_focus,
@@ -437,7 +438,7 @@ impl Timeline {
             _session_observer: session_observer,
             _working_lanes_derived: working_lanes_derived,
             _clock_changed: clock_changed,
-            _step_chosen: step_chosen,
+            _chosen_step_changed: chosen_step_changed,
         }
     }
 
@@ -469,7 +470,6 @@ impl Timeline {
         if let Some(y) = scroll_revealing_rows(&rows, self.lane_scroll(cx), regions.flame_h()) {
             self.scroll_to(y, cx);
         }
-        self.invalidate_canvas(cx);
     }
 
     /// Rebuilds the slice scene along with the overlay; every change to what the
