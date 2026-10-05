@@ -18,11 +18,16 @@ fn cache_name(cache: Cache) -> &'static str {
     }
 }
 
+/// What an ending without a spawn may have been, which nothing seen tells
+/// apart.
+const SPAWNLESS_READINGS: &str = "up to date, run in Bazel, or cached";
+
 /// How a box whose attempts ended as `done` says is said to have ended.
 fn words(label: &str, done: Done) -> String {
     let state = NodeState::Done(Ended::of(done)).label();
     match done {
         Done::Cached(cache) => format!("{label} ends {state} · {}", cache_name(cache)),
+        Done::Spawnless => format!("{label} ends {state} · {SPAWNLESS_READINGS}"),
         Done::Executed | Done::Failed => format!("{label} ends {state}"),
     }
 }
@@ -77,6 +82,10 @@ mod tests {
             "//app:bin ends up to date · action cache"
         );
         assert_eq!(words("a.o", Done::Failed), "a.o ends failed");
+        assert_eq!(
+            words("a.o", Done::Spawnless),
+            "a.o ends done, no spawn · up to date, run in Bazel, or cached"
+        );
         assert_eq!(words("a.o", Done::Executed), "a.o ends done, executed");
     }
 }

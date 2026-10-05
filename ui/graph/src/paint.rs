@@ -252,6 +252,10 @@ const UP_TO_DATE_TINT: StateTint = StateTint {
     blend: 0.575,
     lift: -0.14,
 };
+const SPAWNLESS_TINT: StateTint = StateTint {
+    blend: 0.325,
+    lift: -0.24,
+};
 
 /// A playback state's tint on a canvas that takes black text and on one that
 /// takes white, for a state no one tint holds within the bounds on both.
@@ -282,6 +286,7 @@ const RUNNING_HUE: f32 = 0.4;
 const RUNNING_REMOTELY_HUE: f32 = 0.05;
 const CACHED_HUE: f32 = 0.26;
 const UP_TO_DATE_HUE: f32 = 0.5;
+const SPAWNLESS_HUE: f32 = 0.35;
 
 /// How far the neutral slot is carried toward the canvas to fill a box whose
 /// actions ran on a mix of runners.
@@ -702,8 +707,9 @@ impl Palette {
     /// running warms to the amber of a construction site (an action locally
     /// toward orange and remotely toward yellow, a container between them),
     /// and one done settles to a green low in chroma, a hit in a remote or
-    /// disk cache nearer the canvas and toward cyan, and one the action cache
-    /// found up to date toward yellow. One that failed is red.
+    /// disk cache nearer the canvas and toward cyan, one ended without a
+    /// spawn further toward cyan, and one the action cache found up to date
+    /// toward yellow. One that failed is red.
     pub(crate) fn state_fill(&self, state: NodeState) -> Rgba {
         let d = &self.data;
         let between = bviz_ui_theme::mix;
@@ -728,6 +734,9 @@ impl Palette {
             NodeState::Done(Ended::Cached) => (between(d.green, d.cyan, CACHED_HUE), CACHED_TINT),
             NodeState::Done(Ended::UpToDate) => {
                 (between(d.green, d.yellow, UP_TO_DATE_HUE), UP_TO_DATE_TINT)
+            }
+            NodeState::Done(Ended::Spawnless) => {
+                (between(d.green, d.cyan, SPAWNLESS_HUE), SPAWNLESS_TINT)
             }
             NodeState::Done(Ended::Failed) => (d.red.into(), self.polar(FAILED_TINT)),
         };
@@ -2982,6 +2991,7 @@ mod colors {
                 NodeState::Done(Ended::Executed),
                 NodeState::Done(Ended::Cached),
                 NodeState::Done(Ended::UpToDate),
+                NodeState::Done(Ended::Spawnless),
             ] {
                 let settles = chroma(settled);
                 assert!(

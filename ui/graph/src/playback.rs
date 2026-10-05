@@ -37,6 +37,7 @@ impl NodeState {
         NodeState::Done(Ended::Executed),
         NodeState::Done(Ended::Cached),
         NodeState::Done(Ended::UpToDate),
+        NodeState::Done(Ended::Spawnless),
         NodeState::Done(Ended::Failed),
     ];
 
@@ -61,6 +62,7 @@ impl NodeState {
             NodeState::Done(Ended::Executed) => "done, executed",
             NodeState::Done(Ended::Cached) => "done, cached",
             NodeState::Done(Ended::UpToDate) => "up to date",
+            NodeState::Done(Ended::Spawnless) => "done, no spawn",
             NodeState::Done(Ended::Failed) => "failed",
         }
     }
@@ -83,18 +85,22 @@ pub(crate) enum Ended {
     Cached,
     /// The action cache found every one up to date.
     UpToDate,
+    /// Some ended [without a spawn](Done::Spawnless), and the rest without
+    /// running.
+    Spawnless,
     Failed,
 }
 
 impl Ended {
-    const COUNT: usize = 4;
+    const COUNT: usize = 5;
 
     const fn index(self) -> usize {
         match self {
             Ended::Executed => 0,
             Ended::Cached => 1,
             Ended::UpToDate => 2,
-            Ended::Failed => 3,
+            Ended::Spawnless => 3,
+            Ended::Failed => 4,
         }
     }
 
@@ -103,23 +109,25 @@ impl Ended {
             Done::Executed => Ended::Executed,
             Done::Cached(Cache::Spawn(_)) => Ended::Cached,
             Done::Cached(Cache::Action) => Ended::UpToDate,
+            Done::Spawnless => Ended::Spawnless,
             Done::Failed => Ended::Failed,
         }
     }
 }
 
 /// How the actions of a box ended together where some ended as `one` says and
-/// the rest as `other` does: failed where either failed, otherwise executed where either
-/// executed, otherwise answered by a remote or disk cache where either was,
-/// naming a cache only where both name the same one, and otherwise up to
-/// date.
+/// the rest as `other` does: failed where either failed, otherwise executed
+/// where either executed, otherwise without a spawn where either ended so,
+/// otherwise answered by a remote or disk cache where either was, naming a
+/// cache only where both name the same one, and otherwise up to date.
 fn roll_up(one: Done, other: Done) -> Done {
     const fn weight(done: Done) -> u8 {
         match done {
             Done::Cached(Cache::Action) => 0,
             Done::Cached(Cache::Spawn(_)) => 1,
-            Done::Executed => 2,
-            Done::Failed => 3,
+            Done::Spawnless => 2,
+            Done::Executed => 3,
+            Done::Failed => 4,
         }
     }
     match (one, other) {
@@ -787,6 +795,8 @@ pub(crate) mod tests {
         assert_eq!(roll_up(disk, UP_TO_DATE), disk);
         assert_eq!(roll_up(remote, disk), spawn_hit(SpawnCache::RemoteOrDisk));
         assert_eq!(roll_up(Done::Failed, Done::Executed), Done::Failed);
+        assert_eq!(roll_up(disk, Done::Spawnless), Done::Spawnless);
+        assert_eq!(roll_up(Done::Spawnless, Done::Executed), Done::Executed);
     }
 
     /// A container's actions each run on a venue of their own, so the

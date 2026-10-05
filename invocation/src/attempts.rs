@@ -77,6 +77,10 @@ pub enum Done {
     /// A cache answered it: it never ran.
     Cached(Cache),
     Failed,
+    /// It ended without running a spawn, where what saw it cannot tell why:
+    /// the action cache found it up to date, it ran within Bazel, or a remote
+    /// or disk cache answered it.
+    Spawnless,
 }
 
 impl Done {
@@ -95,16 +99,18 @@ impl Done {
     /// outweighs every other ending, as any source seeing it saw the action
     /// fail; a cache named outweighs one left unnamed, which outweighs an
     /// execution, as a source seeing an attempt end without seeing the cache
-    /// answer it reads it executed. Up to date outweighs nothing: only an
-    /// action the action cache did not find up to date runs a spawn or ends
-    /// within Bazel, so a source seeing it do either refutes it.
+    /// answer it reads it executed. Up to date outweighs only an ending
+    /// without a spawn, one of whose readings it is: only an action the
+    /// action cache did not find up to date runs a spawn or ends within
+    /// Bazel, so a source seeing it do either refutes it.
     const fn telling(self) -> u8 {
         match self {
-            Done::Cached(Cache::Action) => 0,
-            Done::Executed => 1,
-            Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk)) => 2,
-            Done::Cached(Cache::Spawn(SpawnCache::Remote | SpawnCache::Disk)) => 3,
-            Done::Failed => 4,
+            Done::Spawnless => 0,
+            Done::Cached(Cache::Action) => 1,
+            Done::Executed => 2,
+            Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk)) => 3,
+            Done::Cached(Cache::Spawn(SpawnCache::Remote | SpawnCache::Disk)) => 4,
+            Done::Failed => 5,
         }
     }
 }
@@ -536,9 +542,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failure_outweighs_every_ending_and_up_to_date_none() {
+    fn endings_outweigh_one_another_by_how_much_they_tell() {
         let spawn = |cache| Done::Cached(Cache::Spawn(cache));
         let endings = [
+            Done::Spawnless,
             Done::Cached(Cache::Action),
             Done::Executed,
             spawn(SpawnCache::RemoteOrDisk),
