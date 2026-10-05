@@ -2,7 +2,7 @@ use crate::{
     COUNTER_LANE_HEIGHT, COUNTERS_COLLAPSED_HEIGHT, COUNTERS_DIVIDER_HEIGHT, COUNTERS_SNAP_SLOP,
     DEFAULT_COUNTERS_HEIGHT, FLAME_MIN_HEIGHT, METRICS, MIN_DRAG_PX, MIN_GUTTER, RULER_HEIGHT,
 };
-use bviz_trace_layout::LaneLayout;
+use bviz_trace_layout::Viewport;
 use bviz_ui_components::SCROLLBAR_THICKNESS;
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
@@ -126,10 +126,15 @@ pub(crate) struct Regions {
     pub(crate) time_w: f32,
     /// Top of the ruler band (the viewport's top edge).
     ruler_top: f32,
-    /// Top of the flame lanes (ruler bottom).
+    /// Top of the flame lanes (ruler bottom), where the pinned row stands.
     pub(crate) flame_top: f32,
-    /// Bottom of the scrollable flame lanes, which meet the divider.
+    /// Top of the scrolled lanes, below the pinned row.
+    scrolled_top: f32,
+    /// Bottom of the flame lanes, which meet the divider.
     pub(crate) flame_bottom: f32,
+    /// Height of the scrolled lanes' whole stack, which their scroll ceiling is
+    /// read from.
+    scrolled_total: f32,
     /// Top of the divider band.
     divider_top: f32,
     /// Top of the counters strip, which is the divider's bottom.
@@ -144,15 +149,15 @@ pub(crate) struct Regions {
 
 impl Regions {
     /// Splits `bounds` given the counter count, the counters strip, the gutter
-    /// width, and the flame lanes' total height. The last two decide whether
-    /// either section overflows and so whether a column must be reserved for the
+    /// width, and the flame lanes' heights. The last two decide whether either
+    /// section overflows and so whether a column must be reserved for the
     /// vertical bar.
     pub(crate) fn new(
         bounds: Bounds<Pixels>,
         n_counters: usize,
         strip: CountersStrip,
         gutter_width: f32,
-        flame_total: f32,
+        lanes: LaneHeights,
     ) -> Self {
         let ox = f32::from(bounds.origin.x);
         let oy = f32::from(bounds.origin.y);
@@ -172,6 +177,7 @@ impl Regions {
         };
         let flame_top = oy + RULER_HEIGHT;
         let flame_bottom = divider_top.max(flame_top);
+        let scrolled_top = (flame_top + lanes.pinned).min(flame_bottom);
         // Clamp the stored gutter width to the current window: a widened gutter
         // shrunk under by a later window resize must still leave the time axis
         // its share rather than collapsing it.
@@ -179,11 +185,11 @@ impl Regions {
         let content_left = ox + gutter_width;
         let content_w = (w - gutter_width).max(0.0);
         let content_right = ox + w;
-        let flame_h = flame_bottom - flame_top;
+        let scrolled_h = flame_bottom - scrolled_top;
         // Reserve a column for the vertical bar when either section overflows the
         // room it has, so slices and charts end left of the bar rather than under
         // it. The two bars share the column, each over its own section.
-        let overflows = flame_total > flame_h.max(0.0) || counters.total() > counters_h;
+        let overflows = lanes.scrolled > scrolled_h || counters.total() > counters_h;
         let vbar_reserve = match overflows {
             true => SCROLLBAR_THICKNESS,
             false => 0.0,
@@ -195,7 +201,9 @@ impl Regions {
             time_w: (content_w - vbar_reserve).max(0.0),
             ruler_top: oy,
             flame_top,
+            scrolled_top,
             flame_bottom,
+            scrolled_total: lanes.scrolled,
             divider_top,
             counters_top,
             counters_bottom,
@@ -242,9 +250,34 @@ impl Regions {
         self.flame_rect().contains(&pos)
     }
 
-    /// Height the flame lanes scroll within.
+    /// Height of the flame lanes, the pinned row and the scrolled lanes
+    /// together.
     pub(crate) fn flame_h(&self) -> f32 {
         (self.flame_bottom - self.flame_top).max(0.0)
+    }
+
+    /// The row pinned under the ruler, which does not scroll.
+    pub(crate) fn pinned_band(&self) -> LaneBand {
+        LaneBand {
+            top: self.flame_top,
+            height: self.scrolled_top - self.flame_top,
+            scroll: 0.0,
+        }
+    }
+
+    /// The lanes below the pinned row, scrolled up by `scroll` pixels.
+    pub(crate) fn scrolled_band(&self, scroll: f32) -> LaneBand {
+        LaneBand {
+            top: self.scrolled_top,
+            height: (self.flame_bottom - self.scrolled_top).max(0.0),
+            scroll,
+        }
+    }
+
+    /// The pixel ceiling for the lane scroll: the scrolled lanes' stack past the
+    /// height they scroll within.
+    pub(crate) fn max_lane_scroll(&self) -> f32 {
+        (self.scrolled_total - self.scrolled_band(0.0).height).max(0.0)
     }
 
     /// Height of the counters strip below the divider.
@@ -366,10 +399,56 @@ pub(crate) fn clamp_gutter_width(gutter_width: f32, window_w: f32) -> f32 {
     gutter_width.clamp(MIN_GUTTER, max)
 }
 
-/// The pixel ceiling for the lane scroll: the stacked rows' height past the
-/// flame region's on-screen height.
-pub(crate) fn max_lane_scroll(layout: &LaneLayout, regions: &Regions) -> f32 {
-    (layout.total_height - regions.flame_h()).max(0.0)
+/// How tall the flame lanes stand: the row pinned under the ruler, the gap
+/// under it included, and the stack scrolled beneath it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LaneHeights {
+    pub(crate) pinned: f32,
+    pub(crate) scrolled: f32,
+}
+
+/// A band of the flame region that lanes are drawn in, in window y.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneBand {
+    pub(crate) top: f32,
+    pub(crate) height: f32,
+    /// How far the band's lanes are scrolled up, in pixels.
+    pub(crate) scroll: f32,
+}
+
+impl LaneBand {
+    pub(crate) fn bottom(&self) -> f32 {
+        self.top + self.height
+    }
+
+    /// Window y of a point `stack_y` pixels down the band's stack of lanes.
+    pub(crate) fn y_of(&self, stack_y: f32) -> f32 {
+        self.top + stack_y - self.scroll
+    }
+
+    /// How far down the band's stack window y `y` points; `None` outside the
+    /// band.
+    pub(crate) fn stack_y(&self, y: f32) -> Option<f32> {
+        (y >= self.top && y < self.bottom()).then_some(y - self.top + self.scroll)
+    }
+
+    /// The band over the time axis `width` wide, as the cull reads it.
+    pub(crate) fn viewport(&self, width: f32) -> Viewport {
+        Viewport {
+            width,
+            height: self.height,
+            scroll_y: self.scroll,
+        }
+    }
+
+    /// The band across the columns from `left` to `right`, which paint over it
+    /// is masked to.
+    pub(crate) fn rect(&self, left: f32, right: f32) -> Bounds<Pixels> {
+        Bounds::new(
+            point(px(left), px(self.top)),
+            size(px((right - left).max(0.0)), px(self.height)),
+        )
+    }
 }
 
 /// One counter lane as drawn: its top in window y, already carrying the strip's
@@ -384,7 +463,6 @@ pub(crate) struct GraphLane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_trace_layout::Lane;
 
     /// The window the tests split: at the origin and tall enough that the strip
     /// is held by its own floor rather than by the room the flame region keeps.
@@ -398,7 +476,13 @@ mod tests {
     }
 
     fn split(n_counters: usize, strip: CountersStrip, vh: f32) -> Regions {
-        Regions::new(window(vh), n_counters, strip, MIN_GUTTER, 0.0)
+        Regions::new(
+            window(vh),
+            n_counters,
+            strip,
+            MIN_GUTTER,
+            LaneHeights::default(),
+        )
     }
 
     /// A press on the divider of a strip standing with its top edge at
@@ -487,27 +571,60 @@ mod tests {
     fn rows_that_fit_the_flame_region_leave_nothing_to_scroll() {
         let n_counters = 10;
         let strip = CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT);
-        let layout = {
-            let height = split(n_counters, strip, TALL).flame_h();
-            LaneLayout {
-                lanes: vec![Lane {
-                    track: 0,
-                    top: 0.0,
-                    height,
-                    depth_rows: 1,
-                }],
-                total_height: height,
-            }
+        let lanes = LaneHeights {
+            pinned: 0.0,
+            scrolled: split(n_counters, strip, TALL).flame_h(),
         };
-        let regions = Regions::new(
+        let regions = Regions::new(window(TALL), n_counters, strip, MIN_GUTTER, lanes);
+        assert!(regions.max_counter_scroll() > 0.0);
+        assert_eq!(regions.max_lane_scroll(), 0.0);
+    }
+
+    /// The pinned row stands at the top of the flame lanes, and the scrolled
+    /// lanes scroll only through what is left below it.
+    #[test]
+    fn the_scrolled_lanes_stand_below_the_pinned_row() {
+        let strip = CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT);
+        let flame_h = split(COUNTERS, strip, TALL).flame_h();
+        let pinned = 40.0;
+        let lanes = LaneHeights {
+            pinned,
+            scrolled: flame_h,
+        };
+        let regions = Regions::new(window(TALL), COUNTERS, strip, MIN_GUTTER, lanes);
+        let (top, rest) = (regions.pinned_band(), regions.scrolled_band(25.0));
+        assert_eq!(
+            (top.top, top.height, top.scroll),
+            (regions.flame_top, pinned, 0.0)
+        );
+        assert_eq!(rest.top, top.bottom());
+        assert_eq!(rest.bottom(), regions.flame_bottom);
+        assert_eq!(
+            regions.max_lane_scroll(),
+            pinned,
+            "the stack overflows by the row"
+        );
+        assert_eq!(rest.stack_y(rest.top), Some(25.0));
+        assert_eq!(
+            rest.stack_y(top.top),
+            None,
+            "the pinned row is not the stack's"
+        );
+        assert_eq!(rest.y_of(25.0), rest.top);
+
+        let none = Regions::new(
             window(TALL),
-            n_counters,
+            COUNTERS,
             strip,
             MIN_GUTTER,
-            layout.total_height,
+            LaneHeights {
+                pinned: 0.0,
+                scrolled: flame_h,
+            },
         );
-        assert!(regions.max_counter_scroll() > 0.0);
-        assert_eq!(max_lane_scroll(&layout, &regions), 0.0);
+        assert_eq!(none.pinned_band().height, 0.0);
+        assert_eq!(none.scrolled_band(0.0).top, none.flame_top);
+        assert_eq!(none.max_lane_scroll(), 0.0);
     }
 
     /// Lanes that fit leave nothing to scroll to, and so no bar to scroll with.

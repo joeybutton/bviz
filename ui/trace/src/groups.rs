@@ -1,13 +1,18 @@
+use crate::regions::LaneHeights;
 use crate::track_order::{TrackSort, family_runs};
 use crate::{GROUP_BAND_HEIGHT, METRICS, TOP_N_PER_GROUP};
 use bviz_trace_layout::{Lane, LaneLayout};
 use bviz_trace_profile::{LaneClass, Profile, ThreadTrack, track_family};
 
-/// Lane classes in the order their groups stack in the flame chart: the critical
-/// path and main thread first, then the build phases (loading, analysis,
-/// execution), then gc and the leftovers.
-pub(crate) const GROUP_ORDER: [LaneClass; 7] = [
-    LaneClass::CriticalPath,
+/// The lane class whose lanes the flame chart pins under its ruler, so the
+/// critical path stays in view as the other lanes scroll. A profile records one
+/// such lane, so the pinned row carries no header band and folds nothing away.
+pub(crate) const PINNED_CLASS: LaneClass = LaneClass::CriticalPath;
+
+/// Lane classes in the order the flame chart stacks their groups below the
+/// pinned row: the main thread first, then the build phases (loading,
+/// analysis, execution), then gc and the leftovers.
+pub(crate) const STACKED_GROUPS: [LaneClass; 6] = [
     LaneClass::Main,
     LaneClass::RepoFetch,
     LaneClass::Analysis,
@@ -15,6 +20,38 @@ pub(crate) const GROUP_ORDER: [LaneClass; 7] = [
     LaneClass::Gc,
     LaneClass::Other,
 ];
+
+/// The lanes the flame chart draws, each [`LaneLayout`] stacked from the top of
+/// its own band of the flame region.
+#[derive(Debug, Clone)]
+pub(crate) struct ChartLanes {
+    /// The [`PINNED_CLASS`] lanes, standing under the ruler whatever the lane
+    /// scroll; empty where the profile has none or they are hidden.
+    pub(crate) pinned: LaneLayout,
+    /// The grouped lanes under their header rows, which scroll.
+    pub(crate) scrolled: LaneLayout,
+}
+
+impl ChartLanes {
+    /// The heights the flame region is split by. A pinned row keeps a lane gap
+    /// beneath it, as every stacked lane does.
+    pub(crate) fn heights(&self) -> LaneHeights {
+        let pinned = match self.pinned.lanes.is_empty() {
+            true => 0.0,
+            false => self.pinned.total_height + METRICS.lane_gap,
+        };
+        LaneHeights {
+            pinned,
+            scrolled: self.scrolled.total_height,
+        }
+    }
+
+    /// Every lane drawn, the pinned ones first, as the chart shows them top to
+    /// bottom.
+    pub(crate) fn lanes(&self) -> impl Iterator<Item = &Lane> {
+        self.pinned.lanes.iter().chain(&self.scrolled.lanes)
+    }
+}
 
 /// A collapsible group header in the flame chart, one per non-empty lane class,
 /// placed at `top` above its group's lanes. `shown`/`total` count the group's
@@ -62,7 +99,7 @@ pub(crate) struct ChartRow {
 }
 
 /// Which row a [`ChartRow`] is, and what it stands for in the document: a band's
-/// lane-class group, as an index into [`GROUP_ORDER`] — what the collapse and
+/// lane-class group, as an index into [`STACKED_GROUPS`] — what the collapse and
 /// show-all toggles key on — a pool heading part of a group, as its place among
 /// the pools that group's tracks fall into (fixed for a profile, so it holds
 /// while the pool's members are hidden), or a lane's track (an index into
@@ -143,8 +180,8 @@ pub(crate) fn lanes_headed_by_pool(chrome: &GroupChrome) -> impl Iterator<Item =
     })
 }
 
-/// Where the flame chart's viewport top edge sits, as a position the rows carry
-/// with them as the chart restacks them.
+/// Where the top edge of the flame chart's scrolled lanes sits, as a position
+/// the rows carry with them as the chart restacks them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RowAnchor {
     /// The top of the chart.
@@ -326,37 +363,42 @@ pub(crate) struct GroupLayoutState<'a> {
     /// Which tracks the chart draws, indexed by `Profile::threads`; a track past
     /// the end is drawn.
     pub(crate) visible: &'a [bool],
-    pub(crate) collapsed: &'a [bool; GROUP_ORDER.len()],
-    pub(crate) show_all: &'a [bool; GROUP_ORDER.len()],
+    pub(crate) collapsed: &'a [bool; STACKED_GROUPS.len()],
+    pub(crate) show_all: &'a [bool; STACKED_GROUPS.len()],
     /// A track its group's sample keeps whatever it would otherwise leave
     /// out.
     pub(crate) kept: Option<usize>,
     pub(crate) sort: TrackSort,
 }
 
-/// The lane layout the flame chart draws: visible tracks sorted into lane-class
-/// groups, each group behind a header band and ordered by [`GroupLayoutState`]'s
-/// sort, so a collapsed group folds its lanes away and a capped one keeps its
-/// sample in that same order. A pool the order gathers into a run of its own is
-/// headed by a [`FamilyBand`], which a group of one pool has no use for.
+/// The lanes the flame chart draws: the visible [`PINNED_CLASS`] tracks pinned,
+/// and the rest sorted into lane-class groups, each group behind a header band
+/// and ordered by [`GroupLayoutState`]'s sort, so a collapsed group folds its
+/// lanes away and a capped one keeps its sample in that same order. A pool the
+/// order gathers into a run of its own is headed by a [`FamilyBand`], which a
+/// group of one pool has no use for.
 ///
-/// Returns the restacked [`LaneLayout`] (its `lanes` tops leave room for the
-/// bands) and the [`GroupChrome`] painted over it.
+/// Returns the restacked [`ChartLanes`] (the scrolled `lanes` tops leave room
+/// for the bands) and the [`GroupChrome`] painted over the scrolled lanes.
 pub(crate) fn build_grouped_layout(
     profile: &Profile,
     full: &LaneLayout,
     state: &GroupLayoutState,
-) -> (LaneLayout, GroupChrome) {
+) -> (ChartLanes, GroupChrome) {
     let threads = profile.threads();
+    let shows = |t: usize| state.visible.get(t).copied().unwrap_or(true);
+    let pinned = {
+        let (_, tracks) = group_pools_and_tracks(profile, PINNED_CLASS, state.sort, shows);
+        stack_unheaded(full, &tracks)
+    };
     let mut lanes = Vec::with_capacity(threads.len());
     let mut chrome = GroupChrome {
-        bands: Vec::with_capacity(GROUP_ORDER.len()),
+        bands: Vec::with_capacity(STACKED_GROUPS.len()),
         families: Vec::new(),
-        rows: Vec::with_capacity(threads.len() + GROUP_ORDER.len()),
+        rows: Vec::with_capacity(threads.len() + STACKED_GROUPS.len()),
     };
     let mut top = 0.0;
-    for (group, &class) in GROUP_ORDER.iter().enumerate() {
-        let shows = |t: usize| state.visible.get(t).copied().unwrap_or(true);
+    for (group, &class) in STACKED_GROUPS.iter().enumerate() {
         let (pools, mut tracks) = group_pools_and_tracks(profile, class, state.sort, shows);
         if tracks.is_empty() {
             continue;
@@ -427,19 +469,47 @@ pub(crate) fn build_grouped_layout(
             show_all: state.show_all[group],
         });
     }
-    let layout = LaneLayout {
+    let scrolled = LaneLayout {
         lanes,
-        // Each row leaves a trailing gap, so the accumulator sits one gap below
-        // the last row's bottom edge, where the stack ends.
-        total_height: (top - METRICS.lane_gap).max(0.0),
+        total_height: stack_height(top),
     };
-    (layout, chrome)
+    (ChartLanes { pinned, scrolled }, chrome)
+}
+
+/// The stack's height, given the accumulator a stacking loop leaves: each row
+/// leaves a trailing gap, so it sits one gap below the last row's bottom edge,
+/// where the stack ends.
+fn stack_height(top: f32) -> f32 {
+    (top - METRICS.lane_gap).max(0.0)
+}
+
+/// `tracks`' lanes of `full`, stacked from the top with no header over them.
+fn stack_unheaded(full: &LaneLayout, tracks: &[usize]) -> LaneLayout {
+    let mut top = 0.0;
+    let lanes = tracks
+        .iter()
+        .map(|&t| {
+            let lane = Lane {
+                top,
+                ..full.lanes[t]
+            };
+            top += lane.height + METRICS.lane_gap;
+            lane
+        })
+        .collect();
+    LaneLayout {
+        lanes,
+        total_height: stack_height(top),
+    }
 }
 
 /// The initial collapse state: the loading group starts collapsed, the rest open.
-pub(crate) fn default_collapsed_groups() -> [bool; GROUP_ORDER.len()] {
-    let mut collapsed = [false; GROUP_ORDER.len()];
-    if let Some(i) = GROUP_ORDER.iter().position(|&g| g == LaneClass::RepoFetch) {
+pub(crate) fn default_collapsed_groups() -> [bool; STACKED_GROUPS.len()] {
+    let mut collapsed = [false; STACKED_GROUPS.len()];
+    if let Some(i) = STACKED_GROUPS
+        .iter()
+        .position(|&g| g == LaneClass::RepoFetch)
+    {
         collapsed[i] = true;
     }
     collapsed
@@ -497,7 +567,7 @@ mod tests {
             }
             bands.push(GroupBand {
                 group,
-                class: GROUP_ORDER[group],
+                class: STACKED_GROUPS[group],
                 top: band_top,
                 collapsed: group_lanes.is_empty(),
                 shown: group_lanes.len(),
@@ -518,6 +588,16 @@ mod tests {
                 rows,
             },
         )
+    }
+
+    /// The scrolled lanes and the chrome [`build_grouped_layout`] stacks.
+    fn grouped(
+        profile: &Profile,
+        full: &LaneLayout,
+        state: &GroupLayoutState,
+    ) -> (LaneLayout, GroupChrome) {
+        let (lanes, chrome) = build_grouped_layout(profile, full, state);
+        (lanes.scrolled, chrome)
     }
 
     /// The index in `profile.threads()` of the single track of `class`.
@@ -592,16 +672,16 @@ mod tests {
         profile: &Profile,
         full: &LaneLayout,
         visible: &[bool],
-        collapsed: &[bool; GROUP_ORDER.len()],
+        collapsed: &[bool; STACKED_GROUPS.len()],
         sort: TrackSort,
     ) -> (LaneLayout, GroupChrome) {
-        build_grouped_layout(
+        grouped(
             profile,
             full,
             &GroupLayoutState {
                 visible,
                 collapsed,
-                show_all: &[false; GROUP_ORDER.len()],
+                show_all: &[false; STACKED_GROUPS.len()],
                 kept: None,
                 sort,
             },
@@ -614,7 +694,7 @@ mod tests {
         profile: &Profile,
         full: &LaneLayout,
         visible: &[bool],
-        collapsed: &[bool; GROUP_ORDER.len()],
+        collapsed: &[bool; STACKED_GROUPS.len()],
     ) -> (LaneLayout, GroupChrome) {
         built_in(profile, full, visible, collapsed, TrackSort::Name)
     }
@@ -633,9 +713,9 @@ mod tests {
         (i, rows[i].kind)
     }
 
-    /// The index in [`GROUP_ORDER`] of the group of `class`.
+    /// The index in [`STACKED_GROUPS`] of the group of `class`.
     fn group_of(class: LaneClass) -> usize {
-        GROUP_ORDER
+        STACKED_GROUPS
             .iter()
             .position(|&c| c == class)
             .expect("a group of the class")
@@ -701,7 +781,7 @@ mod tests {
     #[test]
     fn hiding_the_anchored_lane_lands_on_the_lane_that_takes_its_place() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let execution = group_of(LaneClass::Execution);
@@ -730,7 +810,7 @@ mod tests {
     #[test]
     fn hiding_lanes_above_the_anchor_follows_the_anchored_lane_up() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let execution = group_of(LaneClass::Execution);
@@ -766,7 +846,7 @@ mod tests {
     #[test]
     fn hiding_the_last_lane_of_a_group_falls_back_to_the_lane_before_it() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let loading = group_of(LaneClass::RepoFetch);
@@ -796,7 +876,7 @@ mod tests {
     #[test]
     fn a_gesture_with_no_vertical_delta_keeps_the_standing_anchor() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let execution = group_of(LaneClass::Execution);
@@ -825,7 +905,7 @@ mod tests {
     #[test]
     fn a_gesture_past_a_shrunken_ceiling_keeps_the_standing_anchor() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (layout, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let execution = group_of(LaneClass::Execution);
@@ -862,7 +942,7 @@ mod tests {
     #[test]
     fn a_collapsed_group_resolves_its_lanes_to_its_band() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let (i, RowKind::Lane { group, .. }) = a_lane_under_a_lane(&rows) else {
@@ -885,7 +965,7 @@ mod tests {
     #[test]
     fn an_emptied_group_resolves_to_the_last_row_above_it() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let loading = group_of(LaneClass::RepoFetch);
@@ -925,7 +1005,7 @@ mod tests {
     #[test]
     fn the_chart_top_anchors_to_its_first_row_and_an_empty_chart_to_the_start() {
         let (profile, full, visible) = fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, chrome) = built_rows(&profile, &full, &visible, &expanded);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let anchor = anchor_at(rows.iter().copied(), 0.0);
@@ -1057,7 +1137,7 @@ mod tests {
     #[test]
     fn a_lane_reads_under_a_pool_header_only_where_one_stands_over_its_run() {
         let (profile, full, visible) = many_pool_fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (layout, chrome) = built_in(&profile, &full, &visible, &expanded, TrackSort::Name);
 
         let lane_rows: Vec<ChartRow> = chart_rows(&chrome)
@@ -1096,7 +1176,7 @@ mod tests {
     #[test]
     fn a_sampled_group_seats_every_pool_and_heads_it_with_its_counts() {
         let (profile, full, visible) = pooled_fixture();
-        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         // The pool order is by name, and the busy pool outbids the idle one for
         // every seat past the one each pool is guaranteed.
         assert_eq!(
@@ -1120,7 +1200,7 @@ mod tests {
     #[test]
     fn a_pool_header_leads_the_lanes_it_heads() {
         let (profile, full, visible) = pooled_fixture();
-        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         let rows = rows_of(&chrome, group_of(LaneClass::Execution));
         assert!(matches!(rows[0].kind, RowKind::Band { .. }));
         assert!(matches!(rows[1].kind, RowKind::Family { family: 0, .. }));
@@ -1136,7 +1216,7 @@ mod tests {
     #[test]
     fn a_group_of_one_pool_carries_no_pool_header() {
         let (profile, full, visible) = fixture();
-        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         assert!(chrome.bands.len() > 1, "several groups, each of one pool");
         assert!(chrome.families.is_empty());
     }
@@ -1144,14 +1224,14 @@ mod tests {
     #[test]
     fn showing_every_lane_draws_every_track_under_its_pool_header() {
         let (profile, full, visible) = pooled_fixture();
-        let mut every_lane = [false; GROUP_ORDER.len()];
+        let mut every_lane = [false; STACKED_GROUPS.len()];
         every_lane[group_of(LaneClass::Execution)] = true;
-        let (layout, chrome) = build_grouped_layout(
+        let (layout, chrome) = grouped(
             &profile,
             &full,
             &GroupLayoutState {
                 visible: &visible,
-                collapsed: &[false; GROUP_ORDER.len()],
+                collapsed: &[false; STACKED_GROUPS.len()],
                 show_all: &every_lane,
                 kept: None,
                 sort: TrackSort::Name,
@@ -1174,7 +1254,7 @@ mod tests {
     #[test]
     fn a_collapsed_group_folds_its_pool_headers_away_with_its_lanes() {
         let (profile, full, visible) = pooled_fixture();
-        let mut collapsed = [false; GROUP_ORDER.len()];
+        let mut collapsed = [false; STACKED_GROUPS.len()];
         let execution = group_of(LaneClass::Execution);
         collapsed[execution] = true;
         let (layout, chrome) = built_rows(&profile, &full, &visible, &collapsed);
@@ -1215,7 +1295,8 @@ mod tests {
         let profile = profile_of(&threads);
         let full = lay_out_lanes(&profile, &METRICS);
         let visible = vec![true; profile.threads().len()];
-        let (layout, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (layout, chrome) =
+            built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         assert_eq!(layout.lanes.len(), TOP_N_PER_GROUP, "the budget, filled");
         assert_eq!(
             chrome.families.len(),
@@ -1241,7 +1322,7 @@ mod tests {
     #[test]
     fn a_pool_header_row_falls_outside_every_group_band() {
         let (profile, full, visible) = pooled_fixture();
-        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         assert!(!chrome.families.is_empty(), "a group of several pools");
         // A press is read against a band's rect, so an overlap would fold a group
         // from a row that toggles nothing.
@@ -1257,7 +1338,8 @@ mod tests {
     #[test]
     fn every_offset_down_a_pooled_chart_round_trips_through_its_anchor() {
         let (profile, full, visible) = pooled_fixture();
-        let (layout, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (layout, chrome) =
+            built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         assert!(
             rows.iter()
@@ -1270,10 +1352,10 @@ mod tests {
     #[test]
     fn a_pool_header_holds_its_anchor_as_the_group_stops_showing_every_lane() {
         let (profile, full, visible) = pooled_fixture();
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let mut every_lane = expanded;
         every_lane[group_of(LaneClass::Execution)] = true;
-        let (_, shown_all) = build_grouped_layout(
+        let (_, shown_all) = grouped(
             &profile,
             &full,
             &GroupLayoutState {
@@ -1307,7 +1389,7 @@ mod tests {
     #[test]
     fn a_capped_group_draws_its_busiest_tracks_in_name_order() {
         let (profile, full, visible) = fixture();
-        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; GROUP_ORDER.len()]);
+        let (_, chrome) = built_rows(&profile, &full, &visible, &[false; STACKED_GROUPS.len()]);
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
         let names: Vec<&str> = lanes_of(&rows, group_of(LaneClass::Execution))
             .iter()
@@ -1329,13 +1411,13 @@ mod tests {
         visible: &[bool],
         sort: TrackSort,
     ) -> (LaneLayout, GroupChrome) {
-        build_grouped_layout(
+        grouped(
             profile,
             full,
             &GroupLayoutState {
                 visible,
-                collapsed: &[false; GROUP_ORDER.len()],
-                show_all: &[true; GROUP_ORDER.len()],
+                collapsed: &[false; STACKED_GROUPS.len()],
+                show_all: &[true; STACKED_GROUPS.len()],
                 kept: None,
                 sort,
             },
@@ -1375,7 +1457,7 @@ mod tests {
             &profile,
             &full,
             &visible,
-            &[false; GROUP_ORDER.len()],
+            &[false; STACKED_GROUPS.len()],
             TrackSort::Weight,
         );
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
@@ -1399,7 +1481,7 @@ mod tests {
         let (_, by_weight) = built_showing_all(&profile, &full, &visible, TrackSort::Weight);
         let named: Vec<ChartRow> = chart_rows(&by_name).collect();
         let weighed: Vec<ChartRow> = chart_rows(&by_weight).collect();
-        for group in 0..GROUP_ORDER.len() {
+        for group in 0..STACKED_GROUPS.len() {
             let sorted = |rows: &[ChartRow]| {
                 let mut tracks = drawn_tracks(rows, group);
                 tracks.sort_unstable();
@@ -1422,7 +1504,7 @@ mod tests {
             &profile,
             &full,
             &visible,
-            &[false; GROUP_ORDER.len()],
+            &[false; STACKED_GROUPS.len()],
             TrackSort::Weight,
         );
         let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
@@ -1468,7 +1550,7 @@ mod tests {
         full: &LaneLayout,
         visible: &[bool],
     ) -> (GroupChrome, Vec<ChartRow>, GroupChrome, Vec<ChartRow>) {
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let (_, by_name) = built_in(profile, full, visible, &expanded, TrackSort::Name);
         let (_, by_weight) = built_in(profile, full, visible, &expanded, TrackSort::Weight);
         let execution = group_of(LaneClass::Execution);
@@ -1554,8 +1636,13 @@ mod tests {
     fn every_offset_down_a_many_pool_chart_round_trips_under_either_order() {
         let (profile, full, visible) = many_pool_fixture();
         for sort in [TrackSort::Name, TrackSort::Weight] {
-            let (layout, chrome) =
-                built_in(&profile, &full, &visible, &[false; GROUP_ORDER.len()], sort);
+            let (layout, chrome) = built_in(
+                &profile,
+                &full,
+                &visible,
+                &[false; STACKED_GROUPS.len()],
+                sort,
+            );
             let rows: Vec<ChartRow> = chart_rows(&chrome).collect();
             assert_offsets_round_trip(&rows, layout.total_height);
         }
@@ -1607,17 +1694,17 @@ mod tests {
     #[test]
     fn the_stack_ends_at_the_last_row() {
         let (profile, full, visible) = fixture();
-        let build = |visible: &[bool], collapsed: &[bool; GROUP_ORDER.len()]| {
+        let build = |visible: &[bool], collapsed: &[bool; STACKED_GROUPS.len()]| {
             built_rows(&profile, &full, visible, collapsed)
         };
-        let expanded = [false; GROUP_ORDER.len()];
+        let expanded = [false; STACKED_GROUPS.len()];
         let middle_collapsed = default_collapsed_groups();
         let mut last_collapsed = expanded;
-        last_collapsed[GROUP_ORDER
+        last_collapsed[STACKED_GROUPS
             .iter()
             .position(|&c| c == LaneClass::Execution)
             .expect("an execution group")] = true;
-        let all_collapsed = [true; GROUP_ORDER.len()];
+        let all_collapsed = [true; STACKED_GROUPS.len()];
         let nothing_visible = vec![false; profile.threads().len()];
 
         type Shape = fn(&GroupChrome) -> bool;
@@ -1659,5 +1746,99 @@ mod tests {
             let last_bottom = last_band.into_iter().chain(last_lane).fold(0.0, f32::max);
             assert_eq!(layout.total_height, last_bottom, "{label}");
         }
+    }
+
+    /// A profile with a critical-path lane over a main thread and two execution
+    /// workers, with the unrestricted layout and a mask hiding nothing.
+    fn pinned_fixture() -> (Profile, LaneLayout, Vec<bool>) {
+        let threads: Vec<(String, usize)> = [
+            ("skyframe-evaluator-execution-0", 2),
+            ("Critical Path", 3),
+            ("Main Thread", 1),
+            ("skyframe-evaluator-execution-1", 2),
+        ]
+        .iter()
+        .map(|&(name, slices)| (name.to_owned(), slices))
+        .collect();
+        let profile = profile_of(&threads);
+        let full = lay_out_lanes(&profile, &METRICS);
+        let visible = vec![true; profile.threads().len()];
+        (profile, full, visible)
+    }
+
+    /// The chart `visible` builds out of a fixture, every group expanded.
+    fn chart_of(
+        profile: &Profile,
+        full: &LaneLayout,
+        visible: &[bool],
+    ) -> (ChartLanes, GroupChrome) {
+        build_grouped_layout(
+            profile,
+            full,
+            &GroupLayoutState {
+                visible,
+                collapsed: &[false; STACKED_GROUPS.len()],
+                show_all: &[false; STACKED_GROUPS.len()],
+                kept: None,
+                sort: TrackSort::Name,
+            },
+        )
+    }
+
+    #[test]
+    fn the_critical_path_lane_is_pinned_apart_from_the_scrolled_groups() {
+        let (profile, full, visible) = pinned_fixture();
+        let critical = track_of(&profile, LaneClass::CriticalPath);
+        let (lanes, chrome) = chart_of(&profile, &full, &visible);
+
+        let [pinned] = lanes.pinned.lanes[..] else {
+            panic!("one pinned lane, got {:?}", lanes.pinned.lanes);
+        };
+        assert_eq!((pinned.track, pinned.top), (critical, 0.0));
+        assert_eq!(pinned.height, full.lanes[critical].height);
+        assert_eq!(
+            lanes.heights().pinned,
+            pinned.height + METRICS.lane_gap,
+            "the row and the gap under it"
+        );
+
+        assert!(
+            chart_rows(&chrome)
+                .all(|row| !matches!(row.kind, RowKind::Lane { track, .. } if track == critical))
+        );
+        let first = chart_rows(&chrome).next().expect("a scrolled row");
+        assert_eq!(
+            (first.top, first.kind),
+            (
+                0.0,
+                RowKind::Band {
+                    group: group_of(LaneClass::Main)
+                }
+            ),
+            "the scrolled stack starts at its own top with the next group"
+        );
+        assert!(lanes.scrolled.lanes.iter().all(|l| l.track != critical));
+        assert_eq!(
+            lanes.lanes().map(|l| l.track).collect::<Vec<_>>()[0],
+            critical,
+            "the pinned lane leads the chart's lanes"
+        );
+    }
+
+    #[test]
+    fn a_hidden_or_absent_critical_path_pins_no_row() {
+        let (profile, full, visible) = pinned_fixture();
+        let mut hidden = visible.clone();
+        hidden[track_of(&profile, LaneClass::CriticalPath)] = false;
+        let (lanes, _) = chart_of(&profile, &full, &hidden);
+        assert!(lanes.pinned.lanes.is_empty());
+        assert_eq!(lanes.heights().pinned, 0.0);
+
+        let (profile, full, visible) = fixture();
+        assert!(!profile.has_critical_path());
+        let (lanes, _) = chart_of(&profile, &full, &visible);
+        assert!(lanes.pinned.lanes.is_empty());
+        assert_eq!(lanes.heights().pinned, 0.0);
+        assert_eq!(lanes.heights().scrolled, lanes.scrolled.total_height);
     }
 }

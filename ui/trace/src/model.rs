@@ -1,5 +1,6 @@
 use crate::groups::{
-    GROUP_ORDER, GroupChrome, GroupLayoutState, build_grouped_layout, default_collapsed_groups,
+    ChartLanes, GroupChrome, GroupLayoutState, STACKED_GROUPS, build_grouped_layout,
+    default_collapsed_groups,
 };
 use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
@@ -435,7 +436,7 @@ pub(crate) struct TraceModel {
     /// and paint asks for a layout through a shared `&TraceModel`, several of them
     /// from inside a `read` of a panel that holds the model, where no `&mut` to
     /// the model can be taken. Filling on demand through the cell keeps
-    /// [`Self::lane_layout`] callable from those paths; the alternative is either
+    /// [`Self::chart_lanes`] callable from those paths; the alternative is either
     /// an exclusive borrow threaded through every read helper or building the
     /// layouts eagerly on each visibility change, which would move the cost of
     /// [`lay_out_lanes`] onto the load path.
@@ -452,12 +453,12 @@ pub(crate) struct TraceModel {
     time_selection: TimeSelection,
     chosen: HeldChoice,
     /// Which lane-class groups are collapsed in the chart, indexed by
-    /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
+    /// [`STACKED_GROUPS`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
-    collapsed_groups: [bool; GROUP_ORDER.len()],
+    collapsed_groups: [bool; STACKED_GROUPS.len()],
     /// Which groups draw every lane rather than a sample, indexed by
-    /// [`GROUP_ORDER`].
-    group_show_all: [bool; GROUP_ORDER.len()],
+    /// [`STACKED_GROUPS`].
+    group_show_all: [bool; STACKED_GROUPS.len()],
     /// The track the chosen action's slices are shown on, which its group's
     /// sample keeps for as long as it stays chosen.
     kept_in_sample: Option<usize>,
@@ -473,7 +474,7 @@ pub(crate) struct TraceModel {
     /// The lane layout restricted to the visible tracks and restacked into
     /// lane-class groups, derived from `lanes` and cleared whenever the
     /// [`GroupLayoutState`] it was built under moves.
-    visible_lanes: RefCell<Option<Rc<LaneLayout>>>,
+    visible_lanes: RefCell<Option<Rc<ChartLanes>>>,
     /// The group headers and show-more rows over `visible_lanes`, built and
     /// cleared alongside it.
     group_chrome: RefCell<Option<Rc<GroupChrome>>>,
@@ -563,7 +564,7 @@ impl TraceModel {
             time_selection: TimeSelection::default(),
             chosen,
             collapsed_groups: default_collapsed_groups(),
-            group_show_all: [false; GROUP_ORDER.len()],
+            group_show_all: [false; STACKED_GROUPS.len()],
             kept_in_sample: None,
             track_sort: TrackSort::default(),
             flame_mode: FlameMode::default(),
@@ -757,13 +758,13 @@ impl TraceModel {
     fn open_lane_of(&mut self, profile: &Profile, track: usize) {
         self.keep_in_sample(Some(track));
         let drawn = self
-            .lane_layout()
-            .is_some_and(|layout| layout.lanes.iter().any(|lane| lane.track == track));
+            .chart_lanes()
+            .is_some_and(|chart| chart.lanes().any(|lane| lane.track == track));
         if drawn || !self.visible_tracks.get(track).copied().unwrap_or(false) {
             return;
         }
         let class = profile.threads()[track].lane_class;
-        if let Some(group) = GROUP_ORDER.iter().position(|&g| g == class)
+        if let Some(group) = STACKED_GROUPS.iter().position(|&g| g == class)
             && self.collapsed_groups[group]
         {
             self.collapsed_groups[group] = false;
@@ -872,7 +873,7 @@ impl TraceModel {
         self.visible_tracks = vec![true; profile.threads().len()];
         self.shared_track_names = shared_names(profile);
         self.collapsed_groups = default_collapsed_groups();
-        self.group_show_all = [false; GROUP_ORDER.len()];
+        self.group_show_all = [false; STACKED_GROUPS.len()];
         self.track_sort = TrackSort::default();
         self.selected_tracks = profile
             .threads()
@@ -899,17 +900,18 @@ impl TraceModel {
         self.lanes.borrow().clone()
     }
 
-    /// The lane layout the flame chart draws: the full layout restricted to the
+    /// The lanes the flame chart draws: the full layout restricted to the
     /// visible tracks and restacked into lane-class groups, cached until the
     /// state it is built under moves. Every paint and hit-test
     /// works from this, so a lane hidden by its group is neither drawn nor
     /// selectable.
-    pub(crate) fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
+    pub(crate) fn chart_lanes(&self) -> Option<Rc<ChartLanes>> {
         self.ensure_grouped();
         self.visible_lanes.borrow().clone()
     }
 
-    /// The group headers and show-more rows over [`Self::lane_layout`].
+    /// The group headers and show-more rows over [`Self::chart_lanes`]'
+    /// scrolled lanes.
     pub(crate) fn group_chrome(&self) -> Option<Rc<GroupChrome>> {
         self.ensure_grouped();
         self.group_chrome.borrow().clone()
@@ -1003,8 +1005,7 @@ impl TraceModel {
     }
 
     /// Shows or hides every track in one lane-class group at once.
-    pub(crate) fn set_group_visible(&mut self, group: usize, visible: bool) {
-        let class = GROUP_ORDER[group];
+    pub(crate) fn set_group_visible(&mut self, class: LaneClass, visible: bool) {
         let targets: Vec<usize> = {
             let Some(profile) = self.profile() else {
                 return;
@@ -1234,7 +1235,7 @@ impl TraceModel {
     /// display order; `None` with no anchor or one no longer a visible lane.
     fn visible_run_to(&self, track: usize) -> Option<Vec<usize>> {
         let anchor = self.select_anchor?;
-        let order: Vec<usize> = self.lane_layout()?.lanes.iter().map(|l| l.track).collect();
+        let order: Vec<usize> = self.chart_lanes()?.lanes().map(|l| l.track).collect();
         let ai = order.iter().position(|&t| t == anchor)?;
         let ti = order.iter().position(|&t| t == track)?;
         Some(order[ai.min(ti)..=ai.max(ti)].to_vec())
@@ -1260,7 +1261,7 @@ mod tests {
         clock_source, critical_steps, nearly_critical_actions, step_slices,
     };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
-    use crate::groups::GROUP_ORDER;
+    use crate::groups::STACKED_GROUPS;
     use crate::track_order::TrackSort;
     use crate::{Source, TOP_N_PER_GROUP};
     use bviz_critical_path::CriticalPath;
@@ -1509,8 +1510,8 @@ mod tests {
 
     /// Whether the chart draws a lane of `track`.
     fn drawn(model: &TraceModel, track: usize) -> bool {
-        let layout = model.lane_layout().expect("a laid-out chart");
-        layout.lanes.iter().any(|lane| lane.track == track)
+        let chart = model.chart_lanes().expect("a laid-out chart");
+        chart.lanes().any(|lane| lane.track == track)
     }
 
     #[test]
@@ -1526,7 +1527,7 @@ mod tests {
 
         assert!(model.adopt_chosen(Chosen::Step(0)));
         assert!(drawn(&model, span.track()));
-        assert_eq!(model.group_show_all, [false; GROUP_ORDER.len()]);
+        assert_eq!(model.group_show_all, [false; STACKED_GROUPS.len()]);
 
         model.release_chosen_lane();
         assert!(!drawn(&model, span.track()), "back out of the sample");

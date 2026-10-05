@@ -1,8 +1,10 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_count};
-use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
+use crate::groups::{
+    ChartLanes, GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows,
+};
 use crate::model::{ChoiceChanged, TraceModel, WorkingLanesDerived};
-use crate::regions::{CountersStrip, Regions, max_lane_scroll};
+use crate::regions::{CountersStrip, LaneBand, Regions};
 use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
@@ -29,16 +31,34 @@ use std::sync::Arc;
 
 /// The timeline's culled draw list together with the inputs that determine it,
 /// so a repaint reuses it unless one changed. The list turns only on the profile
-/// (`Arc` identity), the lane layout (`Rc` identity, a fresh one whenever the
-/// chart restacks), the time view (pan/zoom), and the
-/// viewport (width, height, and `scroll_y`); `min_px` and the metrics are consts,
-/// so they are not keys.
+/// (`Arc` identity), the chart's lanes (`Rc` identity, a fresh one whenever the
+/// chart restacks), the time view (pan/zoom), and the viewport of each band of
+/// the flame region (width, height, and `scroll_y`); `min_px` and the metrics
+/// are consts, so they are not keys.
 pub(crate) struct SliceDrawCache {
     profile: Arc<Profile>,
-    lanes: Rc<LaneLayout>,
+    lanes: Rc<ChartLanes>,
     view: TimeView,
-    viewport: Viewport,
-    slices: Rc<Vec<VisibleSlice>>,
+    pinned: Viewport,
+    scrolled: Viewport,
+    slices: Rc<DrawnSlices>,
+}
+
+/// The slices each band of the flame region draws, `y` down from that band's
+/// top edge.
+pub(crate) struct DrawnSlices {
+    pinned: Vec<VisibleSlice>,
+    scrolled: Vec<VisibleSlice>,
+}
+
+impl DrawnSlices {
+    /// Each band's slices, alongside the band they are drawn in.
+    fn in_bands(&self, regions: Regions, scroll: f32) -> [(LaneBand, &[VisibleSlice]); 2] {
+        [
+            (regions.pinned_band(), &self.pinned),
+            (regions.scrolled_band(scroll), &self.scrolled),
+        ]
+    }
 }
 
 /// A hovered slice paired with the profile its string handles resolve through.
@@ -79,36 +99,48 @@ impl SliceDrawCache {
     /// both without checking.
     fn new(
         profile: Arc<Profile>,
-        lanes: Rc<LaneLayout>,
+        lanes: Rc<ChartLanes>,
         view: TimeView,
-        viewport: Viewport,
+        pinned: Viewport,
+        scrolled: Viewport,
     ) -> Self {
-        let slices = Rc::new(visible_slices(
-            &profile,
-            &lanes,
-            Cull {
-                view: &view,
-                viewport: &viewport,
-                metrics: &METRICS,
-                min_px: MIN_SLICE_PX,
-            },
-        ));
+        let cull = |layout: &LaneLayout, viewport: &Viewport| {
+            visible_slices(
+                &profile,
+                layout,
+                Cull {
+                    view: &view,
+                    viewport,
+                    metrics: &METRICS,
+                    min_px: MIN_SLICE_PX,
+                },
+            )
+        };
+        let slices = Rc::new(DrawnSlices {
+            pinned: cull(&lanes.pinned, &pinned),
+            scrolled: cull(&lanes.scrolled, &scrolled),
+        });
         Self {
             profile,
             lanes,
             view,
-            viewport,
+            pinned,
+            scrolled,
             slices,
         }
     }
 
-    /// The slice drawn at flame-content-relative `(x, y)`, which the caller has
-    /// already gated to the flame region — a point outside it still matches any
-    /// box it falls in. Boxes may overlap, and a later one is drawn over an
-    /// earlier one, so the last match wins.
+    /// The slice drawn at flame-content-relative `(x, y)`, `y` down from the
+    /// top of the pinned row, which the caller has already gated to the flame
+    /// region — a point outside it still matches any box it falls in. Boxes may
+    /// overlap, and a later one is drawn over an earlier one, so the last match
+    /// wins.
     fn hit(&self, x: f32, y: f32) -> Option<HoveredSlice> {
-        let vs = self
-            .slices
+        let (slices, y) = match y < self.pinned.height {
+            true => (&self.slices.pinned, y),
+            false => (&self.slices.scrolled, y - self.pinned.height),
+        };
+        let vs = slices
             .iter()
             .rev()
             .find(|v| x >= v.x && x < v.x + v.w && y >= v.y && y < v.y + v.h)?;
@@ -374,7 +406,7 @@ pub(crate) struct Timeline {
     /// floor all need a width the timeline learns only there — and the same
     /// frame's paint then reads the result.
     view: TimeView,
-    /// Which chart row the flame region's top edge sits in, and where within it;
+    /// Which chart row the scrolled lanes' top edge sits in, and where within it;
     /// [`Self::lane_scroll`] turns it into the pixel offset the frame draws at.
     scroll: RowAnchor,
     /// How far the counters strip is scrolled up, in pixels, held past its
@@ -475,25 +507,18 @@ impl Timeline {
     }
 
     /// Frames the time of what is chosen of the critical path and scrolls
-    /// the lanes to the rows its drawn slices stand in, the action span's
-    /// ahead of a step's own.
+    /// the lanes to the row its action span stands in. A step's own slice
+    /// stands in the pinned row, which no scroll moves.
     fn reveal_chosen(&mut self, cx: &mut Context<Self>) {
-        let (time, span, rows) = {
+        let (time, span, row) = {
             let model = self.model.read(cx);
-            let (Some(profile), Some(layout), Some((_, item))) =
-                (model.profile(), model.lane_layout(), model.chosen(cx))
+            let (Some(profile), Some(lanes), Some((_, item))) =
+                (model.profile(), model.chart_lanes(), model.chosen(cx))
             else {
                 return;
             };
-            let rows: Vec<Row> = item
-                .slices()
-                .into_iter()
-                .filter_map(|at| {
-                    let lane = layout.lanes.iter().find(|lane| lane.track == at.track())?;
-                    Some(Row::of(lane.top, profile.slice(at).depth))
-                })
-                .collect();
-            (item.time(profile), profile.span(), rows)
+            let row = scrolled_row(profile, &lanes.scrolled, &item.slices());
+            (item.time(profile), profile.span(), row)
         };
         let regions = self.regions(cx);
         match self.fitted {
@@ -501,7 +526,10 @@ impl Timeline {
             false => self.framed_on_fit = Some(time),
         }
         self.follow = Follow::Released;
-        if let Some(y) = scroll_revealing_rows(&rows, self.lane_scroll(cx), regions.flame_h()) {
+        let scrolled = regions.scrolled_band(self.lane_scroll(cx));
+        if let Some(row) = row
+            && let Some(y) = scroll_revealing(row, scrolled.scroll, scrolled.height)
+        {
             self.scroll_to(y, cx);
         }
     }
@@ -591,38 +619,32 @@ impl Timeline {
     }
 
     /// [`Regions`] for the current viewport, strip and gutter sizes, the loaded
-    /// profile's counter track count, and the flame lanes' total height.
+    /// profile's counter track count, and the flame lanes' heights.
     fn regions(&self, cx: &App) -> Regions {
-        let (n_counters, flame_total) = {
+        let (n_counters, lanes) = {
             let model = self.model.read(cx);
             let n_counters = model.profile().map_or(0, |p| track_count(p));
-            let flame_total = model.lane_layout().map(|l| l.total_height).unwrap_or(0.0);
-            (n_counters, flame_total)
+            let lanes = model.chart_lanes().map(|l| l.heights()).unwrap_or_default();
+            (n_counters, lanes)
         };
         let (counters, gutter_width) = self.shell_layout(cx);
-        Regions::new(
-            self.viewport,
-            n_counters,
-            counters,
-            gutter_width,
-            flame_total,
-        )
+        Regions::new(self.viewport, n_counters, counters, gutter_width, lanes)
     }
 
     /// The bars for the timeline's view state; all `None` while no profile with a
     /// lane layout is loaded.
     fn scroll_bars(&self, cx: &App) -> TimelineBars {
-        let (span, flame_total) = {
+        let (span, scrolled_total) = {
             let model = self.model.read(cx);
-            let (Some(profile), Some(lanes)) = (model.profile(), model.lane_layout()) else {
+            let (Some(profile), Some(lanes)) = (model.profile(), model.chart_lanes()) else {
                 return TimelineBars::default();
             };
-            (profile.span(), lanes.total_height)
+            (profile.span(), lanes.scrolled.total_height)
         };
         scrollbar_geom(
             span,
             self.view,
-            flame_total,
+            scrolled_total,
             self.regions(cx),
             self.lane_scroll(cx),
             self.counter_scroll(cx),
@@ -634,9 +656,10 @@ impl Timeline {
     /// the shell is leased.
     fn anchored_chart(&self, cx: &App) -> Option<AnchoredChart> {
         let model = self.model.read(cx);
-        let (lanes, chrome) = (model.lane_layout()?, model.group_chrome()?);
+        model.chart_lanes()?;
+        let chrome = model.group_chrome()?;
         let held = anchor_offset(chart_rows(&chrome), self.scroll);
-        let ceiling = max_lane_scroll(&lanes, &self.regions(cx));
+        let ceiling = self.regions(cx).max_lane_scroll();
         Some(AnchoredChart {
             chrome,
             held,
@@ -701,7 +724,7 @@ impl Timeline {
     /// Whether `pos` lies over a time-axis region the crosshair shows on: the
     /// flame lanes, and the counters strip where the profile has counters.
     fn in_content(&self, pos: Point<Pixels>, cx: &App) -> bool {
-        if self.model.read(cx).lane_layout().is_none() {
+        if self.model.read(cx).chart_lanes().is_none() {
             return false;
         }
         let regions = self.regions(cx);
@@ -727,21 +750,18 @@ impl Timeline {
     /// (across the full chart width, gutter included).
     fn group_row_at(&self, pos: Point<Pixels>, cx: &App) -> Option<GroupHit> {
         let model = self.model.read(cx);
-        model.lane_layout()?;
+        model.chart_lanes()?;
         let chrome = model.group_chrome()?;
         let regions = self.regions(cx);
         let (_, gutter_width) = self.shell_layout(cx);
         let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
         let gutter_left = regions.content_left - gutter_width;
-        if x < gutter_left
-            || x >= regions.content_right
-            || y < regions.flame_top
-            || y >= regions.flame_bottom
-        {
+        if x < gutter_left || x >= regions.content_right {
             return None;
         }
-        let content_y = y - regions.flame_top + self.lane_scroll(cx);
+        let content_y = regions
+            .scrolled_band(self.lane_scroll(cx))
+            .stack_y(f32::from(pos.y))?;
         let hits = |top: f32| content_y >= top && content_y < top + GROUP_BAND_HEIGHT;
         let band = chrome.bands.iter().find(|b| hits(b.top))?;
         let icon_left = regions.content_left - GROUP_ICON - 2.0 * SLICE_TEXT_PAD;
@@ -755,25 +775,25 @@ impl Timeline {
     /// The track whose gutter label lies under `pos`, if the press hit the
     /// track-label column. `None` elsewhere or over a lane's empty tail.
     fn track_label_at(&self, pos: Point<Pixels>, cx: &App) -> Option<usize> {
-        let layout = self.model.read(cx).lane_layout()?;
+        let lanes = self.model.read(cx).chart_lanes()?;
         let regions = self.regions(cx);
         let (_, gutter_width) = self.shell_layout(cx);
         let x = f32::from(pos.x);
-        let y = f32::from(pos.y);
         let gutter_left = regions.content_left - gutter_width;
-        if x < gutter_left
-            || x >= regions.content_left
-            || y < regions.flame_top
-            || y >= regions.flame_bottom
-        {
+        if x < gutter_left || x >= regions.content_left {
             return None;
         }
-        let content_y = y - regions.flame_top + self.lane_scroll(cx);
-        layout
-            .lanes
-            .iter()
-            .find(|l| content_y >= l.top && content_y < l.top + l.height)
-            .map(|l| l.track)
+        let y = f32::from(pos.y);
+        let in_band = |layout: &LaneLayout, band: LaneBand| {
+            let content_y = band.stack_y(y)?;
+            layout
+                .lanes
+                .iter()
+                .find(|l| content_y >= l.top && content_y < l.top + l.height)
+                .map(|l| l.track)
+        };
+        in_band(&lanes.pinned, regions.pinned_band())
+            .or_else(|| in_band(&lanes.scrolled, regions.scrolled_band(self.lane_scroll(cx))))
     }
 
     /// Answers [`SelectAllTracks`] by selecting every currently visible track.
@@ -908,7 +928,7 @@ impl Timeline {
 
     /// Maps a horizontal thumb drag back to a pan start time, then clamps the view.
     fn pan_thumb_to(&mut self, pos: Point<Pixels>, grab: f32, cx: &App) {
-        if self.model.read(cx).lane_layout().is_none() {
+        if self.model.read(cx).chart_lanes().is_none() {
             return;
         }
         let Some(profile) = self.model.read(cx).profile().cloned() else {
@@ -927,7 +947,7 @@ impl Timeline {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model.read(cx).lane_layout().is_none() {
+        if self.model.read(cx).chart_lanes().is_none() {
             return;
         }
         let Some(profile) = self.model.read(cx).profile().cloned() else {
@@ -1066,7 +1086,7 @@ impl Render for Timeline {
             let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
-            let Some(lanes) = model.lane_layout() else {
+            let Some(lanes) = model.chart_lanes() else {
                 return div().into_any_element();
             };
             (profile.clone(), lanes)
@@ -1102,7 +1122,7 @@ fn timeline_on_drag(
             timeline.drag = TimelineDrag::Pan(pan);
             let dx = f32::from(position.x) - f32::from(timeline.last_mouse.x);
             let dy = f32::from(position.y) - f32::from(timeline.last_mouse.y);
-            if timeline.model.read(cx).lane_layout().is_none() {
+            if timeline.model.read(cx).chart_lanes().is_none() {
                 return;
             }
             let Some(profile) = timeline.model.read(cx).profile().cloned() else {
@@ -1173,7 +1193,7 @@ impl Render for SliceCanvas {
             let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
-            let (Some(lanes), Some(chrome)) = (model.lane_layout(), model.group_chrome()) else {
+            let (Some(lanes), Some(chrome)) = (model.chart_lanes(), model.group_chrome()) else {
                 return div().into_any_element();
             };
             let (counters, gutter_width) = timeline.shell_layout(cx);
@@ -1202,23 +1222,16 @@ impl Render for SliceCanvas {
 /// the zoom floor and clamp the pan to the span.
 fn fit_prepaint(
     profile: Arc<Profile>,
-    lanes: Rc<LaneLayout>,
+    lanes: Rc<ChartLanes>,
     parent: Entity<Timeline>,
     counters: CountersStrip,
     gutter_width: f32,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
         let old_bounds = parent.read(cx).viewport;
-        let flame_total = lanes.total_height;
-        let regions_of = |b| {
-            Regions::new(
-                b,
-                track_count(&profile),
-                counters,
-                gutter_width,
-                flame_total,
-            )
-        };
+        let heights = lanes.heights();
+        let regions_of =
+            |b| Regions::new(b, track_count(&profile), counters, gutter_width, heights);
         let regions = regions_of(bounds);
         let time_w = regions.time_w;
         let old_time_w = regions_of(old_bounds).time_w;
@@ -1289,34 +1302,29 @@ impl Row {
     }
 }
 
-/// Where to scroll lanes standing `scroll` pixels down the chart in a region
-/// `view_h` tall to show `rows`: every one where the band they span fits in
-/// the region, else the first. `None` where that shows already.
-fn scroll_revealing_rows(rows: &[Row], scroll: f32, view_h: f32) -> Option<f32> {
-    let first = rows.first()?;
-    let top = rows.iter().map(|row| row.top).fold(first.top, f32::min);
-    let bottom = rows
-        .iter()
-        .map(|row| row.bottom)
-        .fold(first.bottom, f32::max);
-    match bottom - top <= view_h {
-        true => scroll_revealing(top, bottom - top, scroll, view_h),
-        false => scroll_revealing(first.top, first.bottom - first.top, scroll, view_h),
-    }
+/// The row of the scrolled lanes the first of `slices` drawn there stands in;
+/// `None` where `scrolled` draws none of them.
+fn scrolled_row(profile: &Profile, scrolled: &LaneLayout, slices: &[SliceAt]) -> Option<Row> {
+    slices.iter().find_map(|&at| {
+        let lane = scrolled
+            .lanes
+            .iter()
+            .find(|lane| lane.track == at.track())?;
+        Some(Row::of(lane.top, profile.slice(at).depth))
+    })
 }
 
 /// Where to scroll lanes standing `scroll` pixels down the chart in a region
-/// `view_h` tall so that the band `height` tall at `top` shows in full, moving
-/// them no further than that takes; its top where it is taller than the
-/// region. `None` where it shows in full already.
-fn scroll_revealing(top: f32, height: f32, scroll: f32, view_h: f32) -> Option<f32> {
-    let bottom = top + height;
-    if top >= scroll && bottom <= scroll + view_h {
+/// `view_h` tall so that `row` shows in full, moving them no further than that
+/// takes; its top where it is taller than the region. `None` where it shows in
+/// full already.
+fn scroll_revealing(row: Row, scroll: f32, view_h: f32) -> Option<f32> {
+    if row.top >= scroll && row.bottom <= scroll + view_h {
         return None;
     }
-    match top < scroll || height > view_h {
-        true => Some(top),
-        false => Some(bottom - view_h),
+    match row.top < scroll || row.bottom - row.top > view_h {
+        true => Some(row.top),
+        false => Some(row.bottom - view_h),
     }
 }
 
@@ -1325,62 +1333,74 @@ fn scroll_revealing(top: f32, height: f32, scroll: f32, view_h: f32) -> Option<f
 const CHOSEN_OUTLINE_PX: f32 = 2.0;
 
 /// Outlines the slices standing for what is chosen of the critical path that
-/// `drawn` holds, within the flame region of `regions`.
+/// `drawn` holds, each within the band of `regions` it is drawn in, the lanes
+/// scrolled up by `scroll`.
 fn paint_chosen_slices(
     chosen: &[SliceAt],
-    drawn: &[VisibleSlice],
+    drawn: &DrawnSlices,
+    regions: Regions,
+    scroll: f32,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    for (band, slices) in drawn.in_bands(regions, scroll) {
+        let bounds = band.rect(regions.content_left, regions.time_right);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            paint_outlines(chosen, slices, band, regions, palette, window);
+        });
+    }
+}
+
+/// Outlines the slices of `slices`, drawn in `band`, that `chosen` holds.
+fn paint_outlines(
+    chosen: &[SliceAt],
+    slices: &[VisibleSlice],
+    band: LaneBand,
     regions: Regions,
     palette: &Palette,
     window: &mut Window,
 ) {
-    let flame = Bounds::new(
-        point(px(regions.content_left), px(regions.flame_top)),
-        size(
-            px(regions.time_right - regions.content_left),
-            px(regions.flame_h()),
-        ),
-    );
-    window.with_content_mask(Some(ContentMask { bounds: flame }), |window| {
-        for v in drawn {
-            if !chosen
-                .iter()
-                .any(|at| at.track() == v.track && at.slice() == v.slice)
-            {
-                continue;
-            }
-            let around = Bounds::new(
-                point(
-                    px(regions.content_left + v.x - CHOSEN_OUTLINE_PX),
-                    px(regions.flame_top + v.y - CHOSEN_OUTLINE_PX),
-                ),
-                size(
-                    px(v.w + 2.0 * CHOSEN_OUTLINE_PX),
-                    px(v.h + 2.0 * CHOSEN_OUTLINE_PX),
-                ),
-            );
-            window.paint_quad(
-                gpui::outline(around, palette.label, gpui::BorderStyle::Solid)
-                    .border_widths(px(CHOSEN_OUTLINE_PX)),
-            );
+    for v in slices {
+        if !chosen
+            .iter()
+            .any(|at| at.track() == v.track && at.slice() == v.slice)
+        {
+            continue;
         }
-    });
+        let around = Bounds::new(
+            point(
+                px(regions.content_left + v.x - CHOSEN_OUTLINE_PX),
+                px(band.top + v.y - CHOSEN_OUTLINE_PX),
+            ),
+            size(
+                px(v.w + 2.0 * CHOSEN_OUTLINE_PX),
+                px(v.h + 2.0 * CHOSEN_OUTLINE_PX),
+            ),
+        );
+        window.paint_quad(
+            gpui::outline(around, palette.label, gpui::BorderStyle::Solid)
+                .border_widths(px(CHOSEN_OUTLINE_PX)),
+        );
+    }
 }
 
 /// The timeline's culled draw list, reusing the [`SliceDrawCache`] in `cache`
-/// unless a key changed, so a repaint that leaves the profile, lane layout, time
-/// view, and viewport unchanged reuses the list rather than re-culling.
+/// unless a key changed, so a repaint that leaves the profile, lanes, time view,
+/// and viewports unchanged reuses the list rather than re-culling.
 fn cached_slices(
     cache: &mut Option<SliceDrawCache>,
     profile: &Arc<Profile>,
-    lanes: &Rc<LaneLayout>,
+    lanes: &Rc<ChartLanes>,
     view: TimeView,
-    viewport: Viewport,
-) -> Rc<Vec<VisibleSlice>> {
+    pinned: Viewport,
+    scrolled: Viewport,
+) -> Rc<DrawnSlices> {
     if let Some(c) = cache.as_ref()
         && Arc::ptr_eq(&c.profile, profile)
         && Rc::ptr_eq(&c.lanes, lanes)
         && c.view == view
-        && c.viewport == viewport
+        && c.pinned == pinned
+        && c.scrolled == scrolled
     {
         return c.slices.clone();
     }
@@ -1389,7 +1409,8 @@ fn cached_slices(
             profile.clone(),
             lanes.clone(),
             view,
-            viewport,
+            pinned,
+            scrolled,
         ))
         .slices
         .clone()
@@ -1400,15 +1421,13 @@ fn cached_slices(
 /// reading the live view state through `parent`.
 fn slice_paint(
     profile: Arc<Profile>,
-    lanes: Rc<LaneLayout>,
+    lanes: Rc<ChartLanes>,
     chrome: Rc<GroupChrome>,
     parent: Entity<Timeline>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
-        let layout = &*lanes;
         let n_counters = track_count(&profile);
-        let flame_total = layout.total_height;
         let (
             tv,
             scroll,
@@ -1418,7 +1437,6 @@ fn slice_paint(
             shared_names,
             regions,
             show_counters,
-            vp,
         ) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
@@ -1427,12 +1445,7 @@ fn slice_paint(
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let selected = timeline.model.read(cx).selected_tracks().to_vec();
             let shared_names = timeline.model.read(cx).shared_track_names().to_vec();
-            let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
-            let vp = Viewport {
-                width: regions.time_w,
-                height: regions.flame_h(),
-                scroll_y: scroll,
-            };
+            let regions = Regions::new(bounds, n_counters, counters, gutter_width, lanes.heights());
             let show_counters = regions.shows_counters();
             (
                 tv,
@@ -1443,11 +1456,18 @@ fn slice_paint(
                 shared_names,
                 regions,
                 show_counters,
-                vp,
             )
         };
+        let pinned = regions.pinned_band();
         let slices = parent.update(cx, |timeline, _| {
-            cached_slices(&mut timeline.slice_draw, &profile, &lanes, tv, vp)
+            cached_slices(
+                &mut timeline.slice_draw,
+                &profile,
+                &lanes,
+                tv,
+                pinned.viewport(regions.time_w),
+                regions.scrolled_band(scroll).viewport(regions.time_w),
+            )
         });
 
         let ticks = ruler_ticks(tv, regions.time_w);
@@ -1470,47 +1490,51 @@ fn slice_paint(
             );
         }
 
-        let flame_mask = ContentMask {
-            bounds: regions.flame_rect(),
-        };
-        window.with_content_mask(Some(flame_mask), |window| {
-            for lane in layout.lanes.iter().skip(1) {
-                let ry = regions.flame_top + lane.top - METRICS.lane_gap / 2.0 - scroll;
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(px(regions.content_left), px(ry)),
-                        size(px(regions.time_w), px(1.0)),
-                    ),
-                    palette.gridline,
-                ));
-            }
-            for header in chart_rows(&chrome).filter(|row| row.kind.is_header()) {
-                let y = regions.flame_top + header.top - scroll;
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(px(regions.content_left), px(y)),
-                        size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
-                    ),
-                    palette.header_band,
-                ));
-            }
-            for vs in slices.iter() {
-                let track = &profile.threads()[vs.track];
-                let slice = profile.slices(track)[vs.slice];
-                paint_slice(
-                    &profile,
-                    &slice,
-                    vs.x,
-                    vs.y + regions.flame_top,
-                    vs.w,
-                    vs.h,
-                    regions.content_left,
-                    &palette,
-                    window,
-                    cx,
-                );
-            }
-        });
+        let stacks = [(&lanes.pinned, None), (&lanes.scrolled, Some(&*chrome))];
+        for ((band, drawn), (layout, headed)) in
+            slices.in_bands(regions, scroll).into_iter().zip(stacks)
+        {
+            let bounds = band.rect(regions.content_left, regions.time_right);
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                for lane in layout.lanes.iter().skip(1) {
+                    let ry = band.y_of(lane.top) - METRICS.lane_gap / 2.0;
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(px(regions.content_left), px(ry)),
+                            size(px(regions.time_w), px(1.0)),
+                        ),
+                        palette.gridline,
+                    ));
+                }
+                if let Some(chrome) = headed {
+                    for header in chart_rows(chrome).filter(|row| row.kind.is_header()) {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(px(regions.content_left), px(band.y_of(header.top))),
+                                size(px(regions.time_w), px(GROUP_BAND_HEIGHT)),
+                            ),
+                            palette.header_band,
+                        ));
+                    }
+                }
+                for vs in drawn {
+                    let track = &profile.threads()[vs.track];
+                    let slice = profile.slices(track)[vs.slice];
+                    paint_slice(
+                        &profile,
+                        &slice,
+                        vs.x,
+                        vs.y + band.top,
+                        vs.w,
+                        vs.h,
+                        regions.content_left,
+                        &palette,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        }
 
         if show_counters {
             let working_lanes_pending = {
@@ -1533,7 +1557,7 @@ fn slice_paint(
         scrollbar_geom(
             profile.span(),
             tv,
-            flame_total,
+            lanes.scrolled.total_height,
             regions,
             scroll,
             counter_scroll,
@@ -1542,7 +1566,7 @@ fn slice_paint(
 
         paint_gutter(
             &profile,
-            layout,
+            &lanes,
             &chrome,
             regions,
             gutter_width,
@@ -1555,6 +1579,20 @@ fn slice_paint(
             window,
             cx,
         );
+
+        if pinned.height > 0.0 {
+            let gutter_left = regions.content_left - gutter_width;
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        px(gutter_left),
+                        px(pinned.bottom() - METRICS.lane_gap / 2.0),
+                    ),
+                    size(px(regions.time_right - gutter_left), px(1.0)),
+                ),
+                palette.divider,
+            ));
+        }
 
         paint_ruler(&ticks, regions, bounds, &palette, window, cx);
         paint_marker_band(&profile, tv, regions, &palette, window, cx);
@@ -1864,7 +1902,7 @@ fn paint_playhead(
 /// crosshair, hover, and drag state it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
-    lanes: Rc<LaneLayout>,
+    lanes: Rc<ChartLanes>,
     parent: Entity<Timeline>,
     palette: Palette,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
@@ -1886,6 +1924,7 @@ fn overlay_paint(
         let (
             tv,
             counters,
+            scroll,
             counter_scroll,
             gutter_width,
             selection,
@@ -1896,6 +1935,7 @@ fn overlay_paint(
         ) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
+            let scroll = timeline.lane_scroll(cx);
             let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let model = timeline.model.read(cx);
@@ -1907,6 +1947,7 @@ fn overlay_paint(
             (
                 tv,
                 counters,
+                scroll,
                 counter_scroll,
                 gutter_width,
                 selection,
@@ -1916,12 +1957,11 @@ fn overlay_paint(
                 !matches!(timeline.drag, TimelineDrag::None),
             )
         };
-        let flame_total = lanes.total_height;
-        let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
+        let regions = Regions::new(bounds, n_counters, counters, gutter_width, lanes.heights());
         let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
         if let Some((chosen, drawn)) = chosen_drawn {
-            paint_chosen_slices(&chosen, &drawn, regions, &palette, window);
+            paint_chosen_slices(&chosen, &drawn, regions, scroll, &palette, window);
         }
         if let Some(at_us) = playhead {
             paint_playhead(at_us, tv, regions, show_counters, &palette, window);
@@ -1960,6 +2000,7 @@ fn overlay_paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_trace_layout::Lane;
 
     /// A profile's whole time, long enough for every framing below to zoom in.
     const WHOLE: TimeSpan = TimeSpan {
@@ -2006,33 +2047,77 @@ mod tests {
     }
 
     #[test]
-    fn lanes_scroll_only_as_far_as_showing_a_lane_in_full_takes() {
+    fn lanes_scroll_only_as_far_as_showing_a_row_in_full_takes() {
+        let row = |top: f32, height: f32| Row {
+            top,
+            bottom: top + height,
+        };
         // Region 100 tall, scrolled 200 down.
-        assert_eq!(scroll_revealing(220.0, 30.0, 200.0, 100.0), None);
-        assert_eq!(scroll_revealing(150.0, 30.0, 200.0, 100.0), Some(150.0));
-        assert_eq!(scroll_revealing(290.0, 30.0, 200.0, 100.0), Some(220.0));
-        assert_eq!(scroll_revealing(400.0, 300.0, 200.0, 100.0), Some(400.0));
+        assert_eq!(scroll_revealing(row(220.0, 30.0), 200.0, 100.0), None);
+        assert_eq!(
+            scroll_revealing(row(150.0, 30.0), 200.0, 100.0),
+            Some(150.0)
+        );
+        assert_eq!(
+            scroll_revealing(row(290.0, 30.0), 200.0, 100.0),
+            Some(220.0)
+        );
+        // Taller than the region, it shows from its top.
+        assert_eq!(
+            scroll_revealing(row(400.0, 300.0), 200.0, 100.0),
+            Some(400.0)
+        );
+    }
+
+    /// The handle of `profile`'s `slice`th slice on its `track`th track.
+    fn slice_at(profile: &Profile, track: usize, slice: usize) -> SliceAt {
+        profile.slices_at(track).nth(slice).expect("a slice")
     }
 
     #[test]
-    fn a_step_s_rows_show_together_where_they_fit_and_else_its_span_s_row() {
-        let view_h = 10.0 * METRICS.row_height;
-        let step = Row::of(0.0, 0);
-        // On a lane far taller than the region, its slice deep in it.
-        let span = Row::of(5.0 * view_h, 40);
-        let y = scroll_revealing_rows(&[span, step], 0.0, view_h).expect("a scroll");
-        assert!(
-            span.top >= y && span.bottom <= y + view_h,
-            "the span's row shows"
+    fn a_reveal_scrolls_to_the_span_s_row_on_a_lane_far_down_a_tall_stack() {
+        let profile = profile_of_events(
+            TEST_TIDS
+                .iter()
+                .flat_map(|&tid| {
+                    // Nested spans, so the last one stands deep in its lane.
+                    thread_events(tid, (0..40).map(|depth| (depth, 1000 - 2 * depth)))
+                })
+                .collect(),
         );
+        let scrolled = lay_out_lanes(&profile, &METRICS);
+        let deep = slice_at(&profile, 1, 39);
+        let lane = scrolled.lanes[deep.track()];
+        let row = scrolled_row(&profile, &scrolled, &[deep]).expect("a drawn row");
+        assert_eq!(row, Row::of(lane.top, 39));
+        let view_h = 10.0 * METRICS.row_height;
+        assert!(lane.height > view_h, "a lane taller than the region");
+        let y = scroll_revealing(row, 0.0, view_h).expect("a scroll");
+        assert!(row.top >= y && row.bottom <= y + view_h, "the row shows");
+        assert_eq!(scroll_revealing(row, y, view_h), None, "and stays put");
+    }
 
-        let near = Row::of(step.bottom + METRICS.lane_gap, 2);
-        let y = scroll_revealing_rows(&[near, step], 5.0 * view_h, view_h).expect("a scroll");
-        for row in [near, step] {
-            assert!(row.top >= y && row.bottom <= y + view_h, "both rows show");
-        }
-        assert_eq!(scroll_revealing_rows(&[near, step], 0.0, view_h), None);
-        assert_eq!(scroll_revealing_rows(&[], 0.0, view_h), None);
+    #[test]
+    fn a_reveal_scrolls_to_no_row_of_a_lane_the_scrolled_stack_does_not_draw() {
+        let profile = profile_of(2);
+        let full = lay_out_lanes(&profile, &METRICS);
+        // The first track's lane pinned, as the critical path's is, the
+        // second's scrolled.
+        let scrolled = LaneLayout {
+            lanes: vec![Lane {
+                top: 0.0,
+                ..full.lanes[1]
+            }],
+            total_height: full.lanes[1].height,
+        };
+        let own = slice_at(&profile, 0, 1);
+        let span = slice_at(&profile, 1, 0);
+        assert_eq!(scrolled_row(&profile, &scrolled, &[own]), None);
+        assert_eq!(
+            scrolled_row(&profile, &scrolled, &[own, span]),
+            Some(Row::of(0.0, 0)),
+            "the span's row, whichever slice comes first"
+        );
     }
     use bviz_invocation::Session;
     use bviz_trace_layout::lay_out_lanes;
@@ -2094,12 +2179,25 @@ mod tests {
         ))
     }
 
-    /// A draw list culled from `profile` over a viewport holding all of it.
+    /// A draw list culled from `profile` over a viewport holding all of it,
+    /// nothing pinned.
     fn draw_cache(profile: &Arc<Profile>) -> SliceDrawCache {
+        let lanes = ChartLanes {
+            pinned: LaneLayout {
+                lanes: Vec::new(),
+                total_height: 0.0,
+            },
+            scrolled: lay_out_lanes(profile, &METRICS),
+        };
+        let pinned = Viewport {
+            height: 0.0,
+            ..TEST_VIEWPORT
+        };
         SliceDrawCache::new(
             profile.clone(),
-            Rc::new(lay_out_lanes(profile, &METRICS)),
+            Rc::new(lanes),
             TEST_VIEW,
+            pinned,
             TEST_VIEWPORT,
         )
     }
@@ -2118,8 +2216,8 @@ mod tests {
     fn a_hit_names_the_slice_drawn_there() {
         let profile = profile_of(3);
         let cache = draw_cache(&profile);
-        assert_eq!(cache.slices.len(), TEST_TIDS.len() * 3);
-        for vs in cache.slices.iter() {
+        assert_eq!(cache.slices.scrolled.len(), TEST_TIDS.len() * 3);
+        for vs in cache.slices.scrolled.iter() {
             let track = &profile.threads()[vs.track];
             let drawn = profile.slices(track)[vs.slice];
             let detail = profile.details(track)[vs.slice];
@@ -2135,14 +2233,70 @@ mod tests {
 
         let below_every_box = cache
             .slices
+            .scrolled
             .iter()
             .map(|vs| vs.y + vs.h)
             .fold(0.0, f32::max);
-        let first = cache.slices.first().expect("a culled slice");
+        let first = cache.slices.scrolled.first().expect("a culled slice");
         assert!(
             cache
                 .hit(first.x + first.w / 2.0, below_every_box)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_hit_in_the_pinned_row_names_its_slice_and_never_one_scrolled_under_it() {
+        let profile = profile_of(3);
+        let full = lay_out_lanes(&profile, &METRICS);
+        let stack = |track: usize| LaneLayout {
+            lanes: vec![Lane {
+                top: 0.0,
+                ..full.lanes[track]
+            }],
+            total_height: full.lanes[track].height,
+        };
+        let lanes = ChartLanes {
+            pinned: stack(0),
+            scrolled: stack(1),
+        };
+        let pinned_h = lanes.heights().pinned;
+        let pinned = Viewport {
+            height: pinned_h,
+            ..TEST_VIEWPORT
+        };
+        // Scrolled past the lane's header, so its slices reach up out of their
+        // band into the pinned row's.
+        let scrolled = Viewport {
+            scroll_y: METRICS.header_height + 2.0,
+            ..TEST_VIEWPORT
+        };
+        let cache =
+            SliceDrawCache::new(profile.clone(), Rc::new(lanes), TEST_VIEW, pinned, scrolled);
+        let named_at = |x: f32, y: f32| {
+            cache
+                .hit(x, y)
+                .map(|hit| profile.str(hit.slice().name).to_owned())
+        };
+        let [pinned_tid, scrolled_tid] = TEST_TIDS;
+
+        let top = cache.slices.pinned.first().expect("a pinned slice");
+        assert_eq!(
+            named_at(top.x + top.w / 2.0, top.y + top.h / 2.0),
+            Some(format!("t{pinned_tid}s0"))
+        );
+        let under = cache.slices.scrolled.first().expect("a scrolled slice");
+        assert!(under.y < 0.0, "the scrolled slice reaches above its band");
+        let mid_x = under.x + under.w / 2.0;
+        assert_eq!(
+            named_at(mid_x, pinned_h + under.y + under.h - 0.5),
+            Some(format!("t{scrolled_tid}s0")),
+            "below the pinned row the scrolled slice is hit"
+        );
+        assert_eq!(
+            named_at(mid_x, pinned_h - 0.5),
+            None,
+            "in the pinned row's gap nothing is, whatever is scrolled under it"
         );
     }
 
@@ -2161,7 +2315,7 @@ mod tests {
             ),
         ]);
         let cache = draw_cache(&profile);
-        let [drawn] = cache.slices[..] else {
+        let [drawn] = cache.slices.scrolled[..] else {
             panic!("expected the fixture's one box");
         };
         let hovered = cache
@@ -2199,10 +2353,10 @@ mod tests {
     fn a_hit_where_boxes_overlap_names_the_one_drawn_last() {
         let profile = profile_of_overlapping_boxes();
         let cache = draw_cache(&profile);
-        let [under, over] = cache.slices[..] else {
+        let [under, over] = cache.slices.scrolled[..] else {
             panic!(
                 "expected the fixture's two boxes, got {}",
-                cache.slices.len()
+                cache.slices.scrolled.len()
             );
         };
         let overlap_end = under.x + under.w;
@@ -2225,6 +2379,7 @@ mod tests {
     fn hovered_self_us(profile: &Arc<Profile>, cache: &SliceDrawCache, name: &str) -> Option<i64> {
         let vs = cache
             .slices
+            .scrolled
             .iter()
             .find(|vs| {
                 let track = &profile.threads()[vs.track];
@@ -2480,7 +2635,7 @@ mod tests {
             0,
             CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             TEST_GUTTER,
-            0.0,
+            crate::regions::LaneHeights::default(),
         )
     }
 

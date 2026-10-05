@@ -24,9 +24,11 @@ use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds
 
 pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
-use groups::{GroupChrome, group_label, lanes_headed_by_pool};
+use groups::{ChartLanes, GroupChrome, group_label, lanes_headed_by_pool};
 use model::{SourceReplaced, TraceModel};
-use regions::{CountersStrip, DividerGrab, DividerPress, Regions, clamp_gutter_width};
+use regions::{
+    CountersStrip, DividerGrab, DividerPress, LaneBand, LaneHeights, Regions, clamp_gutter_width,
+};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
 use timeline::{HoveredSlice, Timeline};
@@ -373,14 +375,17 @@ impl TracePanel {
 
     /// [`Regions`] for the current viewport (captured by the timeline), strip and
     /// gutter sizes, the loaded profile's counter track count, and the flame lanes'
-    /// total height.
+    /// heights.
     fn region_inputs(&self, cx: &App) -> RegionInputs {
         let model = self.model.read(cx);
         RegionInputs {
             n_counters: model.profile().map_or(0, |p| counters::track_count(p)),
             counters: self.counters,
             gutter_width: self.gutter_width,
-            flame_total: model.lane_layout().map(|l| l.total_height).unwrap_or(0.0),
+            lanes: model
+                .chart_lanes()
+                .map(|lanes| lanes.heights())
+                .unwrap_or_default(),
         }
     }
 
@@ -598,7 +603,7 @@ struct RegionInputs {
     n_counters: usize,
     counters: CountersStrip,
     gutter_width: f32,
-    flame_total: f32,
+    lanes: LaneHeights,
 }
 
 impl RegionInputs {
@@ -608,7 +613,7 @@ impl RegionInputs {
             self.n_counters,
             self.counters,
             self.gutter_width,
-            self.flame_total,
+            self.lanes,
         )
     }
 }
@@ -1091,12 +1096,12 @@ impl TimelineBars {
 fn scrollbar_geom(
     span: TimeSpan,
     tv: TimeView,
-    flame_total: f32,
+    scrolled_total: f32,
     regions: Regions,
     scroll_y: f32,
     counter_scroll: f32,
 ) -> TimelineBars {
-    let flame_h = regions.flame_h();
+    let scrolled = regions.scrolled_band(scroll_y);
     let vbar_left = px(regions.content_right - SCROLLBAR_THICKNESS);
 
     let span_us = (span.end_us - span.start_us) as f32;
@@ -1109,11 +1114,11 @@ fn scrollbar_geom(
     let flame = Scrollbar::new(
         Axis::Vertical,
         Bounds::new(
-            point(vbar_left, px(regions.flame_top)),
-            size(px(SCROLLBAR_THICKNESS), px(flame_h)),
+            point(vbar_left, px(scrolled.top)),
+            size(px(SCROLLBAR_THICKNESS), px(scrolled.height)),
         ),
-        flame_total,
-        flame_h,
+        scrolled_total,
+        scrolled.height,
         scroll_y,
         DEFAULT_MIN_THUMB,
     );
@@ -1174,7 +1179,7 @@ struct GutterPaint<'a> {
 #[allow(clippy::too_many_arguments)]
 fn paint_gutter(
     profile: &Profile,
-    layout: &LaneLayout,
+    lanes: &ChartLanes,
     chrome: &GroupChrome,
     regions: Regions,
     gutter_width: f32,
@@ -1210,25 +1215,35 @@ fn paint_gutter(
         palette,
     };
 
-    // Thread and group labels scroll with the lanes, so clip them to the flame
-    // region.
-    let flame_mask = ContentMask {
-        bounds: Bounds::new(
-            point(px(gutter_left), px(regions.flame_top)),
-            size(px(gutter_width), px(regions.flame_h())),
-        ),
-    };
-    let lanes = GutterLanes {
+    // Thread and group labels stand in the band their lanes are drawn in, so
+    // clip them to it.
+    let gutter = GutterLanes {
         profile,
-        chrome,
         selected,
         shared_names,
     };
-    window.with_content_mask(Some(flame_mask), |window| {
-        paint_thread_labels(&g, &lanes, layout, regions, scroll_y, window, cx);
-        paint_group_bands(&g, chrome, regions, scroll_y, window, cx);
-        paint_family_bands(&g, chrome, regions, scroll_y, window, cx);
-    });
+    let pinned = regions.pinned_band();
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: pinned.rect(gutter_left, regions.content_left),
+        }),
+        |window| {
+            let unheaded = std::iter::repeat(false);
+            paint_thread_labels(&g, &gutter, &lanes.pinned, unheaded, pinned, window, cx);
+        },
+    );
+    let scrolled = regions.scrolled_band(scroll_y);
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: scrolled.rect(gutter_left, regions.content_left),
+        }),
+        |window| {
+            let headed = lanes_headed_by_pool(chrome);
+            paint_thread_labels(&g, &gutter, &lanes.scrolled, headed, scrolled, window, cx);
+            paint_group_bands(&g, chrome, scrolled, window, cx);
+            paint_family_bands(&g, chrome, scrolled, window, cx);
+        },
+    );
 
     if show_counters {
         let counters_mask = ContentMask {
@@ -1297,31 +1312,31 @@ fn paint_gutter_label(g: &GutterPaint, name: &str, ty: f32, window: &mut Window,
 /// The state a flame lane's gutter row is drawn from.
 struct GutterLanes<'a> {
     profile: &'a Profile,
-    chrome: &'a GroupChrome,
     selected: &'a [bool],
     shared_names: &'a [bool],
 }
 
-/// Paints each thread's label at its flame lane, scrolled with the lanes and
-/// centred on the part of the lane the flame region shows, so a lane taller than
-/// that region keeps its name on screen. A selected lane's row carries a faint
+/// Paints the label of each of `layout`'s lanes, drawn in `band`, scrolled with
+/// the lanes and centred on the part of the lane the band shows, so a lane
+/// taller than the band keeps its name on screen. `headed` says, lane by lane,
+/// whether a pool header stands over it. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
 fn paint_thread_labels(
     g: &GutterPaint,
     lanes: &GutterLanes,
     layout: &LaneLayout,
-    regions: Regions,
-    scroll_y: f32,
+    headed: impl Iterator<Item = bool>,
+    band: LaneBand,
     window: &mut Window,
     cx: &mut App,
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    for (lane, headed) in layout.lanes.iter().zip(lanes_headed_by_pool(lanes.chrome)) {
-        let top = regions.flame_top + lane.top - scroll_y;
-        if top + lane.height < regions.flame_top || top > regions.flame_bottom {
+    for (lane, headed) in layout.lanes.iter().zip(headed) {
+        let top = band.y_of(lane.top);
+        if top + lane.height < band.top || top > band.bottom() {
             continue;
         }
         if lanes.selected.get(lane.track).copied().unwrap_or(false) {
@@ -1340,8 +1355,8 @@ fn paint_thread_labels(
                 palette.accent,
             ));
         }
-        let seen_top = top.max(regions.flame_top);
-        let seen_bottom = (top + lane.height).min(regions.flame_bottom);
+        let seen_top = top.max(band.top);
+        let seen_bottom = (top + lane.height).min(band.bottom());
         let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
         let label = if headed {
             pool_member_label(lanes.profile, lanes.shared_names, lane.track)
@@ -1374,20 +1389,19 @@ struct HeaderRow<'a> {
     color: Hsla,
 }
 
-/// Paints a header row: its count set against the gutter's trailing edge, clear
-/// of what the row reserves there, and its name truncated into the width left
-/// between the two. Returns the row's top in screen space, and nothing where the
-/// flame region scrolls the row out of view.
+/// Paints a header row of the scrolled lanes' `band`: its count set against the
+/// gutter's trailing edge, clear of what the row reserves there, and its name
+/// truncated into the width left between the two. Returns the row's top in
+/// screen space, and nothing where the band scrolls the row out of view.
 fn paint_header_row(
     g: &GutterPaint,
-    regions: Regions,
-    scroll_y: f32,
+    band: LaneBand,
     row: HeaderRow,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<f32> {
-    let top = regions.flame_top + row.top - scroll_y;
-    if top + GROUP_BAND_HEIGHT < regions.flame_top || top > regions.flame_bottom {
+    let top = band.y_of(row.top);
+    if top + GROUP_BAND_HEIGHT < band.top || top > band.bottom() {
         return None;
     }
     let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
@@ -1420,24 +1434,22 @@ fn paint_header_row(
 fn paint_group_bands(
     g: &GutterPaint,
     chrome: &GroupChrome,
-    regions: Regions,
-    scroll_y: f32,
+    band: LaneBand,
     window: &mut Window,
     cx: &mut App,
 ) {
     let gutter_left = g.left;
     let gutter_width = g.width;
     let palette = g.palette;
-    for band in &chrome.bands {
-        let show_icon = band.capped && !band.collapsed;
-        let count = header_count((!band.collapsed).then_some(band.shown), band.total);
+    for group in &chrome.bands {
+        let show_icon = group.capped && !group.collapsed;
+        let count = header_count((!group.collapsed).then_some(group.shown), group.total);
         let Some(top) = paint_header_row(
             g,
-            regions,
-            scroll_y,
+            band,
             HeaderRow {
-                top: band.top,
-                name: group_label(band.class),
+                top: group.top,
+                name: group_label(group.class),
                 count: &count,
                 indent: GROUP_LABEL_INDENT,
                 reserved: if show_icon {
@@ -1453,7 +1465,7 @@ fn paint_group_bands(
             continue;
         };
         paint_band_icon(
-            if band.collapsed {
+            if group.collapsed {
                 "caret-right"
             } else {
                 "caret-down"
@@ -1465,7 +1477,7 @@ fn paint_group_bands(
             cx,
         );
         if show_icon {
-            let name = if band.show_all {
+            let name = if group.show_all {
                 "caret-double-up"
             } else {
                 "caret-double-down"
@@ -1511,8 +1523,7 @@ fn paint_band_icon(
 fn paint_family_bands(
     g: &GutterPaint,
     chrome: &GroupChrome,
-    regions: Regions,
-    scroll_y: f32,
+    band: LaneBand,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1520,8 +1531,7 @@ fn paint_family_bands(
         let count = header_count(Some(family.shown), family.total);
         paint_header_row(
             g,
-            regions,
-            scroll_y,
+            band,
             HeaderRow {
                 top: family.top,
                 name: &family.name,
@@ -1792,7 +1802,13 @@ mod tests {
     /// flame region never asks for a bar of its own.
     fn counters_split(n: usize, strip: CountersStrip) -> Regions {
         let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(800.0)));
-        Regions::new(window, n, strip, DEFAULT_GUTTER_WIDTH, 0.0)
+        Regions::new(
+            window,
+            n,
+            strip,
+            DEFAULT_GUTTER_WIDTH,
+            LaneHeights::default(),
+        )
     }
 
     /// The counters strip's bar for a split scrolled to its top.
@@ -1829,13 +1845,16 @@ mod tests {
         let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
         // Lanes taller than any region this window can hold, so the split
         // reserves a column for the vertical bar.
-        let flame_total = 2.0 * f32::from(window.size.height);
+        let lanes = LaneHeights {
+            pinned: 0.0,
+            scrolled: 2.0 * f32::from(window.size.height),
+        };
         let regions = Regions::new(
             window,
             0,
             CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
             DEFAULT_GUTTER_WIDTH,
-            flame_total,
+            lanes,
         );
         let right = regions.content_left + regions.time_w;
         assert_eq!(right, regions.content_right - SCROLLBAR_THICKNESS);
@@ -1877,6 +1896,36 @@ mod tests {
         assert!(regions.in_flame(track.origin));
     }
 
+    /// The lane bar scrolls only the lanes below the pinned row, so it spans
+    /// their band and measures their stack alone.
+    #[test]
+    fn the_lane_bar_spans_the_scrolled_lanes_below_the_pinned_row() {
+        let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
+        let lanes = LaneHeights {
+            pinned: 30.0,
+            scrolled: 2.0 * f32::from(window.size.height),
+        };
+        let regions = Regions::new(
+            window,
+            0,
+            CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
+            DEFAULT_GUTTER_WIDTH,
+            lanes,
+        );
+        let span = TimeSpan {
+            start_us: 0,
+            end_us: 1_000,
+        };
+        let tv = TimeView::fit(span, regions.time_w, EDGE_MARGIN_PX);
+        let bar = scrollbar_geom(span, tv, lanes.scrolled, regions, 0.0, 0.0)
+            .flame
+            .expect("lanes overflowing their band");
+        let band = regions.scrolled_band(0.0);
+        assert_eq!(bar.track().origin.y, px(regions.flame_top + lanes.pinned));
+        assert_eq!(bar.track().origin.y, px(band.top));
+        assert_eq!(bar.track().size.height, px(band.height));
+    }
+
     /// A view sitting on the zoom floor holds the whole span in sight, so there
     /// is nothing to pan to and no time bar.
     #[test]
@@ -1899,7 +1948,15 @@ mod tests {
     #[test]
     fn only_a_profile_with_counters_has_a_divider() {
         let window = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
-        let split = |n, strip| Regions::new(window, n, strip, DEFAULT_GUTTER_WIDTH, 0.0);
+        let split = |n, strip| {
+            Regions::new(
+                window,
+                n,
+                strip,
+                DEFAULT_GUTTER_WIDTH,
+                LaneHeights::default(),
+            )
+        };
 
         let none = split(0, CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT));
         assert_eq!(none.divider_rect().size.height, px(0.0));
