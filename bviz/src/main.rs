@@ -5,6 +5,7 @@ mod group;
 
 use bviz_cli::{Cli, Source, Sources};
 use bviz_invocation::Session;
+use bviz_ui_execlog_args::ExecLogSource;
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member};
 use clap::Parser;
@@ -45,7 +46,10 @@ impl Load {
                 file: Self::Console(source.into()),
             },
             Source::ExecLog(source) => File {
-                kind: Kind::ExecLog,
+                kind: match source {
+                    ExecLogSource::Spawns(_) => Kind::ExecLog,
+                    ExecLogSource::Graph(_) => Kind::ExecGraphLog,
+                },
                 invocation: bviz_ui_execlog::invocation_id(&source),
                 file: Self::ExecLog(source.into()),
             },
@@ -115,7 +119,7 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
                 for load in rest {
                     others.push(open(load));
                 }
-                Document::join(group::label(&id).into(), first, second, others)
+                Document::join(group::label(id.as_ref()).into(), first, second, others)
             })
         }
     }

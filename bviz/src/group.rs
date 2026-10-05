@@ -4,13 +4,20 @@
 use bviz_invocation::InvocationId;
 use std::iter;
 
-/// The kinds of file that carry an invocation id. An invocation's document
-/// holds one of each.
+/// The kinds of file an invocation's document holds one of each of.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Kind {
     Profile,
     Bep,
     ExecLog,
+    /// Carries no invocation id.
+    ExecGraphLog,
+}
+
+impl Kind {
+    fn carries_id(self) -> bool {
+        self != Kind::ExecGraphLog
+    }
 }
 
 /// A file of one of the [`Kind`]s.
@@ -31,9 +38,10 @@ pub(crate) enum Given<T> {
 /// What a window opens as one document.
 pub(crate) enum Opening<T> {
     Alone(T),
-    /// Files of the invocation `id`, in the order they were given.
+    /// Files of the invocation `id`, in the order they were given; `None`
+    /// for files of one invocation none of them names.
     Invocation {
-        id: InvocationId,
+        id: Option<InvocationId>,
         first: T,
         second: T,
         rest: Vec<T>,
@@ -46,9 +54,10 @@ enum Gathering<T> {
     Invocation(Gathered<T>),
 }
 
-/// The files gathered for the invocation `id`.
+/// The files gathered for the invocation `id`, `None` for one no file
+/// names.
 struct Gathered<T> {
-    id: InvocationId,
+    id: Option<InvocationId>,
     first: T,
     rest: Vec<T>,
     /// The kinds among those files.
@@ -60,7 +69,7 @@ impl<T> Gathering<T> {
     fn begin(file: File<T>) -> Self {
         match file.invocation {
             Some(id) => Self::Invocation(Gathered {
-                id,
+                id: Some(id),
                 first: file.file,
                 rest: Vec::new(),
                 held: vec![file.kind],
@@ -69,9 +78,10 @@ impl<T> Gathering<T> {
         }
     }
 
-    fn invocation(&mut self, id: &InvocationId) -> Option<&mut Gathered<T>> {
+    /// The invocation `id` names, or for `None` the one no file names.
+    fn invocation(&mut self, id: Option<&InvocationId>) -> Option<&mut Gathered<T>> {
         match self {
-            Self::Invocation(gathered) if gathered.id == *id => Some(gathered),
+            Self::Invocation(gathered) if gathered.id.as_ref() == id => Some(gathered),
             _ => None,
         }
     }
@@ -99,10 +109,28 @@ impl<T> Gathering<T> {
 
 /// The invocation `files` name, where those carrying an id all carry the same
 /// one.
-fn only_invocation<T>(files: &[File<T>]) -> Option<&InvocationId> {
-    let mut named = files.iter().filter_map(|file| file.invocation.as_ref());
+fn only_invocation<'a, T: 'a>(
+    files: impl IntoIterator<Item = &'a File<T>>,
+) -> Option<&'a InvocationId> {
+    let mut named = files
+        .into_iter()
+        .filter_map(|file| file.invocation.as_ref());
     let first = named.next()?;
     named.all(|id| id == first).then_some(first)
+}
+
+/// Takes each file of `files` of a kind carrying no id for a file of the one
+/// invocation those carrying an id name, where they name one.
+fn adopt<'a, T: 'a>(files: impl IntoIterator<Item = &'a mut File<T>>) {
+    let files: Vec<&mut File<T>> = files.into_iter().collect();
+    let Some(id) = only_invocation(files.iter().map(|file| &**file)).cloned() else {
+        return;
+    };
+    for file in files {
+        if !file.kind.carries_id() {
+            file.invocation = Some(id.clone());
+        }
+    }
 }
 
 /// What `given` names as the documents a window opens, each standing where its
@@ -110,20 +138,36 @@ fn only_invocation<T>(files: &[File<T>]) -> Option<&InvocationId> {
 ///
 /// Files carrying one invocation id form one document, which takes one file of
 /// each [`Kind`]; a further file of a kind the document holds opens alone, as
-/// does a file carrying no id. A graph carries none either: nothing tells which
-/// build it describes, so it is taken for the one invocation the files with it
-/// name, and opens alone where they name several or none.
+/// does a file lacking the id its kind carries. A graph, and a file of a kind
+/// carrying no id, name no build they describe, so each is taken for the one
+/// invocation the files with it name, and opens alone where they name several.
+/// Where they name none, a graph and the first file of a kind carrying no id
+/// are taken for one invocation together.
 pub(crate) fn by_invocation<T>(given: Given<T>) -> (Opening<T>, Vec<Opening<T>>) {
+    let given = match given {
+        Given::Graph { graph, mut files } => {
+            adopt(&mut files);
+            Given::Graph { graph, files }
+        }
+        Given::Files {
+            mut first,
+            mut rest,
+        } => {
+            adopt(iter::once(&mut first).chain(&mut rest));
+            Given::Files { first, rest }
+        }
+    };
     let (mut leading, files) = match given {
         Given::Graph { graph, files } => {
-            let leading = match only_invocation(&files) {
-                Some(id) => Gathering::Invocation(Gathered {
-                    id: id.clone(),
+            let named = files.iter().any(|file| file.invocation.is_some());
+            let leading = match (only_invocation(&files), named) {
+                (None, true) => Gathering::Alone(graph),
+                (id, _) => Gathering::Invocation(Gathered {
+                    id: id.cloned(),
                     first: graph,
                     rest: Vec::new(),
                     held: Vec::new(),
                 }),
-                None => Gathering::Alone(graph),
             };
             (leading, files)
         }
@@ -131,11 +175,12 @@ pub(crate) fn by_invocation<T>(given: Given<T>) -> (Opening<T>, Vec<Opening<T>>)
     };
     let mut others = Vec::with_capacity(files.len());
     for file in files {
-        let gathered = file.invocation.as_ref().and_then(|id| {
-            iter::once(&mut leading)
+        let gathered = match (&file.invocation, file.kind.carries_id()) {
+            (None, true) => None,
+            (id, _) => iter::once(&mut leading)
                 .chain(&mut others)
-                .find_map(|gathering| gathering.invocation(id))
-        });
+                .find_map(|gathering| gathering.invocation(id.as_ref())),
+        };
         let apart = match gathered {
             Some(gathered) if !gathered.held.contains(&file.kind) => {
                 gathered.held.push(file.kind);
@@ -159,8 +204,12 @@ const SHORT_ID_CHARS: usize = 8;
 
 /// How the invocation `id` reads as its document's label: by the first group
 /// of the UUID Bazel names an invocation with, and by as many leading
-/// characters of an id that is not one.
-pub(crate) fn label(id: &InvocationId) -> String {
+/// characters of an id that is not one; `None`, for an invocation no file
+/// names, by no id.
+pub(crate) fn label(id: Option<&InvocationId>) -> String {
+    let Some(id) = id else {
+        return "Invocation".to_owned();
+    };
     let id = id.as_str();
     let group = id.split('-').find(|group| !group.is_empty()).unwrap_or(id);
     let short: String = group.chars().take(SHORT_ID_CHARS).collect();
@@ -202,6 +251,14 @@ mod tests {
         }
     }
 
+    fn graph_log(name: &'static str) -> File<&'static str> {
+        File {
+            file: name,
+            kind: Kind::ExecGraphLog,
+            invocation: None,
+        }
+    }
+
     /// The documents `given` opens as, each written as its files' names: a
     /// invocation's as the label it opens under, then its files.
     fn grouped(given: Given<&'static str>) -> Vec<Vec<String>> {
@@ -215,7 +272,7 @@ mod tests {
                     first,
                     second,
                     rest,
-                } => iter::once(label(&id))
+                } => iter::once(label(id.as_ref()))
                     .chain([first, second].into_iter().chain(rest).map(String::from))
                     .collect(),
             })
@@ -338,6 +395,68 @@ mod tests {
         );
     }
 
+    /// A graph log names no invocation either, so it is taken for the one the
+    /// files given with it agree on, wherever it stands among them.
+    #[test]
+    fn a_graph_log_joins_the_one_invocation_the_other_files_name() {
+        assert_eq!(
+            files(vec![
+                graph_log("l"),
+                profile("p", Some(A)),
+                exec_log("e", Some(A))
+            ]),
+            [["Invocation a5f7f3e6", "l", "p", "e"]]
+        );
+        assert_eq!(
+            with_graph(vec![bep("b", Some(A)), graph_log("l")]),
+            [["Invocation a5f7f3e6", "g", "b", "l"]]
+        );
+        assert_eq!(
+            files(vec![
+                profile("p", Some(A)),
+                graph_log("l1"),
+                graph_log("l2")
+            ]),
+            [vec!["Invocation a5f7f3e6", "p", "l1"], vec!["l2"]]
+        );
+    }
+
+    #[test]
+    fn a_graph_log_opens_alone_where_the_files_name_several_invocations_or_none() {
+        assert_eq!(
+            files(vec![
+                graph_log("l"),
+                profile("p", Some(A)),
+                bep("b", Some(B))
+            ]),
+            [["l"], ["p"], ["b"]]
+        );
+        assert_eq!(files(vec![graph_log("l")]), [["l"]]);
+        assert_eq!(
+            files(vec![graph_log("l1"), graph_log("l2")]),
+            [["l1"], ["l2"]]
+        );
+    }
+
+    /// A graph and a graph log given without a file naming the invocation
+    /// both describe are still one build's.
+    #[test]
+    fn a_graph_and_a_graph_log_naming_no_invocation_open_as_one_document() {
+        assert_eq!(with_graph(vec![graph_log("l")]), [["Invocation", "g", "l"]]);
+        assert_eq!(
+            with_graph(vec![
+                graph_log("l1"),
+                profile("unnamed", None),
+                graph_log("l2")
+            ]),
+            [vec!["Invocation", "g", "l1"], vec!["unnamed"], vec!["l2"]]
+        );
+        assert_eq!(
+            with_graph(vec![profile("unnamed", None)]),
+            [["g"], ["unnamed"]]
+        );
+    }
+
     #[test]
     fn a_graph_opens_alone_where_the_files_name_several_invocations_or_none() {
         assert_eq!(
@@ -369,19 +488,19 @@ mod tests {
 
     #[test]
     fn an_invocation_is_labelled_by_the_first_group_of_its_uuid() {
-        assert_eq!(label(&id(A)), "Invocation a5f7f3e6");
+        assert_eq!(label(Some(&id(A))), "Invocation a5f7f3e6");
     }
 
     /// An id is whatever the file holds, so one that is no UUID is still cut to
     /// a label's length, and one led by a hyphen still shows a group.
     #[test]
     fn an_id_that_is_no_uuid_is_labelled_by_its_leading_characters() {
-        assert_eq!(label(&id("abc")), "Invocation abc");
+        assert_eq!(label(Some(&id("abc"))), "Invocation abc");
         assert_eq!(
-            label(&id("0123456789abcdef0123456789abcdef")),
+            label(Some(&id("0123456789abcdef0123456789abcdef"))),
             "Invocation 01234567"
         );
-        assert_eq!(label(&id("-4fda-4675")), "Invocation 4fda");
-        assert_eq!(label(&id("--")), "Invocation --");
+        assert_eq!(label(Some(&id("-4fda-4675"))), "Invocation 4fda");
+        assert_eq!(label(Some(&id("--"))), "Invocation --");
     }
 }

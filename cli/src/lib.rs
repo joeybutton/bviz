@@ -24,10 +24,11 @@ use clap::{CommandFactory, Parser};
 /// further file of a kind the invocation holds is a document of its own, and so
 /// is a file carrying no id.
 ///
-/// The query, cquery and aquery files carry no id, so bviz cannot check which
-/// build a graph describes. It takes the graph for the invocation's when every
-/// id the other files carry is the same one, be that a single file's, and opens
-/// the graph as a document of its own when they carry several ids or none.
+/// The query, cquery and aquery files carry no id, nor does an execution graph
+/// log, so bviz cannot check which build a graph or a graph log describes. It
+/// takes each for the invocation's when every id the other files carry is the
+/// same one, be that a single file's, and opens it as a document of its own
+/// when they carry several ids or none.
 #[derive(Parser, Debug)]
 #[command(name = "bviz", bin_name = "bviz", version, about)]
 pub struct Cli {

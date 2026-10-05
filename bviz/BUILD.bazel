@@ -16,6 +16,7 @@ rust_binary(
         "//invocation",
         "//ui/console:console_lib",
         "//ui/execlog:execlog_lib",
+        "//ui/execlog/args",
         "//ui/graph:graph_lib",
         "//ui/playback",
         "//ui/trace:trace_lib",

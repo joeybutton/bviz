@@ -22,7 +22,7 @@ use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
-use model::{ExecLogModel, Read};
+use model::{ExecLogModel, GraphRead, Read};
 use summary::Summary;
 
 /// A log being read.
@@ -33,7 +33,7 @@ pub struct Load {
 
 enum Reading {
     Spawns(Pending<Read>),
-    Graph(Pending<Summary>),
+    Graph(Pending<GraphRead>),
 }
 
 /// The invocation that wrote the log at `source`, read from the head of the
@@ -61,7 +61,10 @@ impl From<ExecLogSource> for Load {
             })),
             ExecLogSource::Graph(path) => Reading::Graph(Pending::start(move || {
                 GraphLog::from_path(&path)
-                    .map(|log| Summary::of(log.spawns()))
+                    .map(|log| GraphRead {
+                        summary: Summary::of(log.spawns()),
+                        log,
+                    })
                     .map_err(|e| cannot_read(&path, e))
             })),
         };
@@ -70,9 +73,9 @@ impl From<ExecLogSource> for Load {
 }
 
 /// The view of the spawn time the log `load` reads. Where it is opened as
-/// part of an invocation's `session`, an execution log's spawns are reported
-/// to it; where its document plays back on `clock`, an execution log plays
-/// there.
+/// part of an invocation's `session`, what the log tells of the invocation's
+/// spawns and attempts is reported to it; where its document plays back on
+/// `clock`, the log plays there.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
@@ -85,7 +88,7 @@ pub fn open(
         Reading::Spawns(log) => {
             ExecLogModel::reading(log, session.as_ref().map(Entity::downgrade), clock, cx)
         }
-        Reading::Graph(log) => ExecLogModel::reading_graph(log, cx),
+        Reading::Graph(log) => ExecLogModel::reading_graph(log, session, clock, cx),
     });
     let view = ViewSpec::new(move |cx| cx.new(|cx| SpawnTimePanel::new(model.clone(), cx)));
     Member::new(load.title, PanelGroup::one(view))

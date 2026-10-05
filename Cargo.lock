@@ -865,6 +865,7 @@ dependencies = [
  "bviz_invocation",
  "bviz_ui_console",
  "bviz_ui_execlog",
+ "bviz_ui_execlog_args",
  "bviz_ui_graph",
  "bviz_ui_playback",
  "bviz_ui_trace",

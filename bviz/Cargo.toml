@@ -17,6 +17,7 @@ bviz_cli = { path = "../cli" }
 bviz_invocation = { workspace = true }
 bviz_ui_console = { path = "../ui/console" }
 bviz_ui_execlog = { path = "../ui/execlog" }
+bviz_ui_execlog_args = { path = "../ui/execlog/args" }
 bviz_ui_graph = { path = "../ui/graph" }
 bviz_ui_playback = { path = "../ui/playback" }
 bviz_ui_trace = { path = "../ui/trace" }
