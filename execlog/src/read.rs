@@ -31,6 +31,14 @@ const COMPRESSED_BYTES_PER_ENTRY: u64 = 48;
 /// length.
 const PATH_BYTES_PER_COMPRESSED_KIB: u64 = 1344;
 
+/// Compressed log bytes per spawn output, rounded down like
+/// [`COMPRESSED_BYTES_PER_SPAWN`].
+const COMPRESSED_BYTES_PER_OUTPUT: u64 = 192;
+
+/// Output path bytes per KiB of compressed log, rounded up like
+/// [`PATH_BYTES_PER_COMPRESSED_KIB`].
+const OUTPUT_BYTES_PER_COMPRESSED_KIB: u64 = 192;
+
 /// Decoded bytes read from the log at a time.
 const READ_CHUNK_BYTES: usize = 256 << 10;
 
@@ -46,12 +54,7 @@ pub(crate) fn read_compressed(
     compressed: u64,
 ) -> Result<ExecLog, LoadError> {
     let decoder = zstd::stream::read::Decoder::new(log).map_err(LoadError::Io)?;
-    let path_bytes = compressed.saturating_mul(PATH_BYTES_PER_COMPRESSED_KIB) >> 10;
-    let mut builder = Builder::with_capacity(
-        estimate(compressed, COMPRESSED_BYTES_PER_SPAWN),
-        estimate(compressed, COMPRESSED_BYTES_PER_ENTRY),
-        usize::try_from(path_bytes).unwrap_or(usize::MAX),
-    );
+    let mut builder = Builder::with_capacity(compressed);
     let add = |entry: &[u8]| Ok(builder.add(entry)?);
     match worker_count() > 1 {
         true => for_each_message_pipelined(decoder, READ_CHUNK_BYTES, add)?,
@@ -126,10 +129,19 @@ struct Builder {
 }
 
 impl Builder {
-    fn with_capacity(spawns: usize, entries: usize, path_bytes: usize) -> Builder {
+    fn with_capacity(compressed: u64) -> Builder {
+        let path_bytes = compressed.saturating_mul(PATH_BYTES_PER_COMPRESSED_KIB) >> 10;
+        let output_bytes = compressed.saturating_mul(OUTPUT_BYTES_PER_COMPRESSED_KIB) >> 10;
         Builder {
-            paths: Paths::with_capacity(entries, path_bytes),
-            spawns: spawn::Builder::with_capacity(spawns),
+            paths: Paths::with_capacity(
+                estimate(compressed, COMPRESSED_BYTES_PER_ENTRY),
+                usize::try_from(path_bytes).unwrap_or(usize::MAX),
+            ),
+            spawns: spawn::Builder::with_capacity(
+                estimate(compressed, COMPRESSED_BYTES_PER_SPAWN),
+                estimate(compressed, COMPRESSED_BYTES_PER_OUTPUT),
+                usize::try_from(output_bytes).unwrap_or(usize::MAX),
+            ),
         }
     }
 
@@ -175,36 +187,35 @@ impl Builder {
     }
 
     fn add_spawn(&mut self, mut spawn: &[u8]) -> Result<(), DecodeError> {
-        let mut first_output = None;
         let mut target_label = "";
         let mut mnemonic = "";
         let mut runner = "";
+        let mut cache_hit = false;
         let mut metrics = SpawnMetrics::default();
         while !spawn.is_empty() {
             match next_field(&mut spawn)? {
                 (exec_log_entry::spawn::OUTPUTS, Value::Bytes(output)) => {
-                    first_output = first_output.or(Some(output));
+                    if let Some(path) = output_path(&self.paths, output)? {
+                        self.spawns.output(path);
+                    }
                 }
                 (exec_log_entry::spawn::TARGET_LABEL, Value::Bytes(bytes)) => {
                     target_label = text(bytes)?
                 }
                 (exec_log_entry::spawn::MNEMONIC, Value::Bytes(bytes)) => mnemonic = text(bytes)?,
                 (exec_log_entry::spawn::RUNNER, Value::Bytes(bytes)) => runner = text(bytes)?,
+                (exec_log_entry::spawn::CACHE_HIT, Value::Varint(hit)) => cache_hit = hit != 0,
                 (exec_log_entry::spawn::METRICS, Value::Bytes(bytes)) => {
                     metrics = SpawnMetrics::decode(bytes)?;
                 }
                 _ => {}
             }
         }
-        let primary_output = match first_output {
-            Some(output) => output_path(&self.paths, output)?,
-            None => None,
-        };
         self.spawns.push(Logged {
             runner,
             mnemonic,
             target_label,
-            primary_output,
+            cache_hit,
             timing: timing(metrics),
         });
         Ok(())
@@ -345,8 +356,9 @@ mod tests {
         failed.outputs = vec![invalid_output("bazel-out/bin/missing")];
         let mut tree = spawn("disk cache hit", "TreeAction", metrics(1, &[]));
         tree.outputs = vec![output_id(5)];
+        tree.cache_hit = true;
         let mut unknown = spawn("remote", "CppCompile", metrics(1, &[]));
-        unknown.outputs = vec![output_id(99)];
+        unknown.outputs = vec![output_id(99), output_id(4)];
         let log = load(&[
             invocation("abc"),
             file(3, "bazel-out/bin/lib.o"),
@@ -380,11 +392,17 @@ mod tests {
         assert_eq!(spawns[0].mnemonic(), "CppCompile");
         assert_eq!(spawns[0].target_label(), Some("//pkg:lib"));
         assert_eq!(spawns[0].primary_output(), Some("bazel-out/bin/lib.o"));
+        let outputs: Vec<&str> = spawns[0].outputs().collect();
+        assert_eq!(outputs, ["bazel-out/bin/lib.o", "bazel-out/bin/lib.d"]);
 
         assert_eq!(spawns[1].target_label(), None);
         assert_eq!(spawns[1].primary_output(), Some("bazel-out/bin/missing"));
         assert_eq!(spawns[2].primary_output(), Some("bazel-out/bin/tree"));
-        assert_eq!(spawns[3].primary_output(), None);
+        let unknown_outputs: Vec<&str> = spawns[3].outputs().collect();
+        assert_eq!(unknown_outputs, ["bazel-out/bin/lib.d"]);
+
+        let hits: Vec<bool> = spawns.iter().map(|s| s.cache_hit()).collect();
+        assert_eq!(hits, [false, false, true, false]);
     }
 
     #[test]

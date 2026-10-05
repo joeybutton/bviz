@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use super::PhaseTiming;
 
@@ -10,14 +11,54 @@ pub struct LoggedSpawns {
     /// Distinct mnemonics, which [`Record::mnemonic`] indexes.
     mnemonics: Vec<Box<str>>,
     records: Vec<Record>,
+    /// Every spawn's outputs, each spawn's a run [`Record::outputs`] names.
+    outputs: Paths,
 }
 
 struct Record {
     runner: usize,
     mnemonic: usize,
     target_label: Option<Box<str>>,
-    primary_output: Option<Box<str>>,
+    outputs: Range<usize>,
+    cache_hit: bool,
     timing: PhaseTiming,
+}
+
+/// Exec paths end to end, each named by its place in the order added.
+#[derive(Default)]
+struct Paths {
+    text: String,
+    /// Where each path ends in `text`, the next starting there.
+    ends: Vec<usize>,
+}
+
+impl Paths {
+    fn with_capacity(paths: usize, text_bytes: usize) -> Paths {
+        Paths {
+            text: String::with_capacity(text_bytes),
+            ends: Vec::with_capacity(paths),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn push(&mut self, path: &str) {
+        self.text.push_str(path);
+        self.ends.push(self.text.len());
+    }
+
+    /// Keeps the first `paths` paths.
+    fn truncate(&mut self, paths: usize) {
+        self.ends.truncate(paths);
+        self.text.truncate(self.ends.last().copied().unwrap_or(0));
+    }
+
+    fn get(&self, index: usize) -> &str {
+        let start = index.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.text[start..self.ends[index]]
+    }
 }
 
 impl LoggedSpawns {
@@ -81,9 +122,21 @@ impl<'a> LoggedSpawn<'a> {
         self.record.target_label.as_deref()
     }
 
-    /// The exec path of the spawn's first declared output.
+    /// The exec paths of the spawn's outputs the log names, in the order it
+    /// declares them.
+    pub fn outputs(&self) -> impl ExactSizeIterator<Item = &'a str> + use<'a> {
+        let outputs = &self.log.outputs;
+        self.record.outputs.clone().map(|index| outputs.get(index))
+    }
+
+    /// The exec path of the first of [`outputs`](Self::outputs).
     pub fn primary_output(&self) -> Option<&'a str> {
-        self.record.primary_output.as_deref()
+        self.outputs().next()
+    }
+
+    /// Whether a cache answered the spawn rather than an execution of it.
+    pub fn cache_hit(&self) -> bool {
+        self.record.cache_hit
     }
 
     pub fn timing(&self) -> &'a PhaseTiming {
@@ -97,7 +150,7 @@ pub struct Logged<'a> {
     pub mnemonic: &'a str,
     /// Empty where no target owns the spawn's action.
     pub target_label: &'a str,
-    pub primary_output: Option<&'a str>,
+    pub cache_hit: bool,
     pub timing: PhaseTiming,
 }
 
@@ -106,34 +159,52 @@ pub struct Builder {
     runners: Names,
     mnemonics: Names,
     records: Vec<Record>,
+    outputs: Paths,
+    /// Where the outputs of the spawn pushed next start in `outputs`.
+    next_outputs: usize,
 }
 
 impl Builder {
-    /// Room for `spawns` spawns.
-    pub fn with_capacity(spawns: usize) -> Builder {
+    /// Room for `spawns` spawns with `outputs` outputs between them, their
+    /// paths `output_bytes` long together.
+    pub fn with_capacity(spawns: usize, outputs: usize, output_bytes: usize) -> Builder {
         Builder {
             runners: Names::default(),
             mnemonics: Names::default(),
             records: Vec::with_capacity(spawns),
+            outputs: Paths::with_capacity(outputs, output_bytes),
+            next_outputs: 0,
         }
     }
 
+    /// Adds an output of the spawn [`push`](Self::push) adds next.
+    pub fn output(&mut self, path: &str) {
+        self.outputs.push(path);
+    }
+
+    /// Adds `spawn`, with the outputs added since the spawn before it.
     pub fn push(&mut self, spawn: Logged<'_>) {
+        let outputs = self.next_outputs..self.outputs.len();
+        self.next_outputs = outputs.end;
         let record = Record {
             runner: self.runners.intern(spawn.runner),
             mnemonic: self.mnemonics.intern(spawn.mnemonic),
             target_label: (!spawn.target_label.is_empty()).then(|| spawn.target_label.into()),
-            primary_output: spawn.primary_output.map(Box::from),
+            outputs,
+            cache_hit: spawn.cache_hit,
             timing: spawn.timing,
         };
         self.records.push(record);
     }
 
-    pub fn finish(self) -> LoggedSpawns {
+    /// The spawns pushed; outputs added after the last of them are dropped.
+    pub fn finish(mut self) -> LoggedSpawns {
+        self.outputs.truncate(self.next_outputs);
         LoggedSpawns {
             runners: self.runners.into_vec(),
             mnemonics: self.mnemonics.into_vec(),
             records: self.records,
+            outputs: self.outputs,
         }
     }
 }
@@ -176,14 +247,14 @@ mod tests {
             runner,
             mnemonic,
             target_label: "",
-            primary_output: None,
+            cache_hit: false,
             timing: PhaseTiming::new(Duration::ZERO, [Duration::ZERO; REPORTED_PHASES]),
         }
     }
 
     #[test]
     fn names_are_shared_between_spawns() {
-        let mut builder = Builder::with_capacity(3);
+        let mut builder = Builder::with_capacity(3, 0, 0);
         builder.push(logged("remote", "A"));
         builder.push(logged("local", "B"));
         builder.push(logged("remote", "B"));
@@ -196,7 +267,7 @@ mod tests {
 
     #[test]
     fn an_empty_target_label_names_no_target() {
-        let mut builder = Builder::with_capacity(2);
+        let mut builder = Builder::with_capacity(2, 0, 0);
         builder.push(logged("remote", "A"));
         builder.push(Logged {
             target_label: "//a",
@@ -205,5 +276,34 @@ mod tests {
         let log = builder.finish();
         let labels: Vec<_> = log.iter().map(|s| s.target_label()).collect();
         assert_eq!(labels, [None, Some("//a")]);
+    }
+
+    #[test]
+    fn each_spawn_keeps_the_outputs_added_before_it() {
+        let mut builder = Builder::with_capacity(3, 3, 0);
+        builder.output("bazel-out/a.o");
+        builder.output("bazel-out/a.d");
+        builder.push(logged("remote", "A"));
+        builder.push(logged("remote", "B"));
+        builder.output("bazel-out/c");
+        builder.push(Logged {
+            cache_hit: true,
+            ..logged("disk cache hit", "C")
+        });
+        builder.output("bazel-out/dropped");
+        let log = builder.finish();
+        let outputs: Vec<Vec<&str>> = log.iter().map(|s| s.outputs().collect()).collect();
+        assert_eq!(
+            outputs,
+            [
+                vec!["bazel-out/a.o", "bazel-out/a.d"],
+                vec![],
+                vec!["bazel-out/c"]
+            ]
+        );
+        let primary: Vec<_> = log.iter().map(|s| s.primary_output()).collect();
+        assert_eq!(primary, [Some("bazel-out/a.o"), None, Some("bazel-out/c")]);
+        let hits: Vec<bool> = log.iter().map(|s| s.cache_hit()).collect();
+        assert_eq!(hits, [false, false, true]);
     }
 }
