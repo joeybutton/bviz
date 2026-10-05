@@ -916,6 +916,7 @@ version = "0.1.0"
 dependencies = [
  "bviz_parallel",
  "fastrand 2.5.0",
+ "fixedbitset",
  "org-eclipse-elk-alg-layered",
  "org-eclipse-elk-core",
  "org-eclipse-elk-graph",

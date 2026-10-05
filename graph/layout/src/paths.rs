@@ -11,7 +11,7 @@
 
 use crate::graph::{Edge, EdgeKind, Graph, id_span};
 use crate::intern::Id;
-use crate::reach::{Index, State, Toward};
+use crate::reach::{Bounds, Index, State, Toward};
 
 /// The nodes and edges lying on some dependency path.
 #[derive(Clone)]
@@ -71,7 +71,7 @@ pub struct Between {
 pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
     let index = Index::new(graph, &[dependency]);
     let seeds = index.subtree(dependency);
-    let reach = index.walk(&arrivals(&seeds), Toward::Dependents);
+    let reach = index.walk(&arrivals(&seeds), Toward::Dependents, Bounds::NONE);
     let edges: Vec<Edge> = graph
         .edges
         .iter()
@@ -89,13 +89,14 @@ pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
 pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> {
     let index = Index::new(graph, &[dependency, dependent]);
     let from = index.subtree(dependency);
-    let forward = index.walk(&arrivals(&from), Toward::Dependents);
+    let forward = index.walk(&arrivals(&from), Toward::Dependents, Bounds::NONE);
     let end = forward.nearest(dependent)?;
     let to = index.subtree(dependent);
     let at_dependent = dependent.0 as usize;
     let backward = index.walk(
         &[State::arrived(at_dependent), State::lifted(at_dependent)],
         Toward::Dependencies,
+        Bounds::NONE,
     );
     let edges: Vec<Edge> = graph
         .edges
