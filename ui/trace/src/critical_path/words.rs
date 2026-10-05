@@ -198,8 +198,15 @@ pub(crate) fn folded(names: &[&str]) -> String {
 /// What opens the line of levers.
 pub(crate) const LEVERS: &str = "Levers:";
 
-/// A lever with the time on the path it acts on, and what pulls it.
-pub(crate) fn lever(lever: Lever, time: Duration) -> String {
+/// The most pulling a lever acting on `time` can shorten the modeled build
+/// by, its `ceiling`, where that falls short of the time.
+pub(crate) fn lever_bound(ceiling: Option<Duration>, time: Duration) -> Option<Duration> {
+    ceiling.filter(|&ceiling| ceiling < time)
+}
+
+/// A lever with the time on the path it acts on, the [bound](lever_bound)
+/// on what pulling it saves where there is one, and what pulls it.
+pub(crate) fn lever(lever: Lever, time: Duration, bound: Option<Duration>) -> String {
     let (name, pull) = match lever {
         Lever::LeadIn => ("lead-in", "warm server, fewer repository fetches"),
         Lever::Waiting => ("waiting", "inputs off the path, more --jobs"),
@@ -216,7 +223,24 @@ pub(crate) fn lever(lever: Lever, time: Duration) -> String {
         Lever::LocalOnRemote => ("local on a remote build", "check strategies and tags"),
         Lever::CacheHitOverhead => ("steps with neither span nor spawn", "output checking cost"),
     };
-    format!("{name} {} → {pull}", duration(time))
+    let bound = bound.map_or(String::new(), |bound| {
+        format!(", saves at most {}", duration(bound))
+    });
+    format!("{name} {}{bound} → {pull}", duration(time))
+}
+
+/// A lever's tooltip: what its time is and how pulling it shortens the path,
+/// and the [bound](lever_bound) on what that saves where there is one.
+pub(crate) fn lever_account(lever: Lever, bound: Option<Duration>) -> String {
+    let tip = lever_tip(lever);
+    match bound {
+        Some(bound) => format!(
+            "{tip}\nHowever the actions of the steps it acts on are shortened, the modeled \
+             build shrinks by at most {}: other chains of actions then bound it.",
+            duration(bound)
+        ),
+        None => tip.to_owned(),
+    }
 }
 
 /// What the time a lever acts on is, and how pulling it shortens the path.
@@ -826,8 +850,28 @@ mod tests {
     #[test]
     fn a_lever_says_its_time_and_what_pulls_it() {
         assert_eq!(
-            lever(Lever::Fetch, ms(1500)),
+            lever(Lever::Fetch, ms(1500), None),
             "downloads 1.50s → --remote_download_minimal"
+        );
+    }
+
+    #[test]
+    fn a_lever_says_what_pulling_it_saves_only_where_the_model_bounds_it_below_its_time() {
+        assert_eq!(lever_bound(None, ms(1500)), None);
+        assert_eq!(lever_bound(Some(ms(1500)), ms(1500)), None);
+        let bound = lever_bound(Some(ms(400)), ms(1500));
+        assert_eq!(bound, Some(ms(400)));
+        assert_eq!(
+            lever(Lever::Execution, ms(1500), bound),
+            "execution 1.50s, saves at most 400.00ms → a faster tool, or split the target"
+        );
+        assert!(lever_account(Lever::Execution, bound).ends_with(
+            "\nHowever the actions of the steps it acts on are shortened, the modeled build \
+                 shrinks by at most 400.00ms: other chains of actions then bound it."
+        ));
+        assert_eq!(
+            lever_account(Lever::Execution, None),
+            lever_tip(Lever::Execution)
         );
     }
 

@@ -1,8 +1,8 @@
 //! A critical path held against its build's action graph, scheduled with
 //! each action lasting as long as its profile span.
 
-use crate::Step;
-use crate::schedule::Schedule;
+use crate::schedule::{Ceilings, Schedule};
+use crate::{CriticalPath, Lever};
 use bviz_invocation::{ActionGraph, ActionIndex};
 use bviz_trace_profile::{Action, Profile, SliceAt};
 use std::cmp::Reverse;
@@ -26,6 +26,8 @@ pub struct Modeled {
     timed: usize,
     cyclic: usize,
     nearly_critical: Vec<NearlyCritical>,
+    /// By [lever](Lever::index), [`CriticalPath::lever_ceiling`].
+    lever_ceilings: [Option<Duration>; Lever::ALL.len()],
 }
 
 /// A step's action as the modeled build holds it.
@@ -97,6 +99,10 @@ impl Modeled {
     pub fn nearly_critical(&self) -> &[NearlyCritical] {
         &self.nearly_critical
     }
+
+    pub(crate) fn lever_ceiling(&self, lever: Lever) -> Option<Duration> {
+        self.lever_ceilings[lever.index()]
+    }
 }
 
 /// An action of the graph the profile holds a span of.
@@ -109,13 +115,13 @@ struct Timed<'p> {
 }
 
 /// Models the build `graph` holds the actions of, timed by the spans of
-/// `actions` from `profile`, and gives each of `steps` whose action the graph
-/// holds its [model](Step::model).
+/// `actions` from `profile`, and gives each step of `path` whose action the
+/// graph holds its [model](crate::Step::model).
 pub(crate) fn model(
     profile: &Profile,
     actions: &[Action],
     graph: &ActionGraph,
-    steps: &mut [Step],
+    path: &mut CriticalPath,
 ) -> Modeled {
     let timings = profile.timings_of(actions);
     let mut first_spans: HashMap<&str, &Action> = HashMap::with_capacity(actions.len());
@@ -144,24 +150,25 @@ pub(crate) fn model(
         .actions()
         .filter_map(|action| Some((graph.primary_output(action)?, action)))
         .collect();
-    let mut on_path = HashSet::with_capacity(steps.len());
-    let mut path_actions = Vec::with_capacity(steps.len());
+    let step_actions: Vec<Option<ActionIndex>> = path
+        .steps
+        .iter()
+        .map(|step| by_primary_output.get(step.primary_output()?).copied())
+        .collect();
     let mut ceilings = schedule.ceilings();
-    for step in steps.iter_mut() {
-        let Some(&action) = step
-            .primary_output()
-            .and_then(|out| by_primary_output.get(out))
-        else {
-            continue;
-        };
-        on_path.insert(action);
-        path_actions.push(action);
-        step.model = Some(StepModel {
-            duration: schedule.duration(action),
-            ceiling: ceilings.of(&[action]),
-        });
+    for (step, action) in path.steps.iter_mut().zip(&step_actions) {
+        if let &Some(action) = action {
+            step.model = Some(StepModel {
+                duration: schedule.duration(action),
+                ceiling: ceilings.of(&[action]),
+            });
+        }
     }
+    let path_actions: Vec<ActionIndex> = step_actions.iter().flatten().copied().collect();
+    let on_path: HashSet<ActionIndex> = path_actions.iter().copied().collect();
     let path_ceiling = ceilings.of(&path_actions);
+    let lever_ceilings =
+        Lever::ALL.map(|lever| lever_ceiling(path, lever, &step_actions, &mut ceilings));
     Modeled {
         length: schedule.length(),
         path_ceiling,
@@ -170,7 +177,27 @@ pub(crate) fn model(
         timed: timed.iter().flatten().count(),
         cyclic: schedule.cyclic(),
         nearly_critical: nearly_critical(profile, &timed, &schedule, &on_path, path_ceiling),
+        lever_ceilings,
     }
+}
+
+/// [`CriticalPath::lever_ceiling`] of `lever` on `path`, whose steps are
+/// modeled, `step_actions` by step the action the graph holds of it.
+fn lever_ceiling(
+    path: &CriticalPath,
+    lever: Lever,
+    step_actions: &[Option<ActionIndex>],
+    ceilings: &mut Ceilings,
+) -> Option<Duration> {
+    let mut acted_on = Vec::new();
+    for (step, &action) in path.steps.iter().zip(step_actions) {
+        if path.acted_on_in(lever, step).is_zero() {
+            continue;
+        }
+        let timed = step.model.is_some_and(|model| !model.duration.is_zero());
+        acted_on.push(action.filter(|_| timed)?);
+    }
+    (!acted_on.is_empty()).then(|| ceilings.of(&acted_on))
 }
 
 /// [`Modeled::nearly_critical`], `on_path` the actions of the path's steps

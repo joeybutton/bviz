@@ -831,10 +831,10 @@ fn local_link<'a>() -> LogSpawn<'a> {
     )
 }
 
-#[test]
-fn levers_rank_what_would_shorten_the_path() {
-    let p = levered_profile();
-    let spawns = log(&[
+/// The spawns of [`levered_profile`]'s steps: a remote compile and a
+/// local link.
+fn levered_spawns() -> LoggedSpawns {
+    log(&[
         logged(
             "remote",
             &["bazel-out/a.o"],
@@ -847,8 +847,13 @@ fn levers_rank_what_would_shorten_the_path() {
             ],
         ),
         local_link(),
-    ]);
-    let path = CriticalPath::of(&p, Some(&spawns), None).expect("critical path");
+    ])
+}
+
+#[test]
+fn levers_rank_what_would_shorten_the_path() {
+    let path =
+        CriticalPath::of(&levered_profile(), Some(&levered_spawns()), None).expect("critical path");
     assert_eq!(
         path.levers(),
         [
@@ -1126,4 +1131,46 @@ fn a_step_whose_action_the_graph_lacks_has_no_model() {
     let alone = CriticalPath::of(&p, None, None).expect("critical path");
     assert_eq!(alone.modeled(), None);
     assert!(alone.steps().iter().all(|step| step.model().is_none()));
+}
+
+#[test]
+fn a_lever_is_bounded_only_where_the_model_times_every_step_it_acts_on() {
+    let p = levered_profile();
+    let spawns = levered_spawns();
+    let ceilings = |outputs: &[&str], dependencies: &[(usize, usize)]| {
+        let outputs: Vec<Option<&str>> = outputs.iter().copied().map(Some).collect();
+        let graph = action_graph(&outputs, dependencies);
+        let path = CriticalPath::of(&p, Some(&spawns), Some(&graph)).expect("critical path");
+        [
+            Lever::Execution,
+            Lever::RemoteQueue,
+            Lever::LocalSetup,
+            Lever::Waiting,
+            Lever::CacheHitOverhead,
+        ]
+        .map(|lever| path.lever_ceiling(lever))
+    };
+    assert_eq!(
+        ceilings(&["bazel-out/a.o", "bazel-out/a"], &[(1, 0)]),
+        [
+            Some(us(3001 + 2001)),
+            Some(us(3001)),
+            Some(us(2001)),
+            None,
+            None
+        ],
+        "a lever acting on both steps zeroes both; on one, that one"
+    );
+    assert_eq!(
+        ceilings(&["bazel-out/a"], &[]),
+        [None, None, Some(us(2001)), None, None],
+        "the compile the graph lacks leaves the levers acting on it unbounded"
+    );
+    assert_eq!(
+        ceilings(&["bazel-out/elsewhere"], &[]),
+        [None; 5],
+        "nothing the levers act on is modeled"
+    );
+    let alone = CriticalPath::of(&p, Some(&spawns), None).expect("critical path");
+    assert_eq!(alone.lever_ceiling(Lever::Execution), None);
 }

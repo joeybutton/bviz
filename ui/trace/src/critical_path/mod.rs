@@ -565,13 +565,14 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
         .take(LEVERS_SHOWN)
         .enumerate()
         .map(|(i, (lever, time))| {
+            let bound = words::lever_bound(path.lever_ceiling(lever), time);
             div()
                 .id(("critical-path-lever", i))
                 .tooltip(TextTooltip::builder(
-                    words::lever_tip(lever).into(),
+                    words::lever_account(lever, bound).into(),
                     palette.tooltip,
                 ))
-                .child(words::lever(lever, time))
+                .child(words::lever(lever, time, bound))
         });
     legend_row(palette)
         .child(div().text_color(palette.label).child(words::LEVERS))

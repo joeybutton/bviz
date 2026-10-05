@@ -491,11 +491,11 @@ impl CriticalPath {
             }
             coverage
         });
-        let modeled = graph.map(|graph| modeled::model(profile, &actions, graph, &mut steps));
-        Some(CriticalPath {
-            modeled,
-            ..CriticalPath::new(wall, lead_in, steps, tail, coverage)
-        })
+        let mut path = CriticalPath::new(wall, lead_in, steps, tail, coverage);
+        if let Some(graph) = graph {
+            path.modeled = Some(modeled::model(profile, &actions, graph, &mut path));
+        }
+        Some(path)
     }
 
     fn new(
@@ -630,6 +630,11 @@ impl Lever {
         Lever::LocalOnRemote,
         Lever::CacheHitOverhead,
     ];
+
+    /// The lever's place in [`ALL`](Self::ALL).
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 impl CriticalPath {
@@ -645,36 +650,48 @@ impl CriticalPath {
         levers
     }
 
+    /// The most pulling `lever` can shorten the modeled build by: how much
+    /// shorter it is were the actions of every step the lever acts on to
+    /// take no time. `None` without a model, and for a lever acting on time
+    /// the model holds no part of: the lead-in, the waits between steps, and
+    /// a step whose action the graph lacks or the model times at none.
+    pub fn lever_ceiling(&self, lever: Lever) -> Option<Duration> {
+        self.modeled.as_ref()?.lever_ceiling(lever)
+    }
+
     /// The time on the path `lever` acts on.
     fn acted_on(&self, lever: Lever) -> Duration {
-        let phase = |phase: Phase| {
-            self.coverage
-                .map_or(Duration::ZERO, |coverage| coverage.phase(phase))
-        };
-        let spawned = || {
-            self.steps
-                .iter()
-                .filter_map(|step| step.work().spawned().copied())
-        };
-        let phase_where = |phase: Phase, ran: fn(SpawnRunner) -> bool| -> Duration {
-            spawned()
-                .filter(|spawned| ran(spawned.runner()))
-                .map(|spawned| spawned.phase(phase))
-                .sum()
-        };
-        let remotely = |runner: SpawnRunner| runner == SpawnRunner::RemoteExecution;
-        let locally =
-            |runner: SpawnRunner| runner.executed() && runner != SpawnRunner::RemoteExecution;
-        let own_of = |pick: &dyn Fn(&Step) -> bool| -> Duration {
-            self.steps
-                .iter()
-                .filter(|step| pick(step))
-                .map(Step::own)
-                .sum()
-        };
         match lever {
             Lever::LeadIn => self.lead_in(),
             Lever::Waiting => self.time_in(Part::Waiting),
+            _ => self
+                .steps
+                .iter()
+                .map(|step| self.acted_on_in(lever, step))
+                .sum(),
+        }
+    }
+
+    /// The time of `step`'s own `lever` acts on: none for the lead-in and the
+    /// waits, which lie outside every step's own time.
+    fn acted_on_in(&self, lever: Lever, step: &Step) -> Duration {
+        let work = step.work();
+        let spawned = work.spawned();
+        let phase_where = |phase: Phase, ran: fn(SpawnRunner) -> bool| {
+            spawned
+                .filter(|spawned| ran(spawned.runner()))
+                .map_or(Duration::ZERO, |spawned| spawned.phase(phase))
+        };
+        let phase = |phase: Phase| phase_where(phase, |_| true);
+        let remotely = |runner: SpawnRunner| runner == SpawnRunner::RemoteExecution;
+        let locally =
+            |runner: SpawnRunner| runner.executed() && runner != SpawnRunner::RemoteExecution;
+        let own_where = |acted_on: bool| match acted_on {
+            true => step.own(),
+            false => Duration::ZERO,
+        };
+        match lever {
+            Lever::LeadIn | Lever::Waiting => Duration::ZERO,
             Lever::RemoteQueue => phase_where(Phase::Queue, remotely),
             Lever::LocalQueue => phase_where(Phase::Queue, locally),
             Lever::Parse => phase(Phase::Parse),
@@ -685,18 +702,14 @@ impl CriticalPath {
             Lever::Execution => phase(Phase::Execute),
             Lever::ProcessOutputs => phase(Phase::ProcessOutputs),
             Lever::Fetch => phase(Phase::Fetch),
-            Lever::LocalOnRemote => match self.coverage {
-                Some(coverage) if coverage.remote_executed => own_of(&|step| {
-                    step.work()
-                        .spawned()
-                        .is_some_and(|spawned| locally(spawned.runner()))
-                }),
-                _ => Duration::ZERO,
-            },
-            Lever::CacheHitOverhead => match self.coverage {
-                Some(_) => own_of(&|step| matches!(step.work(), Work::Unspanned(Ran::Unlogged(_)))),
-                None => Duration::ZERO,
-            },
+            Lever::LocalOnRemote => own_where(
+                self.coverage
+                    .is_some_and(|coverage| coverage.remote_executed)
+                    && spawned.is_some_and(|spawned| locally(spawned.runner())),
+            ),
+            Lever::CacheHitOverhead => own_where(
+                self.coverage.is_some() && matches!(work, Work::Unspanned(Ran::Unlogged(_))),
+            ),
         }
     }
 }
