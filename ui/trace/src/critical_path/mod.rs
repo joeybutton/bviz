@@ -215,7 +215,8 @@ impl CriticalPathPanel {
                 .flex_col()
                 .size_full()
                 .child(lead(path, legends, palette))
-                .child(self.summary(path, legends, palette, fills, cx));
+                .child(self.summary(path, legends, palette, fills, cx))
+                .children(modeled.map(|modeled| modeled_caption(path, modeled, palette)));
             let choice =
                 || modeled.map(|modeled| self.listing_choice(modeled, listing, palette, cx));
             match (listing, modeled) {
@@ -478,11 +479,10 @@ fn list_pane(
 }
 
 /// What the path took and the levers acting on the most of it, each hovered
-/// for what pulling it involves, then the modeled build where there is one:
-/// the point of the panel, so kept in view down to a pane too short for it
-/// beside a single step, where its lines are left out from the last. Where
-/// the pane is not `roomy`, the headline is set smaller and the levers keep
-/// to one line.
+/// for what pulling it involves: the point of the panel, so kept in view
+/// down to a pane too short for it beside a single step, where its lines are
+/// left out from the last. Where the pane is not `roomy`, the headline is set
+/// smaller and the levers keep to one line.
 fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
     let headline = div().flex_shrink_0().child(words::headline(path));
     div()
@@ -501,19 +501,25 @@ fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
                 .flex_shrink_0()
                 .when(!roomy, |levers| levers.flex_nowrap().overflow_hidden()),
         ))
-        .children(path.modeled().map(|modeled| {
-            whole_or_none(
-                div()
-                    .id("critical-path-modeled")
-                    .flex_shrink_0()
-                    .text_color(palette.muted_label)
-                    .tooltip(TextTooltip::builder(
-                        words::modeled_tip(path, modeled).into(),
-                        palette.tooltip,
-                    ))
-                    .child(line(words::modeled_line(path, modeled))),
-            )
-        }))
+}
+
+/// The modeled build's length against the observed path's actions, heading
+/// the table whose Could save column and nearly critical actions the model
+/// gives.
+fn modeled_caption(path: &CriticalPath, modeled: &Modeled, palette: &Palette) -> Stateful<Div> {
+    div()
+        .id("critical-path-modeled")
+        .flex_shrink_0()
+        .px_3()
+        .py_1()
+        .border_t_1()
+        .border_color(palette.border)
+        .text_color(palette.muted_label)
+        .tooltip(TextTooltip::builder(
+            words::modeled_tip(path, modeled).into(),
+            palette.tooltip,
+        ))
+        .child(line(words::modeled_line(path, modeled)))
 }
 
 /// The wall time partitioned along the path as one bar and its legend, each
