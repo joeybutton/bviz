@@ -8,8 +8,8 @@ use crate::{
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar, centered_spinner,
-    load_in_background, overlay_canvas, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, Toolbar,
+    centered_spinner, load_in_background, overlay_canvas, sort_header, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -89,7 +89,10 @@ fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
 
 /// The sort the stats table opens with. Every aggregate ships this order
 /// precomputed ([`ScopeAggregate::default_order`]), so serving it costs no sort.
-const DEFAULT_STATS_SORT: (StatsColumn, bool) = (StatsColumn::SelfTime, true);
+const DEFAULT_STATS_SORT: Sort<StatsColumn> = Sort {
+    by: StatsColumn::SelfTime,
+    descending: true,
+};
 
 /// The stats rows in sorted display order, as indices into `aggregates.stats`.
 /// Holds its own `Arc<ScopeAggregate>` so the table renders consistent rows even
@@ -213,17 +216,15 @@ pub struct StatsPanel {
     /// Read for the current selection's aggregate and the version its sort keys
     /// on.
     model: Entity<TraceModel>,
-    /// Which column the table sorts by, and whether descending.
-    stats_sort: StatsColumn,
-    stats_desc: bool,
+    stats_sort: Sort<StatsColumn>,
     /// The stats rows in sorted display order for the active key and sort, built
     /// off the UI thread (sorting ~2M rows would freeze a paint) and swapped in
     /// when ready. The previous order stays shown while a re-sort runs, so a
     /// header click doesn't blank the table.
     stats_order: Option<Rc<StatsOrder>>,
     /// Background-sort bookkeeping for `stats_order`, keyed on
-    /// `(aggregate version, sort, desc)`.
-    stats_build: Rebuild<(u64, StatsColumn, bool)>,
+    /// `(aggregate version, sort)`.
+    stats_build: Rebuild<(u64, Sort<StatsColumn>)>,
     /// Scroll position of the virtualized body.
     stats_scroll: UniformListScrollHandle,
     picked: Option<StatsPick>,
@@ -252,8 +253,7 @@ impl StatsPanel {
         Self {
             focus: cx.focus_handle(),
             model,
-            stats_sort: DEFAULT_STATS_SORT.0,
-            stats_desc: DEFAULT_STATS_SORT.1,
+            stats_sort: DEFAULT_STATS_SORT,
             stats_order: None,
             stats_build: Rebuild::new(),
             stats_scroll: UniformListScrollHandle::new(),
@@ -307,28 +307,14 @@ impl StatsPanel {
             .text_color(palette.label)
             .children(STATS_COLUMNS.iter().enumerate().map(|(i, spec)| {
                 let column = spec.column;
-                let caret = (self.stats_sort == column).then(|| {
-                    let name = if self.stats_desc {
-                        "caret-down"
-                    } else {
-                        "caret-up"
-                    };
-                    bviz_ui_assets::icon(name)
-                        .size(px(STATS_TEXT_SIZE))
-                        .flex_shrink_0()
-                        .text_color(palette.label)
-                        .into_any_element()
-                });
-                let label = column_header(column, labels).into_any_element();
-                // Place the caret on the side away from the text's anchor so the
-                // label can't shift as the sort indicator moves: left of a
-                // right-aligned numeric value, right of the left-aligned key.
-                let content = match (caret, spec.width.is_some()) {
-                    (Some(caret), true) => vec![caret, label],
-                    (Some(caret), false) => vec![label, caret],
-                    (None, _) => vec![label],
-                };
-                table_cell(spec.width, content)
+                let content = sort_header(
+                    column_header(column, labels),
+                    self.stats_sort.of(column),
+                    spec.width.is_some(),
+                    px(STATS_TEXT_SIZE),
+                    palette.label,
+                );
+                table_cell(spec.width, [content])
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
@@ -455,14 +441,14 @@ impl StatsPanel {
         let Some(version) = self.model.read(cx).aggregate_version() else {
             return;
         };
-        let key = (version, self.stats_sort, self.stats_desc);
+        let key = (version, self.stats_sort);
         if self.stats_build.is_ready(key) {
             // The shown order is already current; cancel a sort for a key the
             // inputs have since left so its late result can't clobber it.
             self.stats_build.cancel_inflight();
             return;
         }
-        if (self.stats_sort, self.stats_desc) == DEFAULT_STATS_SORT {
+        if self.stats_sort == DEFAULT_STATS_SORT {
             self.stats_order = Some(Rc::new(StatsOrder {
                 aggregates,
                 aggregate_version: version,
@@ -477,8 +463,10 @@ impl StatsPanel {
             return;
         }
         let generation = self.stats_build.start(key);
-        let column = self.stats_sort;
-        let desc = self.stats_desc;
+        let Sort {
+            by: column,
+            descending: desc,
+        } = self.stats_sort;
         let task = load_in_background(
             cx,
             move || {
@@ -505,15 +493,10 @@ impl StatsPanel {
         (picked.aggregate_version == order.aggregate_version).then_some(picked.index)
     }
 
-    /// Sets the sort to `column`, toggling the direction when it is already the
-    /// active column.
+    /// Sorts by `column`, the other way where the table is sorted by it
+    /// already, and descending otherwise.
     fn sort_by(&mut self, column: StatsColumn) {
-        if self.stats_sort == column {
-            self.stats_desc = !self.stats_desc;
-        } else {
-            self.stats_sort = column;
-            self.stats_desc = true;
-        }
+        self.stats_sort = self.stats_sort.clicked(column, true);
     }
 
     /// The bar for the rows' content height against the body's visible height;
