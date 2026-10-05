@@ -2,8 +2,9 @@ use super::{Shown, Slow, Timecard, words};
 use crate::column::{Folding, line};
 use crate::legend::ran_swatch;
 use crate::model::Loaded;
+use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
-use crate::{GraphPanel, Palette, reveal};
+use crate::{GraphPanel, Palette};
 use bviz_graph_layout::Id;
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,

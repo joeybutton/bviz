@@ -54,6 +54,7 @@ mod point;
 mod preset;
 mod relation;
 mod report;
+mod reveal;
 mod rules;
 mod scatter;
 mod scroll;
@@ -443,8 +444,8 @@ impl GraphPanel {
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
                 match event.reveal {
-                    Reveal::Activate => reveal(view, event.node, cx),
-                    Reveal::InPlace => show_in_place(view, event.node, cx),
+                    Reveal::Activate => reveal::reveal(view, event.node, cx),
+                    Reveal::InPlace => reveal::show_in_place(view, event.node, cx),
                 }
             }
         });
@@ -1015,34 +1016,6 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         Some(id) => view.selection.toggle(id),
         None => view.selection.clear(),
     }
-    view.invalidate_canvas(cx);
-}
-
-/// Selects `id` and moves the view onto it, opening what holds it in a layered
-/// drawing, and asks for the panel to be shown.
-fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    view.selection.select(id);
-    if view.mode == LayoutMode::Layered {
-        derive::expand_to(view, id, cx);
-    }
-    view.framing.request_frame(framing::Frame::Node(id));
-    cx.emit(PanelEvent::Activate);
-    view.invalidate_canvas(cx);
-}
-
-/// Selects and frames the box standing for `id` in the drawing as it is: in
-/// a layered drawing the innermost drawn box holding it, which opens none and
-/// so lays nothing out afresh.
-fn show_in_place(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    let shown = match view.mode {
-        LayoutMode::Layered => derive::drawn_holder(view, id),
-        LayoutMode::Map => Some(id),
-    };
-    let Some(shown) = shown else {
-        return;
-    };
-    view.selection.select(shown);
-    view.framing.request_frame(framing::Frame::Node(shown));
     view.invalidate_canvas(cx);
 }
 
