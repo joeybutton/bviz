@@ -187,6 +187,10 @@ impl<T> Default for PerTarget<T> {
 }
 
 impl<T> PerTarget<T> {
+    pub(crate) fn with_capacity(labels: usize) -> Self {
+        Self(HashMap::with_capacity(labels))
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

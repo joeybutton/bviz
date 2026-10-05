@@ -14,7 +14,7 @@ mod runner;
 pub mod spawn;
 mod timings;
 
-pub use analysed::Analysed;
+pub use analysed::{Analysed, Analysing};
 pub use attempts::{
     Attempt, Attempts, Cache, DescribedAction, Done, HeldAction, Phase, SpawnCache, State,
     TEST_LOG, Venue,
@@ -257,6 +257,7 @@ pub struct Session {
     configurations: Configurations,
     outcomes: Reported<HeldOutcomes>,
     analysed: Reported<Analysed>,
+    analysing: Reported<Analysing>,
     timings: Reported<Timings>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
@@ -317,6 +318,20 @@ impl Session {
 
     pub fn report_analysed(&mut self, reported: Analysed) {
         self.analysed.replace(reported);
+    }
+
+    /// When the invocation's build was analysing each target, where its
+    /// profile records it.
+    pub fn analysing(&self) -> &Analysing {
+        &self.analysing.value
+    }
+
+    pub fn analysing_revision(&self) -> Revision {
+        self.analysing.revision
+    }
+
+    pub fn report_analysing(&mut self, reported: Analysing) {
+        self.analysing.replace(reported);
     }
 
     /// What the invocation's profile recorded of its actions.
@@ -565,6 +580,23 @@ mod tests {
         session.report_analysed(analysed);
         assert_ne!(session.analysed_revision(), unanalysed);
         assert_eq!(session.analysed().at(app.borrowed()), Some(at));
+    }
+
+    #[test]
+    fn a_sessions_analysing_is_revised_by_each_report_of_it_and_by_nothing_else() {
+        let lib = ConfiguredTarget::new("//lib".to_owned(), None);
+        let at = EpochMicros::from_millis(1_781_439_245_231);
+        let mut session = Session::default();
+        let unreported = session.analysing_revision();
+        session.report_analysed(Analysed::default());
+        assert_eq!(session.analysing_revision(), unreported);
+
+        let mut analysing = Analysing::default();
+        let during = Interval::new(at, at.plus_micros(5)).expect("ordered");
+        analysing.record(lib.clone(), during);
+        session.report_analysing(analysing);
+        assert_ne!(session.analysing_revision(), unreported);
+        assert_eq!(session.analysing().during(lib.borrowed()), Some(during));
     }
 
     #[test]

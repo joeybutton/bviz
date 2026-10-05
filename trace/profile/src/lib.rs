@@ -1,4 +1,5 @@
 mod actions;
+mod analysis;
 mod concurrent_interner;
 mod model;
 mod parse;

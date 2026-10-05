@@ -41,10 +41,10 @@ pub(crate) struct WorkingLanesDerived;
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
     working_lanes: DerivedLanes,
-    /// Derives the profile's action timings and attempts and reports them to
-    /// its session; held with the profile, so that a profile replaced before
-    /// they are ready reports none.
-    _reporting_timings: Option<Task<()>>,
+    /// Derives the profile's action timings and attempts and when it analysed
+    /// each target, and reports them to its session; held with the profile,
+    /// so that a profile replaced before they are ready reports none.
+    _reporting: Option<Task<()>>,
 }
 
 /// A profile's [`WorkingLanes`], which are derived off the UI thread.
@@ -59,7 +59,7 @@ enum DerivedLanes {
 
 impl LoadedProfile {
     /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx` and its action timings and attempts to `session`.
+    /// `cx` and its action timings, attempts and analysis to `session`.
     fn new(
         profile: Profile,
         session: Option<WeakEntity<Session>>,
@@ -81,25 +81,26 @@ impl LoadedProfile {
                 })
                 .ok();
         });
-        let reporting_timings = session.map(|session| {
+        let reporting = session.map(|session| {
             let timed = flamer.profile().clone();
             cx.spawn(async move |_, cx| {
-                let (timings, attempts) = cx
+                let (timings, attempts, analysing) = cx
                     .background_executor()
-                    .spawn(async move { (timed.timings(), timed.attempts()) })
+                    .spawn(async move { (timed.timings(), timed.attempts(), timed.analysing()) })
                     .await;
                 session
                     .update(cx, |session, cx| {
                         session.report_timings(timings);
                         session
                             .report_attempts(AttemptSource::Profile, attempts.unwrap_or_default());
+                        session.report_analysing(analysing.unwrap_or_default());
                         cx.notify();
                     })
                     .ok();
             })
         });
         LoadedProfile {
-            _reporting_timings: reporting_timings,
+            _reporting: reporting,
             ..LoadedProfile::deriving(flamer, deriving)
         }
     }
@@ -108,7 +109,7 @@ impl LoadedProfile {
         LoadedProfile {
             flamer,
             working_lanes: DerivedLanes::Deriving { _derivation },
-            _reporting_timings: None,
+            _reporting: None,
         }
     }
 
