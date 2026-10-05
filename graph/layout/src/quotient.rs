@@ -36,16 +36,10 @@ pub fn quotient(
     expanded: &HashSet<Id>,
     names: &mut Names,
 ) -> (Graph, BTreeMap<Id, Id>) {
-    let producers = neighbor_lists(graph, |e| (e.to, e.from));
-    let consumers = neighbor_lists(graph, |e| (e.from, e.to));
-
-    // Nodes that hold children: only leaf data nodes merge, so a container of
-    // kind `artifact` (a labeled generated output holding its configured
-    // targets) is never collapsed into a group.
     let containers = crate::lod::containers(graph);
-    let mergeable = |node: &Node| is_candidate(node.kind) && !containers.contains(&node.id);
+    let mergeable = |node: &Node| mergeable(node, &containers);
 
-    let groups = group_by_signature(graph, &mergeable, &producers, &consumers);
+    let groups = group_by_signature(graph, &mergeable);
     let partition = partition_groups(&groups, expanded, names);
 
     let mut out = Graph::new();
@@ -67,14 +61,32 @@ pub fn quotient(
     (out, partition.remap)
 }
 
+/// The id of the multi-member group holding `id` in the quotient of `graph`:
+/// the leaf [`quotient`] collapses the group into, or the container it opens it
+/// as where that id is expanded. `None` for a node no group holds, which keeps
+/// its own box.
+pub fn group_holding(graph: &Graph, id: Id, names: &mut Names) -> Option<Id> {
+    let containers = crate::lod::containers(graph);
+    let groups = group_by_signature(graph, &|node: &Node| mergeable(node, &containers));
+    let members = groups.into_values().find(|members| members.contains(&id))?;
+    (members.len() >= 2).then(|| group_id(&members, names))
+}
+
+/// Whether `node` may merge into a group: only leaf data nodes merge, so a
+/// container of kind `artifact` (a labeled generated output holding its
+/// configured targets), one of `containers`, is never collapsed into a group.
+fn mergeable(node: &Node, containers: &HashSet<Id>) -> bool {
+    is_candidate(node.kind) && !containers.contains(&node.id)
+}
+
 /// Groups mergeable candidate ids by signature; non-candidates are passed
 /// through.
 fn group_by_signature(
     graph: &Graph,
     mergeable: &impl Fn(&Node) -> bool,
-    producers: &BTreeMap<Id, Vec<Id>>,
-    consumers: &BTreeMap<Id, Vec<Id>>,
 ) -> BTreeMap<Signature, Vec<Id>> {
+    let producers = neighbor_lists(graph, |e| (e.to, e.from));
+    let consumers = neighbor_lists(graph, |e| (e.from, e.to));
     let mut groups: BTreeMap<Signature, Vec<Id>> = BTreeMap::new();
     for node in &graph.nodes {
         if !mergeable(node) {
@@ -83,8 +95,8 @@ fn group_by_signature(
         let signature = Signature {
             kind: node.kind,
             parent: node.parent,
-            producers: sorted_neighbors(producers, node.id),
-            consumers: sorted_neighbors(consumers, node.id),
+            producers: sorted_neighbors(&producers, node.id),
+            consumers: sorted_neighbors(&consumers, node.id),
         };
         groups.entry(signature).or_default().push(node.id);
     }
@@ -351,6 +363,39 @@ mod tests {
         assert_eq!(group.label, "3 sources");
         assert_eq!(group.kind, Kind::Source);
         assert_eq!(edges(&out, &names), vec![("group:source1", "action0")]);
+    }
+
+    /// The group a member is found in is the one the quotient draws it in, and
+    /// expanding that id opens it so the member keeps its own box.
+    #[test]
+    fn a_member_is_found_in_the_group_that_opening_draws_it_in() {
+        let mut graph = Graph::new();
+        let mut names = Names::default();
+        node(&mut graph, &mut names, "action0", "A", Kind::Action, None);
+        node(&mut graph, &mut names, "action1", "B", Kind::Action, None);
+        for id in ["source1", "source2"] {
+            leaf(&mut graph, &mut names, id, Kind::Source, None);
+            edge(&mut graph, &mut names, id, "action0", EdgeKind::Aquery);
+        }
+        leaf(&mut graph, &mut names, "source3", Kind::Source, None);
+        edge(
+            &mut graph,
+            &mut names,
+            "source3",
+            "action1",
+            EdgeKind::Aquery,
+        );
+        let member = names.get("source2").expect("an interned node");
+        let alone = names.get("source3").expect("an interned node");
+        let action = names.get("action0").expect("an interned node");
+
+        let group = group_holding(&graph, member, &mut names).expect("a group");
+
+        assert_eq!(names.resolve(group), "group:source1");
+        assert_eq!(group_holding(&graph, alone, &mut names), None);
+        assert_eq!(group_holding(&graph, action, &mut names), None);
+        let (opened, _) = quotient(&graph, &[group].into_iter().collect(), &mut names);
+        assert!(node_ids(&opened, &names).contains(&"source2"));
     }
 
     #[test]
