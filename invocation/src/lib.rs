@@ -14,9 +14,10 @@ pub mod spawn;
 mod timings;
 
 pub use attempts::{
-    Attempt, Attempts, Cache, Done, HeldAction, Phase, SpawnCache, State, TEST_LOG, Venue,
+    Attempt, Attempts, Cache, DescribedAction, Done, HeldAction, Phase, SpawnCache, State,
+    TEST_LOG, Venue,
 };
-pub use merged::{ActionAttempts, AttemptSource, MergedAttempts};
+pub use merged::{ActionAttempts, AttemptSource, MergedAttempts, Resolved};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };

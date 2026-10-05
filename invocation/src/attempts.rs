@@ -302,6 +302,42 @@ impl Attempt {
     }
 }
 
+/// An action as a source naming none of its outputs knows it: by the label of
+/// the target owning it, its mnemonic, and the description Bazel's
+/// `describe()` gives it:
+/// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/actions/AbstractAction.java#L557-L560>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DescribedAction<S = String> {
+    pub owner: S,
+    pub mnemonic: S,
+    pub description: S,
+}
+
+impl DescribedAction {
+    pub fn borrowed(&self) -> DescribedAction<&str> {
+        DescribedAction {
+            owner: &self.owner,
+            mnemonic: &self.mnemonic,
+            description: &self.description,
+        }
+    }
+}
+
+impl<'a> DescribedAction<&'a str> {
+    pub fn owned(self) -> DescribedAction {
+        DescribedAction {
+            owner: self.owner.to_owned(),
+            mnemonic: self.mnemonic.to_owned(),
+            description: self.description.to_owned(),
+        }
+    }
+
+    /// The owner, which a description names in no configuration.
+    pub fn owner_target(self) -> ConfiguredTarget<&'a str> {
+        ConfiguredTarget::new(self.owner, None)
+    }
+}
+
 /// The attempts of one action known by its primary output.
 struct Attempted {
     owner: Option<ConfiguredTarget>,
@@ -321,12 +357,14 @@ fn held_action<'a>(primary_output: &'a str, attempted: &'a Attempted) -> HeldAct
 }
 
 /// The execution attempts of a build's actions. An action is known by its
-/// primary output where its profile names one, kept with its owner where the
-/// profile names that too; the attempts of actions named only by their owner
-/// are pooled under it; an attempt named by neither is not kept.
+/// primary output where its source names one, kept with its owner where the
+/// source names that too, and otherwise by its description where the source
+/// gives one; the attempts of actions named only by their owner are pooled
+/// under it; an attempt named by none of these is not kept.
 #[derive(Default)]
 pub struct Attempts {
     actions: HashMap<String, Attempted>,
+    described: HashMap<DescribedAction, Vec<Attempt>>,
     by_owner: PerTarget<Vec<Attempt>>,
     /// Whether these hold, by its primary output, an attempt of every action
     /// Bazel did not find up to date.
@@ -400,9 +438,23 @@ impl Attempts {
         self.exhaustive
     }
 
+    /// Makes room for `additional` more actions known by their description.
+    pub fn reserve_described(&mut self, additional: usize) {
+        self.described.reserve(additional);
+    }
+
+    /// Records `attempt` of the action `described` describes, after those
+    /// recorded of it before.
+    pub fn record_described(&mut self, described: DescribedAction<&str>, attempt: Attempt) {
+        self.described
+            .entry(described.owned())
+            .or_insert_with(|| Vec::with_capacity(1))
+            .push(attempt);
+    }
+
     /// Whether no attempt is recorded.
     pub fn is_empty(&self) -> bool {
-        self.actions.is_empty() && self.by_owner.is_empty()
+        self.actions.is_empty() && self.described.is_empty() && self.by_owner.is_empty()
     }
 
     /// The attempts of the action whose primary output has the exec path
@@ -426,10 +478,10 @@ impl Attempts {
         self.by_owner.get(owner).map(Vec::as_slice)
     }
 
-    /// How many actions known by primary output and owners pooling attempts
-    /// this holds.
+    /// How many actions known by primary output or description, and owners
+    /// pooling attempts, this holds.
     pub(crate) fn held(&self) -> usize {
-        self.actions.len() + self.by_owner.iter().count()
+        self.actions.len() + self.described.len() + self.by_owner.iter().count()
     }
 
     /// Each action known by its primary output, with that output's exec path,
@@ -440,7 +492,16 @@ impl Attempts {
             .map(|(primary_output, attempted)| held_action(primary_output, attempted))
     }
 
-    /// Each owner of actions known by no primary output, with their attempts.
+    /// Each action known by its description, with its attempts in the order
+    /// recorded.
+    pub fn described(&self) -> impl ExactSizeIterator<Item = (DescribedAction<&str>, &[Attempt])> {
+        self.described
+            .iter()
+            .map(|(described, attempts)| (described.borrowed(), attempts.as_slice()))
+    }
+
+    /// Each owner of actions known by neither primary output nor description,
+    /// with their attempts.
     pub fn by_owner(&self) -> impl Iterator<Item = (ConfiguredTarget<&str>, &[Attempt])> {
         self.by_owner
             .iter()
@@ -613,5 +674,26 @@ pub(crate) mod tests {
             attempts.by_owner().collect::<Vec<_>>(),
             [(owner, &[first, again][..])]
         );
+    }
+
+    #[test]
+    fn attempts_of_one_description_are_kept_together() {
+        let described = DescribedAction {
+            owner: "//a",
+            mnemonic: "Genrule",
+            description: "Executing genrule //a",
+        };
+        let first = attempt(0, 10, &[(LOCAL, 1)]);
+        let again = attempt(20, 30, &[(LOCAL, 21)]);
+        let mut attempts = Attempts::default();
+        attempts.record_described(described, first);
+        attempts.record_described(described, again);
+        assert!(!attempts.is_empty());
+        assert_eq!(
+            attempts.described().collect::<Vec<_>>(),
+            [(described, &[first, again][..])]
+        );
+        assert_eq!(attempts.by_owner().count(), 0);
+        assert_eq!(attempts.held(), 1);
     }
 }

@@ -1,7 +1,10 @@
 //! What the outputs of one invocation tell together of when its actions were
 //! executed and how each ended.
 
-use crate::{Attempt, Attempts, Cache, ConfiguredTarget, Done};
+use std::collections::HashMap;
+
+use crate::attempts::DescribedAction;
+use crate::{Attempt, Attempts, Cache, ConfiguredTarget, Done, HeldAction};
 
 /// An output of an invocation that reports execution attempts, in the order
 /// their timing is trusted, most first.
@@ -34,11 +37,73 @@ impl AttemptSource {
 /// The attempts each source reports, read together: an action's attempts are
 /// timed by the most trusted source holding it, and its last attempt ends as
 /// every source holding it tells together, by [`Done::merge`] in the order
-/// of [`AttemptSource::ALL`].
+/// of [`AttemptSource::ALL`]. A source holds an action by its primary output,
+/// or by a description [resolved](Self::resolved) to that output.
 #[derive(Clone, Copy, Default)]
 pub struct MergedAttempts<'a> {
     /// By [`AttemptSource::index`].
     by_source: [Option<&'a Attempts>; AttemptSource::ALL.len()],
+    resolved: Option<&'a Resolved<'a>>,
+}
+
+/// The primary output of each action that the sources of a
+/// [`MergedAttempts`] know by its description and that a reader knowing the
+/// build's actions found.
+pub struct Resolved<'a> {
+    outputs: HashMap<DescribedAction<&'a str>, &'a str>,
+    /// By primary output, what each source, at its [`AttemptSource::index`],
+    /// holds by description of the action writing it.
+    held: HashMap<&'a str, [Option<Holding<'a>>; AttemptSource::ALL.len()]>,
+}
+
+type Described<'a> = (DescribedAction<&'a str>, &'a [Attempt]);
+
+/// What one source holds by description of the action writing one output.
+#[derive(Clone, Copy)]
+enum Holding<'a> {
+    One(Described<'a>),
+    /// Several descriptions the source gives were found to write the output,
+    /// which cannot tell which of them did, so none is held by it.
+    Several,
+}
+
+impl<'a> Holding<'a> {
+    fn one(self) -> Option<Described<'a>> {
+        match self {
+            Holding::One(described) => Some(described),
+            Holding::Several => None,
+        }
+    }
+}
+
+impl<'a> Resolved<'a> {
+    /// The action `primary_output` names as `source` holds it by
+    /// description.
+    fn held(&self, source: AttemptSource, primary_output: &str) -> Option<HeldAction<'a>> {
+        let (&primary_output, by_source) = self.held.get_key_value(primary_output)?;
+        let (described, tried) = by_source[source.index()]?.one()?;
+        Some((primary_output, Some(described.owner_target()), tried))
+    }
+
+    /// Whether `described` stands among the actions `source` holds by
+    /// primary output.
+    fn resolves(&self, source: AttemptSource, described: DescribedAction<&str>) -> bool {
+        self.outputs
+            .get(&described)
+            .and_then(|primary_output| self.held.get(primary_output)?[source.index()]?.one())
+            .is_some_and(|(holding, _)| holding == described)
+    }
+
+    /// Each action `source` holds by a description resolved to its primary
+    /// output.
+    fn actions(&self, source: AttemptSource) -> impl Iterator<Item = HeldAction<'a>> + use<'_, 'a> {
+        self.held
+            .iter()
+            .filter_map(move |(&primary_output, by_source)| {
+                let (described, tried) = by_source[source.index()]?.one()?;
+                Some((primary_output, Some(described.owner_target()), tried))
+            })
+    }
 }
 
 impl<'a> MergedAttempts<'a> {
@@ -49,7 +114,59 @@ impl<'a> MergedAttempts<'a> {
         for (source, attempts) in reported {
             by_source[source.index()] = Some(attempts);
         }
-        MergedAttempts { by_source }
+        MergedAttempts {
+            by_source,
+            resolved: None,
+        }
+    }
+
+    /// Finds the primary output of each action a source knows by its
+    /// description as `output` finds it, `None` for one it does not. Of the
+    /// actions one source describes that `output` finds the same output for,
+    /// none is held by that output.
+    pub fn resolve(
+        &self,
+        mut output: impl FnMut(DescribedAction<&'a str>) -> Option<&'a str>,
+    ) -> Resolved<'a> {
+        let described: usize = self
+            .reports()
+            .map(|(_, attempts)| attempts.described().len())
+            .sum();
+        let mut resolved = Resolved {
+            outputs: HashMap::with_capacity(described),
+            held: HashMap::with_capacity(described),
+        };
+        for (source, attempts) in self.reports() {
+            for (action, tried) in attempts.described() {
+                let found = match resolved.outputs.get(&action) {
+                    Some(&primary_output) => Some(primary_output),
+                    None => output(action),
+                };
+                let Some(primary_output) = found else {
+                    continue;
+                };
+                resolved.outputs.insert(action, primary_output);
+                let by_source = resolved
+                    .held
+                    .entry(primary_output)
+                    .or_insert([None; AttemptSource::ALL.len()]);
+                let holding = &mut by_source[source.index()];
+                *holding = Some(match holding {
+                    None => Holding::One((action, tried)),
+                    Some(_) => Holding::Several,
+                });
+            }
+        }
+        resolved
+    }
+
+    /// These attempts, with each action a source knows by a description in
+    /// `resolved` held by its primary output.
+    pub fn resolved(self, resolved: &'a Resolved<'a>) -> Self {
+        MergedAttempts {
+            resolved: Some(resolved),
+            ..self
+        }
     }
 
     /// Each source with what it reports, most trusted first.
@@ -81,6 +198,19 @@ impl<'a> MergedAttempts<'a> {
         }
     }
 
+    /// The action whose primary output has the exec path `primary_output`, as
+    /// `attempts`, which `source` reports, holds it.
+    fn holding(
+        &self,
+        source: AttemptSource,
+        attempts: &'a Attempts,
+        primary_output: &str,
+    ) -> Option<HeldAction<'a>> {
+        attempts
+            .attempted(primary_output)
+            .or_else(|| self.resolved?.held(source, primary_output))
+    }
+
     /// Whether no source reports an attempt.
     pub fn is_empty(&self) -> bool {
         self.reports().all(|(_, attempts)| attempts.is_empty())
@@ -98,7 +228,7 @@ impl<'a> MergedAttempts<'a> {
     pub fn action(&self, primary_output: &str) -> Option<ActionAttempts<'a>> {
         let (source, primary_output, attempts) =
             self.reports().find_map(|(source, attempts)| {
-                let (primary_output, _, tried) = attempts.attempted(primary_output)?;
+                let (primary_output, _, tried) = self.holding(source, attempts, primary_output)?;
                 Some((source, primary_output, tried))
             })?;
         Some(self.told(primary_output, source, attempts))
@@ -118,18 +248,26 @@ impl<'a> MergedAttempts<'a> {
     > + use<'a> {
         let merged = *self;
         self.reports().flat_map(move |(source, attempts)| {
+            let described = merged
+                .resolved
+                .into_iter()
+                .flat_map(move |resolved| resolved.actions(source))
+                .filter(move |&(primary_output, _, _)| {
+                    attempts.attempted(primary_output).is_none()
+                });
             attempts
                 .actions()
+                .chain(described)
                 .filter(move |&(primary_output, _, _)| {
-                    !merged
-                        .before(source)
-                        .any(|(_, more)| more.attempted(primary_output).is_some())
+                    !merged.before(source).any(|(more_source, more)| {
+                        merged.holding(more_source, more, primary_output).is_some()
+                    })
                 })
                 .map(move |(primary_output, owner, tried)| {
                     let owner = owner.or_else(|| {
-                        merged
-                            .after(source)
-                            .find_map(|(_, less)| less.attempted(primary_output)?.1)
+                        merged.after(source).find_map(|(less_source, less)| {
+                            merged.holding(less_source, less, primary_output)?.1
+                        })
                     });
                     (
                         primary_output,
@@ -141,17 +279,31 @@ impl<'a> MergedAttempts<'a> {
     }
 
     /// Each owner of actions known by no primary output, with their attempts
-    /// as the most trusted source pooling attempts under it reports them.
+    /// as the most trusted source pooling attempts under it reports them. An
+    /// action a source knows by a description not resolved to a primary
+    /// output is pooled under its owner apart from the rest, so an owner may
+    /// come more than once.
     pub fn by_owner(
         &self,
     ) -> impl Iterator<Item = (ConfiguredTarget<&'a str>, &'a [Attempt])> + use<'a> {
         let merged = *self;
         self.reports().flat_map(move |(source, attempts)| {
-            attempts.by_owner().filter(move |&(owner, _)| {
-                !merged
-                    .before(source)
-                    .any(|(_, more)| more.owned(owner).is_some())
-            })
+            let described = attempts
+                .described()
+                .filter(move |&(described, _)| {
+                    !merged
+                        .resolved
+                        .is_some_and(|resolved| resolved.resolves(source, described))
+                })
+                .map(|(described, tried)| (described.owner_target(), tried));
+            attempts
+                .by_owner()
+                .chain(described)
+                .filter(move |&(owner, _)| {
+                    !merged
+                        .before(source)
+                        .any(|(_, more)| more.owned(owner).is_some())
+                })
         })
     }
 
@@ -234,8 +386,8 @@ impl<'a> ActionAttempts<'a> {
                         attempt,
                         merged
                             .reports()
-                            .filter_map(|(_, attempts)| {
-                                attempts.attempted(primary_output)?.2.last()
+                            .filter_map(|(source, attempts)| {
+                                merged.holding(source, attempts, primary_output)?.2.last()
                             })
                             .map(Attempt::done)
                             .fold(attempt.done(), Done::merge),
@@ -393,6 +545,87 @@ mod tests {
         let mut pooled: Vec<_> = merged.by_owner().collect();
         pooled.sort_unstable_by_key(|(owner, _)| owner.label());
         assert_eq!(pooled, [(owner, &[profiled][..]), (other, &[logged][..])]);
+    }
+
+    const DESCRIBED: DescribedAction<&str> = DescribedAction {
+        owner: "//a",
+        mnemonic: "Genrule",
+        description: "Executing genrule //a",
+    };
+
+    fn described(tried: &[Attempt]) -> Attempts {
+        let mut attempts = Attempts::default();
+        for &attempt in tried {
+            attempts.record_described(DESCRIBED, attempt);
+        }
+        attempts
+    }
+
+    #[test]
+    fn a_described_action_resolved_to_an_output_is_held_by_it() {
+        let up_to_date = ended(0, 10, Done::Cached(Cache::Action));
+        let log = described(&[up_to_date]);
+        let merged = MergedAttempts::new([(AttemptSource::ExecutionGraphLog, &log)]);
+        let resolved = merged.resolve(|action| (action == DESCRIBED).then_some("a.o"));
+        let merged = merged.resolved(&resolved);
+        let actions: Vec<_> = merged
+            .actions()
+            .map(|(output, owner, attempts)| (output, owner, attempts.iter().collect::<Vec<_>>()))
+            .collect();
+        let owner = ConfiguredTarget::new("//a", None);
+        assert_eq!(actions, [("a.o", Some(owner), vec![up_to_date])]);
+        assert_eq!(merged.by_owner().count(), 0);
+    }
+
+    #[test]
+    fn a_described_action_is_timed_as_any_action_its_output_names() {
+        let profiled = ended(0, 10, Done::Executed);
+        let profile = reported(&[("a.o", None, &[profiled])]);
+        let log = described(&[ended(1, 9, Done::Cached(Cache::Action))]);
+        let merged = MergedAttempts::new([
+            (AttemptSource::Profile, &profile),
+            (AttemptSource::ExecutionGraphLog, &log),
+        ]);
+        let resolved = merged.resolve(|_| Some("a.o"));
+        let merged = merged.resolved(&resolved);
+        let actions: Vec<_> = merged
+            .actions()
+            .map(|(output, owner, attempts)| (output, owner, attempts.source()))
+            .collect();
+        let owner = Some(ConfiguredTarget::new("//a", None));
+        assert_eq!(actions, [("a.o", owner, AttemptSource::Profile)]);
+        let a = merged.action("a.o").expect("held");
+        assert_eq!(a.iter().collect::<Vec<_>>(), [profiled]);
+    }
+
+    #[test]
+    fn descriptions_found_to_write_one_output_are_pooled_under_their_owner() {
+        let other = DescribedAction {
+            description: "Executing genrule //a again",
+            ..DESCRIBED
+        };
+        let tried = [ended(0, 10, Done::Spawnless)];
+        let mut log = described(&tried);
+        log.record_described(other, tried[0]);
+        let merged = MergedAttempts::new([(AttemptSource::ExecutionGraphLog, &log)]);
+        let resolved = merged.resolve(|_| Some("a.o"));
+        let merged = merged.resolved(&resolved);
+        assert_eq!(merged.actions().count(), 0);
+        assert!(merged.action("a.o").is_none());
+        assert_eq!(merged.by_owner().count(), 2);
+    }
+
+    #[test]
+    fn a_described_action_not_resolved_is_pooled_under_its_owner() {
+        let tried = [ended(0, 10, Done::Cached(Cache::Action))];
+        let log = described(&tried);
+        let merged = MergedAttempts::new([(AttemptSource::ExecutionGraphLog, &log)]);
+        let owner = ConfiguredTarget::new("//a", None);
+        assert_eq!(merged.by_owner().collect::<Vec<_>>(), [(owner, &tried[..])]);
+        let resolved = merged.resolve(|_| None);
+        let merged = merged.resolved(&resolved);
+        assert_eq!(merged.by_owner().collect::<Vec<_>>(), [(owner, &tried[..])]);
+        assert_eq!(merged.actions().count(), 0);
     }
 
     #[test]
