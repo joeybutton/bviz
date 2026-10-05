@@ -92,6 +92,11 @@ pub(crate) fn ran_swatch(ran: Ran, palette: &Palette) -> Div {
     fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette)
 }
 
+/// The fill a box standing at `state` wears.
+pub(crate) fn state_swatch(state: NodeState, palette: &Palette) -> Div {
+    fill_swatch(palette.state_fill(state), SWATCH_WIDTH, palette)
+}
+
 /// The fills a box's time is read off, from the least its kind holds to the
 /// most.
 fn ramp_swatch(palette: &Palette) -> Div {
@@ -395,10 +400,11 @@ fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> V
         }
         Reading::States { reached, untimed } => {
             let mut rows = Vec::with_capacity(reached.len() + 2);
-            rows.extend(reached.iter().map(|&state| {
-                let fill = fill_swatch(palette.state_fill(state), SWATCH_WIDTH, palette);
-                row(fill, state.label(), palette)
-            }));
+            rows.extend(
+                reached
+                    .iter()
+                    .map(|&state| row(state_swatch(state, palette), state.label(), palette)),
+            );
             rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH, "no record")));
             rows
         }

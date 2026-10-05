@@ -35,6 +35,7 @@ mod derive;
 mod drag;
 mod duration;
 mod emphasis;
+mod ending;
 mod exclusive;
 mod framing;
 mod hints;
@@ -545,6 +546,13 @@ impl GraphPanel {
             self.legend
                 .card(&drawn, zoom, statuses, resolved, coloured, &palette)
         });
+        let ending = zoom.zip(loaded).and_then(|(zoom, loaded)| {
+            let states = loaded
+                .states()
+                .filter(|_| self.colouring == Colouring::Playback)?;
+            let at = self.model.read(cx).clock()?.read(cx).now()?;
+            ending::card(self.hovered, drawn.view(zoom)?, states, at, &palette)
+        });
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -565,6 +573,7 @@ impl GraphPanel {
                     .items_start()
                     .gap_2()
                     .children(missing::card(self, &palette, cx))
+                    .children(ending)
                     .children(legend),
             )
             .child(

@@ -98,7 +98,7 @@ impl Ended {
         }
     }
 
-    fn of(done: Done) -> Self {
+    pub(crate) fn of(done: Done) -> Self {
         match done {
             Done::Executed => Ended::Executed,
             Done::Cached(Cache::Spawn(_)) => Ended::Cached,
@@ -457,6 +457,12 @@ impl NodeStates {
         Some(&self.held[slot.index()])
     }
 
+    /// How the attempts landing on the node `id` names, and on everything it
+    /// contains, ended together; `None` where none lands.
+    pub(crate) fn done(&self, id: Id) -> Option<Done> {
+        Some(self.held(id)?.done)
+    }
+
     /// Where the node `id` names stands at `at`; `None` where no attempt lands
     /// on it or on anything it contains. An id past the graph's own, as a merge
     /// group's is, reads as such a node.
@@ -757,6 +763,20 @@ pub(crate) mod tests {
             done(Ended::Executed)
         );
         assert_eq!(rolled_up(&[disk, Done::Executed]), done(Ended::Executed));
+    }
+
+    #[test]
+    fn a_node_ends_as_its_attempts_rolled_up_did() {
+        let disk = spawn_hit(SpawnCache::Disk);
+        let built = Built::new(&[
+            ("bazel-out/a.o", &[ended(0, 10, disk)]),
+            ("bazel-out/b.o", &[ended(0, 10, UP_TO_DATE)]),
+        ]);
+        let states = built.states();
+        assert_eq!(states.done(built.actions[0]), Some(disk));
+        assert_eq!(states.done(built.actions[1]), Some(UP_TO_DATE));
+        assert_eq!(states.done(built.package), Some(disk));
+        assert_eq!(states.done(Id(built.names.len() as u32)), None);
     }
 
     #[test]
