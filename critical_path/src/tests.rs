@@ -1,4 +1,5 @@
 use super::*;
+use bviz_invocation::spawn::LoggedSpawns;
 
 const CRITICAL_PATH_TID: i64 = 0;
 const MAIN_TID: i64 = 1;
@@ -110,7 +111,7 @@ fn us(micros: u64) -> Duration {
 fn split(before: u64, span: u64) -> Work {
     Work::Spanned(SpanSplit {
         before: us(before),
-        span: us(span),
+        span: Ran::Unlogged(us(span)),
     })
 }
 /// The lead-in, each step's gap and own time, and the tail add up to the
@@ -140,7 +141,7 @@ fn a_profile_without_a_critical_path_lane_has_no_critical_path() {
         event("buildTargets", 0, 10).json("general information", MAIN_TID)
     );
     let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
-    assert_eq!(CriticalPath::of(&profile), None);
+    assert_eq!(CriticalPath::of(&profile, None), None);
 }
 
 #[test]
@@ -154,7 +155,7 @@ fn a_step_is_joined_to_the_span_of_its_description_and_split_around_it() {
             .with_out("bazel-out/a.o")
             .of("CppCompile", "//a")],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let [step] = path.steps() else {
         panic!("one step")
@@ -179,7 +180,7 @@ fn the_action_runs_until_its_step_ends_though_its_span_outlasts_it() {
         &[event(STEP_LINK, 10_000, 416_000)],
         &[event(LINK, 10_250, 416_950)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     assert_eq!(path.steps()[0].work(), split(250, 415_750));
     assert_eq!(path.tail(), us(74_000));
@@ -200,7 +201,7 @@ fn a_step_naming_its_primary_output_is_joined_by_it() {
             event(COMPILE, 120, 990).with_out("bazel-out/b.o"),
         ],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let step = &path.steps()[0];
     assert_eq!(step.work(), split(20, 980));
@@ -218,7 +219,7 @@ fn steps_of_one_description_are_told_apart_by_when_their_spans_started() {
         ],
         &[event(COMPILE, 2003, 998), event(COMPILE, 104, 997)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
     assert_eq!(works, [split(4, 996), split(3, 997)]);
@@ -233,8 +234,11 @@ fn a_span_starting_outside_its_step_is_not_its_span() {
         &[event(STEP_COMPILE, 100, 1000)],
         &[event(COMPILE, 3000, 500)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
-    assert_eq!(path.steps()[0].work(), Work::Unspanned(us(1000)));
+    let path = CriticalPath::of(&p, None).expect("critical path");
+    assert_eq!(
+        path.steps()[0].work(),
+        Work::Unspanned(Ran::Unlogged(us(1000)))
+    );
     assert_eq!(path.time_in(Part::Unspanned), us(1000));
 }
 
@@ -256,7 +260,7 @@ fn a_runfiles_tree_is_joined_to_the_span_building_its_target_s_tree() {
                 .of("RunfilesTree", "//t:bin"),
         ],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let step = &path.steps()[0];
     assert_eq!(step.work(), split(69, 231));
@@ -276,7 +280,7 @@ fn a_runfiles_tree_is_joined_by_its_directory_where_spans_name_no_target() {
         &[event(RUNFILES_STEP, 100, 300)],
         &[event(OTHER_RUNFILES, 169, 280), event(RUNFILES, 169, 332)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     let step = &path.steps()[0];
     assert_eq!(step.work(), split(69, 231));
     assert_eq!(step.target(), Some("//t:bin"));
@@ -289,8 +293,11 @@ fn a_runfiles_tree_of_another_repository_joins_only_by_its_target() {
         &[event("runfiles for @@r+//t:bin", 100, 300)],
         &[event(RUNFILES, 169, 332)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
-    assert_eq!(path.steps()[0].work(), Work::Unspanned(us(300)));
+    let path = CriticalPath::of(&p, None).expect("critical path");
+    assert_eq!(
+        path.steps()[0].work(),
+        Work::Unspanned(Ran::Unlogged(us(300)))
+    );
     assert_eq!(path.steps()[0].target(), Some("@@r+//t:bin"));
 }
 
@@ -301,7 +308,7 @@ fn a_runfiles_tree_of_no_length_was_change_pruned() {
         &[event(RUNFILES_STEP, 100, 0)],
         &[event(RUNFILES, 100, 50).of("RunfilesTree", "//t:bin")],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_eq!(path.steps()[0].work(), Work::ChangePruned);
 }
 
@@ -317,10 +324,13 @@ fn of_two_spans_of_one_description_starting_within_a_step_the_earlier_is_its() {
         ],
         &[event(COMPILE, 102, 10), event(COMPILE, 120, 990)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
-    assert_eq!(works, [split(2, 998), Work::Unspanned(us(1000))]);
+    assert_eq!(
+        works,
+        [split(2, 998), Work::Unspanned(Ran::Unlogged(us(1000)))]
+    );
 }
 
 #[test]
@@ -330,7 +340,7 @@ fn a_step_of_no_length_was_change_pruned_and_claims_no_span() {
         &[event(STEP_LINK, 500, 0), event(STEP_LINK, 1000, 600)],
         &[event(LINK, 1005, 590)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let works: Vec<Work> = path.steps().iter().map(Step::work).collect();
     assert_eq!(works, [Work::ChangePruned, split(5, 595)]);
@@ -348,7 +358,7 @@ fn a_step_starting_before_the_one_before_it_ends_adds_only_what_runs_past() {
         ],
         &[event(COMPILE, 105, 996), event(LINK, 905, 496)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let steps = path.steps();
     assert_eq!(steps[1].work(), Work::ChangePruned);
@@ -373,7 +383,7 @@ fn a_step_the_one_before_it_covers_still_claims_its_span() {
             event(LINK, 1950, 51),
         ],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     let steps = path.steps();
     assert_eq!(steps[1].own(), Duration::ZERO);
@@ -393,7 +403,7 @@ fn the_wall_time_partitions_along_the_path() {
         ],
         &[event(COMPILE, 1010, 1991), event(LINK, 5050, 2951)],
     );
-    let path = CriticalPath::of(&p).expect("critical path");
+    let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
     assert_eq!(path.wall(), us(10_000));
     assert_eq!(path.lead_in(), us(1000));
@@ -403,4 +413,316 @@ fn the_wall_time_partitions_along_the_path() {
     assert_eq!(path.time_in(Part::Unspanned), us(100));
     assert_eq!(path.tail(), us(2000));
     assert_eq!(path.path(), us(5100));
+}
+
+/// A spawn an execution log records, for [`log`].
+#[derive(Clone, Copy)]
+struct LogSpawn<'a> {
+    runner: &'a str,
+    cache_hit: bool,
+    mnemonic: &'a str,
+    target: &'a str,
+    outputs: &'a [&'a str],
+    total_us: u64,
+    phases: &'a [(Phase, u64)],
+}
+
+fn logged<'a>(
+    runner: &'a str,
+    outputs: &'a [&'a str],
+    total_us: u64,
+    phases: &'a [(Phase, u64)],
+) -> LogSpawn<'a> {
+    LogSpawn {
+        runner,
+        cache_hit: false,
+        mnemonic: "CppCompile",
+        target: "//a",
+        outputs,
+        total_us,
+        phases,
+    }
+}
+
+fn log(spawns: &[LogSpawn]) -> LoggedSpawns {
+    use bviz_invocation::spawn::{Builder, Logged, PhaseTiming, REPORTED_PHASES};
+    let mut builder = Builder::with_capacity(spawns.len(), 0, 0);
+    for spawn in spawns {
+        for output in spawn.outputs {
+            builder.output(output);
+        }
+        let mut reported = [Duration::ZERO; REPORTED_PHASES];
+        for &(phase, time) in spawn.phases {
+            reported[phase.index()] = us(time);
+        }
+        builder.push(Logged {
+            runner: spawn.runner,
+            mnemonic: spawn.mnemonic,
+            target_label: spawn.target,
+            cache_hit: spawn.cache_hit,
+            timing: PhaseTiming::new(us(spawn.total_us), reported),
+        });
+    }
+    builder.finish()
+}
+
+/// The spawns joined to `step`.
+fn spawned(step: &Step) -> Spawned {
+    *step.work().spawned().expect("spawns joined to the step")
+}
+
+/// A step's action time partitions into its spawns' phases and the time
+/// around them.
+fn assert_action_partitions(step: &Step) {
+    let spawned = spawned(step);
+    let phases: Duration = Phase::ALL.into_iter().map(|p| spawned.phase(p)).sum();
+    let action = match step.work() {
+        Work::Spanned(split) => split.span.time(),
+        Work::Unspanned(own) => own.time(),
+        Work::ChangePruned => Duration::ZERO,
+    };
+    assert_eq!(phases + spawned.around(), action);
+}
+
+#[test]
+fn a_step_naming_its_output_is_joined_to_the_spawn_listing_it_among_others() {
+    let p = profile(
+        5000,
+        &[event(STEP_COMPILE, 100, 1000)
+            .with_out("bazel-out/a.o")
+            .of("CppCompile", "//a")],
+        &[event(COMPILE, 110, 991).with_out("bazel-out/a.o")],
+    );
+    let spawns = log(&[
+        logged("remote", &["bazel-out/b.o"], 500, &[(Phase::Execute, 500)]),
+        logged(
+            "remote",
+            &["bazel-out/a.d", "bazel-out/a.o"],
+            960,
+            &[
+                (Phase::Upload, 100),
+                (Phase::Queue, 60),
+                (Phase::Execute, 700),
+            ],
+        ),
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_partitions(&path);
+    let step = &path.steps()[0];
+    assert_action_partitions(step);
+    let spawned = spawned(step);
+    assert_eq!(spawned.runner(), SpawnRunner::RemoteExecution);
+    assert_eq!((spawned.spawns(), spawned.logged()), (1, us(960)));
+    assert_eq!(spawned.phase(Phase::Execute), us(700));
+    assert_eq!(spawned.phase(Phase::Other), us(100));
+    assert_eq!(spawned.fit(), Fit::Within { around: us(30) });
+    let coverage = path.coverage().expect("a log was given");
+    assert_eq!((coverage.steps(), coverage.own()), (1, us(1000)));
+    assert_eq!(coverage.action(), us(990));
+    assert_eq!(coverage.phase(Phase::Queue), us(60));
+}
+
+#[test]
+fn a_step_named_by_description_is_joined_by_its_span_s_output() {
+    let p = profile(
+        2000,
+        &[event(STEP_COMPILE, 100, 1000)],
+        &[event(COMPILE, 105, 1001).with_out("bazel-out/a.o")],
+    );
+    let spawns = log(&[logged(
+        "linux-sandbox",
+        &["bazel-out/a.o"],
+        900,
+        &[(Phase::Execute, 900)],
+    )]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_partitions(&path);
+    let spawned = spawned(&path.steps()[0]);
+    assert_eq!(spawned.runner(), SpawnRunner::Sandboxed);
+    assert_eq!(spawned.fit(), Fit::Within { around: us(95) });
+}
+
+#[test]
+fn a_test_is_joined_to_the_spawns_writing_beside_its_log() {
+    const TEST_LOG: &str = "bazel-out/testlogs/t/t_test/test.log";
+    let p = profile(
+        9000,
+        &[event("action 'Testing //t:t_test'", 100, 3000)],
+        &[event("Testing //t:t_test", 102, 2999)
+            .with_out(TEST_LOG)
+            .of("TestRunner", "//t:t_test")],
+    );
+    let test = |outputs, total| LogSpawn {
+        mnemonic: "TestRunner",
+        target: "//t:t_test",
+        ..logged("remote", outputs, total, &[])
+    };
+    let spawns = log(&[
+        test(
+            &[
+                "bazel-out/testlogs/t/t_test/test.xml",
+                "bazel-out/testlogs/t/t_test/test.warnings",
+            ],
+            2000,
+        ),
+        test(&["bazel-out/testlogs/t/t_test/test.xml"], 500),
+        test(&["bazel-out/testlogs/t/t_test/shard_2_of_2/test.xml"], 700),
+        LogSpawn {
+            target: "//t:other_test",
+            ..test(&["bazel-out/testlogs/t/t_test/test.xml"], 400)
+        },
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_partitions(&path);
+    let step = &path.steps()[0];
+    assert_action_partitions(step);
+    let spawned = spawned(step);
+    assert_eq!((spawned.spawns(), spawned.logged()), (2, us(2500)));
+    assert_eq!(spawned.phase(Phase::Other), us(2500));
+}
+
+#[test]
+fn a_test_whose_log_is_unknown_is_joined_to_no_spawn() {
+    let p = profile(
+        9000,
+        &[event("action 'Testing //t:t_test'", 100, 3000).of("TestRunner", "//t:t_test")],
+        &[],
+    );
+    let spawns = log(&[LogSpawn {
+        mnemonic: "TestRunner",
+        target: "//t:t_test",
+        ..logged(
+            "remote",
+            &["bazel-out/testlogs/t/t_test/test.xml"],
+            2000,
+            &[],
+        )
+    }]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_eq!(path.steps()[0].work().spawned(), None);
+}
+
+#[test]
+fn an_action_ran_on_what_executed_it_longest_and_failing_that_what_answered_it() {
+    let p = profile(
+        5000,
+        &[event(STEP_COMPILE, 100, 1000).with_out("bazel-out/a.o")],
+        &[],
+    );
+    let runner = |spawns: &[LogSpawn]| {
+        let path = CriticalPath::of(&p, Some(&log(spawns))).expect("critical path");
+        spawned(&path.steps()[0]).runner()
+    };
+    let deduplicated = logged("deduplicated", &["bazel-out/a.o"], 900, &[]);
+    let hit = LogSpawn {
+        cache_hit: true,
+        ..logged("disk cache hit", &["bazel-out/a.o"], 50, &[])
+    };
+    let remote = logged("remote", &["bazel-out/a.o"], 20, &[]);
+    let sandboxed = logged("linux-sandbox", &["bazel-out/a.o"], 300, &[]);
+    assert_eq!(runner(&[deduplicated]), SpawnRunner::Deduplicated);
+    assert_eq!(runner(&[hit, deduplicated]), SpawnRunner::Deduplicated);
+    assert_eq!(
+        runner(&[deduplicated, remote]),
+        SpawnRunner::RemoteExecution
+    );
+    assert_eq!(runner(&[remote, sandboxed]), SpawnRunner::Sandboxed);
+}
+
+#[test]
+fn a_spawn_cache_hit_shows_its_transfer() {
+    let p = profile(
+        2000,
+        &[event(STEP_COMPILE, 100, 500).with_out("bazel-out/a.o")],
+        &[],
+    );
+    let spawns = log(&[LogSpawn {
+        cache_hit: true,
+        ..logged(
+            "remote cache hit",
+            &["bazel-out/a.o"],
+            480,
+            &[(Phase::Network, 400), (Phase::Fetch, 20)],
+        )
+    }]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_partitions(&path);
+    let step = &path.steps()[0];
+    assert!(matches!(step.work(), Work::Unspanned(Ran::Spawned(_))));
+    assert_action_partitions(step);
+    let spawned = spawned(step);
+    assert_eq!(spawned.runner(), SpawnRunner::RemoteCacheHit);
+    assert_eq!(spawned.phase(Phase::Network), us(400));
+    assert_eq!(spawned.fit(), Fit::Within { around: us(20) });
+}
+
+#[test]
+fn spawns_adding_up_past_the_span_are_scaled_to_fill_it() {
+    let p = profile(
+        2000,
+        &[event(STEP_COMPILE, 100, 1000).with_out("bazel-out/a.o")],
+        &[event(COMPILE, 100, 1001).with_out("bazel-out/a.o")],
+    );
+    let spawns = log(&[
+        logged("remote", &["bazel-out/a.o"], 900, &[(Phase::Execute, 900)]),
+        logged(
+            "linux-sandbox",
+            &["bazel-out/a.o"],
+            601,
+            &[(Phase::Execute, 600)],
+        ),
+    ]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_partitions(&path);
+    let step = &path.steps()[0];
+    assert_action_partitions(step);
+    let spawned = spawned(step);
+    assert_eq!(spawned.fit(), Fit::Scaled);
+    assert_eq!(spawned.runner(), SpawnRunner::RemoteExecution);
+    assert_eq!(spawned.logged(), us(1501));
+    // 1501µs of phases scaled into the 1000µs span, the nanosecond of
+    // rounding going to the longest phase.
+    assert_eq!(
+        spawned.phase(Phase::Execute),
+        us(1000) - spawned.phase(Phase::Other)
+    );
+    assert_eq!(spawned.phase(Phase::Other), Duration::from_nanos(666));
+}
+
+#[test]
+fn without_a_log_no_step_is_joined_and_with_one_every_unjoined_step_says_so() {
+    let p = profile(
+        2000,
+        &[event(STEP_COMPILE, 100, 1000).with_out("bazel-out/a.o")],
+        &[event(COMPILE, 110, 991).with_out("bazel-out/a.o")],
+    );
+    let alone = CriticalPath::of(&p, None).expect("critical path");
+    assert_eq!(alone.coverage(), None);
+    assert_eq!(alone.steps()[0].work(), split(10, 990));
+
+    let unrelated = log(&[logged("remote", &["bazel-out/b.o"], 5, &[])]);
+    let path = CriticalPath::of(&p, Some(&unrelated)).expect("critical path");
+    let coverage = path.coverage().expect("a log was given");
+    assert_eq!((coverage.steps(), coverage.own()), (0, Duration::ZERO));
+    assert_eq!(path.steps()[0].work(), split(10, 990));
+    assert_eq!(
+        path,
+        CriticalPath {
+            coverage: Some(coverage),
+            ..alone
+        }
+    );
+}
+
+#[test]
+fn a_change_pruned_step_is_joined_to_no_spawn() {
+    let p = profile(
+        2000,
+        &[event(STEP_COMPILE, 100, 0).with_out("bazel-out/a.o")],
+        &[],
+    );
+    let spawns = log(&[logged("remote", &["bazel-out/a.o"], 5, &[])]);
+    let path = CriticalPath::of(&p, Some(&spawns)).expect("critical path");
+    assert_eq!(path.steps()[0].work(), Work::ChangePruned);
+    assert_eq!(path.coverage().map(|c| c.steps()), Some(0));
 }

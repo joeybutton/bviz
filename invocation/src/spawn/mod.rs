@@ -3,5 +3,5 @@
 mod logged;
 mod timing;
 
-pub use logged::{Builder, Logged, LoggedSpawn, LoggedSpawns};
+pub use logged::{Builder, Logged, LoggedSpawn, LoggedSpawns, SpawnRunner};
 pub use timing::{Phase, PhaseTiming, REPORTED_PHASES};

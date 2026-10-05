@@ -170,7 +170,7 @@ mod tests {
             {"cat":"critical path component","name":"action 'Compiling a.c'","ph":"X","ts":1000,"dur":2000,"tid":0},
             {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":9000,"dur":400,"tid":0}
         ]}"#;
-        CriticalPath::of(&Profile::from_bytes(json.as_bytes()).expect("parse")).expect("path")
+        CriticalPath::of(&Profile::from_bytes(json.as_bytes()).expect("parse"), None).expect("path")
     }
 
     fn ms(millis: u64) -> Duration {

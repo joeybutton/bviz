@@ -97,7 +97,7 @@ impl LoadedProfile {
         let traced = flamer.profile().clone();
         let tracing = cx.spawn(async move |model, cx| {
             let derive = async move {
-                let path = CriticalPath::of(&traced);
+                let path = CriticalPath::of(&traced, None);
                 (traced, path)
             };
             let (traced, path) = cx.background_executor().spawn(derive).await;

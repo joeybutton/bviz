@@ -1,13 +1,17 @@
 //! Where the wall time of a Bazel build went along its critical path, as the
-//! build's `--profile` records it.
+//! build's `--profile` records it, and as its execution log
+//! (`--execution_log_compact_file`) times the spawns of the path's actions.
 //!
 //! Bazel's critical path is a chain of actions, each waiting on the one
 //! before. The profile's critical-path lane holds one span per step, timed
 //! from when the action won its execution slot to when its outputs were
 //! checked.
 
+mod logged;
 mod spans;
 
+use bviz_invocation::spawn::LoggedSpawns;
+pub use bviz_invocation::spawn::{Phase, SpawnRunner};
 use bviz_trace_profile::{LaneClass, OptStr, Profile, TimeSpan};
 use spans::Spans;
 use std::borrow::Cow;
@@ -31,6 +35,64 @@ pub struct CriticalPath {
     wall: Duration,
     steps: Vec<Step>,
     by_part: [Duration; Part::ALL.len()],
+    /// `None` where no execution log was given.
+    coverage: Option<Coverage>,
+}
+
+/// The steps of a critical path whose action the execution log records
+/// spawns of, taken together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coverage {
+    steps: usize,
+    own: Duration,
+    phases: [Duration; Phase::ALL.len()],
+    around: Duration,
+}
+
+impl Coverage {
+    fn none() -> Coverage {
+        Coverage {
+            steps: 0,
+            own: Duration::ZERO,
+            phases: [Duration::ZERO; Phase::ALL.len()],
+            around: Duration::ZERO,
+        }
+    }
+
+    fn add(&mut self, own: Duration, spawned: &Spawned) {
+        self.steps += 1;
+        self.own += own;
+        for (sum, phase) in self.phases.iter_mut().zip(spawned.phases) {
+            *sum += phase;
+        }
+        self.around += spawned.around();
+    }
+
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+
+    /// The steps' own time summed.
+    pub fn own(&self) -> Duration {
+        self.own
+    }
+
+    /// The steps' actions' time on the path in `phase`, as their spawns'
+    /// phases are fitted to it.
+    pub fn phase(&self, phase: Phase) -> Duration {
+        self.phases[phase.index()]
+    }
+
+    /// The steps' actions' time on the path outside their spawns' phases.
+    pub fn around(&self) -> Duration {
+        self.around
+    }
+
+    /// The steps' actions' time on the path, which the phases and the time
+    /// around them partition.
+    pub fn action(&self) -> Duration {
+        self.phases.iter().sum::<Duration>() + self.around
+    }
 }
 
 /// One step of the critical path.
@@ -53,7 +115,7 @@ pub enum Work {
     /// An action the profile holds no span of. Bazel opens none for an
     /// action its action cache answers, and a slim profile folds short spans
     /// into anonymous ones, so the profile alone cannot tell the two apart.
-    Unspanned(Duration),
+    Unspanned(Ran),
     /// An action Bazel records as a step taking no time: change pruning found
     /// its inputs unchanged, so it was not run.
     ChangePruned,
@@ -67,7 +129,41 @@ pub struct SpanSplit {
     pub before: Duration,
     /// From the span's start until the step's end. Bazel ends the step from
     /// within the span, so the span outlasts the step by only that ending.
-    pub span: Duration,
+    pub span: Ran,
+}
+
+/// The time an action ran for on the path, and the spawns the execution log
+/// records of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ran {
+    /// The log records no spawn of the action, or no log was given.
+    Unlogged(Duration),
+    Spawned(Spawned),
+}
+
+/// The spawns an execution log records of one action, their phases fitted
+/// into the time the action ran for on the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spawned {
+    runner: SpawnRunner,
+    spawns: usize,
+    logged: Duration,
+    phases: [Duration; Phase::ALL.len()],
+    fit: Fit,
+}
+
+/// How the phases of an action's spawns fit the time it ran for. Spawn times
+/// are durations Bazel measured, never instants: a remote spawn's start is
+/// the executor's clock, and a cache hit's that of the run it reuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// The phases take their own times, and what is left of the action's time
+    /// is Bazel's work around the spawns, which no spawn's metrics count.
+    Within { around: Duration },
+    /// The spawns' phases add up past the action's time, so each is scaled
+    /// down by one ratio to fill it exactly; their mix is kept, not their
+    /// times.
+    Scaled,
 }
 
 /// A share of the wall time.
@@ -110,8 +206,8 @@ impl Work {
     /// The own time by part, parts of no time included.
     fn parts(self) -> [(Part, Duration); 3] {
         let (before, span, unspanned) = match self {
-            Work::Spanned(split) => (split.before, split.span, Duration::ZERO),
-            Work::Unspanned(own) => (Duration::ZERO, Duration::ZERO, own),
+            Work::Spanned(split) => (split.before, split.span.time(), Duration::ZERO),
+            Work::Unspanned(own) => (Duration::ZERO, Duration::ZERO, own.time()),
             Work::ChangePruned => (Duration::ZERO, Duration::ZERO, Duration::ZERO),
         };
         [
@@ -120,6 +216,122 @@ impl Work {
             (Part::Unspanned, unspanned),
         ]
     }
+
+    /// The work with the time its action ran for joined to `spawns`.
+    fn with_spawns(self, spawns: &logged::Tally) -> Work {
+        let spawned = |ran: Ran| Ran::Spawned(Spawned::fitted(ran.time(), spawns));
+        match self {
+            Work::Spanned(SpanSplit { before, span }) => Work::Spanned(SpanSplit {
+                before,
+                span: spawned(span),
+            }),
+            Work::Unspanned(own) => Work::Unspanned(spawned(own)),
+            Work::ChangePruned => Work::ChangePruned,
+        }
+    }
+
+    /// The spawns the execution log records of the step's action, if any.
+    pub fn spawned(&self) -> Option<&Spawned> {
+        match self {
+            Work::Spanned(SpanSplit {
+                span: Ran::Spawned(spawned),
+                ..
+            })
+            | Work::Unspanned(Ran::Spawned(spawned)) => Some(spawned),
+            _ => None,
+        }
+    }
+}
+
+impl Ran {
+    pub fn time(self) -> Duration {
+        match self {
+            Ran::Unlogged(time) => time,
+            Ran::Spawned(spawned) => spawned.time(),
+        }
+    }
+}
+
+impl Spawned {
+    /// The spawns `tally` sums, their phases fitted into `time`.
+    fn fitted(time: Duration, tally: &logged::Tally) -> Spawned {
+        let spent = tally
+            .phases
+            .iter()
+            .fold(Duration::ZERO, |sum, &phase| sum.saturating_add(phase));
+        let (phases, fit) = if spent <= time {
+            let around = time - spent;
+            (tally.phases, Fit::Within { around })
+        } else {
+            (scale_to(&tally.phases, spent, time), Fit::Scaled)
+        };
+        Spawned {
+            runner: tally.runner(),
+            spawns: tally.spawns,
+            logged: tally.logged,
+            phases,
+            fit,
+        }
+    }
+
+    /// What answered the action: of the runners that executed its spawns,
+    /// the one they held longest, so that neither a remote attempt failing
+    /// fast before a local fallback nor a short secondary spawn decides;
+    /// failing any execution, what answered its spawns longest.
+    pub fn runner(&self) -> SpawnRunner {
+        self.runner
+    }
+
+    /// How many spawns the log records of the action.
+    pub fn spawns(&self) -> usize {
+        self.spawns
+    }
+
+    /// The spawns' total times as Bazel measured each, summed.
+    pub fn logged(&self) -> Duration {
+        self.logged
+    }
+
+    /// The time on the path in `phase`.
+    pub fn phase(&self, phase: Phase) -> Duration {
+        self.phases[phase.index()]
+    }
+
+    pub fn fit(&self) -> Fit {
+        self.fit
+    }
+
+    /// The action's time on the path outside its spawns' phases.
+    pub fn around(&self) -> Duration {
+        match self.fit {
+            Fit::Within { around } => around,
+            Fit::Scaled => Duration::ZERO,
+        }
+    }
+
+    /// The time the action ran for on the path, the phases and the time around
+    /// them together.
+    pub fn time(&self) -> Duration {
+        self.phases.iter().sum::<Duration>() + self.around()
+    }
+}
+
+/// `phases`, adding up to `spent`, each scaled by one ratio so that they add
+/// up to `time` exactly: what rounding down leaves over goes to the longest.
+fn scale_to(
+    phases: &[Duration; Phase::ALL.len()],
+    spent: Duration,
+    time: Duration,
+) -> [Duration; Phase::ALL.len()] {
+    let (spent, time) = (spent.as_nanos(), time.as_nanos());
+    let mut scaled = phases.map(|phase| phase.as_nanos() * time / spent);
+    let left_over = time - scaled.iter().sum::<u128>();
+    let longest = (1..phases.len()).fold(0, |longest, i| match phases[i] > phases[longest] {
+        true => i,
+        false => longest,
+    });
+    scaled[longest] += left_over;
+    scaled.map(|nanos| Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
 }
 
 impl Step {
@@ -174,8 +386,10 @@ impl Step {
 
 impl CriticalPath {
     /// The critical path the profile records, or `None` where it has no
-    /// critical-path lane. Steps stand in the order they started.
-    pub fn of(profile: &Profile) -> Option<CriticalPath> {
+    /// critical-path lane. Steps stand in the order they started, each joined
+    /// to the spawns `log` records of its action where an execution log of
+    /// the same invocation is given.
+    pub fn of(profile: &Profile, log: Option<&LoggedSpawns>) -> Option<CriticalPath> {
         let lane = profile
             .threads()
             .iter()
@@ -212,15 +426,34 @@ impl CriticalPath {
         let lead_in = recorded
             .first()
             .map_or(Duration::ZERO, |first| cursor.advance_to(first.start_us));
-        let steps = recorded
+        let mut steps: Vec<Step> = recorded
             .iter()
             .map(|recorded| recorded.resolve(profile, &mut spans, &mut cursor))
             .collect();
         let tail = cursor.left();
-        Some(CriticalPath::new(wall, lead_in, steps, tail))
+        let coverage = log.map(|log| {
+            let tallies = logged::join(&steps, log);
+            let mut coverage = Coverage::none();
+            for (step, tally) in steps.iter_mut().zip(tallies) {
+                if let Some(tally) = tally {
+                    step.work = step.work.with_spawns(&tally);
+                    if let Some(spawned) = step.work.spawned() {
+                        coverage.add(step.own(), spawned);
+                    }
+                }
+            }
+            coverage
+        });
+        Some(CriticalPath::new(wall, lead_in, steps, tail, coverage))
     }
 
-    fn new(wall: Duration, lead_in: Duration, steps: Vec<Step>, tail: Duration) -> CriticalPath {
+    fn new(
+        wall: Duration,
+        lead_in: Duration,
+        steps: Vec<Step>,
+        tail: Duration,
+        coverage: Option<Coverage>,
+    ) -> CriticalPath {
         let mut by_part = [Duration::ZERO; Part::ALL.len()];
         by_part[Part::LeadIn.index()] = lead_in;
         by_part[Part::Tail.index()] = tail;
@@ -231,7 +464,14 @@ impl CriticalPath {
             wall,
             steps,
             by_part,
+            coverage,
         }
+    }
+
+    /// How much of the path the execution log accounts for, `None` where no
+    /// log was given.
+    pub fn coverage(&self) -> Option<Coverage> {
+        self.coverage
     }
 
     /// The profile's wall time, from its first event to its last.
@@ -358,11 +598,12 @@ impl<'p> RecordedStep<'p> {
         } else if let Some(action) = spans.claim(self) {
             let split = SpanSplit {
                 before: cursor.advance_to(action.span.start_us),
-                span: cursor.advance_to(self.end_us),
+                span: Ran::Unlogged(cursor.advance_to(self.end_us)),
             };
             (Work::Spanned(split), Some(action))
         } else {
-            (Work::Unspanned(cursor.advance_to(self.end_us)), None)
+            let own = Ran::Unlogged(cursor.advance_to(self.end_us));
+            (Work::Unspanned(own), None)
         };
         // What the step records of itself, else what the span that ran it does.
         let said = |of_step: OptStr, of_span: Option<OptStr>| {

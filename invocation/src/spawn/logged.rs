@@ -3,6 +3,64 @@ use std::ops::Range;
 
 use super::PhaseTiming;
 
+/// The runner name Bazel logs for a spawn sent to a remote executor.
+const REMOTE_RUNNER: &str = "remote";
+/// The runner name Bazel logs for a spawn its local disk cache answered.
+const DISK_CACHE_RUNNER: &str = "disk cache hit";
+/// The runner name Bazel logs for a spawn that reused the outputs of an
+/// identical spawn running in the same build.
+const DEDUPLICATED_RUNNER: &str = "deduplicated";
+/// What the names of Bazel's sandboxed runners hold, as `linux-sandbox` and
+/// `processwrapper-sandbox` do.
+const SANDBOX_RUNNER_PART: &str = "sandbox";
+/// Bazel's runner of spawns in a Docker container, which sandboxes them.
+const DOCKER_RUNNER: &str = "docker";
+/// What the names of Bazel's persistent-worker runners hold.
+const WORKER_RUNNER_PART: &str = "worker";
+
+/// What answered a spawn an execution log records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpawnRunner {
+    RemoteExecution,
+    Worker,
+    Sandboxed,
+    /// A local subprocess outside any sandbox.
+    Local,
+    RemoteCacheHit,
+    DiskCacheHit,
+    /// The outputs of an identical spawn running in the same build, which
+    /// Bazel waited for and reused rather than run this one.
+    Deduplicated,
+}
+
+impl SpawnRunner {
+    pub const ALL: [SpawnRunner; 7] = [
+        SpawnRunner::RemoteExecution,
+        SpawnRunner::Worker,
+        SpawnRunner::Sandboxed,
+        SpawnRunner::Local,
+        SpawnRunner::RemoteCacheHit,
+        SpawnRunner::DiskCacheHit,
+        SpawnRunner::Deduplicated,
+    ];
+
+    /// The runner's place in [`ALL`](Self::ALL).
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Whether the spawn's command ran, rather than a result being reused.
+    pub fn executed(self) -> bool {
+        matches!(
+            self,
+            SpawnRunner::RemoteExecution
+                | SpawnRunner::Worker
+                | SpawnRunner::Sandboxed
+                | SpawnRunner::Local
+        )
+    }
+}
+
 /// The spawns an execution log records of an invocation.
 #[derive(Default)]
 pub struct LoggedSpawns {
@@ -102,6 +160,30 @@ impl<'a> LoggedSpawn<'a> {
     /// or `linux-sandbox`, or a cache, such as `disk cache hit`.
     pub fn runner(&self) -> &'a str {
         &self.log.runners[self.record.runner]
+    }
+
+    /// What answered the spawn, from its [runner](Self::runner) and whether a
+    /// cache answered it. Bazel names a cache's answer after the cache, and
+    /// a runner it names otherwise than remote, sandboxed or worker execution
+    /// ran a local subprocess.
+    pub fn ran_on(&self) -> SpawnRunner {
+        let name = self.runner();
+        if name == DEDUPLICATED_RUNNER {
+            return SpawnRunner::Deduplicated;
+        }
+        if self.cache_hit() {
+            return match name {
+                DISK_CACHE_RUNNER => SpawnRunner::DiskCacheHit,
+                _ => SpawnRunner::RemoteCacheHit,
+            };
+        }
+        match name {
+            REMOTE_RUNNER => SpawnRunner::RemoteExecution,
+            DOCKER_RUNNER => SpawnRunner::Sandboxed,
+            _ if name.contains(SANDBOX_RUNNER_PART) => SpawnRunner::Sandboxed,
+            _ if name.contains(WORKER_RUNNER_PART) => SpawnRunner::Worker,
+            _ => SpawnRunner::Local,
+        }
     }
 
     pub fn runner_index(&self) -> usize {
@@ -305,5 +387,40 @@ mod tests {
         assert_eq!(primary, [Some("bazel-out/a.o"), None, Some("bazel-out/c")]);
         let hits: Vec<bool> = log.iter().map(|s| s.cache_hit()).collect();
         assert_eq!(hits, [false, false, true]);
+    }
+
+    #[test]
+    fn a_spawn_ran_on_what_its_runner_and_cache_hit_name() {
+        // The runner names and cache-hit flags Bazel logs.
+        let ran = [
+            ("remote", false, SpawnRunner::RemoteExecution),
+            ("remote cache hit", true, SpawnRunner::RemoteCacheHit),
+            ("disk cache hit", true, SpawnRunner::DiskCacheHit),
+            ("deduplicated", false, SpawnRunner::Deduplicated),
+            ("linux-sandbox", false, SpawnRunner::Sandboxed),
+            ("processwrapper-sandbox", false, SpawnRunner::Sandboxed),
+            ("docker", false, SpawnRunner::Sandboxed),
+            ("worker", false, SpawnRunner::Worker),
+            ("multiplex-worker", false, SpawnRunner::Worker),
+            ("local", false, SpawnRunner::Local),
+        ];
+        let mut builder = Builder::with_capacity(ran.len(), 0, 0);
+        for (runner, cache_hit, _) in ran {
+            builder.push(Logged {
+                cache_hit,
+                ..logged(runner, "M")
+            });
+        }
+        let log = builder.finish();
+        let on: Vec<SpawnRunner> = log.iter().map(|spawn| spawn.ran_on()).collect();
+        let expected: Vec<SpawnRunner> = ran.iter().map(|&(_, _, runner)| runner).collect();
+        assert_eq!(on, expected);
+    }
+
+    #[test]
+    fn all_lists_every_spawn_runner_at_its_index() {
+        for (i, runner) in SpawnRunner::ALL.into_iter().enumerate() {
+            assert_eq!(runner.index(), i);
+        }
     }
 }
