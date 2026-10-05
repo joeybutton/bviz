@@ -1,7 +1,6 @@
-//! Which targets of a graph a target set names, as Bazel expands the patterns
-//! of a build command line (`skyframe/TargetPatternPhaseFunction.java`) with
-//! the packages and targets the graph holds standing for those the workspace
-//! holds.
+//! Which targets of a graph a target pattern names, as Bazel expands a pattern
+//! (`skyframe/TargetPatternPhaseFunction.java`) with the packages and targets
+//! the graph holds standing for those the workspace holds.
 //!
 //! Bazel is cited here as of its tag 9.2.0: a source file by its path beneath
 //! `src/main/java/com/google/devtools/build/lib`, a test by its class beneath
@@ -10,7 +9,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::capability::{Axis, Capabilities, Support};
 use crate::facets::Facets;
@@ -20,10 +19,9 @@ use crate::label::encloses;
 use crate::select::labels::LabelIndex;
 use crate::select::pattern::{Parts, repo_matches, strip_sigil};
 use crate::target_pattern::{Repo, TargetPattern};
-use crate::target_set::{PatternError, TargetSet};
 
 /// The targets of one graph by repository, package and name, against which a
-/// [`TargetSet`] resolves.
+/// target pattern resolves.
 ///
 /// A package is one some target of the graph sits in, and a repository one
 /// some target's label names, so a package or repository the build holds but
@@ -37,24 +35,23 @@ pub struct TargetIndex {
     tags: Support,
 }
 
-/// The targets of a graph a [`TargetSet`] names.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Resolved {
-    /// In id order.
-    pub targets: Vec<Id>,
-    /// The rules tagged `manual` that are none of `targets` though a wildcard
-    /// adding its targets covers them and no pattern after that wildcard
-    /// takes them out, in the order of their labels.
-    pub left_out: Vec<Id>,
+/// Whether a wildcard leaves out the rules tagged `manual`, as one on a build
+/// command line does (`pkgcache/FilteringPolicies.java`) and one in a query
+/// does not.
+#[derive(Clone, Copy)]
+pub(crate) struct Policy {
+    pub(crate) leave_out_manual: bool,
 }
 
 /// The targets one pattern names, each as where it lies among the labels.
 #[derive(Default)]
-struct Named {
+pub(crate) struct Named {
     /// Named on their own, which no tag leaves out.
-    alone: Vec<usize>,
-    /// Covered by a wildcard.
-    covered: Vec<usize>,
+    pub(crate) alone: Vec<usize>,
+    /// Covered by a wildcard and kept by the policy.
+    pub(crate) covered: Vec<usize>,
+    /// Covered by a wildcard and left out by the policy.
+    pub(crate) left_out: Vec<usize>,
 }
 
 /// What a wildcard tells targets apart by.
@@ -117,52 +114,27 @@ impl TargetIndex {
         self.tags
     }
 
-    /// The targets `set` names: each pattern's targets are added to those
-    /// before it, or taken out of them where it is negative, so a negative
-    /// pattern ahead of every positive one takes nothing out. A wildcard
-    /// leaves out a rule tagged `manual` where it adds, and not where it
-    /// takes out; a target named on its own is never left out.
-    pub fn resolve(&self, set: &TargetSet) -> Result<Resolved, PatternError> {
-        let mut chosen: FxHashSet<usize> = FxHashSet::default();
-        let mut left_out: FxHashSet<usize> = FxHashSet::default();
-        for signed in set.patterns() {
-            let Named { alone, covered } =
-                self.named(signed.pattern())
-                    .map_err(|message| PatternError {
-                        pattern: signed.written().to_string(),
-                        message,
-                    })?;
-            match signed.negative() {
-                false => {
-                    chosen.extend(alone);
-                    for at in covered {
-                        match self.sorts[at] {
-                            Sort::Rule { manual: true } => left_out.insert(at),
-                            Sort::Rule { manual: false } | Sort::NoRule => chosen.insert(at),
-                        };
-                    }
-                }
-                true => {
-                    for at in alone.iter().chain(&covered) {
-                        chosen.remove(at);
-                        left_out.remove(at);
-                    }
-                }
-            }
-        }
-        let id = |at: usize| self.labels.entries()[at].0;
-        let mut left_out: Vec<usize> = left_out.difference(&chosen).copied().collect();
-        left_out.sort_unstable();
-        let mut targets: Vec<Id> = chosen.into_iter().map(id).collect();
+    /// The targets `pattern` names, as a query names them: a wildcard keeps
+    /// the rules tagged `manual`. In label order.
+    pub fn targets(&self, pattern: &TargetPattern) -> Result<Vec<Id>, String> {
+        let policy = Policy {
+            leave_out_manual: false,
+        };
+        let Named { alone, covered, .. } = self.named(pattern, policy)?;
+        let mut targets: Vec<usize> = alone;
+        targets.extend(covered);
         targets.sort_unstable();
-        Ok(Resolved {
-            targets,
-            left_out: left_out.into_iter().map(id).collect(),
-        })
+        targets.dedup();
+        Ok(targets.into_iter().map(|at| self.id(at)).collect())
     }
 
-    /// The targets `pattern` names.
-    fn named(&self, pattern: &TargetPattern) -> Result<Named, String> {
+    /// The node of the target at `at` among the labels.
+    pub(crate) fn id(&self, at: usize) -> Id {
+        self.labels.entries()[at].0
+    }
+
+    /// The targets `pattern` names, a wildcard leaving out what `policy` says.
+    pub(crate) fn named(&self, pattern: &TargetPattern, policy: Policy) -> Result<Named, String> {
         let kept = |at: usize, rules_only: bool| match self.sorts[at] {
             Sort::NoRule => !rules_only,
             Sort::Rule { .. } => true,
@@ -197,7 +169,7 @@ impl TargetIndex {
                         Some(target) => named.alone.push(target),
                         None => {
                             let kept = targets.filter(|&at| kept(at, wildcard.rules_only()));
-                            named.covered.extend(kept);
+                            named.cover(kept, &self.sorts, policy);
                         }
                     }
                 }
@@ -216,11 +188,13 @@ impl TargetIndex {
                 if beneath().next().is_none() {
                     return Err(format!("no targets found beneath '{directory}'"));
                 }
-                let covered = beneath().filter(|&at| kept(at, *rules_only)).collect();
-                Ok(Named {
-                    covered,
-                    ..Named::default()
-                })
+                let mut named = Named::default();
+                named.cover(
+                    beneath().filter(|&at| kept(at, *rules_only)),
+                    &self.sorts,
+                    policy,
+                );
+                Ok(named)
             }
             TargetPattern::PathAsTarget { path } => self.path_as_target(path).map(alone),
         }
@@ -323,6 +297,19 @@ impl TargetIndex {
     }
 }
 
+impl Named {
+    /// Adds the targets at `covered` a wildcard covers, as `policy` keeps or
+    /// leaves each out by its sort in `sorts`.
+    fn cover(&mut self, covered: impl Iterator<Item = usize>, sorts: &[Sort], policy: Policy) {
+        for at in covered {
+            match sorts[at] {
+                Sort::Rule { manual: true } if policy.leave_out_manual => self.left_out.push(at),
+                Sort::Rule { .. } | Sort::NoRule => self.covered.push(at),
+            }
+        }
+    }
+}
+
 /// The repository part a pattern naming `repo` writes, sigil and all.
 fn part(repo: &Repo) -> String {
     match repo {
@@ -338,6 +325,7 @@ mod tests {
     use crate::facets::FacetsBuilder;
     use crate::graph::Node;
     use crate::intern::Names;
+    use crate::target_set::{Resolved, TargetSet};
 
     /// A graph of targets, each written as its canonical label, a rule unless
     /// its name has a dot, tagged as `tags` says.
@@ -394,7 +382,7 @@ mod tests {
     fn resolved_both(fixture: &mut Fixture, set: &str) -> Result<[Vec<String>; 2], String> {
         let (index, names) = fixture.index();
         let set = TargetSet::parse(set).map_err(|e| e.to_string())?;
-        let Resolved { targets, left_out } = index.resolve(&set).map_err(|e| e.to_string())?;
+        let Resolved { targets, left_out } = set.resolve(&index).map_err(|e| e.to_string())?;
         let label = |&id| names.resolve(id).trim_start_matches("target:").to_string();
         let mut targets: Vec<String> = targets.iter().map(label).collect();
         targets.sort();
@@ -422,6 +410,26 @@ mod tests {
         assert_eq!(set("//cc/..."), ["//cc:my_test"]);
         assert_eq!(set("//cc:my_lib"), ["//cc:my_lib"]);
         assert_eq!(set("//cc:*"), ["//cc:lib.cc", "//cc:my_test"]);
+    }
+
+    /// A query reads a wildcard as naming every target it covers, a rule
+    /// tagged `manual` among them (`query2/SkyQueryEnvironment.java` resolves
+    /// its patterns with `FilteringPolicies.NO_FILTER`).
+    #[test]
+    fn a_query_wildcard_keeps_a_manual_rule() {
+        let mut fixture = Fixture::new();
+        fixture
+            .target("//cc:my_lib", &["manual"])
+            .target("//cc:my_test", &[]);
+        let (index, names) = fixture.index();
+        let labels = |pattern: &str| -> Vec<&str> {
+            let pattern = TargetPattern::parse(pattern).unwrap();
+            let targets = index.targets(&pattern).unwrap();
+            let label = |id: &Id| names.resolve(*id).trim_start_matches("target:");
+            targets.iter().map(label).collect()
+        };
+        assert_eq!(labels("//cc:all"), ["//cc:my_lib", "//cc:my_test"]);
+        assert_eq!(labels("//..."), ["//cc:my_lib", "//cc:my_test"]);
     }
 
     /// A negative pattern takes out what it names, manual or not, and only

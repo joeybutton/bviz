@@ -8,8 +8,8 @@ use crate::point::{point_label, unit_names};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
-use bviz_graph_layout::target_pattern::{Resolved, TargetIndex, TargetPattern};
-use bviz_graph_layout::target_set::{PatternError, TargetSet, TopLevel};
+use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
+use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
 use bviz_ui_components::{QueryField, TextTooltip, TooltipColors};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 
@@ -114,7 +114,7 @@ pub(super) fn find(
     let Resolved {
         targets: named,
         left_out,
-    } = index.resolve(&set)?;
+    } = set.resolve(index)?;
     let mut notices: Vec<String> = Vec::new();
     let shared = targets.shared();
     let left_out = left_out.iter().map(|&id| point_label(id, shared));

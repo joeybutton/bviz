@@ -4,7 +4,10 @@
 
 use std::fmt;
 
-use crate::target_pattern::TargetPattern;
+use rustc_hash::FxHashSet;
+
+use crate::intern::Id;
+use crate::target_pattern::{Policy, TargetIndex, TargetPattern};
 
 mod copies;
 
@@ -100,6 +103,59 @@ impl TargetSet {
 
     pub fn patterns(&self) -> &[Signed] {
         &self.patterns
+    }
+}
+
+/// The targets of a graph a [`TargetSet`] names.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Resolved {
+    /// In id order.
+    pub targets: Vec<Id>,
+    /// The rules tagged `manual` that are none of `targets` though a wildcard
+    /// adding its targets covers them and no pattern after that wildcard
+    /// takes them out, in the order of their labels.
+    pub left_out: Vec<Id>,
+}
+
+impl TargetSet {
+    /// The targets of `index` this set names: each pattern's targets are
+    /// added to those before it, or taken out of them where it is negative, so
+    /// a negative pattern ahead of every positive one takes nothing out. A
+    /// wildcard leaves out a rule tagged `manual` where it adds
+    /// (`pkgcache/FilteringPolicies.java`), and not where it takes out; a
+    /// target named on its own is never left out.
+    pub fn resolve(&self, index: &TargetIndex) -> Result<Resolved, PatternError> {
+        let mut chosen: FxHashSet<usize> = FxHashSet::default();
+        let mut left_out: FxHashSet<usize> = FxHashSet::default();
+        for signed in self.patterns() {
+            let leave_out_manual = !signed.negative();
+            let named = index
+                .named(signed.pattern(), Policy { leave_out_manual })
+                .map_err(|message| PatternError {
+                    pattern: signed.written().to_string(),
+                    message,
+                })?;
+            match signed.negative() {
+                false => {
+                    chosen.extend(named.alone.iter().chain(&named.covered));
+                    left_out.extend(named.left_out);
+                }
+                true => {
+                    for at in named.alone.iter().chain(&named.covered) {
+                        chosen.remove(at);
+                        left_out.remove(at);
+                    }
+                }
+            }
+        }
+        let mut left_out: Vec<usize> = left_out.difference(&chosen).copied().collect();
+        left_out.sort_unstable();
+        let mut targets: Vec<Id> = chosen.into_iter().map(|at| index.id(at)).collect();
+        targets.sort_unstable();
+        Ok(Resolved {
+            targets,
+            left_out: left_out.into_iter().map(|at| index.id(at)).collect(),
+        })
     }
 }
 

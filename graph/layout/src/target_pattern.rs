@@ -9,7 +9,8 @@
 
 mod resolve;
 
-pub use resolve::{Resolved, TargetIndex};
+pub(crate) use resolve::Policy;
+pub use resolve::TargetIndex;
 
 /// What one pattern names, by the kinds Bazel tells patterns apart by.
 #[derive(Clone, PartialEq, Eq, Debug)]
