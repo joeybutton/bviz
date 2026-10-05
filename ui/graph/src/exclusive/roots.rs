@@ -8,9 +8,8 @@ use crate::point::{point_label, unit_names};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
-use bviz_graph_layout::target_set::{
-    PatternError, Resolved, TargetIndex, TargetPattern, TargetSet, TopLevel,
-};
+use bviz_graph_layout::target_pattern::{Resolved, TargetIndex, TargetPattern};
+use bviz_graph_layout::target_set::{PatternError, TargetSet, TopLevel};
 use bviz_ui_components::{QueryField, TextTooltip, TooltipColors};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 

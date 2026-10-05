@@ -3,7 +3,7 @@
 //! the packages and targets the graph holds standing for those the workspace
 //! holds.
 //!
-//! Bazel is cited here as of its tag 9.1.0: a source file by its path beneath
+//! Bazel is cited here as of its tag 9.2.0: a source file by its path beneath
 //! `src/main/java/com/google/devtools/build/lib`, a test by its class beneath
 //! `src/test/java/com/google/devtools/build/lib`.
 
@@ -19,7 +19,8 @@ use crate::intern::Id;
 use crate::label::encloses;
 use crate::select::labels::LabelIndex;
 use crate::select::pattern::{Parts, repo_matches, strip_sigil};
-use crate::target_set::{PatternError, Repo, TargetPattern, TargetSet};
+use crate::target_pattern::{Repo, TargetPattern};
+use crate::target_set::{PatternError, TargetSet};
 
 /// The targets of one graph by repository, package and name, against which a
 /// [`TargetSet`] resolves.

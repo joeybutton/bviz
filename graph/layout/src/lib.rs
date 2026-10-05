@@ -32,6 +32,7 @@ pub mod repo;
 pub mod select;
 mod sketch;
 pub mod streamed_proto;
+pub mod target_pattern;
 pub mod target_set;
 pub mod transition;
 
