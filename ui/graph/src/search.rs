@@ -373,6 +373,11 @@ pub(crate) fn acting(filter: &Filter) -> Option<Act> {
     filter.rules.iter().find_map(written)
 }
 
+/// Whether the search wrote `rule`.
+pub(crate) fn wrote(rule: &Rule) -> bool {
+    written(rule).is_some()
+}
+
 /// What `rule` does with the labels it names, where it is one the search wrote:
 /// a rule over the label term and nothing besides.
 fn written(rule: &Rule) -> Option<Act> {

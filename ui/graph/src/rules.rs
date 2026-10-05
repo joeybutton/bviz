@@ -114,6 +114,11 @@ pub(crate) fn hiding(filter: &Filter, term: Term, values: BTreeSet<Value>) -> Fi
     }
 }
 
+/// The term whose control wrote `rule`; `None` for a rule no control wrote.
+pub(crate) fn control(rule: &Rule) -> Option<Term> {
+    written(rule).map(|(term, _)| term)
+}
+
 /// The term and values `rule` hides, where it is one a control wrote; `None` for
 /// any other rule, which no control may edit.
 fn written(rule: &Rule) -> Option<(Term, Vec<Value>)> {

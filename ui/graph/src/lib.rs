@@ -293,6 +293,7 @@ pub struct GraphPanel {
     missing_open: bool,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
+    reveal: reveal::Reveal,
     report: report::Card,
     timecard: timecard::Card,
     /// The dependency paths asked for, which the panel draws in place of its
@@ -491,6 +492,7 @@ impl GraphPanel {
             critical_path_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
+            reveal: reveal::Reveal::Idle,
             report: report::Card::new(),
             timecard: timecard::Card::new(),
             why: why::Why::new(),
@@ -583,6 +585,7 @@ impl GraphPanel {
             )
             .child(
                 column::Column::new()
+                    .held(reveal::card(self, &palette, cx))
                     .held(pins::panel(self, &palette, cx))
                     .folding(report::card(self, &palette, cx))
                     .folding(timecard::card(self, &palette, cx))
@@ -721,10 +724,12 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
-    /// Puts away the innermost thing the reader set up: the selection, and
-    /// with none the dependency paths asked for.
+    /// Puts away the innermost thing the reader set up: a reveal pending, then
+    /// the selection, and with neither the dependency paths asked for.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.selection.node().is_some() {
+        if reveal::dismiss(self) {
+            cx.notify();
+        } else if self.selection.node().is_some() {
             self.selection.clear();
             self.invalidate_canvas(cx);
         } else {

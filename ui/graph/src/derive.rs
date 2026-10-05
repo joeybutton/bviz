@@ -17,7 +17,7 @@ use crate::{GraphPanel, MARGIN, build};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::paths::Paths;
-use bviz_graph_layout::select::{Filter, Verdict};
+use bviz_graph_layout::select::{Filter, Hiding, Verdict, Verdicts};
 use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
@@ -186,14 +186,38 @@ enum Lens {
     Paths(Arc<Paths>),
 }
 
+/// The lens a slice was derived through, with what it made of the document's
+/// nodes where that is more than which of them the slice holds.
+#[derive(Clone)]
+enum Through {
+    Filter {
+        filter: Filter,
+        verdicts: Arc<Verdicts>,
+    },
+    Paths {
+        paths: Arc<Paths>,
+        /// Which ids the paths' subgraph holds, indexed by id.
+        held: Arc<Vec<bool>>,
+    },
+}
+
+/// What keeps a node of the document's graph out of what a panel draws.
+pub(crate) enum Hidden<'a> {
+    /// Dependency paths are drawn in the filter's place, and none passes
+    /// through the node.
+    OffPaths,
+    /// The filter hides the node, by `hiding` among its rules and pins.
+    Filtered { filter: &'a Filter, hiding: Hiding },
+}
+
 /// The graph one lens leaves of the document's, with everything derived from
 /// it. A derivation replaces it whole, so a frame reads one lens's graph
 /// throughout.
 #[derive(Clone)]
 struct Slice {
-    /// The lens this was derived from, which a panel drawing through another
+    /// The lens this was derived through, which a panel drawing through another
     /// must restrict the document's graph afresh to leave behind.
-    lens: Lens,
+    lens: Through,
     base: Arc<Graph>,
     /// The restriction with its transitively-redundant edges removed, which the
     /// collapsed views are projected through.
@@ -261,12 +285,15 @@ impl RestrictedMap {
 }
 
 impl Slice {
-    /// The whole graph, which is what `filter` leaves where it hides nothing; it
-    /// is already reduced and placed with the document, so such a filter costs
-    /// nothing to draw through.
-    fn whole(shared: &Shared, filter: Filter) -> Self {
+    /// The whole graph drawn through no filter, which is also what a filter
+    /// hiding nothing leaves; it is already reduced and placed with the
+    /// document, so such a filter costs nothing to draw through.
+    fn whole(shared: &Shared) -> Self {
         Slice {
-            lens: Lens::Filter(filter),
+            lens: Through::Filter {
+                filter: Filter::default(),
+                verdicts: Arc::default(),
+            },
             base: Arc::clone(&shared.base),
             reduced: Arc::clone(&shared.reduced_base),
             map: SliceMap::Whole(shared.map.clone()),
@@ -460,7 +487,7 @@ impl Derived {
         self.expanded = loaded.opening.expanded.clone();
         self.revealing = None;
         self.over_budget = loaded.opening.over_budget;
-        self.slice = Some(Slice::whole(&loaded.shared, Filter::default()));
+        self.slice = Some(Slice::whole(&loaded.shared));
         self.drawings += 1;
         self.layered = None;
         self.in_flight = None;
@@ -537,12 +564,34 @@ impl Derived {
     }
 
     /// Whether `lens` is the one the panel draws through.
-    fn draws_through(&self, lens: &Lens) -> bool {
+    fn draws_through(&self, lens: &Through) -> bool {
         match (lens, &self.paths) {
-            (Lens::Paths(drawn), Some(view)) => Arc::ptr_eq(drawn, &view.paths),
-            (Lens::Filter(drawn), None) => *drawn == self.filter,
+            (Through::Paths { paths, .. }, Some(view)) => Arc::ptr_eq(paths, &view.paths),
+            (Through::Filter { filter, .. }, None) => *filter == self.filter,
             _ => false,
         }
+    }
+
+    /// What keeps the node `id` out of the drawing the panel holds, read from
+    /// the lens that drawing was derived through; `None` where it holds the
+    /// node, and before the graph is read.
+    pub(crate) fn hidden(&self, id: Id) -> Option<Hidden<'_>> {
+        let slice = self.slice.as_ref()?;
+        match &slice.lens {
+            Through::Filter { filter, verdicts } => verdicts
+                .hiding(id)
+                .map(|hiding| Hidden::Filtered { filter, hiding }),
+            Through::Paths { held, .. } => {
+                let held = held.get(id.0 as usize).copied().unwrap_or(false);
+                (!held).then_some(Hidden::OffPaths)
+            }
+        }
+    }
+
+    /// Has the next derivation open the layered layout onto `id`, as
+    /// [`expand_to`] does, for a request that derivation answers.
+    pub(crate) fn open_onto_next(&mut self, id: Id) {
+        self.revealing = Some(id);
     }
 
     /// The filter this panel draws its share of the document's graph through,
@@ -608,7 +657,7 @@ impl Derived {
     /// than lay out over the restriction the panel holds, which it must wherever
     /// that restriction was derived through another lens — as it is for every
     /// request made before a filter change has landed.
-    fn restricting(&self) -> bool {
+    pub(crate) fn restricting(&self) -> bool {
         self.slice
             .as_ref()
             .is_some_and(|slice| !self.draws_through(&slice.lens))
@@ -708,6 +757,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     publish_filter(view, cx);
     crate::search::reset(view, cx);
     crate::why::reset(view);
+    crate::reveal::reset(view);
     ensure_layout(view, cx);
 }
 
@@ -998,6 +1048,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             if let Some(landing) = landing {
                 view.settle_onto(&landing, cx);
             }
+            crate::reveal::landed(view, cx);
             view.invalidate_canvas(cx);
         },
     );
@@ -1014,7 +1065,7 @@ fn restrict(
     expanded: &HashSet<Id>,
     reduced: bool,
 ) -> (Slice, Restricted) {
-    let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
+    let verdicts = Arc::new(filter.evaluate(&shared.base, &shared.names, &shared.facets));
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();
@@ -1035,14 +1086,18 @@ fn restrict(
         }
     }
     let faded = Arc::new(faded);
+    let lens = Through::Filter {
+        filter: filter.clone(),
+        verdicts,
+    };
     let slice = match dropped.is_empty() {
         true => Slice {
+            lens,
             faded,
-            ..Slice::whole(shared, filter.clone())
+            ..Slice::whole(shared)
         },
         false => {
             let base = bviz_graph_layout::filter::filter(&shared.base, &shared.reduced_base, &keep);
-            let lens = Lens::Filter(filter.clone());
             restricted_slice(shared, lens, base, faded, Arc::default())
         }
     };
@@ -1054,15 +1109,19 @@ fn restrict(
 /// a legible drawing allow: the reader named exactly what to look at.
 fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted) {
     let base = paths.subgraph(&shared.base);
-    let kept: FxHashSet<Id> = base.nodes.iter().map(|node| node.id).collect();
-    let mut dropped: HashSet<Id> = HashSet::with_capacity(shared.base.nodes.len() - kept.len());
+    let mut held = vec![false; bviz_graph_layout::graph::id_span(&shared.base)];
+    for node in &base.nodes {
+        held[node.id.0 as usize] = true;
+    }
+    let mut dropped: HashSet<Id> =
+        HashSet::with_capacity(shared.base.nodes.len() - base.nodes.len());
     dropped.extend(
         shared
             .base
             .nodes
             .iter()
             .map(|node| node.id)
-            .filter(|id| !kept.contains(id)),
+            .filter(|id| !held[id.0 as usize]),
     );
     let opened = bviz_graph_layout::lod::default_expansion(
         &base,
@@ -1074,7 +1133,10 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
         Ok(expanded) => (expanded, None),
         Err(overflow) => (HashSet::new(), Some(overflow)),
     };
-    let lens = Lens::Paths(Arc::clone(paths));
+    let lens = Through::Paths {
+        paths: Arc::clone(paths),
+        held: Arc::new(held),
+    };
     let transitions = Arc::new(Transitions::of(&base, &shared.facets));
     let slice = restricted_slice(shared, lens, base, Arc::new(HashSet::new()), transitions);
     let restricted = Restricted {
@@ -1090,7 +1152,7 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
 /// `transitions` are what the drawing marks of it.
 fn restricted_slice(
     shared: &Shared,
-    lens: Lens,
+    lens: Through,
     base: Graph,
     faded: Arc<HashSet<Id>>,
     transitions: Arc<Transitions>,
@@ -1431,7 +1493,7 @@ mod tests {
         assert!(!derived.deriving_for(LayoutMode::Layered));
 
         derived.adopt(Landed {
-            slice: Slice::whole(&loaded.shared, Filter::default()),
+            slice: Slice::whole(&loaded.shared),
             expanded: HashSet::new(),
             restricted: None,
             layered: Relaid::Nothing,
@@ -1629,11 +1691,15 @@ mod tests {
             !derived.draws_through(&slice.lens),
             "paths found afresh are told from the ones asked for"
         );
+        let Through::Paths { held, .. } = &slice.lens else {
+            panic!("a slice drawn through paths");
+        };
+        let lens = Through::Paths {
+            paths: Arc::clone(&derived.paths.as_ref().expect("the paths asked for").paths),
+            held: Arc::clone(held),
+        };
         derived.adopt(Landed {
-            slice: Slice {
-                lens: derived.lens(),
-                ..slice
-            },
+            slice: Slice { lens, ..slice },
             expanded: restricted.expanded.clone(),
             restricted: Some(restricted),
             layered: Relaid::Nothing,
@@ -1692,6 +1758,46 @@ mod tests {
         assert!(expanded.is_empty());
     }
 
+    /// What the panel draws through decides what keeps a node out of the
+    /// drawing: a filter names the hiding its verdicts reached, and paths drawn
+    /// in its place leave out every node off them.
+    #[test]
+    fn a_node_the_drawing_leaves_out_is_told_by_the_lens_it_was_drawn_through() {
+        let loaded = document();
+        let mut derived = opened(&loaded);
+        let action = id(&loaded, "//a:t#compile");
+        let target = id(&loaded, "//a:t");
+        assert!(derived.hidden(action).is_none());
+
+        derived.filter = hiding(Kind::Action);
+        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        derived.adopt(Landed {
+            slice,
+            expanded: restricted.expanded.clone(),
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        assert!(matches!(
+            derived.hidden(action),
+            Some(Hidden::Filtered {
+                hiding: Hiding::Rule(0),
+                ..
+            })
+        ));
+        assert!(derived.hidden(target).is_none());
+
+        derived.show_paths(Some(across(&loaded)));
+        let (slice, restricted) = restrict_to_paths(&loaded.shared, &across(&loaded));
+        derived.adopt(Landed {
+            slice,
+            expanded: restricted.expanded.clone(),
+            restricted: Some(restricted),
+            layered: Relaid::Nothing,
+        });
+        assert!(matches!(derived.hidden(action), Some(Hidden::OffPaths)));
+        assert!(derived.hidden(id(&loaded, "//a:t#link")).is_none());
+    }
+
     /// A drawing whose extent says which derivation produced it.
     fn drawing(width: f64) -> Arc<LaidOut> {
         Arc::new(LaidOut {
@@ -1713,7 +1819,7 @@ mod tests {
 
     fn landed(loaded: &Loaded, width: f64) -> Landed {
         Landed {
-            slice: Slice::whole(&loaded.shared, Filter::default()),
+            slice: Slice::whole(&loaded.shared),
             expanded: HashSet::new(),
             restricted: None,
             layered: Relaid::Fresh(layered(loaded, width)),
@@ -1747,7 +1853,7 @@ mod tests {
         let held = Arc::clone(&derived.layered.as_ref().expect("a drawing held").view);
 
         let adopted = derived.adopt(Landed {
-            slice: Slice::whole(&loaded.shared, Filter::default()),
+            slice: Slice::whole(&loaded.shared),
             expanded: HashSet::new(),
             restricted: None,
             layered: Relaid::Held,

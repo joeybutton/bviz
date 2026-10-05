@@ -53,6 +53,16 @@ pub(crate) fn toggle(filter: &Filter, node: Id, pin: Visibility) -> Filter {
     }
 }
 
+/// `filter` without the pin it holds for `node`.
+fn unpinned(filter: &Filter, node: Id) -> Filter {
+    let mut pins = filter.pins.clone();
+    pins.remove(&node);
+    Filter {
+        pins,
+        ..filter.clone()
+    }
+}
+
 /// The override `filter` holds for `node`.
 pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Visibility> {
     filter.pins.get(&node).copied()
@@ -111,6 +121,12 @@ fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
 /// Pins `node` to `pin`, or takes that override back off.
 pub(crate) fn set(view: &mut GraphPanel, node: Id, pin: Visibility, cx: &mut Context<GraphPanel>) {
     let filter = toggle(view.derived.filter(), node, pin);
+    checklist::set_filter(view, filter, cx);
+}
+
+/// Drops the pin `node` carries, leaving it to the rules.
+pub(crate) fn unpin(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
+    let filter = unpinned(view.derived.filter(), node);
     checklist::set_filter(view, filter, cx);
 }
 
