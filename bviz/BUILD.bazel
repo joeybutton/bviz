@@ -17,6 +17,7 @@ rust_binary(
         "//ui/console:console_lib",
         "//ui/execlog:execlog_lib",
         "//ui/graph:graph_lib",
+        "//ui/playback",
         "//ui/trace:trace_lib",
         "//ui/workspace",
         "@crates//:clap",

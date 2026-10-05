@@ -20,6 +20,7 @@ members = [
     "ui/execlog/args",
     "ui/graph",
     "ui/graph/args",
+    "ui/playback",
     "ui/shell",
     "ui/theme",
     "ui/trace",

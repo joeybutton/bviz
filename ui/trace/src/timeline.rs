@@ -17,6 +17,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, SliceDetail, TimeSpan};
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
+use bviz_ui_playback::Clock;
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
@@ -354,6 +355,7 @@ pub(crate) struct Timeline {
     /// Whether the initial fit-to-window view has been set; latched during the
     /// first paint, when the viewport size is first known.
     fitted: bool,
+    follow: Follow,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Option<SliceDrawCache>,
     /// The cursor position while it hovers the flame lanes, anchoring the slice
@@ -376,6 +378,9 @@ pub(crate) struct Timeline {
     _session_observer: Option<Subscription>,
     /// Redraws the counter plots once the working lanes are there to plot.
     _working_lanes_derived: Subscription,
+    /// Repaints the overlay, which draws the playhead, as a gesture moves the
+    /// document's clock, and follows the playhead again from there.
+    _clock_changed: Option<Subscription>,
 }
 
 impl Timeline {
@@ -390,6 +395,13 @@ impl Timeline {
         let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
         let session = model.read(cx).session().cloned();
         let session_observer = session.map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
+        let clock = model.read(cx).clock().cloned();
+        let clock_changed = clock.map(|clock| {
+            cx.observe(&clock, |timeline, _, cx| {
+                timeline.follow = Follow::Playhead;
+                cx.notify();
+            })
+        });
         let working_lanes_derived = cx
             .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
                 timeline.invalidate_canvas(cx)
@@ -406,6 +418,7 @@ impl Timeline {
             counter_scroll_held: 0.0,
             viewport: Bounds::default(),
             fitted: false,
+            follow: Follow::Playhead,
             slice_draw: None,
             hover: None,
             crosshair: None,
@@ -415,6 +428,7 @@ impl Timeline {
             _model_observer: model_observer,
             _session_observer: session_observer,
             _working_lanes_derived: working_lanes_derived,
+            _clock_changed: clock_changed,
         }
     }
 
@@ -426,6 +440,43 @@ impl Timeline {
         cx.notify();
     }
 
+    /// Pages the time view to show the playhead again where it has played out
+    /// of sight. Only a playing clock moves the view, and neither while a drag
+    /// holds it nor once the reader has moved it ([`Follow::Released`]), so a
+    /// reader exploring the timeline keeps where they are.
+    fn follow_playhead(&mut self, cx: &mut Context<Self>) {
+        if !self.fitted || !matches!(self.drag, TimelineDrag::None) {
+            return;
+        }
+        let (span, at_us) = {
+            let model = self.model.read(cx);
+            let playing = model.clock().is_some_and(|clock| {
+                clock
+                    .read(cx)
+                    .timeline()
+                    .is_some_and(|timeline| timeline.is_playing())
+            });
+            if !playing {
+                return;
+            }
+            let (Some(profile), Some(at_us)) = (model.profile(), model.playhead_us(cx)) else {
+                return;
+            };
+            (profile.span(), at_us)
+        };
+        if !(span.start_us..=span.end_us).contains(&at_us) {
+            return;
+        }
+        let time_w = self.regions(cx).time_w;
+        let x = self.view.x_of(at_us);
+        if !self.follow.pages((0.0..=time_w).contains(&x)) {
+            return;
+        }
+        self.view.pan_px(time_w * PLAYHEAD_FOLLOW_INSET - x);
+        self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
+        self.invalidate_canvas(cx);
+    }
+
     /// Drops the state that addresses the document being replaced, so nothing
     /// survives the swap still pointing into the old profile.
     pub(crate) fn reset_for_new_profile(&mut self) {
@@ -433,6 +484,15 @@ impl Timeline {
         self.scroll = RowAnchor::Start;
         self.counter_scroll_held = 0.0;
         self.drag = TimelineDrag::None;
+        self.follow = Follow::Playhead;
+    }
+
+    /// Releases the time view from following the playhead where the reader
+    /// moved it from `before`.
+    fn release_if_moved(&mut self, before: TimeView) {
+        if self.view != before {
+            self.follow = Follow::Released;
+        }
     }
 
     /// The counters strip and gutter width the timeline is split by, held by the
@@ -801,6 +861,7 @@ impl Timeline {
         let regions = self.regions(cx);
         let time_w = regions.time_w;
         let content_left = regions.content_left;
+        let before = self.view;
         let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         if e.modifiers.control || e.modifiers.platform {
@@ -828,6 +889,7 @@ impl Timeline {
             self.view.pan_px(pan_dx);
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         }
+        self.release_if_moved(before);
         self.invalidate_canvas(cx);
     }
 
@@ -920,8 +982,10 @@ impl Focusable for Timeline {
 
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.follow_playhead(cx);
         let (profile, lanes) = {
             let model = self.model.read(cx);
+            Clock::keep_pace(model.clock(), window, cx);
             let Some(profile) = model.profile() else {
                 return div().into_any_element();
             };
@@ -954,6 +1018,7 @@ fn timeline_on_drag(
     cx: &mut Context<Timeline>,
 ) {
     let moves_slices = !matches!(timeline.drag, TimelineDrag::TimeRegion(_));
+    let before = timeline.view;
     match timeline.drag {
         TimelineDrag::Pan => {
             let dx = f32::from(position.x) - f32::from(timeline.last_mouse.x);
@@ -983,6 +1048,7 @@ fn timeline_on_drag(
         }
         TimelineDrag::None => {}
     }
+    timeline.release_if_moved(before);
     timeline.update_hover(position, cx);
     if moves_slices {
         timeline.invalidate_canvas(cx);
@@ -1526,9 +1592,69 @@ fn paint_time_selection(
     }
 }
 
-/// The overlay's paint closure: the time selection, the crosshair, the hover
-/// tooltip, and — while a drag runs — the window-global drag handlers, from the
-/// selection, crosshair, hover, and drag state it reads through `parent`.
+/// Whether the time view pages to keep a playing clock's playhead in sight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Follow {
+    Playhead,
+    /// The reader moved the view, which stays where they put it until the
+    /// playhead is in sight again or a gesture moves the clock.
+    Released,
+}
+
+impl Follow {
+    /// Whether a frame showing the playhead, or not as `in_sight` says, pages
+    /// the view to it; a playhead in sight is followed from there on.
+    fn pages(&mut self, in_sight: bool) -> bool {
+        if in_sight {
+            *self = Follow::Playhead;
+        }
+        !in_sight && *self == Follow::Playhead
+    }
+}
+
+/// Where a page brings the playhead back into view, as a share of the time
+/// axis from its left edge: near the start, so it plays on across most of the
+/// width before the next page.
+const PLAYHEAD_FOLLOW_INSET: f32 = 0.1;
+
+/// Width of the playhead's rule, broader than the crosshair's hairline so the
+/// two read apart where they cross.
+const PLAYHEAD_WIDTH_PX: f32 = 2.0;
+
+/// Paints the playback time, profile instant `at_us`, as a rule down the
+/// time-axis sections the crosshair covers, where it falls within the shown
+/// time.
+fn paint_playhead(
+    at_us: i64,
+    tv: TimeView,
+    regions: Regions,
+    show_counters: bool,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let x = regions.content_left + tv.x_of(at_us);
+    if !(regions.content_left..=regions.time_right).contains(&x) {
+        return;
+    }
+    let rule = |top: f32, height: f32, window: &mut Window| {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(x - PLAYHEAD_WIDTH_PX / 2.0), px(top)),
+                size(px(PLAYHEAD_WIDTH_PX), px(height)),
+            ),
+            palette.playhead,
+        ));
+    };
+    rule(regions.flame_top, regions.flame_h(), window);
+    if show_counters {
+        rule(regions.counters_top, regions.counters_h(), window);
+    }
+}
+
+/// The overlay's paint closure: the time selection, the playhead, the
+/// crosshair, the hover tooltip, and — while a drag runs — the window-global
+/// drag handlers, from the selection, clock, crosshair, hover, and drag state
+/// it reads through `parent`.
 fn overlay_paint(
     profile: Arc<Profile>,
     lanes: Rc<LaneLayout>,
@@ -1537,7 +1663,17 @@ fn overlay_paint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds, window, cx| {
         let n_counters = track_count(&profile);
-        let (tv, counters, counter_scroll, gutter_width, selection, crosshair, hovered, dragging) = {
+        let (
+            tv,
+            counters,
+            counter_scroll,
+            gutter_width,
+            selection,
+            playhead,
+            crosshair,
+            hovered,
+            dragging,
+        ) = {
             let timeline = parent.read(cx);
             let tv = timeline.view;
             let counter_scroll = timeline.counter_scroll(cx);
@@ -1554,6 +1690,7 @@ fn overlay_paint(
                 counter_scroll,
                 gutter_width,
                 selection,
+                model.playhead_us(cx),
                 timeline.crosshair,
                 hovered,
                 !matches!(timeline.drag, TimelineDrag::None),
@@ -1563,6 +1700,9 @@ fn overlay_paint(
         let regions = Regions::new(bounds, n_counters, counters, gutter_width, flame_total);
         let show_counters = regions.shows_counters();
         paint_time_selection(&selection, tv, regions, show_counters, &palette, window);
+        if let Some(at_us) = playhead {
+            paint_playhead(at_us, tv, regions, show_counters, &palette, window);
+        }
         if let Some(at) = crosshair
             && f32::from(at.x) >= regions.content_left
         {
@@ -1665,6 +1805,16 @@ mod tests {
             TEST_VIEW,
             TEST_VIEWPORT,
         )
+    }
+
+    #[test]
+    fn a_released_view_follows_the_playhead_again_once_it_is_back_in_sight() {
+        let mut follow = Follow::Released;
+        assert!(!follow.pages(false));
+        assert_eq!(follow, Follow::Released);
+        assert!(!follow.pages(true));
+        assert_eq!(follow, Follow::Playhead);
+        assert!(follow.pages(false));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[package]
+name = "bviz_ui_playback"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_ui_playback"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+bviz_invocation = { workspace = true }
+bviz_ui_assets = { path = "../assets" }
+bviz_ui_components = { path = "../components" }
+bviz_ui_theme = { path = "../theme" }

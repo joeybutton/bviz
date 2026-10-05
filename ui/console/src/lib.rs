@@ -18,7 +18,8 @@ use model::ConsoleModel;
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_playback::DocumentClock;
+use bviz_ui_workspace::{Document, Member, PanelGroup, ViewSpec, Weight, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
@@ -52,16 +53,18 @@ impl From<ConsoleSource> for Load {
 }
 
 /// The views replaying the build `load` reads, which tells `session` what its
-/// stream knows of the invocation where it is opened as part of one.
+/// stream knows of the invocation where it is opened as part of one, and plays
+/// on `clock` where its document plays back.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
+    clock: Option<DocumentClock>,
     _window: &mut Window,
     cx: &mut App,
 ) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, cx));
+    let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, clock, cx));
     let console = ViewSpec::new({
         let label = label.clone();
         move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
@@ -104,7 +107,11 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, None, window, cx).into(),
+        |load, window, cx| {
+            Document::playing_on(DocumentClock::alone(cx), |clock| {
+                open(load, None, Some(clock.clone()), window, cx).into()
+            })
+        },
         &[console::register_keys],
     );
 }

@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod attempts;
 mod outcomes;
 mod runner;
 mod timings;
 
+pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
@@ -19,7 +21,7 @@ const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 
 /// A wall-clock instant, in microseconds since the Unix epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EpochMicros(i64);
 
 impl EpochMicros {
@@ -29,15 +31,27 @@ impl EpochMicros {
         EpochMicros(millis.saturating_mul(MICROS_PER_MILLI))
     }
 
-    /// The instant `seconds` seconds after the Unix epoch, to the nearest
-    /// microsecond and saturating at the representable range; the epoch itself
-    /// for a NaN.
+    /// The instant `seconds` seconds after the Unix epoch, placed as
+    /// [`plus_secs_f64`](Self::plus_secs_f64) places it.
     pub fn from_secs_f64(seconds: f64) -> EpochMicros {
-        EpochMicros((seconds * MICROS_PER_SECOND).round() as i64)
+        EpochMicros(0).plus_secs_f64(seconds)
     }
 
     pub const fn micros(self) -> i64 {
         self.0
+    }
+
+    /// The instant `micros` microseconds after this one (before it for a
+    /// negative count), saturating at the representable range.
+    pub const fn plus_micros(self, micros: i64) -> EpochMicros {
+        EpochMicros(self.0.saturating_add(micros))
+    }
+
+    /// The instant `seconds` seconds after this one, to the nearest
+    /// microsecond and saturating at the representable range; this one for a
+    /// NaN.
+    pub fn plus_secs_f64(self, seconds: f64) -> EpochMicros {
+        self.plus_micros((seconds * MICROS_PER_SECOND).round() as i64)
     }
 }
 
@@ -121,15 +135,30 @@ fn short(checksum: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision(u64);
 
+/// What a [`Session`] holds of one kind of report. An invocation writes one of
+/// each output a kind is reported from, so a report stands in place of any
+/// taken before, and the revision moves with each report and nothing else.
+#[derive(Default)]
+struct Reported<T> {
+    value: T,
+    revision: Revision,
+}
+
+impl<T> Reported<T> {
+    fn replace(&mut self, value: T) {
+        self.value = value;
+        self.revision.0 += 1;
+    }
+}
+
 /// What the views of one invocation's outputs share. Each output's reader adds
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
+    attempts: Reported<Attempts>,
     configurations: Configurations,
-    outcomes: Outcomes,
-    reported: Revision,
-    timings: Timings,
-    timed: Revision,
+    outcomes: Reported<Outcomes>,
+    timings: Reported<Timings>,
 }
 
 impl Session {
@@ -144,40 +173,42 @@ impl Session {
 
     /// What the invocation's build reported.
     pub fn outcomes(&self) -> &Outcomes {
-        &self.outcomes
+        &self.outcomes.value
     }
 
-    /// The same for as long as [`outcomes`](Self::outcomes) are those of one
-    /// report, whatever else the session learns meanwhile.
     pub fn outcomes_revision(&self) -> Revision {
-        self.reported
+        self.outcomes.revision
     }
 
-    /// Takes `reported` for what the invocation's build reported. A build
-    /// writes one build event stream, so these stand in place of any reported
-    /// before.
     pub fn report_outcomes(&mut self, reported: Outcomes) {
-        self.outcomes = reported;
-        self.reported.0 += 1;
+        self.outcomes.replace(reported);
     }
 
     /// What the invocation's profile recorded of its actions.
     pub fn timings(&self) -> &Timings {
-        &self.timings
+        &self.timings.value
     }
 
-    /// The same for as long as [`timings`](Self::timings) are those of one
-    /// report, whatever else the session learns meanwhile.
     pub fn timings_revision(&self) -> Revision {
-        self.timed
+        self.timings.revision
     }
 
-    /// Takes `reported` for what the invocation's profile recorded of its
-    /// actions. An invocation writes one profile, so these stand in place of
-    /// any reported before.
     pub fn report_timings(&mut self, reported: Timings) {
-        self.timings = reported;
-        self.timed.0 += 1;
+        self.timings.replace(reported);
+    }
+
+    /// When the invocation's actions were executed; none where its profile
+    /// cannot place them on the wall clock.
+    pub fn attempts(&self) -> &Attempts {
+        &self.attempts.value
+    }
+
+    pub fn attempts_revision(&self) -> Revision {
+        self.attempts.revision
+    }
+
+    pub fn report_attempts(&mut self, reported: Attempts) {
+        self.attempts.replace(reported);
     }
 }
 
@@ -202,6 +233,21 @@ mod tests {
         assert_eq!(EpochMicros::from_secs_f64(-0.000_001_6).micros(), -2);
         assert_eq!(EpochMicros::from_secs_f64(f64::INFINITY).micros(), i64::MAX);
         assert_eq!(EpochMicros::from_secs_f64(f64::NAN).micros(), 0);
+    }
+
+    #[test]
+    fn an_offset_moves_an_instant_in_order_and_saturates() {
+        let origin = EpochMicros::from_millis(1_781_439_245_231);
+        let later = origin.plus_micros(1_500);
+        assert_eq!(later.micros() - origin.micros(), 1_500);
+        assert!(origin < later && origin.plus_micros(-1) < origin);
+        assert_eq!(later.max(origin), later);
+        assert_eq!(origin.plus_micros(i64::MAX).micros(), i64::MAX);
+        assert_eq!(
+            origin.plus_secs_f64(1.000_000_6),
+            origin.plus_micros(1_000_001)
+        );
+        assert_eq!(origin.plus_secs_f64(f64::NAN), origin);
     }
 
     #[test]
@@ -331,6 +377,31 @@ mod tests {
         session.report_timings(Timings::default());
         assert_ne!(session.timings_revision(), timed);
         assert!(session.timings().is_empty());
+    }
+
+    #[test]
+    fn a_sessions_attempts_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let unattempted = session.attempts_revision();
+        session.report_timings(Timings::default());
+        assert_eq!(session.attempts_revision(), unattempted);
+
+        let attempt = attempts::tests::attempt(0, 10, &[]);
+        let mut attempts = Attempts::default();
+        attempts.record(Some("bazel-out/a.o"), None, attempt);
+        session.report_attempts(attempts);
+        let attempted = session.attempts_revision();
+        assert_ne!(attempted, unattempted);
+        assert_eq!(
+            session.attempts().action("bazel-out/a.o"),
+            Some(&[attempt][..])
+        );
+        session.report_timings(Timings::default());
+        assert_eq!(session.attempts_revision(), attempted);
+
+        session.report_attempts(Attempts::default());
+        assert_ne!(session.attempts_revision(), attempted);
+        assert!(session.attempts().is_empty());
     }
 
     #[test]

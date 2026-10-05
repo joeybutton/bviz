@@ -11,7 +11,8 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
-use gpui::{Context, Entity, EventEmitter, Task, WeakEntity};
+use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
+use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,9 +41,9 @@ pub(crate) struct WorkingLanesDerived;
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
     working_lanes: DerivedLanes,
-    /// Derives the profile's action timings and reports them to its session;
-    /// held with the profile, so that a profile replaced before its timings
-    /// are ready reports none.
+    /// Derives the profile's action timings and attempts and reports them to
+    /// its session; held with the profile, so that a profile replaced before
+    /// they are ready reports none.
     _reporting_timings: Option<Task<()>>,
 }
 
@@ -58,7 +59,7 @@ enum DerivedLanes {
 
 impl LoadedProfile {
     /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx` and its action timings to `session`.
+    /// `cx` and its action timings and attempts to `session`.
     fn new(
         profile: Profile,
         session: Option<WeakEntity<Session>>,
@@ -83,13 +84,14 @@ impl LoadedProfile {
         let reporting_timings = session.map(|session| {
             let timed = flamer.profile().clone();
             cx.spawn(async move |_, cx| {
-                let timings = cx
+                let (timings, attempts) = cx
                     .background_executor()
-                    .spawn(async move { timed.timings() })
+                    .spawn(async move { (timed.timings(), timed.attempts()) })
                     .await;
                 session
                     .update(cx, |session, cx| {
                         session.report_timings(timings);
+                        session.report_attempts(attempts.unwrap_or_default());
                         cx.notify();
                     })
                     .ok();
@@ -134,6 +136,9 @@ pub(crate) struct TraceModel {
     /// name what the profile holds only an id of. `None` for a profile opened
     /// apart from any.
     session: Option<Entity<Session>>,
+    /// Where the profile plays, `None` for a profile its document gives no
+    /// clock.
+    on_clock: Option<OnClock>,
     /// The full thread/counter lane layout for the loaded profile, built on first
     /// use. It depends only on the immutable profile, so it is cleared only when a
     /// new profile loads.
@@ -200,15 +205,17 @@ impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 
 impl TraceModel {
-    /// The document `profile` is being read into, loaded once the read finishes
-    /// and failed where it does not.
+    /// The document `profile` is being read into, loaded and playing on `clock`
+    /// once the read finishes and failed where it does not.
     pub(crate) fn reading(
         profile: Pending<Profile>,
         session: Option<Entity<Session>>,
+        clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new(
             session,
+            clock,
             load_in_background(
                 cx,
                 move || profile.join(),
@@ -221,15 +228,17 @@ impl TraceModel {
                         Err(err) => Source::Failed(err),
                     };
                     model.set_source(source, cx);
+                    model.place_on_clock(cx);
                 },
             ),
         )
     }
 
-    fn new(session: Option<Entity<Session>>, load: Task<()>) -> Self {
+    fn new(session: Option<Entity<Session>>, clock: Option<DocumentClock>, load: Task<()>) -> Self {
         Self {
             source: Source::Loading,
             session,
+            on_clock: clock.map(OnClock::new),
             lanes: RefCell::new(None),
             visible_tracks: Vec::new(),
             shared_track_names: Vec::new(),
@@ -255,6 +264,37 @@ impl TraceModel {
 
     pub(crate) fn session(&self) -> Option<&Entity<Session>> {
         self.session.as_ref()
+    }
+
+    /// Registers the profile with the clock as what it plays, or withdraws it
+    /// where no profile with a wall-clock origin is loaded.
+    fn place_on_clock(&mut self, cx: &mut Context<Self>) {
+        let played = self.profile().and_then(|profile| clock_source(profile));
+        if let Some(on_clock) = &mut self.on_clock {
+            on_clock.place(played, cx);
+        }
+    }
+
+    /// The clock the views follow, where the document plays back.
+    pub(crate) fn clock(&self) -> Option<&Entity<Clock>> {
+        self.on_clock.as_ref().map(OnClock::clock)
+    }
+
+    /// The profile instant the clock's time stands at, `None` while the loaded
+    /// profile plays on no clock.
+    pub(crate) fn playhead_us(&self, cx: &App) -> Option<i64> {
+        let origin = self.profile()?.metadata().epoch_origin?;
+        let now = self.clock()?.read(cx).now()?;
+        Some(now.micros() - origin.micros())
+    }
+
+    /// Whether the loaded profile plays on no clock its document has, recording
+    /// no wall-clock time to stand beside the other files' times.
+    pub(crate) fn unaligned(&self) -> bool {
+        self.on_clock.is_some()
+            && self
+                .profile()
+                .is_some_and(|profile| profile.metadata().epoch_origin.is_none())
     }
 
     pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
@@ -711,9 +751,21 @@ impl TraceModel {
     }
 }
 
+/// What `profile` gives a clock: the wall-clock span its events cover, `None`
+/// where it records no wall-clock origin or covers no time.
+fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
+    let origin = profile.metadata().epoch_origin?;
+    let span = profile.span();
+    let covered = Span::new(
+        origin.plus_micros(span.start_us),
+        origin.plus_micros(span.end_us),
+    )?;
+    Some(bviz_ui_playback::Source::new(covered))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LoadedProfile, TraceModel};
+    use super::{LoadedProfile, TraceModel, clock_source};
     use crate::Source;
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
@@ -725,7 +777,29 @@ mod tests {
     /// A document whose read has not finished, for exercising the state a panel
     /// drives it through.
     fn model() -> TraceModel {
-        TraceModel::new(None, Task::ready(()))
+        TraceModel::new(None, None, Task::ready(()))
+    }
+
+    /// A profile of one slice over `[0, 100)` whose writer started at
+    /// `start_ms` past the epoch, where it says when.
+    fn profile_started_at(start_ms: Option<i64>) -> Profile {
+        let other_data = start_ms.map_or(String::new(), |ms| {
+            format!(r#""otherData":{{"profile_start_ts":{ms}}},"#)
+        });
+        let json = format!(
+            r#"{{{other_data}"traceEvents":[{{"cat":"general information","name":"a","ph":"X","ts":0,"dur":100,"tid":1}}]}}"#
+        );
+        Profile::from_bytes(json.as_bytes()).expect("parse test profile")
+    }
+
+    #[test]
+    fn a_profile_saying_when_it_started_plays_on_a_clock() {
+        assert!(clock_source(&profile_started_at(Some(1_000))).is_some());
+    }
+
+    #[test]
+    fn a_profile_not_saying_when_it_started_gives_a_clock_nothing_to_play() {
+        assert!(clock_source(&profile_started_at(None)).is_none());
     }
 
     /// The flamer of a profile of one lane working over `[0, 100)`.

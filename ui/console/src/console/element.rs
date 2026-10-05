@@ -71,7 +71,9 @@ impl TerminalElement {
     /// source loads there is nothing to build and the viewport reads empty.
     fn sync_terminal(&self, cols: usize, rows: usize, cx: &mut App) {
         self.view.update(cx, |view, cx| {
-            let frame = view.current_frame;
+            let Some(frame) = view.model.read(cx).shown_frame(cx) else {
+                return;
+            };
             if view.terminal.is_none() || view.terminal_frame != Some(frame) {
                 let Some(replay) = view.replay(cx) else {
                     return;

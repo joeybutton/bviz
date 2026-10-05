@@ -15,6 +15,7 @@ rust_library(
     deps = [
         "//ui/assets",
         "//ui/components",
+        "//ui/playback",
         "//ui/shell",
         "//ui/theme",
         "@crates//:gpui",

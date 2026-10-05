@@ -1,4 +1,5 @@
 use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
+use bviz_ui_playback::Clock;
 use gpui::{
     App, AppContext, Context, Entity, EntityId, EventEmitter, Global, SharedString, Subscription,
     WeakEntity, Window,
@@ -20,9 +21,10 @@ impl DocumentId {
     }
 }
 
-/// Builds a panel showing one view of a document. Takes no window, so a view can
-/// be minted wherever the reader asks for it.
-type Mint = Rc<dyn Fn(Option<NonZeroUsize>, &mut App) -> AnyPanel>;
+/// Builds a panel showing one view of a document, the panel carrying the
+/// document's identity and the number of its file. Takes no window, so a view
+/// can be minted wherever the reader asks for it.
+type Mint = Rc<dyn Fn(DocumentId, Option<NonZeroUsize>, &mut App) -> AnyPanel>;
 
 /// One view a document can show, and how to build a panel showing it.
 pub struct ViewSpec {
@@ -39,7 +41,7 @@ impl ViewSpec {
         Self {
             kind: kind.view,
             label: kind.label,
-            mint: Rc::new(move |ordinal, cx| AnyPanel::new(mint(cx), ordinal)),
+            mint: Rc::new(move |document, ordinal, cx| AnyPanel::new(mint(cx), document, ordinal)),
         }
     }
 
@@ -55,7 +57,7 @@ impl ViewSpec {
         Self {
             kind,
             label: kind.as_str(),
-            mint: Rc::new(move |_, _| panic!("{} mints no panel here", kind.as_str())),
+            mint: Rc::new(move |_, _, _| panic!("{} mints no panel here", kind.as_str())),
         }
     }
 
@@ -104,6 +106,7 @@ impl OpenDocument {
                 .chain(&document.rest)
                 .map(Held::registered)
                 .collect(),
+            clock: document.clock,
         }
         .listed(&mut |_| ViewState::Closed)
     }
@@ -168,6 +171,7 @@ pub(crate) struct Registration {
     pub(crate) name: SharedString,
     pub(crate) first: Held<ViewSpec>,
     pub(crate) rest: Vec<Held<ViewSpec>>,
+    pub(crate) clock: Option<Entity<Clock>>,
 }
 
 /// The views of one file of a document, arranged as the viewer opening it asked
@@ -192,6 +196,7 @@ struct Registered {
     id: DocumentId,
     name: SharedString,
     members: Vec<Held<View>>,
+    clock: Option<Entity<Clock>>,
 }
 
 impl Registered {
@@ -278,19 +283,26 @@ impl Documents {
         document: Registration,
         cx: &mut Context<Self>,
     ) -> (PanelGroup, Vec<PanelGroup>) {
-        let Registration { name, first, rest } = document;
-        let mut members = Vec::with_capacity(1 + rest.len());
-        let mut minted = |member: Held<ViewSpec>| {
-            let held = member.registered();
-            let panels = held
-                .views
-                .map(&mut |view: &View| (view.mint)(held.ordinal, cx));
-            members.push(held);
-            panels
-        };
-        let first = minted(first);
-        let rest: Vec<PanelGroup> = rest.into_iter().map(minted).collect();
-        let id = self.register(name, members);
+        let Registration {
+            name,
+            first,
+            rest,
+            clock,
+        } = document;
+        let (id, (first, rest)) = self.register(name, clock, |id| {
+            let mut members = Vec::with_capacity(1 + rest.len());
+            let mut minted = |member: Held<ViewSpec>| {
+                let held = member.registered();
+                let panels = held
+                    .views
+                    .map(&mut |view: &View| (view.mint)(id, held.ordinal, cx));
+                members.push(held);
+                panels
+            };
+            let first = minted(first);
+            let rest: Vec<PanelGroup> = rest.into_iter().map(minted).collect();
+            (members, (first, rest))
+        });
         for (member, panels) in iter::once(&first).chain(&rest).enumerate() {
             for panel in panels.panels() {
                 let kind = panel.view_kind();
@@ -325,7 +337,7 @@ impl Documents {
         match live {
             Some(panel) => self.reveal(panel, workspace, window, cx),
             None => {
-                let panel = mint(ordinal, cx);
+                let panel = mint(document, ordinal, cx);
                 self.watch(document, view, &panel, cx);
                 workspace.update(cx, |workspace, cx| {
                     workspace.add_panel(panel, window, cx);
@@ -465,11 +477,32 @@ impl Documents {
         }
     }
 
-    fn register(&mut self, name: SharedString, members: Vec<Held<View>>) -> DocumentId {
+    /// Lists a document under `name`, its files as `held` makes them knowing
+    /// the document's id, with what else `held` gives.
+    fn register<T>(
+        &mut self,
+        name: SharedString,
+        clock: Option<Entity<Clock>>,
+        held: impl FnOnce(DocumentId) -> (Vec<Held<View>>, T),
+    ) -> (DocumentId, T) {
         let id = DocumentId(self.next);
         self.next += 1;
-        self.documents.push(Registered { id, name, members });
-        id
+        let (members, given) = held(id);
+        self.documents.push(Registered {
+            id,
+            name,
+            members,
+            clock,
+        });
+        (id, given)
+    }
+
+    /// The clock `document` plays back on and the name it is listed under,
+    /// where it plays back.
+    pub(crate) fn playback(&self, document: DocumentId) -> Option<(SharedString, Entity<Clock>)> {
+        let registered = self.registered(document)?;
+        let clock = registered.clock.clone()?;
+        Some((registered.name.clone(), clock))
     }
 
     fn registered(&self, document: DocumentId) -> Option<&Registered> {
@@ -562,7 +595,9 @@ mod tests {
             ordinal: None,
             views,
         };
-        documents.register(label.to_string().into(), vec![file])
+        documents
+            .register(label.to_string().into(), None, |_| (vec![file], ()))
+            .0
     }
 
     /// The view of `kind` a file opened by itself shows.
@@ -838,7 +873,7 @@ mod tests {
                     kinds.map(move |kind| ViewId { member, kind })
                 })
                 .collect();
-            let id = registry.register(format!("d{at}").into(), members);
+            let (id, ()) = registry.register(format!("d{at}").into(), None, |_| (members, ()));
             for view in views {
                 let named = (panel(panels.len() as u64), letter(panels.len()));
                 opened(&mut registry, id, view, named.0);
@@ -998,7 +1033,7 @@ mod tests {
             ordinal: NonZeroUsize::new(ordinal),
             views: PanelGroup::one(view(TIMELINE)),
         };
-        let id = documents.register("Both".into(), vec![file(1), file(2)]);
+        let (id, ()) = documents.register("Both".into(), None, |_| (vec![file(1), file(2)], ()));
         let ordinals: Vec<Option<NonZeroUsize>> = (0..2)
             .map(|member| {
                 let timeline = ViewId {

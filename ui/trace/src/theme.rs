@@ -193,6 +193,10 @@ pub(crate) struct Palette {
     /// laid on the chart, so it ranks with secondary text and stands over the
     /// scenery it crosses.
     pub(crate) crosshair: Rgba,
+    /// The rule at the document's playback time: where the whole document
+    /// stands rather than where the cursor points, so it ranks with primary
+    /// text where the crosshair ranks with secondary.
+    pub(crate) playhead: Rgba,
     /// The edges and bars bounding what the reader has picked out.
     pub(crate) accent: Rgba,
     /// The wash over what the reader has picked out — a selected lane's gutter
@@ -223,6 +227,7 @@ impl Palette {
             divider: colors.border.into(),
             panel: colors.panel.into(),
             crosshair: colors.text_muted.into(),
+            playhead: colors.text.into(),
             accent: colors.accent.into(),
             selection: colors.selection.into(),
             data: theme.data,

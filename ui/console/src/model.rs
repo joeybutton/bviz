@@ -1,14 +1,10 @@
-use bviz_invocation::{Configurations, Outcomes, Session};
+use bviz_invocation::{Configurations, EpochMicros, Outcomes, Session};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
-use gpui::{Context, Entity, EventEmitter, Task};
+use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
+use gpui::{App, Context, Entity, Task};
 
 pub(crate) type Source = bviz_ui_components::Source<Replay>;
-
-/// The read has landed, loaded or failed. Carried as an event because what it
-/// calls for is view-local — putting the playhead on the build that landed — and
-/// owed once, on the landing.
-pub(crate) struct SourceReplaced;
 
 /// What a build event stream is read into.
 pub(crate) struct Stream {
@@ -37,26 +33,30 @@ impl Stream {
     }
 }
 
+/// Where time zero of a replay recording no wall-clock time stands on a clock
+/// it plays on alone, there being no other file's times for it to meet.
+const UNRECORDED_ORIGIN: EpochMicros = EpochMicros::from_millis(0);
+
 /// A build's captured console output, held apart from the panels replaying it so
 /// a view of it can close and be shown again without the build event stream
 /// being read and reconstructed afresh.
 pub(crate) struct ConsoleModel {
     source: Source,
+    on_clock: Option<OnClock>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
 }
 
-impl EventEmitter<SourceReplaced> for ConsoleModel {}
-
 impl ConsoleModel {
-    /// The build `stream` is being read into, playable once the read finishes
-    /// and failed where it does not.
+    /// The build `stream` is being read into, playable on `clock` once the read
+    /// finishes and failed where it does not.
     pub(crate) fn reading(
         stream: Pending<Stream>,
         session: Option<Entity<Session>>,
+        clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(load_in_background(
+        let load = load_in_background(
             cx,
             move || stream.join(),
             move |model, result, cx| {
@@ -70,15 +70,64 @@ impl ConsoleModel {
                     }),
                     Err(err) => Source::Failed(err),
                 };
-                cx.emit(SourceReplaced);
+                model.place_on_clock(cx);
             },
-        ))
+        );
+        Self::new(load, clock)
     }
 
-    fn new(load: Task<()>) -> Self {
+    fn new(load: Task<()>, clock: Option<DocumentClock>) -> Self {
         Self {
             source: Source::Loading,
+            on_clock: clock.map(OnClock::new),
             _load: load,
+        }
+    }
+
+    /// Registers the replay with the clock as what it plays, or withdraws it
+    /// where the replay gives the clock no time.
+    fn place_on_clock(&mut self, cx: &mut Context<Self>) {
+        let Some(on_clock) = &mut self.on_clock else {
+            return;
+        };
+        let played = match &self.source {
+            Source::Loaded(replay) => {
+                origin(replay, on_clock.document_clock()).and_then(|at| clock_source(replay, at))
+            }
+            _ => None,
+        };
+        on_clock.place(played, cx);
+    }
+
+    /// The clock the views follow, where the document plays back.
+    pub(crate) fn clock(&self) -> Option<&Entity<Clock>> {
+        self.on_clock.as_ref().map(OnClock::clock)
+    }
+
+    /// The frame the views show, `None` while there is no replay: the one the
+    /// clock's time reaches, else the last, showing the finished build.
+    pub(crate) fn shown_frame(&self, cx: &App) -> Option<usize> {
+        let replay = self.replay()?;
+        let reached = self.on_clock.as_ref().and_then(|on_clock| {
+            let origin = origin(replay, on_clock.document_clock())?;
+            let now = on_clock.clock().read(cx).now()?;
+            // At the instants `clock_source` marks the frames at, so stepping
+            // to a mark shows its frame.
+            Some(last_reached(
+                replay.frame_count(),
+                |frame| origin.plus_secs_f64(replay.time_of(frame)),
+                now,
+            ))
+        });
+        Some(reached.unwrap_or(replay.frame_count() - 1))
+    }
+
+    /// Whether the replay, joined to other files, records no wall-clock time
+    /// to stand beside theirs on the clock.
+    pub(crate) fn unaligned(&self) -> bool {
+        match (self.replay(), &self.on_clock) {
+            (Some(replay), Some(on_clock)) => origin(replay, on_clock.document_clock()).is_none(),
+            _ => false,
         }
     }
 
@@ -96,15 +145,79 @@ impl ConsoleModel {
     }
 }
 
+/// The instant `replay`'s time zero stands at on `clock`, `None` where it
+/// records none yet must meet another file's times.
+fn origin(replay: &Replay, clock: &DocumentClock) -> Option<EpochMicros> {
+    match clock {
+        DocumentClock::Joined(_) => replay.epoch_origin(),
+        DocumentClock::Alone(_) => Some(replay.epoch_origin().unwrap_or(UNRECORDED_ORIGIN)),
+    }
+}
+
+/// The last of `count` frames, each at `instant_of` it in time order, that
+/// `now` has reached; the first where `now` reaches none.
+fn last_reached(
+    count: usize,
+    instant_of: impl Fn(usize) -> EpochMicros,
+    now: EpochMicros,
+) -> usize {
+    let (mut reached, mut beyond) = (0, count);
+    while reached < beyond {
+        let mid = reached + (beyond - reached) / 2;
+        if instant_of(mid) <= now {
+            reached = mid + 1;
+        } else {
+            beyond = mid;
+        }
+    }
+    reached.saturating_sub(1)
+}
+
+/// What `replay` gives a clock with its time zero at `origin`: its span, a step
+/// stopping at each frame, `None` where all its frames share one instant.
+fn clock_source(replay: &Replay, origin: EpochMicros) -> Option<bviz_ui_playback::Source> {
+    let span = Span::new(origin, origin.plus_secs_f64(replay.duration()))?;
+    let frames = (0..replay.frame_count()).map(|frame| origin.plus_secs_f64(replay.time_of(frame)));
+    let source = bviz_ui_playback::Source::new(span).with_marks(frames);
+    Some(if replay.real_time() {
+        source
+    } else {
+        source.approximate()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_is_reached_at_the_instant_its_mark_stands_at() {
+        let origin = EpochMicros::from_millis(1_781_439_245_231);
+        // Each rounds down to its microsecond, which in seconds falls short of
+        // the frame's own time.
+        let times = [0.0, 1.000_000_2, 2.000_000_4];
+        let instant_of = |frame: usize| origin.plus_secs_f64(times[frame]);
+        for frame in 0..times.len() {
+            assert_eq!(
+                last_reached(times.len(), instant_of, instant_of(frame)),
+                frame
+            );
+        }
+        assert_eq!(
+            last_reached(times.len(), instant_of, origin.plus_micros(-1)),
+            0
+        );
+        assert_eq!(
+            last_reached(times.len(), instant_of, origin.plus_micros(1_999_999)),
+            1
+        );
+    }
     use bviz_invocation::{BuildOutcome, ConfiguredTarget};
 
     /// A build whose read has not finished, for exercising what a view reads
     /// off it before one has.
     fn reading() -> ConsoleModel {
-        ConsoleModel::new(Task::ready(()))
+        ConsoleModel::new(Task::ready(()), None)
     }
 
     /// One `BuildEvent` carrying a `Progress` payload whose `stderr` is `text`,
@@ -264,6 +377,14 @@ mod tests {
             panic!("the read failed")
         };
         assert_eq!(why, "build.bep: no such file");
+    }
+
+    /// A replay whose frames all share one instant has no time for a clock to
+    /// play, wherever its time zero stands.
+    #[test]
+    fn a_replay_of_one_instant_gives_a_clock_nothing_to_play() {
+        let stream = Stream::parse(&progress_event("Loading: \n")).expect("the stream parses");
+        assert!(clock_source(&stream.replay, UNRECORDED_ORIGIN).is_none());
     }
 
     /// Every progress event of the stream read is a frame the reader can seek to.

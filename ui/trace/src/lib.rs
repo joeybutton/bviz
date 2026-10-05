@@ -38,6 +38,7 @@ use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
     Scrollbar, overlay_canvas, track_drag,
 };
+use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
@@ -337,7 +338,9 @@ impl TracePanel {
         div()
             .id("trace-viewport")
             .relative()
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .overflow_hidden()
             .child(timeline)
             .child(drag_overlay)
@@ -552,7 +555,16 @@ impl Render for TracePanel {
             .overflow_hidden();
         match placeholder {
             Some(placeholder) => chrome.child(placeholder),
-            None => chrome.child(self.trace_body(palette, cx)),
+            None => {
+                let unaligned = self
+                    .model
+                    .read(cx)
+                    .unaligned()
+                    .then(|| unaligned_note("profile", &theme.colors));
+                chrome
+                    .children(unaligned)
+                    .child(self.trace_body(palette, cx))
+            }
         }
     }
 }
@@ -1520,16 +1532,18 @@ impl From<TraceSource> for Load {
 /// The views rendering the profile `load` reads, as the timeline above the
 /// flame graph and stats that aggregate whatever tracks it has selected. Where
 /// it is opened as part of an invocation's `session`, it names what the profile
-/// holds an id of by what the session knows.
+/// holds an id of by what the session knows, and plays on `clock` where its
+/// document plays back.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
+    clock: Option<DocumentClock>,
     _window: &mut Window,
     cx: &mut App,
 ) -> Member {
     let load = load.into();
     let label = load.title;
-    let model = cx.new(|cx| TraceModel::reading(load.profile, session, cx));
+    let model = cx.new(|cx| TraceModel::reading(load.profile, session, clock, cx));
     let views = PanelGroup::split(
         gpui::Axis::Vertical,
         TIMELINE_SHARE,
@@ -1574,7 +1588,7 @@ pub fn run() {
         size(px(1280.), px(820.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, None, window, cx).into(),
+        |load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );
 }
