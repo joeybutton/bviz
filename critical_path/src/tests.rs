@@ -48,6 +48,7 @@ struct Event<'a> {
     out: Option<&'a str>,
     mnemonic: Option<&'a str>,
     target: Option<&'a str>,
+    configuration: Option<&'a str>,
 }
 
 impl<'a> Event<'a> {
@@ -62,10 +63,14 @@ impl<'a> Event<'a> {
         let out = self
             .out
             .map_or(String::new(), |out| format!(r#","out":"{out}""#));
-        let args: Vec<String> = [("mnemonic", self.mnemonic), ("target", self.target)]
-            .into_iter()
-            .filter_map(|(key, value)| Some(format!(r#""{key}":"{}""#, value?)))
-            .collect();
+        let args: Vec<String> = [
+            ("mnemonic", self.mnemonic),
+            ("target", self.target),
+            ("configuration", self.configuration),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| Some(format!(r#""{key}":"{}""#, value?)))
+        .collect();
         format!(
             r#"{{"cat":"{cat}","name":"{name}",{timing},"tid":{tid}{out},"args":{{{}}}}}"#,
             args.join(",")
@@ -75,6 +80,13 @@ impl<'a> Event<'a> {
     fn with_out(self, out: &'a str) -> Self {
         Event {
             out: Some(out),
+            ..self
+        }
+    }
+
+    fn in_configuration(self, configuration: &'a str) -> Self {
+        Event {
+            configuration: Some(configuration),
             ..self
         }
     }
@@ -96,6 +108,7 @@ fn event(name: &str, ts: i64, dur: i64) -> Event<'_> {
         out: None,
         mnemonic: None,
         target: None,
+        configuration: None,
     }
 }
 
@@ -116,6 +129,9 @@ enum Timed {
     Unspanned(Ran),
     ChangePruned,
 }
+
+/// The checksum of a configuration an action ran in, as a profile records it.
+const CONFIGURATION: &str = "4f8a2bd4c1e07b3e9a6d5f2c8b1e0a7d3c6f9b2e5a8d1c4f7b0e3a6d9c2f5b8e";
 
 /// A step's own time split around an action span.
 fn split(before: u64, span: u64) -> Timed {
@@ -174,7 +190,8 @@ fn a_step_is_joined_to_the_span_of_its_description_and_split_around_it() {
         &[event(STEP_COMPILE, 100, 1000)],
         &[event(COMPILE, 105, 1001)
             .with_out("bazel-out/a.o")
-            .of("CppCompile", "//a")],
+            .of("CppCompile", "//a")
+            .in_configuration(CONFIGURATION)],
     );
     let path = CriticalPath::of(&p, None).expect("critical path");
     assert_partitions(&path);
@@ -185,6 +202,7 @@ fn a_step_is_joined_to_the_span_of_its_description_and_split_around_it() {
     assert_eq!(step.mnemonic(), Some("CppCompile"));
     assert_eq!(step.target(), Some("//a"));
     assert_eq!(step.primary_output(), Some("bazel-out/a.o"));
+    assert_eq!(step.configuration(), Some(CONFIGURATION));
     assert_eq!(step.work().timed(), split(5, 995));
     assert_eq!((path.lead_in(), path.tail()), (us(100), us(900)));
     assert_eq!(path.time_in(Part::BeforeAction), us(5));

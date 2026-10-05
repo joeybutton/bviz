@@ -108,6 +108,7 @@ pub struct Step {
     name: String,
     mnemonic: Option<String>,
     target: Option<String>,
+    configuration: Option<String>,
     primary_output: Option<String>,
     at: SliceAt,
     start_us: i64,
@@ -360,6 +361,11 @@ impl Step {
         self.target.as_deref()
     }
 
+    /// The checksum of the configuration the step's action ran in.
+    pub fn configuration(&self) -> Option<&str> {
+        self.configuration.as_deref()
+    }
+
     pub fn primary_output(&self) -> Option<&str> {
         self.primary_output.as_deref()
     }
@@ -434,6 +440,7 @@ impl CriticalPath {
                     end_us: slice.end_us(),
                     mnemonic: detail.mnemonic,
                     target: detail.target,
+                    configuration: detail.configuration,
                     primary_output: profile.opt_str(detail.out),
                     kind,
                 }
@@ -701,6 +708,7 @@ struct RecordedStep<'p> {
     end_us: i64,
     mnemonic: OptStr,
     target: OptStr,
+    configuration: OptStr,
     primary_output: Option<&'p str>,
     kind: Recorded<'p>,
 }
@@ -772,6 +780,7 @@ impl<'p> RecordedStep<'p> {
             mnemonic: said(self.mnemonic, span.map(|action| action.mnemonic)),
             target: said(self.target, span.map(|action| action.target))
                 .or_else(|| self.runfiles_label().map(str::to_owned)),
+            configuration: said(self.configuration, span.map(|action| action.configuration)),
             primary_output: self
                 .primary_output
                 .or_else(|| profile.opt_str(span?.out))
