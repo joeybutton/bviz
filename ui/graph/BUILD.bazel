@@ -21,6 +21,7 @@ rust_library(
         "//ui/workspace",
         "@crates//:clap",
         "@crates//:gpui",
+        "@crates//:nucleo",
         "@crates//:rustc-hash",
     ],
 )

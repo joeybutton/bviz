@@ -124,6 +124,19 @@ complete source is the release above, and the binary can be relinked against a
 modified version of it by rebuilding bviz from source with that version in
 place.
 
+## Linked under the MPL
+
+The graph viewer's fuzzy finder links nucleo and the nucleo-matcher crate it
+builds on, both Mozilla Public License 2.0 and used unmodified.
+
+nucleo 0.5.0 — Mozilla Public License 2.0
+    https://crates.io/crates/nucleo/0.5.0
+nucleo-matcher 0.3.1 — Mozilla Public License 2.0
+    https://crates.io/crates/nucleo-matcher/0.3.1
+
+Whoever redistributes a binary owes what MPL-2.0 section 3.2 asks of the
+executable form: the Source Code Form of those files is the releases above.
+
 ## Dependencies
 
 Crates, Bazel modules and toolchains that bviz builds against are pinned in

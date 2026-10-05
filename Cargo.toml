@@ -50,6 +50,7 @@ hashbrown = { version = "0.16", default-features = false }
 heck = "0.5"
 libmimalloc-sys = "0.1"
 mimalloc = "0.1"
+nucleo = "0.5"
 num_cpus = "1"
 packageurl = "0.7"
 rayon = "1"
