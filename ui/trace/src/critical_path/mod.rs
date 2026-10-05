@@ -2,6 +2,7 @@
 
 mod by_height;
 mod fills;
+mod order;
 mod whole;
 mod words;
 
@@ -18,17 +19,18 @@ use bviz_critical_path::{
 };
 use bviz_invocation::Chosen;
 use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner,
-    list_scrollbar,
+    Button, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice, centered_spinner,
+    list_scrollbar, sort_header,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use by_height::ByHeight;
 use fills::{Fills, outside};
 use gpui::{
-    App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Render, ScrollStrategy, SharedString, Stateful,
-    Subscription, Window, div, prelude::*, px, relative, uniform_list,
+    AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Render, ScrollStrategy, SharedString,
+    Stateful, Subscription, Window, div, prelude::*, px, relative, uniform_list,
 };
+use order::{NEARLY_CRITICAL_SORT, NearlyCriticalKey, STEPS_SORT, StepKey};
 use std::time::Duration;
 use whole::whole_or_none;
 
@@ -79,40 +81,64 @@ const BAR_COLUMN_WIDTH: f32 = 200.0;
 /// them together.
 const MIN_STRIP_PHASE_WIDTH: f32 = 2.0;
 
-/// One column of a table: its title and its fixed width, `None` for the one
-/// flexible column.
-struct Column {
+/// One column of a table of rows sorted by a `K`: its title and its fixed
+/// width, `None` for the one flexible column.
+struct Column<K> {
     title: &'static str,
     width: Option<f32>,
     /// Shown only for a path held against a modeled build.
     modeled: bool,
+    /// What a click on its header sorts by, `None` where it sorts nothing.
+    sorts: Option<Sorts<K>>,
 }
 
-const fn column(title: &'static str, width: Option<f32>) -> Column {
+#[derive(Clone, Copy)]
+struct Sorts<K> {
+    by: K,
+    /// Whether the column sorts descending on the first click on it.
+    descending: bool,
+}
+
+const fn column<K>(title: &'static str, width: Option<f32>) -> Column<K> {
     Column {
         title,
         width,
         modeled: false,
+        sorts: None,
     }
 }
 
-const COLUMNS: [Column; 7] = [
+const fn sorting<K>(title: &'static str, width: f32, by: K, descending: bool) -> Column<K> {
+    Column {
+        title,
+        width: Some(width),
+        modeled: false,
+        sorts: Some(Sorts { by, descending }),
+    }
+}
+
+const COLUMNS: [Column<StepKey>; 7] = [
     column("Step", None),
-    column("Start", Some(STATS_NUM_COL_WIDTH)),
-    column("Waited", Some(STATS_NUM_COL_WIDTH)),
-    column("Own", Some(STATS_NUM_COL_WIDTH)),
+    sorting("Start", STATS_NUM_COL_WIDTH, StepKey::Start, false),
+    sorting("Waited", STATS_NUM_COL_WIDTH, StepKey::Waited, true),
+    sorting("Own", STATS_NUM_COL_WIDTH, StepKey::Own, true),
     Column {
         modeled: true,
-        ..column("Could save", Some(STATS_NUM_COL_WIDTH))
+        ..sorting("Could save", STATS_NUM_COL_WIDTH, StepKey::CouldSave, true)
     },
-    column("% of path", Some(SHARE_WIDTH)),
-    column("Wait and own time", Some(BAR_COLUMN_WIDTH)),
+    sorting("% of path", SHARE_WIDTH, StepKey::Share, true),
+    sorting("Wait and own time", BAR_COLUMN_WIDTH, StepKey::Total, true),
 ];
 
-const NEARLY_CRITICAL_COLUMNS: [Column; 3] = [
+const NEARLY_CRITICAL_COLUMNS: [Column<NearlyCriticalKey>; 3] = [
     column("Action", None),
-    column("Took", Some(STATS_NUM_COL_WIDTH)),
-    column("Slack", Some(STATS_NUM_COL_WIDTH)),
+    sorting("Took", STATS_NUM_COL_WIDTH, NearlyCriticalKey::Took, true),
+    sorting(
+        "Slack",
+        STATS_NUM_COL_WIDTH,
+        NearlyCriticalKey::Slack,
+        false,
+    ),
 ];
 
 /// Which list the table under the summary shows.
@@ -131,6 +157,8 @@ pub struct CriticalPathPanel {
     focus: FocusHandle,
     model: Entity<TraceModel>,
     listing: Listing,
+    steps_sort: Sort<StepKey>,
+    nearly_critical_sort: Sort<NearlyCriticalKey>,
     scroll: ListScroll,
     nearly_critical_scroll: ListScroll,
     summary_scroll: ListScroll,
@@ -147,6 +175,8 @@ impl CriticalPathPanel {
         let derived = cx.subscribe(&model, |_, _, _: &CriticalPathDerived, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |panel, _, _: &SourceReplaced, cx| {
             panel.listing = Listing::Steps;
+            panel.steps_sort = STEPS_SORT;
+            panel.nearly_critical_sort = NEARLY_CRITICAL_SORT;
             panel.scroll.to_top();
             panel.nearly_critical_scroll.to_top();
             panel.summary_scroll.to_top();
@@ -156,6 +186,8 @@ impl CriticalPathPanel {
             focus: cx.focus_handle(),
             model,
             listing: Listing::Steps,
+            steps_sort: STEPS_SORT,
+            nearly_critical_sort: NEARLY_CRITICAL_SORT,
             scroll: ListScroll::new(),
             nearly_critical_scroll: ListScroll::new(),
             summary_scroll: ListScroll::new(),
@@ -167,18 +199,44 @@ impl CriticalPathPanel {
 
     /// Chooses `chosen`, showing the list it is among with its row in view.
     fn choose(&mut self, chosen: Chosen, cx: &mut Context<Self>) {
-        let (listing, index, scroll) = match chosen {
-            Chosen::Step(index) => (Listing::Steps, index, &self.scroll),
-            Chosen::NearlyCritical(index) => {
-                (Listing::NearlyCritical, index, &self.nearly_critical_scroll)
-            }
+        self.listing = match chosen {
+            Chosen::Step(_) => Listing::Steps,
+            Chosen::NearlyCritical(_) => Listing::NearlyCritical,
         };
-        scroll
-            .uniform_handle()
-            .scroll_to_item(index, ScrollStrategy::Nearest);
-        self.listing = listing;
+        self.reveal(chosen, cx);
         self.model.update(cx, |model, cx| model.choose(chosen, cx));
         cx.notify();
+    }
+
+    /// Scrolls `chosen`'s row into view where it stands in its list's order.
+    fn reveal(&self, chosen: Chosen, cx: &App) {
+        let Some(path) = traced_path(self.model.read(cx)) else {
+            return;
+        };
+        let (order, index, scroll) = match chosen {
+            Chosen::Step(index) => (
+                order::steps(path.steps(), self.steps_sort),
+                index,
+                &self.scroll,
+            ),
+            Chosen::NearlyCritical(index) => (
+                self.nearly_critical_order(path),
+                index,
+                &self.nearly_critical_scroll,
+            ),
+        };
+        if let Some(row) = order::position(&order, index) {
+            scroll
+                .uniform_handle()
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// The actions nearly critical of `path` by index, in the order shown.
+    fn nearly_critical_order(&self, path: &CriticalPath) -> Vec<usize> {
+        path.modeled().map_or_else(Vec::new, |modeled| {
+            order::nearly_critical(modeled.nearly_critical(), self.nearly_critical_sort)
+        })
     }
 
     /// Lets go of `chosen` where it is what is chosen, and chooses it
@@ -194,44 +252,60 @@ impl CriticalPathPanel {
     }
 
     /// Chooses the row `by` rows from the chosen one in the list the table
-    /// shows, or its first where none of it is chosen, stopping at either
-    /// end of the list.
+    /// shows, in the order it shows them, or its first where none of it is
+    /// chosen, stopping at either end of the list.
     fn choose_by(&mut self, by: isize, cx: &mut Context<Self>) {
         let model = self.model.read(cx);
-        let Some(TracedPath::Traced {
-            path: Some(path), ..
-        }) = model.critical_path()
-        else {
+        let Some(path) = traced_path(model) else {
             return;
         };
         let standing = model.chosen(cx).map(|(standing, _)| standing);
-        let (rows, row, chosen): (usize, Option<usize>, fn(usize) -> Chosen) =
-            match (shown_listing(self.listing, path), path.modeled()) {
-                (Listing::NearlyCritical, Some(modeled)) => (
-                    modeled.nearly_critical().len(),
-                    match standing {
-                        Some(Chosen::NearlyCritical(index)) => Some(index),
-                        _ => None,
-                    },
-                    Chosen::NearlyCritical,
-                ),
-                _ => (
-                    path.steps().len(),
-                    match standing {
-                        Some(Chosen::Step(index)) => Some(index),
-                        _ => None,
-                    },
-                    Chosen::Step,
-                ),
-            };
-        let Some(last) = rows.checked_sub(1) else {
-            return;
+        let chosen = match shown_listing(self.listing, path) {
+            Listing::NearlyCritical => {
+                let from = match standing {
+                    Some(Chosen::NearlyCritical(index)) => Some(index),
+                    _ => None,
+                };
+                order::moved(&self.nearly_critical_order(path), from, by)
+                    .map(Chosen::NearlyCritical)
+            }
+            Listing::Steps => {
+                let from = match standing {
+                    Some(Chosen::Step(index)) => Some(index),
+                    _ => None,
+                };
+                order::moved(&order::steps(path.steps(), self.steps_sort), from, by)
+                    .map(Chosen::Step)
+            }
         };
-        let index = match row {
-            Some(row) => row.saturating_add_signed(by).min(last),
-            None => 0,
-        };
-        self.choose(chosen(index), cx);
+        if let Some(chosen) = chosen {
+            self.choose(chosen, cx);
+        }
+    }
+
+    /// Sorts the steps by `by`, the column first sorting `descending`.
+    fn sort_steps(&mut self, by: StepKey, descending: bool, cx: &mut Context<Self>) {
+        self.steps_sort = self.steps_sort.clicked(by, descending);
+        self.reveal_standing(cx);
+    }
+
+    /// Sorts the actions nearly critical by `by`, the column first sorting
+    /// `descending`.
+    fn sort_nearly_critical(
+        &mut self,
+        by: NearlyCriticalKey,
+        descending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.nearly_critical_sort = self.nearly_critical_sort.clicked(by, descending);
+        self.reveal_standing(cx);
+    }
+
+    /// Keeps what is chosen in view across a change of its list's order.
+    fn reveal_standing(&self, cx: &App) {
+        if let Some((chosen, _)) = self.model.read(cx).chosen(cx) {
+            self.reveal(chosen, cx);
+        }
     }
 
     /// The path in sum over its table of steps, or where the path is held
@@ -257,7 +331,14 @@ impl CriticalPathPanel {
                 || modeled.map(|modeled| self.listing_choice(modeled, listing, palette, cx));
             match (listing, modeled) {
                 (Listing::NearlyCritical, Some(modeled)) => {
-                    let header = header_row(NEARLY_CRITICAL_COLUMNS.iter(), choice(), palette);
+                    let header = header_row(
+                        NEARLY_CRITICAL_COLUMNS.iter(),
+                        choice(),
+                        self.nearly_critical_sort,
+                        CriticalPathPanel::sort_nearly_critical,
+                        palette,
+                        cx,
+                    );
                     match modeled.nearly_critical().is_empty() {
                         true => body.child(header).child(
                             div()
@@ -278,7 +359,10 @@ impl CriticalPathPanel {
                             .iter()
                             .filter(|column| modeled.is_some() || !column.modeled),
                         choice(),
+                        self.steps_sort,
+                        CriticalPathPanel::sort_steps,
                         palette,
+                        cx,
                     ))
                     .child(self.steps(path, palette, fills, cx)),
             }
@@ -337,6 +421,7 @@ impl CriticalPathPanel {
     fn nearly_critical(&self, modeled: &Modeled, palette: &Palette, cx: &Context<Self>) -> Div {
         let entity = cx.entity();
         let palette = *palette;
+        let order = order::nearly_critical(modeled.nearly_critical(), self.nearly_critical_sort);
         let rows = uniform_list(
             "critical-path-nearly-critical",
             modeled.nearly_critical().len(),
@@ -344,18 +429,13 @@ impl CriticalPathPanel {
                 let entity = entity.clone();
                 move |range, _, cx| {
                     let model = entity.read(cx).model.read(cx);
-                    let Some(TracedPath::Traced {
-                        path: Some(path), ..
-                    }) = model.critical_path()
-                    else {
-                        return Vec::new();
-                    };
-                    let Some(modeled) = path.modeled() else {
+                    let Some(modeled) = traced_path(model).and_then(CriticalPath::modeled) else {
                         return Vec::new();
                     };
                     let chosen = model.chosen(cx).map(|(chosen, _)| chosen);
                     range
-                        .map(|index| {
+                        .map(|row| {
+                            let index = order[row];
                             nearly_critical_row(index, &modeled.nearly_critical()[index], &palette)
                                 .map(|row| {
                                     choosable(
@@ -444,14 +524,12 @@ impl CriticalPathPanel {
             .max()
             .unwrap_or_default();
         let (palette, fills) = (*palette, *fills);
+        let order = order::steps(path.steps(), self.steps_sort);
         let rows = uniform_list("critical-path-steps", path.steps().len(), {
             let entity = entity.clone();
             move |range, _, cx| {
                 let model = entity.read(cx).model.read(cx);
-                let Some(TracedPath::Traced {
-                    path: Some(path), ..
-                }) = model.critical_path()
-                else {
+                let Some(path) = traced_path(model) else {
                     return Vec::new();
                 };
                 let against = Against {
@@ -462,7 +540,8 @@ impl CriticalPathPanel {
                 };
                 let chosen = model.chosen(cx).map(|(chosen, _)| chosen);
                 range
-                    .map(|index| {
+                    .map(|row| {
+                        let index = order[row];
                         let entity = entity.clone();
                         step_row(index, &path.steps()[index], against, &palette, &fills).map(
                             |row| choosable(row, Chosen::Step(index), chosen, entity, &palette),
@@ -491,6 +570,16 @@ fn shown_listing(listing: Listing, path: &CriticalPath) -> Listing {
     match path.modeled() {
         Some(_) => listing,
         None => Listing::Steps,
+    }
+}
+
+/// The critical path `model` traced, where it traced one.
+fn traced_path(model: &TraceModel) -> Option<&CriticalPath> {
+    match model.critical_path() {
+        Some(TracedPath::Traced {
+            path: Some(path), ..
+        }) => Some(path),
+        _ => None,
     }
 }
 
@@ -756,14 +845,42 @@ fn swatch(fill: Hsla, edge: Option<Hsla>) -> Div {
     }
 }
 
-/// The header of a table of `columns`, the flexible column titled by
-/// `title` where one is given.
-fn header_row<'c>(
-    columns: impl Iterator<Item = &'c Column>,
+/// The header of a table of `columns` sorted by `sort`, the flexible column
+/// titled by `title` where one is given. A click on a sorting column's
+/// header has `sort_by` sort by it.
+fn header_row<'c, K: Copy + PartialEq + 'static>(
+    columns: impl Iterator<Item = &'c Column<K>>,
     title: Option<Div>,
+    sort: Sort<K>,
+    sort_by: fn(&mut CriticalPathPanel, K, bool, &mut Context<CriticalPathPanel>),
     palette: &Palette,
+    cx: &Context<CriticalPathPanel>,
 ) -> Div {
     let mut title = title;
+    let cells = columns.map(|column| -> AnyElement {
+        match (column.width, title.take(), column.sorts) {
+            (None, Some(title), _) => table_cell(None, [title]).into_any_element(),
+            (width, _, None) => table_cell(width, [column.title]).into_any_element(),
+            (width, _, Some(Sorts { by, descending })) => table_cell(
+                width,
+                [sort_header(
+                    column.title,
+                    sort.of(by),
+                    width.is_some(),
+                    px(STATS_TEXT_SIZE),
+                    palette.label,
+                )],
+            )
+            .id(column.title)
+            .cursor_pointer()
+            .hover(|cell| cell.bg(palette.hover))
+            .on_click(cx.listener(move |panel, _, _, cx| {
+                sort_by(panel, by, descending, cx);
+                cx.notify();
+            }))
+            .into_any_element(),
+        }
+    });
     div()
         .flex()
         .flex_row()
@@ -776,10 +893,7 @@ fn header_row<'c>(
         .border_color(palette.border)
         .text_size(px(STATS_TEXT_SIZE))
         .text_color(palette.label)
-        .children(columns.map(|column| match (column.width, title.take()) {
-            (None, Some(title)) => table_cell(None, [title.into_any_element()]),
-            (width, _) => table_cell(width, [column.title.into_any_element()]),
-        }))
+        .children(cells)
 }
 
 /// What an execution log tells of a path's steps. Where it records spawns of

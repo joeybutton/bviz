@@ -540,11 +540,12 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
 pub(crate) const STEPS_TITLE: &str = "Steps";
 
 /// The tooltip of the choice of the list of a path's steps.
-pub(crate) const STEPS_TIP: &str = "The steps of the critical path, in the order they started.";
+pub(crate) const STEPS_TIP: &str =
+    "The steps of the critical path; sorted by Start, in the order they ran.";
 
 /// The tooltip of the choice of the list of actions nearly critical.
 pub(crate) const NEARLY_CRITICAL_TIP: &str = "The actions off the path that can become critical once the path's actions are \
-     shortened, least slack first.";
+     shortened.";
 
 /// The title of the list of actions nearly critical.
 pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {
@@ -578,7 +579,7 @@ pub(crate) fn nearly_critical_tip(action: &NearlyCritical) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use bviz_invocation::ActionGraph;
     use bviz_trace_profile::Profile;
@@ -689,7 +690,7 @@ mod tests {
     }
 
     /// The primary outputs of the actions of [`modeled_path`]'s graph.
-    const MODELED_OUTPUTS: [&str; 5] = [
+    pub(in crate::critical_path) const MODELED_OUTPUTS: [&str; 5] = [
         "bazel-out/a.h",
         "bazel-out/a.o",
         "bazel-out/b.o",
@@ -705,7 +706,7 @@ mod tests {
     /// the actions of `outputs`: the compile's 2 ms takes a generated
     /// header's 0.3 ms before it, and is bounded by a 1.5 ms compile beside
     /// them.
-    fn modeled_path(outputs: &[&str]) -> CriticalPath {
+    pub(in crate::critical_path) fn modeled_path(outputs: &[&str]) -> CriticalPath {
         let json = r#"{"traceEvents":[
             {"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}},
             {"name":"thread_name","ph":"M","tid":1,"args":{"name":"Main Thread"}},
