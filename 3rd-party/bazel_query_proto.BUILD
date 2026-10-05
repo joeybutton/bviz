@@ -39,5 +39,8 @@ proto_descriptor_set(
 
 exports_files(
     ["LICENSE"],
-    visibility = ["@//LICENSES:__pkg__"],
+    visibility = [
+        "@//LICENSES:__pkg__",
+        "@bazel_server_jar//:__pkg__",
+    ],
 )

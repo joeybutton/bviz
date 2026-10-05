@@ -19,7 +19,10 @@ rust_library(
         exclude = ["src/query_lang/bazel_goldens.rs"],
     ) + [":bazel_goldens_src"],
     crate_name = "bviz_graph_layout",
-    visibility = ["//ui/graph:__pkg__"],
+    visibility = [
+        "//graph/layout/oracle:__pkg__",
+        "//ui/graph:__pkg__",
+    ],
     deps = [
         "//util/parallel",
         "@bazel_query_proto//:bazel_query_rust_proto",

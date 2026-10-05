@@ -399,6 +399,17 @@ http_archive(
     url = "https://github.com/spdx/license-list-data/archive/refs/tags/v3.29.0.tar.gz",
 )
 
+# Bazel's own server jar, whose query engine bviz's query tests are checked
+# against. The release binary is a launcher with the jar appended as a zip; the
+# jar is pure Java, so this one download serves every development host.
+http_archive(
+    name = "bazel_server_jar",
+    build_file = "//3rd-party:bazel_server_jar.BUILD",
+    sha256 = "9cf3498e6d132b60ca90b1390499a07265084d4707e98c128c13c284da4c470f",
+    type = "zip",
+    url = "https://github.com/bazelbuild/bazel/releases/download/9.2.0/bazel_nojdk-9.2.0-linux-x86_64",
+)
+
 new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 # query (build.proto), cquery + aquery (analysis_v2.proto) and their transitive
@@ -448,6 +459,7 @@ new_git_repository(
 
 bazel_dep(name = "bazel_env.bzl", version = "0.7.2", dev_dependency = True)
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3", dev_dependency = True)
+bazel_dep(name = "rules_java", version = "9.3.0", dev_dependency = True)
 bazel_dep(name = "rules_multitool", version = "1.11.1", dev_dependency = True)
 bazel_dep(name = "rules_shell", version = "0.8.0", dev_dependency = True)
 bazel_dep(name = "with_cfg.bzl", version = "0.12.0", dev_dependency = True)
