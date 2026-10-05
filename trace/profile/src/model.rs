@@ -1058,17 +1058,24 @@ impl Profile {
             .any(|t| t.lane_class == LaneClass::CriticalPath)
     }
 
-    /// Phase markers as half-open `[start, end)` intervals: each runs to the next
-    /// marker's start, the last to `span.end_us`. Mirrors Bazel's `JsonProfile`
-    /// phase-summary reconstruction from consecutive markers. Each name is an
-    /// interned handle; resolve with [`Profile::str`].
+    /// The build's phases as half-open `[start, end)` intervals: each runs
+    /// to the next one's start, the last to `span.end_us`, as Bazel's
+    /// `JsonProfile` sums them up. Of the phase markers, only those naming one
+    /// of the build's phases start one; the others mark steps of a phase, such
+    /// as the launch's extraction of the Bazel binary, logged from the
+    /// phase's own start. Each name is an interned handle; resolve with
+    /// [`Profile::str`].
     pub fn phase_intervals(&self) -> Vec<(Str, i64, i64)> {
-        let markers = &self.phase_markers;
-        markers
+        let phases: Vec<&PhaseMarker> = self
+            .phase_markers
+            .iter()
+            .filter(|marker| BUILD_PHASES.contains(&self.str(marker.name)))
+            .collect();
+        phases
             .iter()
             .enumerate()
             .map(|(i, marker)| {
-                let end = markers
+                let end = phases
                     .get(i + 1)
                     .map_or(self.span.end_us, |next| next.start_us);
                 (marker.name, marker.start_us, end)
@@ -1076,6 +1083,21 @@ impl Profile {
             .collect()
     }
 }
+
+/// The name of each of the build's phases, as its marker in a profile gives
+/// it:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/ProfilePhase.java#L21-L30>
+const BUILD_PHASES: [&str; 9] = [
+    "Launch Blaze",
+    "Initialize command",
+    "Evaluate target patterns",
+    "Load and analyze dependencies",
+    "Load, analyze dependencies and build artifacts",
+    "Analyze licenses",
+    "Prepare for build",
+    "Build artifacts",
+    "Complete build",
+];
 
 impl Profile {
     /// Assembles a profile from filled pools and resolved top-level vectors. The
@@ -1835,7 +1857,15 @@ mod tests {
 
     #[test]
     fn phase_intervals_abut_and_last_runs_to_span_end() {
-        let p = profile_with(vec![("Loading", 30), ("Launch", 0), ("Execute", 100)], 250);
+        let p = profile_with(
+            vec![
+                ("Initialize command", 30),
+                ("Launch Blaze", 0),
+                ("Extracting Bazel binary", 0),
+                ("Build artifacts", 100),
+            ],
+            250,
+        );
         let resolved: Vec<_> = p
             .phase_intervals()
             .into_iter()
@@ -1844,9 +1874,9 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                ("Launch".to_owned(), 0, 30),
-                ("Loading".to_owned(), 30, 100),
-                ("Execute".to_owned(), 100, 250),
+                ("Launch Blaze".to_owned(), 0, 30),
+                ("Initialize command".to_owned(), 30, 100),
+                ("Build artifacts".to_owned(), 100, 250),
             ]
         );
     }
@@ -1854,13 +1884,13 @@ mod tests {
     #[test]
     fn phase_intervals_handles_empty_and_single() {
         assert!(profile_with(vec![], 250).phase_intervals().is_empty());
-        let p = profile_with(vec![("only", 10)], 250);
+        let p = profile_with(vec![("Complete build", 10)], 250);
         let resolved: Vec<_> = p
             .phase_intervals()
             .into_iter()
             .map(|(name, start, end)| (p.str(name).to_owned(), start, end))
             .collect();
-        assert_eq!(resolved, vec![("only".to_owned(), 10, 250)]);
+        assert_eq!(resolved, vec![("Complete build".to_owned(), 10, 250)]);
     }
 
     #[test]
