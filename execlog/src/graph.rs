@@ -20,6 +20,10 @@ use crate::read::READ_CHUNK_BYTES;
 use crate::wire::{Value, int32, next_field, text};
 use crate::{ExecLog, LoadError};
 
+mod dated;
+
+pub use dated::DatedNodes;
+
 /// Compressed log bytes per node, rounded down from the densest logs measured
 /// so the node lists are reserved at or above their final length.
 const COMPRESSED_BYTES_PER_NODE: u64 = 24;
@@ -288,14 +292,14 @@ mod tests {
         zstd::encode_all(decoded.as_slice(), 0).expect("compress in memory")
     }
 
-    fn load(nodes: &[Node]) -> GraphLog {
+    pub(super) fn load(nodes: &[Node]) -> GraphLog {
         let log = encode(nodes);
         read_compressed(log.as_slice(), log.len() as u64).expect("read the log")
     }
 
     /// A node of the action `description` of `//p:t`, started `start`
     /// milliseconds into the build and lasting `duration`.
-    fn node(runner: &str, description: &str, start: i64, duration: i32) -> Node {
+    pub(super) fn node(runner: &str, description: &str, start: i64, duration: i32) -> Node {
         Node {
             description: description.into(),
             target_label: "//p:t".into(),
@@ -311,7 +315,7 @@ mod tests {
         }
     }
 
-    fn at(millis: i64) -> EpochMicros {
+    pub(super) fn at(millis: i64) -> EpochMicros {
         EpochMicros::from_millis(ORIGIN_MS + millis)
     }
 

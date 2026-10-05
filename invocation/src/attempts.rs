@@ -364,7 +364,7 @@ impl Attempts {
     /// Records `later`, a step of the attempt recorded last of the action
     /// `primary_output` names, as [carrying on](Attempt::continued) that
     /// attempt; where none is recorded, as [`record`](Self::record) does.
-    pub(crate) fn record_continued(
+    pub fn record_continued(
         &mut self,
         primary_output: Option<&str>,
         owner: Option<ConfiguredTarget<&str>>,
