@@ -205,9 +205,25 @@ impl Index {
     /// state it reaches leads on to one of `seeds`. Containment moves cost
     /// nothing, so the walk is a 0-1 breadth-first search.
     pub(crate) fn walk(&self, seeds: &[usize], toward: Toward, bounds: Bounds<'_>) -> Walk {
+        self.search(seeds, toward, bounds, None)
+    }
+
+    /// The walk [`Self::walk`] makes, recording how it reached each state.
+    pub(crate) fn routed(&self, seeds: &[usize], toward: Toward, bounds: Bounds<'_>) -> Routed {
+        let mut step = vec![Step::Seed; 2 * self.ids()];
+        let walk = self.search(seeds, toward, bounds, Some(&mut step));
+        Routed { walk, step }
+    }
+
+    fn search(
+        &self,
+        seeds: &[usize],
+        toward: Toward,
+        bounds: Bounds<'_>,
+        mut steps: Option<&mut [Step]>,
+    ) -> Walk {
         let mut walk = Walk {
             fewest: vec![UNREACHED; 2 * self.ids()],
-            step: vec![Step::Seed; 2 * self.ids()],
         };
         let above = |id: usize| self.level[id].is_some_and(|level| level < bounds.ceiling);
         let kept = |state: usize| {
@@ -234,7 +250,11 @@ impl Index {
                     Some(edge) => (walk.fewest[at] + 1, Step::Edge(at, edge)),
                     None => (walk.fewest[at], Step::Contain(at)),
                 };
-                if walk.improve(to, edges, step) {
+                if edges < walk.fewest[to] {
+                    walk.fewest[to] = edges;
+                    if let Some(steps) = steps.as_deref_mut() {
+                        steps[to] = step;
+                    }
                     match over {
                         Some(_) => open.push_back(to),
                         None => open.push_front(to),
@@ -358,22 +378,16 @@ enum Step {
 /// What one walk reached, by state.
 pub(crate) struct Walk {
     fewest: Vec<u32>,
-    /// Meaningful only for a state `fewest` holds reached.
+}
+
+/// A walk with how it reached each state.
+pub(crate) struct Routed {
+    pub(crate) walk: Walk,
+    /// Meaningful only for a state the walk reached.
     step: Vec<Step>,
 }
 
 impl Walk {
-    /// Records reaching `state` in `edges` by `step` where that beats what the
-    /// walk had, reporting whether it did.
-    fn improve(&mut self, state: usize, edges: u32, step: Step) -> bool {
-        let better = edges < self.fewest[state];
-        if better {
-            self.fewest[state] = edges;
-            self.step[state] = step;
-        }
-        better
-    }
-
     pub(crate) fn reached(&self, id: Id) -> bool {
         let id = id.0 as usize;
         self.fewest[State::arrived(id)] != UNREACHED || self.fewest[State::lifted(id)] != UNREACHED
@@ -391,12 +405,14 @@ impl Walk {
             .filter(|&state| self.fewest[state] != UNREACHED)
             .min_by_key(|&state| self.fewest[state])
     }
+}
 
+impl Routed {
     /// The nodes the walk passed on its way from `start`'s subtree to `end`, a
     /// state of `finish`: `start`, the ends of each edge it took, and `finish`,
     /// each named once where consecutive.
     pub(crate) fn chain(&self, graph: &Graph, end: usize, start: Id, finish: Id) -> Vec<Id> {
-        let mut taken: Vec<u32> = Vec::with_capacity(self.fewest[end] as usize);
+        let mut taken: Vec<u32> = Vec::with_capacity(self.walk.fewest[end] as usize);
         let mut at = end;
         loop {
             match self.step[at] {

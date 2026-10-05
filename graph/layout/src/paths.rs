@@ -89,7 +89,8 @@ pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
 pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> {
     let index = Index::new(graph, &[dependency, dependent]);
     let from = index.subtree(dependency);
-    let forward = index.walk(&arrivals(&from), Toward::Dependents, Bounds::NONE);
+    let routed = index.routed(&arrivals(&from), Toward::Dependents, Bounds::NONE);
+    let forward = &routed.walk;
     let end = forward.nearest(dependent)?;
     let to = index.subtree(dependent);
     let at_dependent = dependent.0 as usize;
@@ -110,7 +111,7 @@ pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> 
         })
         .cloned()
         .collect();
-    let shortest = forward.chain(graph, end, dependency, dependent);
+    let shortest = routed.chain(graph, end, dependency, dependent);
     Some(Between {
         paths: Paths {
             nodes: spanned(&[dependency, dependent], &edges),
