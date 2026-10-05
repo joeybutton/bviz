@@ -27,6 +27,16 @@ where the time went, weighed by summed time or by share of the wall time.
 
 The console output of a build, replayed from its build event log.
 
+### Execution logs
+
+Where a build's spawns spent their time, phase by phase, from its execution
+log or execution graph log.
+
+### Playback
+
+A build played back on its graph: each target and action pending, being
+analysed, waiting, running or done at every moment of the build.
+
 bviz can open several files at once.
 
 ## Install
@@ -106,8 +116,47 @@ bviz --bep /tmp/build.bep
 Bazel does not timestamp its progress output, so without `--show_timestamps` the
 replay interpolates its timing between the events that do carry a clock.
 
-`--profile` and `--bep` can be repeated, and combined with the graph flags, to
-open several files grouped by Bazel invocation.
+### Execution logs
+
+```sh
+bazel build --execution_log_compact_file=/tmp/exec_log.binpb.zst \
+  --experimental_enable_execution_graph_log \
+  --experimental_execution_graph_log_path=/tmp/graph_log.binpb.zst //...
+bviz --exec_log /tmp/exec_log.binpb.zst --exec_graph_log /tmp/graph_log.binpb.zst
+```
+
+Either log is enough; each opens as a breakdown of spawn time by phase.
+
+`--profile`, `--bep`, `--exec_log` and `--exec_graph_log` can be repeated, and
+combined with the graph flags, to open several files grouped by Bazel
+invocation.
+
+### Playback
+
+The files one invocation wrote open as one document with a playback bar: play,
+step or drag through the build, and pick `colour: playback` to see where each
+box of the graph stood at that moment. Each file adds what it records, so
+capture all of them from one build, and the graph's `cquery` and `aquery`
+results from the same workspace:
+
+| Bazel flags | bviz flag | Adds |
+| --- | --- | --- |
+| `--profile=FILE --noslim_profile --record_full_profiler_data --experimental_profile_include_target_label --experimental_profile_include_target_configuration --experimental_profile_include_primary_output` | `--profile` | Each action's phases to the microsecond; the analysis of each target whose rule is written in Starlark; the build's phases, as bands along the bar. |
+| `--execution_log_compact_file=FILE` | `--exec_log` | Each spawn's runner, cache hit and exit code. A spawn run locally is placed exactly, the others between those by the order they finished in. |
+| `--experimental_enable_execution_graph_log --experimental_execution_graph_log_path=FILE` | `--exec_graph_log` | Each action's timing to the millisecond, including the actions that ran no spawn; with a profile of the same build written with the flags above, which of those the build found up to date. |
+| `--build_event_binary_file=FILE --build_event_publish_all_actions --show_timestamps` | `--bep` | When each top-level target was analysed, and was built or failed; how each action ended; each test attempt. |
+
+Without `--record_full_profiler_data` the profile keeps only analysis lasting
+50 ms or more.
+
+The execution graph log names no action's output. A spawn of it that the
+execution log of the same build holds by digest lands on its action; every
+other node is found among the aquery's actions by its target, mnemonic and
+description, and lands on the target where that finds none or several, as for
+an action its target registers in several configurations. An aquery from a
+Bazel release before 10.0.0-pre.20260723.1 records no progress message, so with
+one an action that sets a progress message is found only where it is its
+target's only action of that mnemonic.
 
 ## Getting help
 
