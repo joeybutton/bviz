@@ -10,7 +10,6 @@ use bviz_invocation::spawn::LoggedSpawns;
 use bviz_invocation::{ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
-    span_between,
 };
 use bviz_trace_profile::{LaneClass, Profile, SliceAt, TimeSpan};
 use bviz_ui_components::{Pending, load_in_background};
@@ -79,17 +78,6 @@ pub(crate) fn step_time(profile: &Profile, step: &Step) -> TimeSpan {
                 end_us: time.end_us.max(slice.end_us()),
             },
         )
-}
-
-/// The time selection standing for `step`: its own slice's time, or none for
-/// a step of no length.
-fn step_selection(profile: &Profile, step: &Step) -> TimeSelection {
-    let own = profile.slice(step.at());
-    let mut selection = TimeSelection::default();
-    if let Some(region) = span_between(own.start_us, own.end_us()) {
-        selection.set(region);
-    }
-    selection
 }
 
 /// `steps` as the session of their invocation holds them.
@@ -678,30 +666,30 @@ impl TraceModel {
         }
     }
 
-    /// Chooses step `index` of the critical path, selects its time and has
-    /// the timeline and the views of the invocation's other outputs show it.
+    /// Chooses step `index` of the critical path and has the timeline and
+    /// the views of the invocation's other outputs show it.
     pub(crate) fn choose_step(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(selection) = self.adopt_chosen_step(index) else {
-            return;
-        };
-        self.chosen.set(Some(Chosen::Step(index)), cx);
-        self.set_time_selection(selection, cx);
-        cx.emit(StepChosen);
-        cx.notify();
+        if self.adopt_chosen_step(index) {
+            self.chosen.set(Some(Chosen::Step(index)), cx);
+            cx.emit(StepChosen);
+            cx.notify();
+        }
     }
 
-    /// Opens the lane the timeline shows step `index` on, and returns the
-    /// time selection standing for the step. `None` where the path holds no
-    /// such step.
-    fn adopt_chosen_step(&mut self, index: usize) -> Option<TimeSelection> {
-        let profile = self.profile()?.clone();
-        let step = self.steps().get(index)?;
-        let selection = step_selection(&profile, step);
+    /// Opens the lane the timeline shows step `index` on. Says whether the
+    /// path holds such a step.
+    fn adopt_chosen_step(&mut self, index: usize) -> bool {
+        let Some(profile) = self.profile().cloned() else {
+            return false;
+        };
+        let Some(step) = self.steps().get(index) else {
+            return false;
+        };
         let shown_on = step_slices(step).next().map(SliceAt::track);
         if let Some(track) = shown_on {
             self.open_lane_of(&profile, track);
         }
-        Some(selection)
+        true
     }
 
     /// Has the chart draw the lane of `track`: kept in its group's sample,
@@ -731,42 +719,21 @@ impl TraceModel {
         }
     }
 
-    /// Lets go of the chosen step, and of its time where that is still the
-    /// time selection. Says whether a step was chosen.
+    /// Lets go of the chosen step. Says whether a step was chosen.
     pub(crate) fn unchoose_step(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(selection) = self.chosen_selection(cx) else {
+        if self.chosen_step(cx).is_none() {
             return false;
-        };
-        self.chosen.set(None, cx);
-        if self.release_chosen_lane(&selection) {
-            self.set_time_selection(TimeSelection::default(), cx);
         }
+        self.chosen.set(None, cx);
+        self.release_chosen_lane();
         cx.notify();
         true
     }
 
     /// Lets the lane a step let go of was shown on fall back to its group's
-    /// sample, and says whether the step's `selection` is still the time
-    /// selection.
-    fn release_chosen_lane(&mut self, selection: &TimeSelection) -> bool {
+    /// sample.
+    fn release_chosen_lane(&mut self) {
         self.keep_in_sample(None);
-        self.time_selection == *selection
-    }
-
-    /// The time selection standing for the chosen step, where one is chosen.
-    fn chosen_selection(&self, cx: &App) -> Option<TimeSelection> {
-        let (_, step) = self.chosen_step(cx)?;
-        Some(step_selection(self.profile()?, step))
-    }
-
-    /// Widens the time selection back to the whole timeline, letting go of
-    /// the chosen step as well where the selection is still the step's. Says
-    /// whether anything changed.
-    pub(crate) fn clear_time_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.chosen_selection(cx).as_ref() == Some(&self.time_selection) {
-            return self.unchoose_step(cx);
-        }
-        self.set_time_selection(TimeSelection::default(), cx)
     }
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
@@ -1239,7 +1206,8 @@ mod tests {
     use bviz_invocation::spawn::LoggedSpawns;
     use bviz_invocation::{ActionGraph, ConfiguredTarget, Session};
     use bviz_trace_layout::{
-        FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer, span_between,
+        FlameDirection, FlameLabels, FlameMode, FlameWeight, TimeSelection, TrackFlamer,
+        span_between,
     };
     use bviz_trace_profile::Profile;
     use gpui::Task;
@@ -1476,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chosen_step_selects_its_own_time_and_opens_the_lane_its_action_ran_on() {
+    fn a_chosen_step_opens_the_lane_its_action_ran_on_until_let_go_of() {
         let mut model = traced();
         let step = model.steps().first().expect("a step");
         let [span, own] = step_slices(step).collect::<Vec<_>>()[..] else {
@@ -1486,30 +1454,31 @@ mod tests {
         assert!(drawn(&model, own.track()));
         assert!(!drawn(&model, span.track()), "left out of the sample");
 
-        let selection = model.adopt_chosen_step(0).expect("a step to choose");
-        assert_eq!(
-            selection.spans(),
-            [span_between(100, 1100).expect("a region")]
-        );
+        assert!(model.adopt_chosen_step(0));
         assert!(drawn(&model, span.track()));
         assert_eq!(model.group_show_all, [false; GROUP_ORDER.len()]);
 
-        model.time_selection = selection.clone();
-        assert!(model.release_chosen_lane(&selection), "still its time");
+        model.release_chosen_lane();
         assert!(!drawn(&model, span.track()), "back out of the sample");
     }
 
     #[test]
-    fn a_step_let_go_of_after_another_time_was_selected_leaves_that_time() {
+    fn choosing_a_step_and_letting_go_of_it_leave_the_time_selection() {
         let mut model = traced();
-        let selection = model.adopt_chosen_step(0).expect("a step to choose");
-        assert!(!model.release_chosen_lane(&selection));
+        let mut selection = TimeSelection::default();
+        selection.set(span_between(5, 50).expect("a region"));
+        selection.insert(span_between(2000, 2100).expect("a region"));
+        model.time_selection = selection.clone();
+        assert!(model.adopt_chosen_step(0));
+        assert_eq!(model.time_selection, selection);
+        model.release_chosen_lane();
+        assert_eq!(model.time_selection, selection);
     }
 
     #[test]
     fn a_replaced_document_holds_no_chosen_step() {
         let mut model = traced();
-        model.adopt_chosen_step(0).expect("a step to choose");
+        assert!(model.adopt_chosen_step(0));
         model.chosen = HeldChoice::Alone(Some(Chosen::Step(0)));
         model.replace_source(Source::Loading);
         assert!(matches!(model.chosen, HeldChoice::Alone(None)));
@@ -1540,11 +1509,15 @@ mod tests {
     }
 
     #[test]
-    fn a_step_of_no_length_selects_no_time_and_a_step_past_the_path_is_not_chosen() {
+    fn a_step_past_the_path_is_not_chosen() {
         let mut model = traced();
-        let selection = model.adopt_chosen_step(1).expect("a step to choose");
-        assert!(selection.is_empty());
-        assert_eq!(model.adopt_chosen_step(2), None);
+        assert!(model.adopt_chosen_step(1));
+        assert_eq!(
+            model.step_of(Chosen::Step(1)).map(|(index, _)| index),
+            Some(1)
+        );
+        assert!(!model.adopt_chosen_step(2));
+        assert!(model.step_of(Chosen::Step(2)).is_none());
     }
 
     #[test]

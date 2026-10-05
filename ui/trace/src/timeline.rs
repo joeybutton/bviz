@@ -750,7 +750,8 @@ impl Timeline {
     }
 
     /// Answers [`ClearTimeSelection`] by backing out of the innermost gesture: a
-    /// region drag under way is abandoned, and failing that the aggregate widens
+    /// region drag under way is abandoned, failing that the chosen
+    /// critical-path step is let go of, and failing that the aggregate widens
     /// back to the whole timeline.
     fn clear_time_selection(
         &mut self,
@@ -758,8 +759,10 @@ impl Timeline {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let backed_out =
-            self.drag.cancel_region() || self.model.update(cx, |m, cx| m.clear_time_selection(cx));
+        let backed_out = self.drag.cancel_region()
+            || self.model.update(cx, |m, cx| {
+                m.unchoose_step(cx) || m.set_time_selection(TimeSelection::default(), cx)
+            });
         if backed_out {
             cx.notify();
         }
