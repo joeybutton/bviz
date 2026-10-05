@@ -39,8 +39,8 @@ const COMPRESSED_BYTES_PER_OUTPUT: u64 = 192;
 /// [`PATH_BYTES_PER_COMPRESSED_KIB`].
 const OUTPUT_BYTES_PER_COMPRESSED_KIB: u64 = 192;
 
-/// Decoded bytes read from the log at a time.
-const READ_CHUNK_BYTES: usize = 256 << 10;
+/// Decoded bytes read from a log at a time.
+pub(crate) const READ_CHUNK_BYTES: usize = 256 << 10;
 
 pub(crate) fn read_path(path: &Path) -> Result<ExecLog, LoadError> {
     let file = File::open(path).map_err(LoadError::Io)?;

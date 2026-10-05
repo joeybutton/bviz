@@ -15,9 +15,24 @@ run_binary(
     tool = "//tools/proto_field_numbers:proto_field_numbers_gen",
 )
 
+run_binary(
+    name = "graph_fields",
+    srcs = ["@bazel_spawn_proto//:bazel_spawn_proto_descriptor_set"],
+    outs = ["src/graph_fields.rs"],
+    args = [
+        "$(execpath @bazel_spawn_proto//:bazel_spawn_proto_descriptor_set)",
+        "src/main/protobuf/execution_graph.proto",
+        "$(execpath src/graph_fields.rs)",
+    ],
+    tool = "//tools/proto_field_numbers:proto_field_numbers_gen",
+)
+
 rust_library(
     name = "execlog",
-    srcs = glob(["src/**/*.rs"]) + [":spawn_fields"],
+    srcs = glob(["src/**/*.rs"]) + [
+        ":graph_fields",
+        ":spawn_fields",
+    ],
     crate_name = "bviz_execlog",
     visibility = ["//ui/execlog:__pkg__"],
     deps = [

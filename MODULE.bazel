@@ -421,7 +421,8 @@ new_git_repository(
     ],
 )
 
-# spawn.proto, for reading `--execution_log_compact_file`.
+# spawn.proto, for reading `--execution_log_compact_file`, and execution_graph.proto,
+# for reading `--experimental_enable_execution_graph_log`.
 new_git_repository(
     name = "bazel_spawn_proto",
     build_file = "//3rd-party:bazel_spawn_proto.BUILD",
@@ -429,6 +430,7 @@ new_git_repository(
     remote = "https://github.com/bazelbuild/bazel.git",
     sparse_checkout_patterns = [
         "/LICENSE",
+        "src/main/protobuf/execution_graph.proto",
         "src/main/protobuf/spawn.proto",
     ],
 )

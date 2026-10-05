@@ -24,7 +24,10 @@ license(
 
 proto_library(
     name = "bazel_spawn_proto",
-    srcs = ["src/main/protobuf/spawn.proto"],
+    srcs = [
+        "src/main/protobuf/execution_graph.proto",
+        "src/main/protobuf/spawn.proto",
+    ],
     deps = [
         "@com_google_protobuf//:duration_proto",
         "@com_google_protobuf//:timestamp_proto",

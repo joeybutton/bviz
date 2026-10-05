@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::ops::Range;
 
 use super::PhaseTiming;
@@ -302,14 +303,23 @@ impl Builder {
 /// log of a build keying spawns by digest is reserved room for per spawn.
 const SHA256_HEX_CHARS: usize = 64;
 
-/// Distinct strings, each named by its place in the order first seen.
+/// Distinct strings, each named by its place in the order first seen,
+/// hashed by `S`.
 #[derive(Default)]
-struct Names {
-    index: HashMap<Box<str>, usize>,
+pub struct Names<S = RandomState> {
+    index: HashMap<Box<str>, usize, S>,
 }
 
-impl Names {
-    fn intern(&mut self, name: &str) -> usize {
+impl<S: BuildHasher + Default> Names<S> {
+    /// Room for `names` distinct strings.
+    pub fn with_capacity(names: usize) -> Self {
+        Names {
+            index: HashMap::with_capacity_and_hasher(names, S::default()),
+        }
+    }
+
+    /// The name of `name`, which is new where it was not seen before.
+    pub fn intern(&mut self, name: &str) -> usize {
         let next = self.index.len();
         match self.index.get(name) {
             Some(&index) => index,
@@ -320,7 +330,8 @@ impl Names {
         }
     }
 
-    fn into_vec(self) -> Vec<Box<str>> {
+    /// The strings seen, each at its name.
+    pub fn into_vec(self) -> Vec<Box<str>> {
         let mut names = vec![Box::<str>::default(); self.index.len()];
         for (name, index) in self.index {
             names[index] = name;

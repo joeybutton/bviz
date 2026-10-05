@@ -1,6 +1,7 @@
 //! Reader for Bazel's compact execution log (`--execution_log_compact_file`):
 //! the spawns an invocation executed or answered from a remote or disk cache,
-//! with the time each spent in every phase Bazel's spawn metrics report.
+//! with the time each spent in every phase Bazel's spawn metrics report; and
+//! for its execution graph log, in [`graph`].
 
 use std::cmp::Reverse;
 use std::fmt;
@@ -8,6 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 mod frame;
+pub mod graph;
+mod graph_fields;
 mod read;
 mod spawn_fields;
 #[cfg(test)]
