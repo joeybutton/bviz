@@ -8,15 +8,15 @@ use bazel_spawn_proto::duration_proto::google::protobuf::Duration as ProtoDurati
 use bazel_spawn_proto::tools::protos::SpawnMetrics;
 use bazel_spawn_proto::tools::protos::exec_log_entry::Invocation;
 use bviz_invocation::InvocationId;
+use bviz_invocation::spawn::{self, Logged, PhaseTiming, REPORTED_PHASES};
 use bviz_parallel::worker_count;
 use prost::{DecodeError, Message};
 use rustc_hash::FxHashMap;
 
 use crate::frame::{first_message, for_each_message, for_each_message_pipelined};
 use crate::spawn_fields::exec_log_entry;
-use crate::timing::{REPORTED_PHASES, Timing};
 use crate::wire::{Value, next_field, text};
-use crate::{ExecLog, LoadError, Record};
+use crate::{ExecLog, LoadError};
 
 /// Compressed log bytes per spawn, rounded down from the densest logs measured
 /// so the spawn list is reserved at or above its final length.
@@ -62,33 +62,6 @@ pub(crate) fn read_compressed(
 
 fn estimate(compressed: u64, bytes_per_item: u64) -> usize {
     usize::try_from(compressed / bytes_per_item).unwrap_or(usize::MAX)
-}
-
-/// Distinct strings, each named by its place in the order first seen.
-#[derive(Default)]
-struct Names {
-    index: FxHashMap<Box<str>, usize>,
-}
-
-impl Names {
-    fn intern(&mut self, name: &str) -> usize {
-        let next = self.index.len();
-        match self.index.get(name) {
-            Some(&index) => index,
-            None => {
-                self.index.insert(name.into(), next);
-                next
-            }
-        }
-    }
-
-    fn into_vec(self) -> Vec<Box<str>> {
-        let mut names = vec![Box::<str>::default(); self.index.len()];
-        for (name, index) in self.index {
-            names[index] = name;
-        }
-        names
-    }
 }
 
 /// Ids below this always index [`Paths`]'s vector.
@@ -148,19 +121,15 @@ impl Paths {
 }
 
 struct Builder {
-    runners: Names,
-    mnemonics: Names,
     paths: Paths,
-    records: Vec<Record>,
+    spawns: spawn::Builder,
 }
 
 impl Builder {
     fn with_capacity(spawns: usize, entries: usize, path_bytes: usize) -> Builder {
         Builder {
-            runners: Names::default(),
-            mnemonics: Names::default(),
             paths: Paths::with_capacity(entries, path_bytes),
-            records: Vec::with_capacity(spawns),
+            spawns: spawn::Builder::with_capacity(spawns),
         }
     }
 
@@ -182,10 +151,7 @@ impl Builder {
             Some(Payload {
                 kind: exec_log_entry::SPAWN,
                 bytes,
-            }) => {
-                let record = self.record(bytes)?;
-                self.records.push(record);
-            }
+            }) => self.add_spawn(bytes)?,
             _ => {}
         }
         Ok(())
@@ -208,7 +174,7 @@ impl Builder {
         Ok(())
     }
 
-    fn record(&mut self, mut spawn: &[u8]) -> Result<Record, DecodeError> {
+    fn add_spawn(&mut self, mut spawn: &[u8]) -> Result<(), DecodeError> {
         let mut first_output = None;
         let mut target_label = "";
         let mut mnemonic = "";
@@ -231,42 +197,41 @@ impl Builder {
             }
         }
         let primary_output = match first_output {
-            Some(output) => self.output_path(output)?,
+            Some(output) => output_path(&self.paths, output)?,
             None => None,
         };
-        Ok(Record {
-            runner: self.runners.intern(runner),
-            mnemonic: self.mnemonics.intern(mnemonic),
-            target_label: (!target_label.is_empty()).then(|| target_label.into()),
+        self.spawns.push(Logged {
+            runner,
+            mnemonic,
+            target_label,
             primary_output,
             timing: timing(metrics),
-        })
-    }
-
-    /// The path of the spawn output encoded in `output`.
-    fn output_path(&self, mut output: &[u8]) -> Result<Option<Box<str>>, DecodeError> {
-        let mut path = None;
-        while !output.is_empty() {
-            match next_field(&mut output)? {
-                (exec_log_entry::output::OUTPUT_ID, Value::Varint(id)) => {
-                    path = self.paths.get(id as u32).map(Box::from);
-                }
-                (exec_log_entry::output::INVALID_OUTPUT_PATH, Value::Bytes(bytes)) => {
-                    path = Some(text(bytes)?.into());
-                }
-                _ => {}
-            }
-        }
-        Ok(path)
+        });
+        Ok(())
     }
 
     fn finish(self) -> ExecLog {
         ExecLog {
-            runners: self.runners.into_vec(),
-            mnemonics: self.mnemonics.into_vec(),
-            records: self.records,
+            spawns: self.spawns.finish(),
         }
     }
+}
+
+/// The path of the spawn output encoded in `output`.
+fn output_path<'a>(paths: &'a Paths, mut output: &'a [u8]) -> Result<Option<&'a str>, DecodeError> {
+    let mut path = None;
+    while !output.is_empty() {
+        match next_field(&mut output)? {
+            (exec_log_entry::output::OUTPUT_ID, Value::Varint(id)) => {
+                path = paths.get(id as u32);
+            }
+            (exec_log_entry::output::INVALID_OUTPUT_PATH, Value::Bytes(bytes)) => {
+                path = Some(text(bytes)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(path)
 }
 
 struct Entry<'a> {
@@ -297,7 +262,7 @@ fn invocation_id(invocation: &[u8]) -> Result<Option<InvocationId>, DecodeError>
     Ok(InvocationId::new(&Invocation::decode(invocation)?.id))
 }
 
-fn timing(metrics: SpawnMetrics) -> Timing {
+fn timing(metrics: SpawnMetrics) -> PhaseTiming {
     let reported: [Option<ProtoDuration>; REPORTED_PHASES] = [
         metrics.parse_time,
         metrics.upload_time,
@@ -309,7 +274,7 @@ fn timing(metrics: SpawnMetrics) -> Timing {
         metrics.fetch_time,
         metrics.retry_time,
     ];
-    Timing::new(duration(metrics.total_time), reported.map(duration))
+    PhaseTiming::new(duration(metrics.total_time), reported.map(duration))
 }
 
 /// `None` and negative durations read as none at all.
@@ -457,17 +422,6 @@ mod tests {
         ]);
         let outputs: Vec<_> = log.spawns().map(|s| s.primary_output()).collect();
         assert_eq!(outputs, [Some("far"), Some("near")]);
-    }
-
-    #[test]
-    fn names_are_shared_between_spawns() {
-        let log = load(&[
-            entry(0, Type::Spawn(spawn("remote", "A", metrics(1, &[])))),
-            entry(0, Type::Spawn(spawn("local", "B", metrics(1, &[])))),
-            entry(0, Type::Spawn(spawn("remote", "B", metrics(1, &[])))),
-        ]);
-        assert_eq!(*log.runners, ["remote".into(), "local".into()]);
-        assert_eq!(*log.mnemonics, ["A".into(), "B".into()]);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::model::ExecLogModel;
 use crate::model::Source;
 use crate::palette::Palette;
 use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
-use bviz_execlog::{Phase, Timing};
+use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar,
 };
@@ -573,7 +573,7 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
 ///
 /// The phases of a runner that reports only execution are drawn as one
 /// unbroken bar, apart from a breakdown whose other phases took no time.
-fn phase_bar(timing: &Timing, longest: Duration, palette: &Palette) -> Div {
+fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div {
     let total = timing.total();
     let summed: Duration = Phase::ALL.into_iter().map(|p| timing.phase(p)).sum();
     let span = total.max(summed);
@@ -700,7 +700,7 @@ mod tests {
             .map(|&(name, spawns)| GroupRow {
                 name: name.to_owned().into(),
                 spawns,
-                timing: Timing::default(),
+                timing: PhaseTiming::default(),
             })
             .collect()
     }

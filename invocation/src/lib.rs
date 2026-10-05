@@ -8,6 +8,7 @@ use std::sync::Arc;
 mod attempts;
 mod outcomes;
 mod runner;
+pub mod spawn;
 mod timings;
 
 pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
