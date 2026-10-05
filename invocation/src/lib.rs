@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod attempts;
+mod critical;
 mod outcomes;
 mod runner;
 pub mod spawn;
 mod timings;
 
 pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
+pub use critical::CriticalStep;
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
@@ -160,6 +162,8 @@ impl<T> Reported<T> {
 pub struct Session {
     attempts: Reported<Attempts>,
     configurations: Configurations,
+    /// In the order they started.
+    critical_path: Reported<Vec<CriticalStep>>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
     /// not a view of the invocation reads them.
@@ -231,11 +235,43 @@ impl Session {
     pub fn report_logged_spawns(&mut self, reported: LoggedSpawns) {
         self.logged_spawns.replace(Some(Arc::new(reported)));
     }
+
+    /// The steps of the invocation's critical path in the order they
+    /// started, none until its profile's path is reported.
+    pub fn critical_path(&self) -> &[CriticalStep] {
+        &self.critical_path.value
+    }
+
+    pub fn critical_path_revision(&self) -> Revision {
+        self.critical_path.revision
+    }
+
+    /// Says whether `reported` differs from the steps held: the same steps
+    /// again are no new report.
+    pub fn report_critical_path(&mut self, reported: Vec<CriticalStep>) -> bool {
+        let changed = self.critical_path.value != reported;
+        if changed {
+            self.critical_path.replace(reported);
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_critical_path_reported_again_alike_is_no_new_report() {
+        let mut session = Session::default();
+        let steps = || vec![CriticalStep::new(Some("bazel-out/a.o"), None)];
+        assert!(session.report_critical_path(steps()));
+        let traced = session.critical_path_revision();
+        assert!(!session.report_critical_path(steps()));
+        assert_eq!(session.critical_path_revision(), traced);
+        assert!(session.report_critical_path(Vec::new()));
+        assert_ne!(session.critical_path_revision(), traced);
+    }
 
     #[test]
     fn millis_scale_to_micros_and_saturate() {

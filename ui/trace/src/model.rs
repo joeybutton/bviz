@@ -7,7 +7,7 @@ use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_critical_path::{CriticalPath, Step, Work};
 use bviz_invocation::spawn::LoggedSpawns;
-use bviz_invocation::{Revision, Session};
+use bviz_invocation::{ConfiguredTarget, CriticalStep, Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
     span_between,
@@ -90,6 +90,19 @@ fn step_selection(profile: &Profile, step: &Step) -> TimeSelection {
         selection.set(region);
     }
     selection
+}
+
+/// `steps` as the session of their invocation holds them.
+fn critical_steps(steps: &[Step]) -> Vec<CriticalStep> {
+    steps
+        .iter()
+        .map(|step| {
+            let owner = step
+                .target()
+                .map(|label| ConfiguredTarget::new(label, step.configuration()));
+            CriticalStep::new(step.primary_output(), owner)
+        })
+        .collect()
 }
 
 /// A loaded profile with what is derived from it once for every reader of it.
@@ -201,6 +214,7 @@ fn trace(
         model
             .update(cx, |model, cx| {
                 if model.adopt_critical_path(&profile, joined, path) {
+                    model.report_critical_path(cx);
                     cx.emit(CriticalPathDerived);
                 }
             })
@@ -585,6 +599,20 @@ impl TraceModel {
             }) => path.steps(),
             _ => &[],
         }
+    }
+
+    /// Tells the session the steps of the traced path, which tracing the
+    /// path again with other spawns mostly leaves as they were.
+    fn report_critical_path(&self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let steps = critical_steps(self.steps());
+        session.update(cx, |session, cx| {
+            if session.report_critical_path(steps) {
+                cx.notify();
+            }
+        });
     }
 
     /// The chosen step of the critical path and its place among the steps.
@@ -1137,7 +1165,8 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Derivations, LoadedProfile, TraceModel, TracedPath, Tracing, clock_source, step_slices,
+        Derivations, LoadedProfile, TraceModel, TracedPath, Tracing, clock_source, critical_steps,
+        step_slices,
     };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::groups::GROUP_ORDER;
@@ -1145,7 +1174,7 @@ mod tests {
     use crate::{Source, TOP_N_PER_GROUP};
     use bviz_critical_path::CriticalPath;
     use bviz_invocation::spawn::LoggedSpawns;
-    use bviz_invocation::{Revision, Session};
+    use bviz_invocation::{ConfiguredTarget, Revision, Session};
     use bviz_trace_layout::{
         FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer, span_between,
     };
@@ -1376,6 +1405,29 @@ mod tests {
         model.replace_source(Source::Loading);
         assert_eq!(model.chosen_step, None);
         assert_eq!(model.kept_in_sample, None);
+    }
+
+    #[test]
+    fn a_step_is_reported_by_its_primary_output_and_its_configured_target() {
+        const CONFIGURATION: &str =
+            "4f8a2bd4c1e07b3e9a6d5f2c8b1e0a7d3c6f9b2e5a8d1c4f7b0e3a6d9c2f5b8e";
+        let json = format!(
+            r#"{{"traceEvents":[
+            {{"name":"thread_name","ph":"M","tid":0,"args":{{"name":"Critical Path"}}}},
+            {{"name":"thread_name","ph":"M","tid":1,"args":{{"name":"skyframe-evaluator-execution-1"}}}},
+            {{"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":100,"dur":1000,"tid":0}},
+            {{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":1,"out":"bazel-out/a","args":{{"target":"//a:a","configuration":"{CONFIGURATION}"}}}},
+            {{"cat":"critical path component","name":"action 'Linking b'","ph":"X","ts":2000,"dur":10,"tid":0}}]}}"#
+        );
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let path = CriticalPath::of(&profile, None).expect("a critical path");
+        let steps = critical_steps(path.steps());
+        assert_eq!(steps[0].primary_output(), Some("bazel-out/a"));
+        assert_eq!(
+            steps[0].owner(),
+            Some(ConfiguredTarget::new("//a:a", Some(CONFIGURATION)))
+        );
+        assert_eq!((steps[1].primary_output(), steps[1].owner()), (None, None));
     }
 
     #[test]

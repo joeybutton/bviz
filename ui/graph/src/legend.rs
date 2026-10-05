@@ -1,5 +1,6 @@
 use crate::Palette;
 use crate::colour::Colouring;
+use crate::critical::CriticalNodes;
 use crate::derive::{Drawn, ViewKey};
 use crate::duration::lasted;
 use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
@@ -87,6 +88,13 @@ fn fill_swatch(fill: Rgba, width: f32, palette: &Palette) -> Div {
         .bg(fill)
 }
 
+/// A box wearing the critical path's halo.
+fn halo_swatch(palette: &Palette) -> Div {
+    fill_swatch(palette.container, SWATCH_WIDTH, palette)
+        .border_2()
+        .border_color(palette.label)
+}
+
 /// The fill a box wears whose actions ran as `ran` says.
 pub(crate) fn ran_swatch(ran: Ran, palette: &Palette) -> Div {
     fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette)
@@ -129,6 +137,15 @@ pub(crate) struct Coloured<'a> {
     pub(crate) timed: Revision,
     pub(crate) states: Option<&'a NodeStates>,
     pub(crate) attempted: Revision,
+}
+
+/// Where a view's boxes wear the critical path's halo: the nodes its steps
+/// land on, resolved from a session's report at `traced`, or `None` where the
+/// halo is turned off.
+#[derive(Clone, Copy)]
+pub(crate) struct Haloed<'a> {
+    pub(crate) nodes: Option<&'a CriticalNodes>,
+    pub(crate) traced: Revision,
 }
 
 /// What the fills of a view's boxes say beyond each box's kind.
@@ -246,10 +263,14 @@ struct Found {
     /// Which of a session's attempts the reading was found from.
     attempted: Revision,
     colouring: Colouring,
+    /// Which report of the critical path, and whether its halo is drawn.
+    haloed: (Revision, bool),
     kinds: Vec<EdgeKind>,
     transitions: Vec<Transition>,
     standing: Vec<Status>,
     reading: Reading,
+    /// Whether some box wears the critical path's halo.
+    on_path: bool,
 }
 
 impl Legend {
@@ -260,8 +281,10 @@ impl Legend {
     /// drawn, or the view is yet to be derived.
     ///
     /// `resolved` says which of a session's outcomes `statuses` were resolved
-    /// from. Outcomes and timings land without the view changing, so what is
-    /// found stands for as long as the view, `resolved` and `coloured` do.
+    /// from. Outcomes, timings and the critical path land without the view
+    /// changing, so what is found stands for as long as the view, `resolved`,
+    /// `coloured` and `haloed` do.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn card(
         &mut self,
         drawn: &Drawn,
@@ -269,9 +292,10 @@ impl Legend {
         statuses: &Statuses,
         resolved: Revision,
         coloured: Coloured,
+        haloed: Haloed,
         palette: &Palette,
     ) -> Option<Div> {
-        let found = self.found(drawn, zoom, statuses, resolved, coloured)?;
+        let found = self.found(drawn, zoom, statuses, resolved, coloured, haloed)?;
         card(found, coloured.times, palette)
     }
 
@@ -282,15 +306,18 @@ impl Legend {
         statuses: &Statuses,
         resolved: Revision,
         coloured: Coloured,
+        haloed: Haloed,
     ) -> Option<&Found> {
         let view = drawn.view_key(zoom);
+        let halo_key = (haloed.traced, haloed.nodes.is_some());
         let found = match self.found.take() {
             Some(found)
                 if found.view == view
                     && found.resolved == resolved
                     && found.timed == coloured.timed
                     && found.attempted == coloured.attempted
-                    && found.colouring == coloured.colouring =>
+                    && found.colouring == coloured.colouring
+                    && found.haloed == halo_key =>
             {
                 found
             }
@@ -302,10 +329,14 @@ impl Legend {
                     timed: coloured.timed,
                     attempted: coloured.attempted,
                     colouring: coloured.colouring,
+                    haloed: halo_key,
                     kinds: present(g),
                     transitions: crossed(g),
                     standing: standing(g, statuses),
                     reading: Reading::of(g, coloured),
+                    on_path: haloed.nodes.is_some_and(|nodes| {
+                        g.boxes.iter().any(|b| nodes.marks(b.id, !b.compound))
+                    }),
                 }
             }
         };
@@ -415,8 +446,11 @@ fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<D
         ..
     } = found;
     let reading = reading(&found.reading, times, palette);
-    let present =
-        !kinds.is_empty() || !transitions.is_empty() || !standing.is_empty() || !reading.is_empty();
+    let present = !kinds.is_empty()
+        || !transitions.is_empty()
+        || !standing.is_empty()
+        || found.on_path
+        || !reading.is_empty();
     present.then(|| {
         div()
             .block_mouse_except_scroll()
@@ -440,6 +474,11 @@ fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<D
                 standing
                     .iter()
                     .map(|&s| row(status_swatch(s, palette), s.label(), palette)),
+            )
+            .children(
+                found
+                    .on_path
+                    .then(|| row(halo_swatch(palette), "critical path", palette)),
             )
             .children(reading)
     })
@@ -473,6 +512,14 @@ mod tests {
         }
     }
 
+    /// No critical path's halo drawn.
+    fn unhaloed() -> Haloed<'static> {
+        Haloed {
+            nodes: None,
+            traced: Revision::default(),
+        }
+    }
+
     /// A zoom far enough out that a map draws its coarsest level.
     const COARSEST: f32 = 0.0;
     /// A zoom far enough in that a map draws its finest level.
@@ -484,7 +531,14 @@ mod tests {
         let unreported = Revision::default();
         Some(
             &legend
-                .found(drawn, zoom, &Statuses::default(), unreported, uncoloured())?
+                .found(
+                    drawn,
+                    zoom,
+                    &Statuses::default(),
+                    unreported,
+                    uncoloured(),
+                    unhaloed(),
+                )?
                 .kinds,
         )
     }
@@ -534,7 +588,14 @@ mod tests {
     }
 
     fn standing_in(legend: &mut Legend, drawn: &Drawn, statuses: &Statuses) -> Vec<Status> {
-        let found = legend.found(drawn, 1.0, statuses, Revision::default(), uncoloured());
+        let found = legend.found(
+            drawn,
+            1.0,
+            statuses,
+            Revision::default(),
+            uncoloured(),
+            unhaloed(),
+        );
         found.expect("a derived view").standing.clone()
     }
 
@@ -569,7 +630,7 @@ mod tests {
         let mut legend = Legend::default();
         let drawn = boxes(1);
         let mut standing = |statuses: &Statuses, resolved| {
-            let found = legend.found(&drawn, 1.0, statuses, resolved, uncoloured());
+            let found = legend.found(&drawn, 1.0, statuses, resolved, uncoloured(), unhaloed());
             found.expect("a derived view").standing.clone()
         };
         assert_eq!(standing(&Statuses::default(), unreported), []);
@@ -673,6 +734,7 @@ mod tests {
             &Statuses::default(),
             Revision::default(),
             coloured,
+            unhaloed(),
         );
         found.expect("a derived view").reading.clone()
     }
@@ -740,6 +802,7 @@ mod tests {
             &Statuses::default(),
             Revision::default(),
             stale,
+            unhaloed(),
         );
         assert_eq!(found.map(|found| &found.reading), Some(&Reading::Kinds));
 
@@ -768,6 +831,7 @@ mod tests {
             &Statuses::default(),
             Revision::default(),
             coloured,
+            unhaloed(),
         );
         found.expect("a derived view").reading.clone()
     }
@@ -897,6 +961,7 @@ mod tests {
                     &Statuses::default(),
                     Revision::default(),
                     uncoloured(),
+                    unhaloed(),
                 )
                 .map(|found| found.transitions.clone())
         };

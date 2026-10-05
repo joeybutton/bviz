@@ -1,5 +1,6 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
+use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -122,6 +123,9 @@ pub(crate) struct Loaded {
     /// as the card over the graph lists it.
     timecard: Timecard,
     timed: Revision,
+    /// Where the steps of the invocation's critical path land.
+    critical: CriticalNodes,
+    traced: Revision,
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
@@ -149,6 +153,8 @@ impl Loaded {
             times: Err(Untimed::NoProfile),
             timecard: Timecard::default(),
             timed: Revision::default(),
+            critical: CriticalNodes::default(),
+            traced: Revision::default(),
             dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
             states: None,
@@ -196,6 +202,16 @@ impl Loaded {
         self.states.as_ref()
     }
 
+    pub(crate) fn critical(&self) -> &CriticalNodes {
+        &self.critical
+    }
+
+    /// Which of a session's reports of the critical path
+    /// [`critical`](Self::critical) was resolved from.
+    pub(crate) fn traced(&self) -> Revision {
+        self.traced
+    }
+
     /// Takes up what the build and the profile of `session` report of the
     /// graph's nodes, and says whether that changed anything a view of the
     /// graph shows. Each is read again only once it is reported anew.
@@ -203,7 +219,8 @@ impl Loaded {
         let outcomes = self.take_up_outcomes(session);
         let timings = self.take_up_timings(session);
         let attempts = self.take_up_attempts(session);
-        outcomes || timings || attempts
+        let critical = self.take_up_critical_path(session);
+        outcomes || timings || attempts || critical
     }
 
     fn take_up_attempts(&mut self, session: &Session) -> bool {
@@ -219,6 +236,19 @@ impl Loaded {
         let states = NodeStates::resolve(&landings, base, attempts);
         let changed = self.states != states;
         self.states = states;
+        changed
+    }
+
+    fn take_up_critical_path(&mut self, session: &Session) -> bool {
+        let revision = session.critical_path_revision();
+        if self.traced == revision {
+            return false;
+        }
+        self.traced = revision;
+        let shared = &self.shared;
+        let critical = CriticalNodes::resolve(&shared.base, &shared.names, session.critical_path());
+        let changed = self.critical != critical;
+        self.critical = critical;
         changed
     }
 
@@ -848,7 +878,8 @@ mod tests {
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
+        Attempts, BuildOutcome, ConfiguredTarget, CriticalStep, Outcomes, Profiled, Runner, Spawns,
+        Timings,
     };
     use std::time::Duration;
 
@@ -993,6 +1024,24 @@ mod tests {
         session.report_attempts(Attempts::default());
         assert!(loaded.report(&session));
         assert!(loaded.states().is_none());
+    }
+
+    /// A critical path is taken up once per report of it, and one landing on
+    /// none of the graph's nodes marks nothing.
+    #[test]
+    fn a_graph_takes_up_the_critical_path_once_per_report_of_it() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+
+        session.report_critical_path(vec![step("bazel-out/bin/app/bin")]);
+        assert!(loaded.report(&session));
+        assert!(loaded.critical().any());
+        assert!(!loaded.report(&session));
+
+        session.report_critical_path(vec![step("bazel-out/bin/app/other")]);
+        assert!(loaded.report(&session));
+        assert!(!loaded.critical().any());
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.
