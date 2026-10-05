@@ -1,6 +1,6 @@
 use bviz_invocation::{
-    AttemptSource, Attempts, Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Interval,
-    Session,
+    Analysed, AttemptSource, Attempts, Configurations, DatedOutcomes, EpochMicros, HeldOutcomes,
+    Interval, Session,
 };
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
@@ -19,6 +19,8 @@ pub(crate) struct Stream {
     /// the replay stands on the wall clock.
     attempts: Attempts,
     attempted: Attempted,
+    /// Empty where the replay does not stand on the wall clock.
+    analysed: Analysed,
 }
 
 /// When the attempts a stream records took place, from the first start to
@@ -32,27 +34,31 @@ impl Stream {
         let configurations = std::mem::take(&mut output.configurations);
         let reports = std::mem::take(&mut output.reports);
         let recorded = std::mem::take(&mut output.attempts);
+        let configured = std::mem::take(&mut output.analysed);
         let attempted = recorded.span();
         let replay = Replay::from_output(output);
-        let (outcomes, attempts) = match replay.dating() {
-            Some(dating) => (
-                HeldOutcomes::Dated(DatedOutcomes::new(
-                    (reports.into_iter())
-                        .map(|(position, report)| (dating.instant_at(position), report)),
-                )),
-                recorded.dated(dating),
-            ),
-            None => (
-                HeldOutcomes::Undated(reports.into_iter().map(|(_, report)| report).collect()),
-                Attempts::default(),
-            ),
+        let dating = replay.dating();
+        let outcomes = match dating {
+            Some(dating) => HeldOutcomes::Dated(DatedOutcomes::new(
+                (reports.into_iter())
+                    .map(|(position, report)| (dating.instant_at(position), report)),
+            )),
+            None => HeldOutcomes::Undated(reports.into_iter().map(|(_, report)| report).collect()),
         };
+        let attempts = dating.map_or_else(Attempts::default, |dating| recorded.dated(dating));
+        let mut analysed = Analysed::default();
+        if let Some(dating) = dating {
+            for (position, target) in configured {
+                analysed.record(target, dating.instant_at(position));
+            }
+        }
         Ok(Self {
             replay,
             configurations,
             outcomes,
             attempts,
             attempted,
+            analysed,
         })
     }
 
@@ -63,6 +69,7 @@ impl Stream {
             HeldOutcomes::Dated(dated) => session.report_dated_outcomes(dated),
         }
         session.report_attempts(AttemptSource::BuildEvents, self.attempts);
+        session.report_analysed(self.analysed);
         self.replay
     }
 }
@@ -454,6 +461,45 @@ mod tests {
         };
         assert_eq!(known(STARTED + TOOK - 1), None);
         assert_eq!(known(STARTED + TOOK), Some(BuildOutcome::Built));
+    }
+
+    #[test]
+    fn a_stream_on_the_wall_clock_reports_when_it_analysed_each_target() {
+        use bviz_terminal::bep::build_event_stream::{
+            BuildEvent, BuildEventId, TargetConfigured,
+            build_event::Payload,
+            build_event_id::{ConfigurationId, Id, TargetCompletedId, TargetConfiguredId},
+        };
+        use prost::Message;
+
+        let configured = BuildEvent {
+            id: Some(BuildEventId {
+                id: Some(Id::TargetConfigured(TargetConfiguredId {
+                    label: "//app".into(),
+                    ..Default::default()
+                })),
+            }),
+            children: vec![BuildEventId {
+                id: Some(Id::TargetCompleted(TargetCompletedId {
+                    label: "//app".into(),
+                    configuration: Some(ConfigurationId {
+                        id: CONFIGURATION.into(),
+                    }),
+                    ..Default::default()
+                })),
+            }],
+            payload: Some(Payload::Configured(TargetConfigured::default())),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec();
+        let stream = Stream::parse(&on_the_wall_clock(&[configured])).expect("the stream parses");
+        let mut session = Session::default();
+        stream.replay_telling(&mut session);
+        let app = ConfiguredTarget::new("//app", Some(CONFIGURATION));
+        assert_eq!(
+            session.analysed().at(app),
+            Some(EpochMicros::from_millis((STARTED + TOOK) * 1_000))
+        );
     }
 
     #[test]

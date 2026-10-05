@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod analysed;
 mod attempts;
 mod merged;
 mod outcomes;
@@ -13,6 +14,7 @@ mod runner;
 pub mod spawn;
 mod timings;
 
+pub use analysed::Analysed;
 pub use attempts::{
     Attempt, Attempts, Cache, DescribedAction, Done, HeldAction, Phase, SpawnCache, State,
     TEST_LOG, Venue,
@@ -254,6 +256,7 @@ pub struct Session {
     attempts: Reported<[Option<Attempts>; AttemptSource::ALL.len()]>,
     configurations: Configurations,
     outcomes: Reported<HeldOutcomes>,
+    analysed: Reported<Analysed>,
     timings: Reported<Timings>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
@@ -300,6 +303,20 @@ impl Session {
 
     pub fn report_dated_outcomes(&mut self, reported: DatedOutcomes) {
         self.outcomes.replace(HeldOutcomes::Dated(reported));
+    }
+
+    /// When the invocation's build finished analysing each top-level target
+    /// it was asked for.
+    pub fn analysed(&self) -> &Analysed {
+        &self.analysed.value
+    }
+
+    pub fn analysed_revision(&self) -> Revision {
+        self.analysed.revision
+    }
+
+    pub fn report_analysed(&mut self, reported: Analysed) {
+        self.analysed.replace(reported);
     }
 
     /// What the invocation's profile recorded of its actions.
@@ -532,6 +549,22 @@ mod tests {
         session.report_outcomes(Outcomes::default());
         assert_ne!(session.outcomes_revision(), first);
         assert_ne!(session.outcomes_revision(), unreported);
+    }
+
+    #[test]
+    fn a_sessions_analysis_is_revised_by_each_report_of_it_and_by_nothing_else() {
+        let app = ConfiguredTarget::new("//app".to_owned(), Some("55817e2200e2".to_owned()));
+        let at = EpochMicros::from_millis(1_781_439_245_231);
+        let mut session = Session::default();
+        let unanalysed = session.analysed_revision();
+        session.report_outcomes(Outcomes::default());
+        assert_eq!(session.analysed_revision(), unanalysed);
+
+        let mut analysed = Analysed::default();
+        analysed.record(app.clone(), at);
+        session.report_analysed(analysed);
+        assert_ne!(session.analysed_revision(), unanalysed);
+        assert_eq!(session.analysed().at(app.borrowed()), Some(at));
     }
 
     #[test]

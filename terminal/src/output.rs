@@ -5,14 +5,14 @@
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use bviz_invocation::{Configurations, InvocationId, Outcomes, Report};
+use bviz_invocation::{Configurations, ConfiguredTarget, InvocationId, Outcomes, Report};
 use prost::Message;
 
 use crate::attempts::RecordedAttempts;
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
-use crate::outcomes::{self, checksum};
+use crate::outcomes::{self, checksum, target};
 
 /// What a build event stream tells of the build that wrote it.
 pub struct BuildOutput {
@@ -23,6 +23,9 @@ pub struct BuildOutput {
     pub reports: Vec<(Position, Report)>,
     /// The attempts of the build's actions the stream records.
     pub attempts: RecordedAttempts,
+    /// The top-level configured targets the stream says the build analysed,
+    /// each where it says so.
+    pub analysed: Vec<(Position, ConfiguredTarget)>,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -81,6 +84,7 @@ impl BuildOutput {
             configurations: Configurations::default(),
             reports: Vec::new(),
             attempts: RecordedAttempts::default(),
+            analysed: Vec::new(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -102,6 +106,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut configurations = Configurations::default();
     let mut reports = Vec::new();
     let mut attempts = RecordedAttempts::default();
+    let mut analysed = Vec::new();
     let mut columns = None;
     let mut show_timestamps = false;
     let mut began = Began::default();
@@ -149,6 +154,20 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
                 outcomes::completed(&mut report, id, children, c.success)
             }
             Some(Payload::Aborted(a)) => outcomes::aborted(&mut report, id, children, a),
+            Some(Payload::Configured(_)) => {
+                if let Some(Id::TargetConfigured(configured)) = &id
+                    && configured.aspect.is_empty()
+                {
+                    analysed.extend(children.iter().filter_map(|child| match &child.id {
+                        Some(Id::TargetCompleted(completed)) if completed.aspect.is_empty() => {
+                            let label = completed.label.clone();
+                            let configured = target(label, completed.configuration.clone());
+                            Some((Position(frame), configured))
+                        }
+                        _ => None,
+                    }));
+                }
+            }
             Some(Payload::Configuration(c)) => {
                 if let Some(Id::Configuration(id)) = id
                     && let Some(checksum) = checksum(Some(id))
@@ -167,6 +186,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         configurations,
         reports,
         attempts,
+        analysed,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
@@ -439,6 +459,49 @@ mod tests {
         let positions: Vec<Position> = output.reports.iter().map(|(at, _)| *at).collect();
         assert_eq!(positions, [Position(0), Position(2)]);
         assert_eq!(output.outcomes().builds().count(), 2);
+    }
+
+    #[test]
+    fn a_top_level_target_is_analysed_in_the_configuration_its_completion_names() {
+        let configured = |aspect: &str, configurations: &[&str]| {
+            BuildEvent {
+                id: Some(BuildEventId {
+                    id: Some(Id::TargetConfigured(build_event_id::TargetConfiguredId {
+                        label: "//app".into(),
+                        aspect: aspect.into(),
+                    })),
+                }),
+                children: (configurations.iter())
+                    .map(|configuration| BuildEventId {
+                        id: Some(Id::TargetCompleted(build_event_id::TargetCompletedId {
+                            label: "//app".into(),
+                            configuration: Some(build_event_id::ConfigurationId {
+                                id: (*configuration).into(),
+                            }),
+                            aspect: aspect.into(),
+                        })),
+                    })
+                    .collect(),
+                payload: Some(Payload::Configured(bes::TargetConfigured::default())),
+                ..Default::default()
+            }
+            .encode_length_delimited_to_vec()
+        };
+        let progress = payload_event(Payload::Progress(bes::Progress::default()));
+        let stream = [
+            configured("//lint:defs.bzl%lint", &["a7a71f"]),
+            progress,
+            configured("", &["a7a71f"]),
+        ]
+        .concat();
+        let output = parse(&stream).expect("parse stream");
+        assert_eq!(
+            output.analysed,
+            [(
+                Position(1),
+                ConfiguredTarget::new("//app".into(), Some("a7a71f".into()))
+            )]
+        );
     }
 
     #[test]
