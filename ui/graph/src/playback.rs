@@ -83,7 +83,7 @@ pub(crate) enum Ended {
     Executed,
     /// A cache answered every one, a remote or disk cache at least one.
     Cached,
-    /// The action cache found every one up to date.
+    /// Bazel found every one up to date.
     UpToDate,
     /// Some ended [without a spawn](Done::Spawnless), and the rest without
     /// running.
@@ -108,7 +108,7 @@ impl Ended {
         match done {
             Done::Executed => Ended::Executed,
             Done::Cached(Cache::Spawn(_)) => Ended::Cached,
-            Done::Cached(Cache::Action) => Ended::UpToDate,
+            Done::Cached(Cache::Action) | Done::UpToDate => Ended::UpToDate,
             Done::Spawnless => Ended::Spawnless,
             Done::Failed => Ended::Failed,
         }
@@ -119,15 +119,17 @@ impl Ended {
 /// the rest as `other` does: failed where either failed, otherwise executed
 /// where either executed, otherwise without a spawn where either ended so,
 /// otherwise answered by a remote or disk cache where either was, naming a
-/// cache only where both name the same one, and otherwise up to date.
+/// cache only where both name the same one, and otherwise up to date, by the
+/// action cache only where both were.
 fn roll_up(one: Done, other: Done) -> Done {
     const fn weight(done: Done) -> u8 {
         match done {
             Done::Cached(Cache::Action) => 0,
-            Done::Cached(Cache::Spawn(_)) => 1,
-            Done::Spawnless => 2,
-            Done::Executed => 3,
-            Done::Failed => 4,
+            Done::UpToDate => 1,
+            Done::Cached(Cache::Spawn(_)) => 2,
+            Done::Spawnless => 3,
+            Done::Executed => 4,
+            Done::Failed => 5,
         }
     }
     match (one, other) {
@@ -797,6 +799,8 @@ pub(crate) mod tests {
         assert_eq!(roll_up(Done::Failed, Done::Executed), Done::Failed);
         assert_eq!(roll_up(disk, Done::Spawnless), Done::Spawnless);
         assert_eq!(roll_up(Done::Spawnless, Done::Executed), Done::Executed);
+        assert_eq!(roll_up(UP_TO_DATE, Done::UpToDate), Done::UpToDate);
+        assert_eq!(roll_up(Done::UpToDate, disk), disk);
     }
 
     /// A container's actions each run on a venue of their own, so the

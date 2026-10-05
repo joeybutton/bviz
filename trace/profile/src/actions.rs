@@ -55,6 +55,13 @@ impl Sightings {
 /// finish, `ProfilerTask.ACTION`.
 const ACTION_CATEGORY: &str = "action processing";
 
+/// The Bazel `cat` of a span standing for several brief spans of a thread
+/// that a slim profile merged, `ProfilerTask.UNKNOWN`, which no other span
+/// takes:
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/JsonTraceFileWriter.java#L168-L191>
+/// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/profiler/Profiler.java#L166-L167>
+const MERGED_CATEGORY: &str = "Unknown event";
+
 /// The span Bazel opens on the command's thread while it connects to a gRPC
 /// remote cache or executor:
 /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/remote/RemoteModule.java#L653>
@@ -303,12 +310,16 @@ impl Profile {
     }
 
     /// Each of [its actions](Self::actions) as an execution attempt on the
-    /// wall clock; `None` for a profile that does not say when its clock
-    /// started.
+    /// wall clock, [exhaustive](Attempts::is_exhaustive) where the profile
+    /// names every action's primary output and merged none of its spans;
+    /// `None` for a profile that does not say when its clock started.
     pub fn attempts(&self) -> Option<Attempts> {
         let origin = self.metadata().epoch_origin?;
         let actions = self.actions();
         let mut attempts = Attempts::with_capacity(actions.len());
+        if !self.merged_spans() && actions.iter().all(|action| action.out.get().is_some()) {
+            attempts.mark_exhaustive();
+        }
         for action in &actions {
             let attempt = Attempt::new(
                 origin.plus_micros(action.span.start_us),
@@ -321,6 +332,13 @@ impl Profile {
             attempts.record(self.opt_str(action.out), self.owner(action), attempt);
         }
         Some(attempts)
+    }
+
+    /// Whether the profile merged spans, as a slim profile does, so that
+    /// an action's span may stand among them unseen.
+    fn merged_spans(&self) -> bool {
+        self.categories()
+            .any(|category| self.str(category) == MERGED_CATEGORY)
     }
 
     fn owner(&self, action: &Action) -> Option<ConfiguredTarget<&str>> {
@@ -661,6 +679,22 @@ mod tests {
     fn an_attempt_spans_its_action_on_the_wall_clock() {
         let a = attempt(false, &[CACHE_CHECK]);
         assert_eq!((a.start(), a.end()), (at(0), at(100)));
+    }
+
+    #[test]
+    fn attempts_are_exhaustive_where_every_action_is_named_and_no_span_merged() {
+        let exhaustive = |actions: &[(Option<&str>, &[Span])]| {
+            let attempts = profile(false, actions).attempts().expect("aligned");
+            attempts.is_exhaustive()
+        };
+        let named: [(Option<&str>, &[Span]); 2] = [
+            (Some("bazel-out/a"), &[CACHE_CHECK]),
+            (Some("bazel-out/b"), &[CACHE_CHECK]),
+        ];
+        assert!(exhaustive(&named));
+        assert!(!exhaustive(&[named[0], (None, &[CACHE_CHECK])]));
+        let merged = (MERGED_CATEGORY, "3x various events", 2, 5);
+        assert!(!exhaustive(&[named[0], (Some("bazel-out/b"), &[merged])]));
     }
 
     #[test]

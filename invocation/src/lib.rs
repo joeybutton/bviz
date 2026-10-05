@@ -574,6 +574,31 @@ mod tests {
     }
 
     #[test]
+    fn a_session_corroborates_an_ending_only_by_a_source_that_reported() {
+        let mut session = Session::default();
+        let mut log = Attempts::default();
+        let spawnless = Attempt::ended(
+            EpochMicros::from_millis(0),
+            EpochMicros::from_millis(10),
+            [],
+            Done::Spawnless,
+        );
+        log.record(Some("bazel-out/a.o"), None, spawnless);
+        session.report_attempts(AttemptSource::ExecutionGraphLog, log);
+        let ending = |session: &Session| {
+            let merged = session.attempts();
+            let held = merged.action("bazel-out/a.o").expect("held");
+            held.iter().map(|tried| tried.done()).collect::<Vec<_>>()
+        };
+        assert_eq!(ending(&session), [Done::Spawnless]);
+
+        let mut profile = Attempts::default();
+        profile.mark_exhaustive();
+        session.report_attempts(AttemptSource::Profile, profile);
+        assert_eq!(ending(&session), [Done::Cached(Cache::Action)]);
+    }
+
+    #[test]
     fn a_sessions_logged_spawns_are_revised_by_each_report_of_them_and_by_nothing_else() {
         let mut session = Session::default();
         let unlogged = session.logged_spawns_revision();

@@ -1,7 +1,7 @@
 //! What the outputs of one invocation tell together of when its actions were
 //! executed and how each ended.
 
-use crate::{Attempt, Attempts, ConfiguredTarget, Done};
+use crate::{Attempt, Attempts, Cache, ConfiguredTarget, Done};
 
 /// An output of an invocation that reports execution attempts, in the order
 /// their timing is trusted, most first.
@@ -58,6 +58,27 @@ impl<'a> MergedAttempts<'a> {
         AttemptSource::ALL
             .into_iter()
             .filter_map(move |source| Some((source, by_source[source.index()]?)))
+    }
+
+    /// How an action whose last attempt, `last`, the sources together tell
+    /// ended as `done` ended. Bazel profiles every action it does not find up
+    /// to date:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/skyframe/SkyframeActionExecutor.java#L1075-L1082>
+    /// so an action seen to end [without a spawn](Done::Spawnless) where a
+    /// source holding [every such action](Attempts::is_exhaustive) reports,
+    /// and so holds no attempt of it, was found up to date. An execution graph
+    /// log records an action Skyframe pruned as ending at the instant it
+    /// starts, so one that took any time the action cache found up to date:
+    /// <https://github.com/bazelbuild/bazel/blob/9.1.0/src/main/java/com/google/devtools/build/lib/runtime/ExecutionGraphModule.java#L325-L342>
+    fn corroborated(&self, last: Attempt, done: Done) -> Done {
+        let exhaustive = self.reports().any(|(_, attempts)| attempts.is_exhaustive());
+        match done {
+            Done::Spawnless if exhaustive && last.start() < last.end() => {
+                Done::Cached(Cache::Action)
+            }
+            Done::Spawnless if exhaustive => Done::UpToDate,
+            done => done,
+        }
     }
 
     /// Whether no source reports an attempt.
@@ -194,7 +215,8 @@ impl<'a> ActionAttempts<'a> {
     }
 
     /// The attempts in the order recorded, the last ending as every source
-    /// holding the action tells.
+    /// holding the action tells, [corroborated](MergedAttempts::corroborated)
+    /// by a source holding every action Bazel did not find up to date.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Attempt> + use<'a> {
         let ActionAttempts {
             timed,
@@ -208,11 +230,16 @@ impl<'a> ActionAttempts<'a> {
             .enumerate()
             .map(move |(index, &attempt)| match index == final_index {
                 true => attempt.ending(
-                    merged
-                        .reports()
-                        .filter_map(|(_, attempts)| attempts.attempted(primary_output)?.2.last())
-                        .map(Attempt::done)
-                        .fold(attempt.done(), Done::merge),
+                    merged.corroborated(
+                        attempt,
+                        merged
+                            .reports()
+                            .filter_map(|(_, attempts)| {
+                                attempts.attempted(primary_output)?.2.last()
+                            })
+                            .map(Attempt::done)
+                            .fold(attempt.done(), Done::merge),
+                    ),
                 ),
                 false => attempt,
             })
@@ -223,7 +250,7 @@ impl<'a> ActionAttempts<'a> {
 mod tests {
     use super::*;
     use crate::attempts::tests::attempt;
-    use crate::{Cache, Phase, SpawnCache, Venue};
+    use crate::{Phase, SpawnCache, Venue};
 
     const LOCAL: Phase = Phase::Running(Venue::Local);
 
@@ -272,6 +299,34 @@ mod tests {
             ]
         );
         assert!(merged.held() >= actions.len());
+    }
+
+    #[test]
+    fn an_action_ending_without_a_spawn_is_up_to_date_where_an_exhaustive_source_holds_none() {
+        let took = ended(0, 10, Done::Spawnless);
+        let pruned = ended(20, 20, Done::Spawnless);
+        let log = reported(&[("a.o", None, &[took]), ("p.o", None, &[pruned])]);
+        let ending = |merged: MergedAttempts<'_>, output| {
+            let held = merged.action(output).expect("held");
+            held.iter()
+                .map(|attempt| attempt.done())
+                .collect::<Vec<_>>()
+        };
+        let alone = MergedAttempts::new([(AttemptSource::ExecutionGraphLog, &log)]);
+        assert_eq!(ending(alone, "a.o"), [Done::Spawnless]);
+        let mut profile = reported(&[("b.o", None, &[ended(0, 10, Done::Executed)])]);
+        let partial = MergedAttempts::new([
+            (AttemptSource::Profile, &profile),
+            (AttemptSource::ExecutionGraphLog, &log),
+        ]);
+        assert_eq!(ending(partial, "a.o"), [Done::Spawnless]);
+        profile.mark_exhaustive();
+        let exhaustive = MergedAttempts::new([
+            (AttemptSource::Profile, &profile),
+            (AttemptSource::ExecutionGraphLog, &log),
+        ]);
+        assert_eq!(ending(exhaustive, "a.o"), [Done::Cached(Cache::Action)]);
+        assert_eq!(ending(exhaustive, "p.o"), [Done::UpToDate]);
     }
 
     #[test]
