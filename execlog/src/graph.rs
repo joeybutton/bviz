@@ -8,8 +8,8 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-use bviz_invocation::EpochMicros;
 use bviz_invocation::spawn::{self, Logged, LoggedSpawn, Names, PhaseTiming, REPORTED_PHASES};
+use bviz_invocation::{DescribedAction, EpochMicros};
 use bviz_parallel::worker_count;
 use prost::DecodeError;
 use rustc_hash::{FxBuildHasher, FxHashSet};
@@ -28,6 +28,11 @@ pub use dated::DatedNodes;
 /// so the node lists are reserved at or above their final length.
 const COMPRESSED_BYTES_PER_NODE: u64 = 24;
 
+/// What Bazel wraps the description of the action a node is of in:
+/// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/actions/AbstractAction.java#L420-L423>
+const DESCRIPTION_OPENING: &str = "action '";
+const DESCRIPTION_CLOSING: &str = "'";
+
 /// What a cache answering a spawn appends to the name of the runner that
 /// asked it, as in `remote cache hit`:
 /// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/remote/util/Utils.java#L159>
@@ -41,20 +46,28 @@ const CACHE_HIT_SUFFIX: &str = " cache hit";
 /// [`spawnless`](Self::spawnless).
 pub struct GraphLog {
     spawns: ExecLog,
-    /// By spawn, in the order of [`spawns`](Self::spawns), when it started on
-    /// the local clock: when its action began discovering inputs, or when its
-    /// runner was handed it where it discovered none.
-    spawn_starts: Vec<EpochMicros>,
-    /// Distinct target labels, which [`Spawnless::owner`] indexes.
+    /// By spawn, in the order of [`spawns`](Self::spawns).
+    spawn_nodes: Vec<SpawnNode>,
+    /// Distinct target labels, which [`ActionKey::owner`] indexes.
     labels: Vec<Box<str>>,
+    /// Distinct mnemonics and descriptions, which [`ActionKey`] indexes.
+    words: Vec<Box<str>>,
     spawnless: Vec<Spawnless>,
+}
+
+/// What a spawn node tells beyond its spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpawnNode {
+    action: ActionKey,
+    /// On the local clock: when the action began discovering inputs, or when
+    /// the runner was handed the spawn where it discovered none.
+    start: EpochMicros,
 }
 
 /// An action node no spawn node of the same action accompanies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spawnless {
-    /// `None` for an action no target owns.
-    owner: Option<usize>,
+    action: ActionKey,
     start: EpochMicros,
     took: Duration,
 }
@@ -66,9 +79,8 @@ struct Spawnless {
 /// or not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpawnlessAction<'a> {
-    /// The label of the target owning the action; `None` for one no target
-    /// owns.
-    pub target_label: Option<&'a str>,
+    /// `None` for an action no target owns.
+    pub action: Option<DescribedAction<&'a str>>,
     /// On the local clock.
     pub start: EpochMicros,
     pub took: Duration,
@@ -82,26 +94,39 @@ impl GraphLog {
     }
 
     /// The spawn nodes, as an execution log of the spawns they record, which
-    /// names no outputs; [`spawns_started`](Self::spawns_started) gives when
-    /// each started.
+    /// names no outputs; [`spawns_of`](Self::spawns_of) gives when each
+    /// started.
     pub fn spawns(&self) -> &ExecLog {
         &self.spawns
     }
 
-    /// Each spawn node's spawn, with when it started.
-    pub fn spawns_started(&self) -> impl ExactSizeIterator<Item = (LoggedSpawn<'_>, EpochMicros)> {
-        self.spawns
-            .spawns
-            .iter()
-            .zip(self.spawn_starts.iter().copied())
+    /// Each spawn node's spawn, with when it started and the action it is
+    /// of; `None` for one no target owns.
+    pub fn spawns_of(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (LoggedSpawn<'_>, EpochMicros, Option<DescribedAction<&str>>)>
+    {
+        (self.spawns.spawns.iter())
+            .zip(&self.spawn_nodes)
+            .map(|(spawn, node)| (spawn, node.start, self.described(node.action)))
     }
 
     /// The actions that ran no spawn, in the order the log lists them.
     pub fn spawnless(&self) -> impl ExactSizeIterator<Item = SpawnlessAction<'_>> {
-        self.spawnless.iter().map(|action| SpawnlessAction {
-            target_label: action.owner.map(|owner| &*self.labels[owner]),
-            start: action.start,
-            took: action.took,
+        self.spawnless.iter().map(|spawnless| SpawnlessAction {
+            action: self.described(spawnless.action),
+            start: spawnless.start,
+            took: spawnless.took,
+        })
+    }
+
+    /// The action `key` names; `None` for one no target owns.
+    fn described(&self, key: ActionKey) -> Option<DescribedAction<&str>> {
+        let owner = &*self.labels[key.owner];
+        (!owner.is_empty()).then(|| DescribedAction {
+            owner,
+            mnemonic: &self.words[key.mnemonic],
+            description: &self.words[key.description],
         })
     }
 }
@@ -120,7 +145,8 @@ fn read_compressed(log: impl Read + Send, compressed: u64) -> Result<GraphLog, L
 }
 
 /// An action as its nodes name it: by the label of its owner, its mnemonic and
-/// its description, each interned.
+/// its description, each interned, the description bare of what Bazel wraps
+/// it in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ActionKey {
     owner: usize,
@@ -130,12 +156,12 @@ struct ActionKey {
 
 struct Builder {
     spawns: spawn::Builder,
-    spawn_starts: Vec<EpochMicros>,
     labels: Names<FxBuildHasher>,
     /// Mnemonics and descriptions alike.
     words: Names<FxBuildHasher>,
     /// The actions spawn nodes ran spawns of.
     ran: FxHashSet<ActionKey>,
+    spawn_nodes: Vec<SpawnNode>,
     /// The action nodes, in log order, each with its action, start and
     /// duration.
     actions: Vec<(ActionKey, EpochMicros, Duration)>,
@@ -155,10 +181,10 @@ impl Builder {
     fn with_capacity(nodes: usize) -> Builder {
         Builder {
             spawns: spawn::Builder::with_capacity(nodes, 0, 0),
-            spawn_starts: Vec::with_capacity(nodes),
             labels: Names::default(),
             words: Names::with_capacity(nodes),
             ran: FxHashSet::with_capacity_and_hasher(nodes, Default::default()),
+            spawn_nodes: Vec::with_capacity(nodes),
             actions: Vec::with_capacity(nodes),
         }
     }
@@ -181,6 +207,10 @@ impl Builder {
                 _ => {}
             }
         }
+        let description = description
+            .strip_prefix(DESCRIPTION_OPENING)
+            .and_then(|bare| bare.strip_suffix(DESCRIPTION_CLOSING))
+            .unwrap_or(description);
         let action = ActionKey {
             owner: self.labels.intern(target_label),
             mnemonic: self.words.intern(mnemonic),
@@ -197,7 +227,10 @@ impl Builder {
             self.spawns.digest(identifier);
         }
         let discovering = Duration::from_millis(metrics.discover_inputs);
-        self.spawn_starts.push(start.before(discovering));
+        self.spawn_nodes.push(SpawnNode {
+            action,
+            start: start.before(discovering),
+        });
         self.spawns.push(Logged {
             runner,
             mnemonic,
@@ -212,14 +245,13 @@ impl Builder {
     }
 
     fn finish(self) -> GraphLog {
-        let labels = self.labels.into_vec();
         let ran = self.ran;
         let spawnless = self
             .actions
             .into_iter()
             .filter(|(action, _, _)| !ran.contains(action))
             .map(|(action, start, took)| Spawnless {
-                owner: (!labels[action.owner].is_empty()).then_some(action.owner),
+                action,
                 start,
                 took,
             })
@@ -228,8 +260,9 @@ impl Builder {
             spawns: ExecLog {
                 spawns: self.spawns.finish(),
             },
-            spawn_starts: self.spawn_starts,
-            labels,
+            spawn_nodes: self.spawn_nodes,
+            labels: self.labels.into_vec(),
+            words: self.words.into_vec(),
             spawnless,
         }
     }
@@ -342,7 +375,7 @@ mod tests {
         assert_eq!(spawns[0].mnemonic(), "Genrule");
         assert_eq!(spawns[0].target_label(), Some("//p:t"));
         assert_eq!(spawns[0].digest(), Some("9f86d081"));
-        let starts: Vec<_> = log.spawns_started().map(|(_, start)| start).collect();
+        let starts: Vec<_> = log.spawns_of().map(|(_, start, _)| start).collect();
         assert_eq!(starts, [at(96), at(200)]);
         assert!(!spawns[0].cache_hit());
         let timing = spawns[0].timing();
@@ -367,10 +400,23 @@ mod tests {
         assert_eq!(
             log.spawnless().collect::<Vec<_>>(),
             [SpawnlessAction {
-                target_label: Some("//p:t"),
+                action: Some(DescribedAction {
+                    owner: "//p:t",
+                    mnemonic: "Genrule",
+                    description: "Expanding template p/t.sh",
+                }),
                 start: at(50),
                 took: Duration::from_millis(2),
             }]
+        );
+        let spawns: Vec<_> = log.spawns_of().map(|(_, _, action)| action).collect();
+        assert_eq!(
+            spawns,
+            [Some(DescribedAction {
+                owner: "//p:t",
+                mnemonic: "Genrule",
+                description: "Executing genrule //p:t",
+            })]
         );
     }
 
@@ -398,7 +444,10 @@ mod tests {
             other_mnemonic,
             unowned,
         ]);
-        let owners: Vec<_> = log.spawnless().map(|a| a.target_label).collect();
+        let owners: Vec<_> = log
+            .spawnless()
+            .map(|a| a.action.map(|action| action.owner))
+            .collect();
         assert_eq!(owners, [Some("//q:t"), Some("//p:t"), None]);
     }
 

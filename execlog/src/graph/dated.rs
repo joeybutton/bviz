@@ -2,7 +2,7 @@
 //! clock, which every node is started on.
 
 use bviz_invocation::spawn::LoggedSpawns;
-use bviz_invocation::{Attempt, Attempts, ConfiguredTarget, Done, Interval};
+use bviz_invocation::{Attempt, Attempts, DescribedAction, Done, Interval};
 use rustc_hash::FxHashMap;
 
 use super::GraphLog;
@@ -15,8 +15,7 @@ pub struct DatedNodes {
 }
 
 impl GraphLog {
-    /// Each node as an attempt owned by its target in no particular
-    /// configuration: a spawn as its
+    /// Each node as an attempt of its action: a spawn as its
     /// [attempt](bviz_invocation::spawn::LoggedSpawn::attempt) lasting its
     /// total time from its start, and an action that ran no spawn as ending
     /// [without one](Done::Spawnless), for as long as it took. `None` for a
@@ -28,7 +27,8 @@ impl GraphLog {
     /// executor or a remote or disk cache could answer, and carries on the
     /// attempt of a test's run where that spawn
     /// [follows one](bviz_invocation::spawn::LoggedSpawn::follows_a_test_run);
-    /// every other attempt is pooled under its owner.
+    /// every other attempt is one of the action its owner, mnemonic and
+    /// description describe.
     pub fn dated(&self, logged: Option<&LoggedSpawns>) -> Option<DatedNodes> {
         let spawns = &self.spawns.spawns;
         let keyed = match logged {
@@ -46,26 +46,39 @@ impl GraphLog {
             }
             _ => FxHashMap::default(),
         };
-        let mut attempts = Attempts::with_capacity(spawns.len());
+        let joinable = match keyed.is_empty() {
+            true => 0,
+            false => spawns
+                .iter()
+                .filter(|spawn| spawn.digest().is_some())
+                .count(),
+        };
+        let mut attempts = Attempts::with_capacity(joinable);
+        attempts.reserve_described(spawns.len() - joinable + self.spawnless.len());
         let mut span: Option<Interval> = None;
         let mut spanning = |attempt: &Attempt| {
             span = Some(span.map_or(attempt.span(), |span| span.hull(attempt.span())));
         };
-        for (spawn, start) in self.spawns_started() {
+        for (spawn, start, action) in self.spawns_of() {
             let attempt = spawn.attempt(start.after(spawn.timing().total()));
             spanning(&attempt);
-            let owner = owned(spawn.target_label());
-            match spawn.digest().and_then(|digest| keyed.get(digest)) {
-                Some((output, true)) => attempts.record_continued(Some(output), owner, attempt),
-                Some((output, false)) => attempts.record(Some(output), owner, attempt),
-                None => attempts.record(None, owner, attempt),
+            let owner = action.map(DescribedAction::owner_target);
+            match (spawn.digest().and_then(|digest| keyed.get(digest)), action) {
+                (Some((output, true)), _) => {
+                    attempts.record_continued(Some(output), owner, attempt)
+                }
+                (Some((output, false)), _) => attempts.record(Some(output), owner, attempt),
+                (None, Some(action)) => attempts.record_described(action, attempt),
+                (None, None) => {}
             }
         }
         for action in self.spawnless() {
             let end = action.start.after(action.took);
             let spawnless = Attempt::ended(action.start, end, [], Done::Spawnless);
             spanning(&spawnless);
-            attempts.record(None, owned(action.target_label), spawnless);
+            if let Some(described) = action.action {
+                attempts.record_described(described, spawnless);
+            }
         }
         Some(DatedNodes {
             attempts,
@@ -74,18 +87,13 @@ impl GraphLog {
     }
 }
 
-/// The target labelled `label`, in no particular configuration.
-fn owned(label: Option<&str>) -> Option<ConfiguredTarget<&str>> {
-    label.map(|label| ConfiguredTarget::new(label, None))
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use bazel_spawn_proto::execution_graph::{Metrics, Node};
     use bviz_invocation::spawn::{Builder, Logged, PhaseTiming, REPORTED_PHASES};
-    use bviz_invocation::{Cache, Phase, SpawnCache, State, Venue};
+    use bviz_invocation::{Cache, ConfiguredTarget, Phase, SpawnCache, State, Venue};
 
     use super::*;
     use crate::graph::tests::{at, load, node};
@@ -114,8 +122,13 @@ mod tests {
         spawn
     }
 
-    fn owner() -> ConfiguredTarget<&'static str> {
-        ConfiguredTarget::new("//p:t", None)
+    /// The action of `//p:t` that `description` describes.
+    fn described_action(description: &str) -> DescribedAction<&str> {
+        DescribedAction {
+            owner: "//p:t",
+            mnemonic: "Genrule",
+            description,
+        }
     }
 
     #[test]
@@ -155,8 +168,8 @@ mod tests {
             ..spawn.metrics.expect("timed")
         });
         let dated = load(&[spawn]).dated(None).expect("a node");
-        let pooled: Vec<_> = dated.attempts.by_owner().collect();
-        let a = pooled[0].1[0];
+        let described: Vec<_> = dated.attempts.described().collect();
+        let a = described[0].1[0];
         assert_eq!((a.start(), a.end()), (at(90), at(150)));
         assert_eq!(a.entered(Phase::Scheduling), Some(at(105)));
         assert_eq!(a.entered(Phase::Running(Venue::Local)), Some(at(110)));
@@ -226,22 +239,37 @@ mod tests {
     }
 
     #[test]
-    fn a_spawn_with_no_spawn_of_its_digest_logged_is_pooled_under_its_owner() {
+    fn a_spawn_with_no_spawn_of_its_digest_logged_is_of_its_described_action() {
         let log = load(&[
             keyed(node("local", "action 'a'", 0, 5)),
             node("local", "action 'b'", 10, 5),
         ]);
-        let pooled = |dated: &DatedNodes| {
-            let pooled: Vec<_> = dated.attempts.by_owner().collect();
-            assert_eq!(pooled.len(), 1);
-            assert_eq!(pooled[0].0, owner());
-            pooled[0].1.len()
-        };
+        fn described(dated: &DatedNodes) -> Vec<(DescribedAction<&str>, usize)> {
+            let mut described: Vec<_> = dated
+                .attempts
+                .described()
+                .map(|(action, tried)| (action, tried.len()))
+                .collect();
+            described.sort_unstable_by_key(|(action, _)| action.description);
+            described
+        }
         let unjoined = log.dated(None).expect("nodes");
-        assert_eq!(pooled(&unjoined), 2);
+        assert_eq!(
+            described(&unjoined),
+            [(described_action("a"), 1), (described_action("b"), 1)]
+        );
         let joined = log.dated(Some(&logged("Genrule", OUTPUT))).expect("nodes");
-        assert_eq!(pooled(&joined), 1);
-        assert!(joined.attempts.action(OUTPUT).is_some());
+        assert_eq!(described(&joined), [(described_action("b"), 1)]);
+        let owner = ConfiguredTarget::new("//p:t", None);
+        assert_eq!(
+            joined
+                .attempts
+                .actions()
+                .map(|(output, owner, _)| (output, owner))
+                .collect::<Vec<_>>(),
+            [(OUTPUT, Some(owner))]
+        );
+        assert_eq!(joined.attempts.by_owner().count(), 0);
     }
 
     #[test]
@@ -252,17 +280,21 @@ mod tests {
         ])
         .dated(None)
         .expect("nodes");
-        let pooled: Vec<_> = dated.attempts.by_owner().collect();
-        let attempts: Vec<_> = pooled[0]
-            .1
-            .iter()
-            .map(|a| (a.start(), a.end(), a.done()))
+        let mut attempts: Vec<_> = dated
+            .attempts
+            .described()
+            .flat_map(|(action, tried)| {
+                tried
+                    .iter()
+                    .map(move |a| (action.description, a.start(), a.end(), a.done()))
+            })
             .collect();
+        attempts.sort_unstable_by_key(|&(_, start, _, _)| start);
         assert_eq!(
             attempts,
             [
-                (at(100), at(108), Done::Spawnless),
-                (at(120), at(120), Done::Spawnless)
+                ("Executing genrule //p:t", at(100), at(108), Done::Spawnless),
+                ("Executing genrule //p:u", at(120), at(120), Done::Spawnless)
             ]
         );
         assert_eq!(
