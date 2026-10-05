@@ -298,9 +298,14 @@ impl Profile {
 
     /// The time each of [its actions](Self::actions) took and where it ran.
     pub fn timings(&self) -> Timings {
-        let actions = self.actions();
+        self.timings_of(&self.actions())
+    }
+
+    /// [`timings`](Self::timings), of `actions` as [`actions`](Self::actions)
+    /// returned them.
+    pub fn timings_of(&self, actions: &[Action]) -> Timings {
         let mut timings = Timings::with_capacity(actions.len());
-        for action in &actions {
+        for action in actions {
             timings.record(Profiled {
                 primary_output: self.opt_str(action.out),
                 owner: self.owner(action),

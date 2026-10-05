@@ -8,12 +8,15 @@
 //! checked.
 
 mod logged;
+mod modeled;
 mod schedule;
 mod spans;
 
+use bviz_invocation::ActionGraph;
 use bviz_invocation::spawn::LoggedSpawns;
 pub use bviz_invocation::spawn::{Phase, SpawnRunner};
 use bviz_trace_profile::{LaneClass, OptStr, Profile, SliceAt, TimeSpan};
+pub use modeled::{Modeled, NEARLY_CRITICAL_KEPT, NearlyCritical, StepModel};
 pub use schedule::{Ceilings, Finish, Schedule};
 use spans::Spans;
 use std::borrow::Cow;
@@ -39,6 +42,8 @@ pub struct CriticalPath {
     by_part: [Duration; Part::ALL.len()],
     /// `None` where no execution log was given.
     coverage: Option<Coverage>,
+    /// `None` where no action graph was given.
+    modeled: Option<Modeled>,
 }
 
 /// The steps of a critical path whose action the execution log records
@@ -116,6 +121,7 @@ pub struct Step {
     start_us: i64,
     gap: Duration,
     work: Work,
+    model: Option<StepModel>,
 }
 
 /// What a step did with its own time, as far as the profile tells.
@@ -400,6 +406,13 @@ impl Step {
         self.work
     }
 
+    /// The step's action in the [modeled](CriticalPath::modeled) build,
+    /// `None` where no action graph was given or it holds no action of the
+    /// step's primary output.
+    pub fn model(&self) -> Option<StepModel> {
+        self.model
+    }
+
     /// The wait and own time by part, in the order they passed; parts the
     /// step spent no time in are left out.
     pub fn parts(&self) -> impl Iterator<Item = (Part, Duration)> {
@@ -413,8 +426,13 @@ impl CriticalPath {
     /// The critical path the profile records, or `None` where it has no
     /// critical-path lane. Steps stand in the order they started, each joined
     /// to the spawns `log` records of its action where an execution log of
-    /// the same invocation is given.
-    pub fn of(profile: &Profile, log: Option<&LoggedSpawns>) -> Option<CriticalPath> {
+    /// the same invocation is given, and the build modeled where its action
+    /// `graph` is.
+    pub fn of(
+        profile: &Profile,
+        log: Option<&LoggedSpawns>,
+        graph: Option<&ActionGraph>,
+    ) -> Option<CriticalPath> {
         let (lane_at, lane) = profile
             .threads()
             .iter()
@@ -473,7 +491,11 @@ impl CriticalPath {
             }
             coverage
         });
-        Some(CriticalPath::new(wall, lead_in, steps, tail, coverage))
+        let modeled = graph.map(|graph| modeled::model(profile, &actions, graph, &mut steps));
+        Some(CriticalPath {
+            modeled,
+            ..CriticalPath::new(wall, lead_in, steps, tail, coverage)
+        })
     }
 
     fn new(
@@ -494,7 +516,13 @@ impl CriticalPath {
             steps,
             by_part,
             coverage,
+            modeled: None,
         }
+    }
+
+    /// The build modeled from its action graph, `None` where none was given.
+    pub fn modeled(&self) -> Option<&Modeled> {
+        self.modeled.as_ref()
     }
 
     /// How much of the path the execution log accounts for, `None` where no
@@ -791,6 +819,7 @@ impl<'p> RecordedStep<'p> {
             start_us: self.start_us,
             gap,
             work,
+            model: None,
         }
     }
 }

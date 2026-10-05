@@ -239,7 +239,7 @@ fn trace(
 ) -> Tracing {
     let task = cx.spawn(async move |model, cx| {
         let derive = async move {
-            let path = CriticalPath::of(&profile, spawns.as_deref());
+            let path = CriticalPath::of(&profile, spawns.as_deref(), None);
             (profile, path)
         };
         let (profile, path) = cx.background_executor().spawn(derive).await;
@@ -1386,7 +1386,7 @@ mod tests {
         ));
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
         let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
-        let path = CriticalPath::of(&profile, None);
+        let path = CriticalPath::of(&profile, None, None);
         let loaded = Arc::new(TrackFlamer::new(&Arc::new(profile)));
         let mut model = model();
         model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
@@ -1457,7 +1457,7 @@ mod tests {
             {{"cat":"critical path component","name":"action 'Linking b'","ph":"X","ts":2000,"dur":10,"tid":0}}]}}"#
         );
         let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
-        let path = CriticalPath::of(&profile, None).expect("a critical path");
+        let path = CriticalPath::of(&profile, None, None).expect("a critical path");
         let steps = critical_steps(path.steps());
         assert_eq!(steps[0].primary_output(), Some("bazel-out/a"));
         assert_eq!(

@@ -436,7 +436,12 @@ mod tests {
             {"cat":"critical path component","name":"action 'Compiling a.c'","ph":"X","ts":1000,"dur":2000,"tid":0},
             {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":9000,"dur":400,"tid":0}
         ]}"#;
-        CriticalPath::of(&Profile::from_bytes(json.as_bytes()).expect("parse"), None).expect("path")
+        CriticalPath::of(
+            &Profile::from_bytes(json.as_bytes()).expect("parse"),
+            None,
+            None,
+        )
+        .expect("path")
     }
 
     fn ms(millis: u64) -> Duration {
@@ -461,7 +466,7 @@ mod tests {
         ]}"#;
         let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
         let unrelated = bviz_invocation::spawn::LoggedSpawns::default();
-        let path = CriticalPath::of(&profile, Some(&unrelated)).expect("path");
+        let path = CriticalPath::of(&profile, Some(&unrelated), None).expect("path");
         assert_eq!(
             headline(&path),
             "Wall time 10.00ms · critical path 400µs (4.0% of it) over 1 step · \
@@ -495,7 +500,7 @@ mod tests {
             timing: PhaseTiming::new(ms(3), [Duration::ZERO; REPORTED_PHASES]),
         });
         let log = builder.finish();
-        CriticalPath::of(&profile, logged.then_some(&log)).expect("path")
+        CriticalPath::of(&profile, logged.then_some(&log), None).expect("path")
     }
 
     #[test]

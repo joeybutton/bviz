@@ -73,6 +73,11 @@ impl<'g> Schedule<'g> {
         self.length
     }
 
+    /// Every action of the scheduled graph, those waiting on a cycle too.
+    pub fn actions(&self) -> impl ExactSizeIterator<Item = ActionIndex> + use<> {
+        self.graph.actions()
+    }
+
     pub fn duration(&self, action: ActionIndex) -> Duration {
         self.durations[action.index()]
     }
