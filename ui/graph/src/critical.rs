@@ -15,29 +15,35 @@ enum OnPath {
     Own,
 }
 
-/// Where the steps of a critical path land on the nodes of one graph: on the
-/// node of a step's action, or where the graph holds none, on the target
-/// owning it.
+/// Where the steps of a critical path and the actions nearly on it land on
+/// the nodes of one graph: on the node of an action, or where the graph holds
+/// none, on the target owning it.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct CriticalNodes {
     /// By step, in the order the steps started, the node it lands on.
     steps: Vec<Option<Id>>,
+    /// By action nearly critical, least slack first, the node it lands on.
+    nearly_critical: Vec<Option<Id>>,
     /// By node id.
     on_path: Vec<OnPath>,
 }
 
 impl CriticalNodes {
-    /// Places `steps` on the nodes of `graph`, which `names` names.
-    pub(crate) fn resolve(graph: &Graph, names: &Names, steps: &[CriticalStep]) -> Self {
-        let landings = Landings::new(graph, names, steps.len());
-        let landed: Vec<Option<Id>> = steps
+    /// Places `steps` and the actions `nearly_critical` on the nodes of
+    /// `graph`, which `names` names.
+    pub(crate) fn resolve(
+        graph: &Graph,
+        names: &Names,
+        steps: &[CriticalStep],
+        nearly_critical: &[CriticalStep],
+    ) -> Self {
+        let landings = Landings::new(graph, names, steps.len() + nearly_critical.len());
+        let landed: Vec<Option<Id>> = steps.iter().map(|step| land(&landings, step)).collect();
+        let nearly_critical: Vec<Option<Id>> = nearly_critical
             .iter()
-            .map(|step| match step.primary_output() {
-                Some(primary_output) => landings.action(primary_output, step.owner()),
-                None => landings.landing(step.owner()?).node(),
-            })
+            .map(|action| land(&landings, action))
             .collect();
-        if landed.iter().all(Option::is_none) {
+        if landed.iter().chain(&nearly_critical).all(Option::is_none) {
             return Self::default();
         }
         let mut parent = vec![None; landings.ids()];
@@ -57,18 +63,25 @@ impl CriticalNodes {
         }
         Self {
             steps: landed,
+            nearly_critical,
             on_path,
         }
     }
 
     /// Whether any step lands on the graph.
     pub(crate) fn any(&self) -> bool {
-        !self.steps.is_empty()
+        self.steps.iter().any(Option::is_some)
     }
 
     /// The node step `index` lands on, if it lands on the graph.
     pub(crate) fn step(&self, index: usize) -> Option<Id> {
         self.steps.get(index).copied().flatten()
+    }
+
+    /// The node the action nearly critical `index` lands on, if it lands on
+    /// the graph.
+    pub(crate) fn nearly_critical(&self, index: usize) -> Option<Id> {
+        self.nearly_critical.get(index).copied().flatten()
     }
 
     /// Whether the box drawing the node `id` stands for a step: the step's
@@ -81,6 +94,14 @@ impl CriticalNodes {
             Some(OnPath::Holds) => closed,
             Some(OnPath::Off) | None => false,
         }
+    }
+}
+
+/// The node `action` lands on among `landings`.
+fn land<'a>(landings: &Landings<'a>, action: &'a CriticalStep) -> Option<Id> {
+    match action.primary_output() {
+        Some(primary_output) => landings.action(primary_output, action.owner()),
+        None => landings.landing(action.owner()?).node(),
     }
 }
 
@@ -129,7 +150,7 @@ mod tests {
         }
 
         fn resolve(&self, steps: &[CriticalStep]) -> CriticalNodes {
-            CriticalNodes::resolve(&self.graph, &self.names, steps)
+            CriticalNodes::resolve(&self.graph, &self.names, steps, &[])
         }
     }
 
@@ -180,6 +201,28 @@ mod tests {
             assert!(!nodes.marks(container, false));
         }
         assert!(!nodes.marks(Id(u32::MAX), true));
+    }
+
+    #[test]
+    fn an_action_nearly_critical_lands_on_its_node_and_marks_none() {
+        let mut built = Built::default();
+        let (_, compiled) = built.target("a", "lib");
+        let compile = built.action("bazel-out/a/lib.o", compiled);
+        let (_, linked) = built.target("b", "bin");
+        let nodes = CriticalNodes::resolve(
+            &built.graph,
+            &built.names,
+            &[step(Some("bazel-out/x.o"), "//x:x")],
+            &[
+                step(Some("bazel-out/a/lib.o"), "//a:lib"),
+                step(Some("bazel-out/b/bin"), "//b:bin"),
+            ],
+        );
+        assert!(!nodes.any());
+        assert_eq!(nodes.nearly_critical(0), Some(compile));
+        assert_eq!(nodes.nearly_critical(1), Some(linked));
+        assert_eq!(nodes.nearly_critical(2), None);
+        assert!(!nodes.marks(compile, false));
     }
 
     #[test]

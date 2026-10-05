@@ -61,9 +61,9 @@ gpui::actions!(
     [
         SelectAllTracks,
         ClearTimeSelection,
-        ChoosePreviousStep,
-        ChooseNextStep,
-        UnchooseStep
+        ChoosePrevious,
+        ChooseNext,
+        Unchoose
     ]
 );
 
@@ -71,9 +71,9 @@ pub fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
         KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
-        KeyBinding::new("up", ChoosePreviousStep, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("down", ChooseNextStep, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("escape", UnchooseStep, Some(critical_path::KEY_CONTEXT)),
+        KeyBinding::new("up", ChoosePrevious, Some(critical_path::KEY_CONTEXT)),
+        KeyBinding::new("down", ChooseNext, Some(critical_path::KEY_CONTEXT)),
+        KeyBinding::new("escape", Unchoose, Some(critical_path::KEY_CONTEXT)),
     ]);
 }
 

@@ -10,12 +10,13 @@ use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
 use crate::stats_panel::table_cell;
 use crate::theme::Palette;
 use crate::{
-    ChooseNextStep, ChoosePreviousStep, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
-    STATS_TEXT_SIZE, UnchooseStep, profile_status,
+    ChooseNext, ChoosePrevious, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
+    STATS_TEXT_SIZE, Unchoose, profile_status,
 };
 use bviz_critical_path::{
     Coverage, CriticalPath, Modeled, NearlyCritical, Part, Phase, Spawned, Step,
 };
+use bviz_invocation::Chosen;
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner,
     list_scrollbar,
@@ -164,51 +165,73 @@ impl CriticalPathPanel {
         }
     }
 
-    /// Chooses step `index`, keeping its row in view.
-    fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.listing = Listing::Steps;
-        self.model
-            .update(cx, |model, cx| model.choose_step(index, cx));
-        self.scroll
+    /// Chooses `chosen`, showing the list it is among with its row in view.
+    fn choose(&mut self, chosen: Chosen, cx: &mut Context<Self>) {
+        let (listing, index, scroll) = match chosen {
+            Chosen::Step(index) => (Listing::Steps, index, &self.scroll),
+            Chosen::NearlyCritical(index) => {
+                (Listing::NearlyCritical, index, &self.nearly_critical_scroll)
+            }
+        };
+        scroll
             .uniform_handle()
             .scroll_to_item(index, ScrollStrategy::Nearest);
+        self.listing = listing;
+        self.model.update(cx, |model, cx| model.choose(chosen, cx));
         cx.notify();
     }
 
-    /// Lets go of step `index` where it is the chosen one, and chooses it
+    /// Lets go of `chosen` where it is what is chosen, and chooses it
     /// otherwise.
-    fn toggle(&mut self, index: usize, cx: &mut Context<Self>) {
-        let chosen = self
-            .model
-            .read(cx)
-            .chosen_step(cx)
-            .map(|(chosen, _)| chosen);
-        match chosen == Some(index) {
+    fn toggle(&mut self, chosen: Chosen, cx: &mut Context<Self>) {
+        let standing = self.model.read(cx).chosen(cx).map(|(standing, _)| standing);
+        match standing == Some(chosen) {
             true => {
-                self.model.update(cx, |model, cx| model.unchoose_step(cx));
+                self.model.update(cx, |model, cx| model.unchoose(cx));
             }
-            false => self.choose(index, cx),
+            false => self.choose(chosen, cx),
         }
     }
 
-    /// Chooses the step `by` rows from the chosen one, or the first where
-    /// none is chosen, stopping at either end of the table.
+    /// Chooses the row `by` rows from the chosen one in the list the table
+    /// shows, or its first where none of it is chosen, stopping at either
+    /// end of the list.
     fn choose_by(&mut self, by: isize, cx: &mut Context<Self>) {
         let model = self.model.read(cx);
-        let steps = match model.critical_path() {
-            Some(TracedPath::Traced {
-                path: Some(path), ..
-            }) => path.steps().len(),
-            _ => return,
-        };
-        let Some(last) = steps.checked_sub(1) else {
+        let Some(TracedPath::Traced {
+            path: Some(path), ..
+        }) = model.critical_path()
+        else {
             return;
         };
-        let index = match model.chosen_step(cx) {
-            Some((chosen, _)) => chosen.saturating_add_signed(by).min(last),
+        let standing = model.chosen(cx).map(|(standing, _)| standing);
+        let (rows, row, chosen): (usize, Option<usize>, fn(usize) -> Chosen) =
+            match (shown_listing(self.listing, path), path.modeled()) {
+                (Listing::NearlyCritical, Some(modeled)) => (
+                    modeled.nearly_critical().len(),
+                    match standing {
+                        Some(Chosen::NearlyCritical(index)) => Some(index),
+                        _ => None,
+                    },
+                    Chosen::NearlyCritical,
+                ),
+                _ => (
+                    path.steps().len(),
+                    match standing {
+                        Some(Chosen::Step(index)) => Some(index),
+                        _ => None,
+                    },
+                    Chosen::Step,
+                ),
+            };
+        let Some(last) = rows.checked_sub(1) else {
+            return;
+        };
+        let index = match row {
+            Some(row) => row.saturating_add_signed(by).min(last),
             None => 0,
         };
-        self.choose(index, cx);
+        self.choose(chosen(index), cx);
     }
 
     /// The path in sum over its table of steps, or where the path is held
@@ -221,10 +244,7 @@ impl CriticalPathPanel {
         cx: &Context<Self>,
     ) -> ByHeight {
         let modeled = path.modeled();
-        let listing = match modeled {
-            Some(_) => self.listing,
-            None => Listing::Steps,
-        };
+        let listing = shown_listing(self.listing, path);
         let body = |legends: bool| {
             let body = div()
                 .flex()
@@ -333,9 +353,19 @@ impl CriticalPathPanel {
                     let Some(modeled) = path.modeled() else {
                         return Vec::new();
                     };
+                    let chosen = model.chosen(cx).map(|(chosen, _)| chosen);
                     range
                         .map(|index| {
                             nearly_critical_row(index, &modeled.nearly_critical()[index], &palette)
+                                .map(|row| {
+                                    choosable(
+                                        row,
+                                        Chosen::NearlyCritical(index),
+                                        chosen,
+                                        entity.clone(),
+                                        &palette,
+                                    )
+                                })
                         })
                         .collect()
                 }
@@ -430,21 +460,13 @@ impl CriticalPathPanel {
                     logged: Logged::of(path),
                     modeled: path.modeled().is_some(),
                 };
-                let chosen = model.chosen_step(cx).map(|(index, _)| index);
+                let chosen = model.chosen(cx).map(|(chosen, _)| chosen);
                 range
                     .map(|index| {
                         let entity = entity.clone();
-                        step_row(index, &path.steps()[index], against, &palette, &fills)
-                            .when(chosen == Some(index), |row| {
-                                row.bg(palette.selection)
-                                    .hover(|row| row.bg(palette.picked_hover()))
-                            })
-                            .on_click(move |_, window, cx| {
-                                entity.update(cx, |panel, cx| {
-                                    panel.focus.focus(window, cx);
-                                    panel.toggle(index, cx)
-                                })
-                            })
+                        step_row(index, &path.steps()[index], against, &palette, &fills).map(
+                            |row| choosable(row, Chosen::Step(index), chosen, entity, &palette),
+                        )
                     })
                     .collect()
             }
@@ -461,6 +483,37 @@ impl CriticalPathPanel {
             cx,
         )
     }
+}
+
+/// The list the table shows of `path` where `listing` is the one chosen: the
+/// steps for a path held against no modeled build.
+fn shown_listing(listing: Listing, path: &CriticalPath) -> Listing {
+    match path.modeled() {
+        Some(_) => listing,
+        None => Listing::Steps,
+    }
+}
+
+/// `row`, standing for `stands_for`, marked where that is `chosen` and
+/// toggling it on a click in the panel `entity`.
+fn choosable(
+    row: Stateful<Div>,
+    stands_for: Chosen,
+    chosen: Option<Chosen>,
+    entity: Entity<CriticalPathPanel>,
+    palette: &Palette,
+) -> Stateful<Div> {
+    let picked_hover = palette.picked_hover();
+    row.when(chosen == Some(stands_for), |row| {
+        row.bg(palette.selection)
+            .hover(move |row| row.bg(picked_hover))
+    })
+    .on_click(move |_, window, cx| {
+        entity.update(cx, |panel, cx| {
+            panel.focus.focus(window, cx);
+            panel.toggle(stands_for, cx)
+        })
+    })
 }
 
 /// `rows` taking the table's room under its header, scrolled through
@@ -1088,10 +1141,10 @@ impl Render for CriticalPathPanel {
         let panel = div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
-            .on_action(cx.listener(|panel, _: &ChoosePreviousStep, _, cx| panel.choose_by(-1, cx)))
-            .on_action(cx.listener(|panel, _: &ChooseNextStep, _, cx| panel.choose_by(1, cx)))
-            .on_action(cx.listener(|panel, _: &UnchooseStep, _, cx| {
-                panel.model.update(cx, |model, cx| model.unchoose_step(cx));
+            .on_action(cx.listener(|panel, _: &ChoosePrevious, _, cx| panel.choose_by(-1, cx)))
+            .on_action(cx.listener(|panel, _: &ChooseNext, _, cx| panel.choose_by(1, cx)))
+            .on_action(cx.listener(|panel, _: &Unchoose, _, cx| {
+                panel.model.update(cx, |model, cx| model.unchoose(cx));
             }))
             .flex()
             .flex_col()

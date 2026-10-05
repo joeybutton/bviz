@@ -50,6 +50,8 @@ pub struct NearlyCritical {
     pub description: String,
     pub mnemonic: Option<String>,
     pub target: Option<String>,
+    /// The checksum of the configuration it ran in.
+    pub configuration: Option<String>,
     pub primary_output: String,
     /// Its spans' time summed.
     pub duration: Duration,
@@ -230,6 +232,7 @@ fn nearly_critical(
             description: profile.str(timed.span.description).to_owned(),
             mnemonic: profile.opt_str(timed.span.mnemonic).map(str::to_owned),
             target: profile.opt_str(timed.span.target).map(str::to_owned),
+            configuration: profile.opt_str(timed.span.configuration).map(str::to_owned),
             primary_output: timed.primary_output.to_owned(),
             duration: timed.duration,
             slack,

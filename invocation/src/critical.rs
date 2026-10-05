@@ -1,7 +1,8 @@
 use crate::ConfiguredTarget;
 
-/// One step of an invocation's critical path, by what its other outputs know
-/// the step's action by: its primary output, and the target owning it.
+/// One step of an invocation's critical path, or an action nearly on it, by
+/// what its other outputs know the action by: its primary output, and the
+/// target owning it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CriticalStep {
     primary_output: Option<String>,

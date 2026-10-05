@@ -260,6 +260,7 @@ impl Loaded {
         self.chosen = revision;
         match session.chosen()? {
             Chosen::Step(index) => self.critical.step(index),
+            Chosen::NearlyCritical(index) => self.critical.nearly_critical(index),
         }
     }
 
@@ -270,7 +271,12 @@ impl Loaded {
         }
         self.traced = revision;
         let shared = &self.shared;
-        let critical = CriticalNodes::resolve(&shared.base, &shared.names, session.critical_path());
+        let critical = CriticalNodes::resolve(
+            &shared.base,
+            &shared.names,
+            session.critical_path(),
+            session.nearly_critical(),
+        );
         let changed = self.critical != critical;
         self.critical = critical;
         changed
@@ -1107,12 +1113,12 @@ mod tests {
         let mut session = Session::default();
         let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
 
-        session.report_critical_path(vec![step("bazel-out/bin/app/bin")]);
+        session.report_critical_path(vec![step("bazel-out/bin/app/bin")], Vec::new());
         assert!(loaded.report(&session));
         assert!(loaded.critical().any());
         assert!(!loaded.report(&session));
 
-        session.report_critical_path(vec![step("bazel-out/bin/app/other")]);
+        session.report_critical_path(vec![step("bazel-out/bin/app/other")], Vec::new());
         assert!(loaded.report(&session));
         assert!(!loaded.critical().any());
     }
@@ -1124,10 +1130,13 @@ mod tests {
         let mut loaded = loaded();
         let mut session = Session::default();
         let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
-        session.report_critical_path(vec![
-            step("bazel-out/bin/app/bin"),
-            step("bazel-out/bin/app/other"),
-        ]);
+        session.report_critical_path(
+            vec![
+                step("bazel-out/bin/app/bin"),
+                step("bazel-out/bin/app/other"),
+            ],
+            Vec::new(),
+        );
         loaded.report(&session);
         assert_eq!(loaded.take_up_choice(&session), None);
 
@@ -1144,12 +1153,32 @@ mod tests {
         assert_eq!(loaded.take_up_choice(&session), None);
     }
 
+    /// A chosen action nearly critical is shown on the node of its action,
+    /// which marks no node as on the path.
+    #[test]
+    fn a_graph_shows_a_chosen_nearly_critical_action() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let action = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+        session.report_critical_path(
+            vec![action("bazel-out/bin/app/other")],
+            vec![action("bazel-out/bin/app/bin")],
+        );
+        loaded.report(&session);
+        assert!(!loaded.critical().any());
+
+        assert!(session.choose(Some(Chosen::NearlyCritical(0))));
+        let shown = loaded.take_up_choice(&session);
+        assert!(shown.is_some());
+        assert_eq!(shown, loaded.critical().nearly_critical(0));
+    }
+
     /// A step chosen before the graph landed is not shown on its landing.
     #[test]
     fn a_graph_passes_over_a_step_chosen_before_it_landed() {
         let mut session = Session::default();
         let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
-        session.report_critical_path(vec![step]);
+        session.report_critical_path(vec![step], Vec::new());
         assert!(session.choose(Some(Chosen::Step(0))));
         let mut loaded = loaded();
         loaded.pass_over_choice(&session);
@@ -1166,7 +1195,7 @@ mod tests {
     fn a_chosen_step_is_revealed_in_place_in_the_deferred_to_panel() {
         let mut session = Session::default();
         let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
-        session.report_critical_path(vec![step]);
+        session.report_critical_path(vec![step], Vec::new());
         let mut model = GraphModel::new(Task::ready(()));
         model.source = Source::Loaded(loaded());
         let panel = EntityId::from(1);

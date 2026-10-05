@@ -167,8 +167,7 @@ pub struct Session {
     attempts: Reported<Attempts>,
     chosen: Reported<Option<Chosen>>,
     configurations: Configurations,
-    /// In the order they started.
-    critical_path: Reported<Vec<CriticalStep>>,
+    critical_path: Reported<Traced>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
     /// not a view of the invocation reads them.
@@ -177,12 +176,24 @@ pub struct Session {
     timings: Reported<Timings>,
 }
 
+/// What a [`Session`] holds of the critical path its invocation's profile
+/// records.
+#[derive(Default)]
+struct Traced {
+    /// In the order they started.
+    steps: Vec<CriticalStep>,
+    /// Least slack first.
+    nearly_critical: Vec<CriticalStep>,
+}
+
 /// What a reader chose of an invocation's critical path in a view of one of
 /// its outputs, for the views of the others to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chosen {
     /// A step, by its place among the path's steps.
     Step(usize),
+    /// An action nearly critical, by its place among those.
+    NearlyCritical(usize),
 }
 
 impl Session {
@@ -268,25 +279,48 @@ impl Session {
     /// The steps of the invocation's critical path in the order they
     /// started, none until its profile's path is reported.
     pub fn critical_path(&self) -> &[CriticalStep] {
-        &self.critical_path.value
+        &self.critical_path.value.steps
     }
 
     pub fn critical_path_revision(&self) -> Revision {
         self.critical_path.revision
     }
 
-    /// Says whether `reported` differs from the steps held: the same steps
-    /// again are no new report, and a new one lets go of a step chosen of
-    /// those held.
-    pub fn report_critical_path(&mut self, reported: Vec<CriticalStep>) -> bool {
-        let changed = self.critical_path.value != reported;
-        if changed {
-            self.critical_path.replace(reported);
-            if matches!(self.chosen.value, Some(Chosen::Step(_))) {
-                self.chosen.replace(None);
-            }
+    /// The actions off the invocation's critical path closest to becoming
+    /// critical, least slack first, none until reported.
+    pub fn nearly_critical(&self) -> &[CriticalStep] {
+        &self.critical_path.value.nearly_critical
+    }
+
+    /// Takes `steps` for the steps of the critical path the invocation's
+    /// profile records and `nearly_critical` for the actions closest to
+    /// becoming critical. Says whether either differs from what is held: the
+    /// same lists again are no new report, and a choice among a list that
+    /// changes is let go of.
+    pub fn report_critical_path(
+        &mut self,
+        steps: Vec<CriticalStep>,
+        nearly_critical: Vec<CriticalStep>,
+    ) -> bool {
+        let held = &self.critical_path.value;
+        let steps_changed = held.steps != steps;
+        let nearly_changed = held.nearly_critical != nearly_critical;
+        if !steps_changed && !nearly_changed {
+            return false;
         }
-        changed
+        self.critical_path.replace(Traced {
+            steps,
+            nearly_critical,
+        });
+        let chosen_changed = match self.chosen.value {
+            Some(Chosen::Step(_)) => steps_changed,
+            Some(Chosen::NearlyCritical(_)) => nearly_changed,
+            None => false,
+        };
+        if chosen_changed {
+            self.chosen.replace(None);
+        }
+        true
     }
 
     /// What of the [critical path](Self::critical_path) a reader last chose,
@@ -302,11 +336,12 @@ impl Session {
     }
 
     /// Takes `chosen` for what a reader chose of the critical path, or
-    /// nothing for `None`. Says whether it took it: a place past the steps
-    /// holds none to choose.
+    /// nothing for `None`. Says whether it took it: a place past the list it
+    /// indexes holds nothing to choose.
     pub fn choose(&mut self, chosen: Option<Chosen>) -> bool {
         let held = match chosen {
-            Some(Chosen::Step(index)) => index < self.critical_path.value.len(),
+            Some(Chosen::Step(index)) => index < self.critical_path().len(),
+            Some(Chosen::NearlyCritical(index)) => index < self.nearly_critical().len(),
             None => true,
         };
         if held {
@@ -324,31 +359,37 @@ mod tests {
     fn a_critical_path_reported_again_alike_is_no_new_report() {
         let mut session = Session::default();
         let steps = || vec![CriticalStep::new(Some("bazel-out/a.o"), None)];
-        assert!(session.report_critical_path(steps()));
+        assert!(session.report_critical_path(steps(), Vec::new()));
         let traced = session.critical_path_revision();
         assert!(session.choose(Some(Chosen::Step(0))));
-        assert!(!session.report_critical_path(steps()));
+        assert!(!session.report_critical_path(steps(), Vec::new()));
         assert_eq!(session.critical_path_revision(), traced);
         assert_eq!(
             session.chosen(),
             Some(Chosen::Step(0)),
             "still a step of the path"
         );
-        assert!(session.report_critical_path(Vec::new()));
+        assert!(session.report_critical_path(Vec::new(), Vec::new()));
         assert_ne!(session.critical_path_revision(), traced);
     }
 
     #[test]
     fn a_critical_path_reported_anew_holds_no_step_chosen_of_the_last() {
         let mut session = Session::default();
-        session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/a.o"), None)]);
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/a.o"), None)],
+            Vec::new(),
+        );
         let unchosen = session.chosen_revision();
         assert!(session.choose(Some(Chosen::Step(0))));
         assert_eq!(session.chosen(), Some(Chosen::Step(0)));
         let chosen = session.chosen_revision();
         assert_ne!(chosen, unchosen);
 
-        session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/b.o"), None)]);
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/b.o"), None)],
+            Vec::new(),
+        );
         assert_eq!(session.chosen(), None);
         assert_ne!(session.chosen_revision(), chosen);
     }
@@ -356,7 +397,10 @@ mod tests {
     #[test]
     fn a_step_past_the_critical_path_is_not_chosen() {
         let mut session = Session::default();
-        session.report_critical_path(vec![CriticalStep::new(Some("bazel-out/a.o"), None)]);
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/a.o"), None)],
+            Vec::new(),
+        );
         assert!(session.choose(Some(Chosen::Step(0))));
         let chosen = session.chosen_revision();
         assert!(!session.choose(Some(Chosen::Step(1))));
@@ -364,6 +408,27 @@ mod tests {
         assert_eq!(session.chosen_revision(), chosen);
         assert!(session.choose(None));
         assert_eq!(session.chosen(), None);
+    }
+
+    #[test]
+    fn a_choice_is_let_go_of_only_where_the_list_it_indexes_changes() {
+        let mut session = Session::default();
+        let action = |output: &str| CriticalStep::new(Some(output), None);
+        let steps = || vec![action("bazel-out/a.o")];
+        session.report_critical_path(steps(), vec![action("bazel-out/n.o")]);
+        assert!(session.choose(Some(Chosen::NearlyCritical(0))));
+        assert!(!session.choose(Some(Chosen::NearlyCritical(1))));
+        assert_eq!(session.chosen(), Some(Chosen::NearlyCritical(0)));
+
+        assert!(session.report_critical_path(Vec::new(), vec![action("bazel-out/n.o")]));
+        assert_eq!(session.chosen(), Some(Chosen::NearlyCritical(0)));
+        assert!(session.report_critical_path(Vec::new(), vec![action("bazel-out/m.o")]));
+        assert_eq!(session.chosen(), None);
+
+        session.report_critical_path(steps(), Vec::new());
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert!(session.report_critical_path(steps(), vec![action("bazel-out/n.o")]));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
     }
 
     #[test]

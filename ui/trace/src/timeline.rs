@@ -1,7 +1,7 @@
 use crate::chart::fit_px_per_us;
 use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_count};
 use crate::groups::{GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows};
-use crate::model::{ChosenStepChanged, TraceModel, WorkingLanesDerived, step_slices, step_time};
+use crate::model::{ChoiceChanged, TraceModel, WorkingLanesDerived};
 use crate::regions::{CountersStrip, Regions, max_lane_scroll};
 use crate::theme::Palette;
 use crate::{
@@ -415,7 +415,7 @@ pub(crate) struct Timeline {
     /// Repaints the overlay, which draws the playhead, as a gesture moves the
     /// document's clock, and follows the playhead again from there.
     _clock_changed: Option<Subscription>,
-    _chosen_step_changed: Subscription,
+    _choice_changed: Subscription,
 }
 
 impl Timeline {
@@ -441,8 +441,8 @@ impl Timeline {
             .subscribe(&model, |timeline, _, _: &WorkingLanesDerived, cx| {
                 timeline.invalidate_canvas(cx)
             });
-        let chosen_step_changed = cx.subscribe(&model, |timeline, _, _: &ChosenStepChanged, cx| {
-            timeline.reveal_chosen_step(cx);
+        let choice_changed = cx.subscribe(&model, |timeline, _, _: &ChoiceChanged, cx| {
+            timeline.reveal_chosen(cx);
             timeline.invalidate_canvas(cx);
         });
         Self {
@@ -469,28 +469,30 @@ impl Timeline {
             _session_observer: session_observer,
             _working_lanes_derived: working_lanes_derived,
             _clock_changed: clock_changed,
-            _chosen_step_changed: chosen_step_changed,
+            _choice_changed: choice_changed,
         }
     }
 
-    /// Frames the chosen critical-path step's time and scrolls the lanes to
-    /// the rows its drawn slices stand in, the action span's ahead of the
-    /// step's own.
-    fn reveal_chosen_step(&mut self, cx: &mut Context<Self>) {
+    /// Frames the time of what is chosen of the critical path and scrolls
+    /// the lanes to the rows its drawn slices stand in, the action span's
+    /// ahead of a step's own.
+    fn reveal_chosen(&mut self, cx: &mut Context<Self>) {
         let (time, span, rows) = {
             let model = self.model.read(cx);
-            let (Some(profile), Some(layout), Some((_, step))) =
-                (model.profile(), model.lane_layout(), model.chosen_step(cx))
+            let (Some(profile), Some(layout), Some((_, item))) =
+                (model.profile(), model.lane_layout(), model.chosen(cx))
             else {
                 return;
             };
-            let rows: Vec<Row> = step_slices(step)
+            let rows: Vec<Row> = item
+                .slices()
+                .into_iter()
                 .filter_map(|at| {
                     let lane = layout.lanes.iter().find(|lane| lane.track == at.track())?;
                     Some(Row::of(lane.top, profile.slice(at).depth))
                 })
                 .collect();
-            (step_time(profile, step), profile.span(), rows)
+            (item.time(profile), profile.span(), rows)
         };
         let regions = self.regions(cx);
         match self.fitted {
@@ -781,9 +783,9 @@ impl Timeline {
     }
 
     /// Answers [`ClearTimeSelection`] by backing out of the innermost gesture: a
-    /// region drag under way is abandoned, failing that the chosen
-    /// critical-path step is let go of, and failing that the aggregate widens
-    /// back to the whole timeline.
+    /// region drag under way is abandoned, failing that what is chosen of the
+    /// critical path is let go of, and failing that the aggregate widens back
+    /// to the whole timeline.
     fn clear_time_selection(
         &mut self,
         _: &ClearTimeSelection,
@@ -792,7 +794,7 @@ impl Timeline {
     ) {
         let backed_out = self.drag.cancel_region()
             || self.model.update(cx, |m, cx| {
-                m.unchoose_step(cx) || m.set_time_selection(TimeSelection::default(), cx)
+                m.unchoose(cx) || m.set_time_selection(TimeSelection::default(), cx)
             });
         if backed_out {
             cx.notify();
@@ -995,7 +997,7 @@ impl Timeline {
     /// or shows-all it, on a track label selects that track, on a scroll
     /// thumb/track drives that bar, on the ruler (or with shift on the lanes)
     /// selects time regions, anywhere else pans, a click there letting go of
-    /// the chosen critical-path step; the wheel zooms/pans/scrolls,
+    /// what is chosen of the critical path; the wheel zooms/pans/scrolls,
     /// and a move updates the crosshair and hover. Holds the content focus and
     /// the chart's actions, so after a press here [`SelectAllTracks`] selects all
     /// tracks and [`ClearTimeSelection`] widens the aggregate to the whole
@@ -1146,9 +1148,7 @@ fn timeline_end_drag(
             cx.notify();
         }
         TimelineDrag::Pan(pan) if pan.clicked(end) => {
-            timeline
-                .model
-                .update(cx, |model, cx| model.unchoose_step(cx));
+            timeline.model.update(cx, |model, cx| model.unchoose(cx));
             timeline.invalidate_canvas(cx);
         }
         _ => timeline.invalidate_canvas(cx),
@@ -1319,11 +1319,11 @@ fn scroll_revealing(top: f32, height: f32, scroll: f32, view_h: f32) -> Option<f
     }
 }
 
-/// Width of the line around each slice standing for the chosen critical-path
-/// step, drawn outside the slice so its fill and label stay whole.
+/// Width of the line around each slice standing for what is chosen of the
+/// critical path, drawn outside the slice so its fill and label stay whole.
 const CHOSEN_OUTLINE_PX: f32 = 2.0;
 
-/// Outlines the slices standing for the chosen critical-path step that
+/// Outlines the slices standing for what is chosen of the critical path that
 /// `drawn` holds, within the flame region of `regions`.
 fn paint_chosen_slices(
     chosen: &[SliceAt],
@@ -1873,8 +1873,8 @@ fn overlay_paint(
             let chosen: Vec<SliceAt> = timeline
                 .model
                 .read(cx)
-                .chosen_step(cx)
-                .map(|(_, step)| step_slices(step).collect())
+                .chosen(cx)
+                .map(|(_, item)| item.slices())
                 .unwrap_or_default();
             match (&timeline.slice_draw, chosen.is_empty()) {
                 (Some(cache), false) => Some((chosen, cache.slices.clone())),

@@ -5,7 +5,7 @@ use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
-use bviz_critical_path::{CriticalPath, Step, Work};
+use bviz_critical_path::{CriticalPath, NearlyCritical, Step, Work};
 use bviz_invocation::spawn::LoggedSpawns;
 use bviz_invocation::{ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Revision, Session};
 use bviz_trace_layout::{
@@ -43,11 +43,11 @@ pub(crate) struct WorkingLanesDerived;
 /// it concerns only the panel showing the path.
 pub(crate) struct CriticalPathDerived;
 
-/// A step of the critical path was chosen, or the chosen one let go of.
-/// Carried as an event because the timeline moves its view to a chosen step
+/// Something was chosen of the critical path, or what was chosen let go of.
+/// Carried as an event because the timeline moves its view to what is chosen
 /// once, on the choice, and not on every notification after it, and redraws
-/// its lanes, which the chosen step's keeps in its group's sample.
-pub(crate) struct ChosenStepChanged;
+/// its lanes, which the chosen action's keeps in its group's sample.
+pub(crate) struct ChoiceChanged;
 
 /// Where the action span that ran `step` stands, where the path joined one.
 fn step_span(step: &Step) -> Option<SliceAt> {
@@ -63,13 +63,31 @@ pub(crate) fn step_slices(step: &Step) -> impl Iterator<Item = SliceAt> {
     step_span(step).into_iter().chain([step.at()])
 }
 
-/// From the first start to the last end of the slices standing for `step`.
-pub(crate) fn step_time(profile: &Profile, step: &Step) -> TimeSpan {
-    let own = profile.slice(step.at());
-    step_span(step)
-        .map(|at| profile.slice(at))
-        .into_iter()
-        .fold(
+/// What was chosen of the critical path, as the profile records it.
+#[derive(Clone, Copy)]
+pub(crate) enum ChosenItem<'p> {
+    Step(&'p Step),
+    NearlyCritical(&'p NearlyCritical),
+}
+
+impl ChosenItem<'_> {
+    /// The slices standing for it in the profile, the action span that ran
+    /// it first where there is one.
+    pub(crate) fn slices(self) -> Vec<SliceAt> {
+        match self {
+            ChosenItem::Step(step) => step_slices(step).collect(),
+            ChosenItem::NearlyCritical(action) => vec![action.at],
+        }
+    }
+
+    /// From the first start to the last end of its slices.
+    pub(crate) fn time(self, profile: &Profile) -> TimeSpan {
+        let (own, span) = match self {
+            ChosenItem::Step(step) => (step.at(), step_span(step)),
+            ChosenItem::NearlyCritical(action) => (action.at, None),
+        };
+        let own = profile.slice(own);
+        span.map(|at| profile.slice(at)).into_iter().fold(
             TimeSpan {
                 start_us: own.start_us,
                 end_us: own.end_us(),
@@ -79,6 +97,21 @@ pub(crate) fn step_time(profile: &Profile, step: &Step) -> TimeSpan {
                 end_us: time.end_us.max(slice.end_us()),
             },
         )
+    }
+}
+
+/// The actions nearly critical as the session of their invocation holds them.
+fn nearly_critical_actions(actions: &[NearlyCritical]) -> Vec<CriticalStep> {
+    actions
+        .iter()
+        .map(|action| {
+            let owner = action
+                .target
+                .as_deref()
+                .map(|label| ConfiguredTarget::new(label, action.configuration.as_deref()));
+            CriticalStep::new(Some(&action.primary_output), owner)
+        })
+        .collect()
 }
 
 /// `steps` as the session of their invocation holds them.
@@ -425,8 +458,8 @@ pub(crate) struct TraceModel {
     /// Which groups draw every lane rather than a sample, indexed by
     /// [`GROUP_ORDER`].
     group_show_all: [bool; GROUP_ORDER.len()],
-    /// The track the chosen step's slices are shown on, which its group's
-    /// sample keeps for as long as the step stays chosen.
+    /// The track the chosen action's slices are shown on, which its group's
+    /// sample keeps for as long as it stays chosen.
     kept_in_sample: Option<usize>,
     /// The order every group stands its tracks in.
     track_sort: TrackSort,
@@ -465,7 +498,7 @@ impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
 impl EventEmitter<CriticalPathDerived> for TraceModel {}
-impl EventEmitter<ChosenStepChanged> for TraceModel {}
+impl EventEmitter<ChoiceChanged> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
@@ -641,58 +674,77 @@ impl TraceModel {
         }
     }
 
-    /// Tells the session the steps of the traced path, which tracing the
-    /// path again with other spawns mostly leaves as they were, and lets the
-    /// lane of a step the session let go of with them fall back to its
-    /// group's sample.
+    /// The actions nearly critical of the traced path; none while it is
+    /// traced or where no modeled build holds it.
+    fn nearly_critical(&self) -> &[NearlyCritical] {
+        match self.critical_path() {
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => path
+                .modeled()
+                .map_or(&[], |modeled| modeled.nearly_critical()),
+            _ => &[],
+        }
+    }
+
+    /// Tells the session the steps of the traced path and the actions nearly
+    /// critical, which tracing the path again with other spawns mostly
+    /// leaves as they were, and lets the lane of what the session let go of
+    /// with them fall back to its group's sample.
     fn report_critical_path(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
         let steps = critical_steps(self.steps());
+        let nearly_critical = nearly_critical_actions(self.nearly_critical());
         session.update(cx, |session, cx| {
-            if session.report_critical_path(steps) {
+            if session.report_critical_path(steps, nearly_critical) {
                 cx.notify();
             }
         });
         if self.chosen.get(cx).is_none() && self.kept_in_sample.is_some() {
             self.release_chosen_lane();
-            cx.emit(ChosenStepChanged);
+            cx.emit(ChoiceChanged);
         }
     }
 
-    /// The chosen step of the critical path and its place among the steps.
-    pub(crate) fn chosen_step(&self, cx: &App) -> Option<(usize, &Step)> {
-        self.step_of(self.chosen.get(cx)?)
+    /// What is chosen of the critical path, and the profile's record of it.
+    pub(crate) fn chosen(&self, cx: &App) -> Option<(Chosen, ChosenItem<'_>)> {
+        let chosen = self.chosen.get(cx)?;
+        Some((chosen, self.item_of(chosen)?))
     }
 
-    /// The step `chosen` stands for, and its place among the steps.
-    fn step_of(&self, chosen: Chosen) -> Option<(usize, &Step)> {
+    /// The profile's record of `chosen`, where the path holds it.
+    fn item_of(&self, chosen: Chosen) -> Option<ChosenItem<'_>> {
         match chosen {
-            Chosen::Step(index) => Some((index, self.steps().get(index)?)),
+            Chosen::Step(index) => self.steps().get(index).map(ChosenItem::Step),
+            Chosen::NearlyCritical(index) => self
+                .nearly_critical()
+                .get(index)
+                .map(ChosenItem::NearlyCritical),
         }
     }
 
-    /// Chooses step `index` of the critical path and has the timeline and
-    /// the views of the invocation's other outputs show it.
-    pub(crate) fn choose_step(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.adopt_chosen_step(index) {
-            self.chosen.set(Some(Chosen::Step(index)), cx);
-            cx.emit(ChosenStepChanged);
+    /// Chooses `chosen` of the critical path and has the timeline and the
+    /// views of the invocation's other outputs show it.
+    pub(crate) fn choose(&mut self, chosen: Chosen, cx: &mut Context<Self>) {
+        if self.adopt_chosen(chosen) {
+            self.chosen.set(Some(chosen), cx);
+            cx.emit(ChoiceChanged);
             cx.notify();
         }
     }
 
-    /// Opens the lane the timeline shows step `index` on. Says whether the
-    /// path holds such a step.
-    fn adopt_chosen_step(&mut self, index: usize) -> bool {
+    /// Opens the lane the timeline shows `chosen` on. Says whether the path
+    /// holds it.
+    fn adopt_chosen(&mut self, chosen: Chosen) -> bool {
         let Some(profile) = self.profile().cloned() else {
             return false;
         };
-        let Some(step) = self.steps().get(index) else {
+        let Some(item) = self.item_of(chosen) else {
             return false;
         };
-        let shown_on = step_slices(step).next().map(SliceAt::track);
+        let shown_on = item.slices().first().map(|at| at.track());
         if let Some(track) = shown_on {
             self.open_lane_of(&profile, track);
         }
@@ -726,20 +778,21 @@ impl TraceModel {
         }
     }
 
-    /// Lets go of the chosen step. Says whether a step was chosen.
-    pub(crate) fn unchoose_step(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.chosen_step(cx).is_none() {
+    /// Lets go of what is chosen of the critical path. Says whether anything
+    /// was.
+    pub(crate) fn unchoose(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.chosen(cx).is_none() {
             return false;
         }
         self.chosen.set(None, cx);
         self.release_chosen_lane();
-        cx.emit(ChosenStepChanged);
+        cx.emit(ChoiceChanged);
         cx.notify();
         true
     }
 
-    /// Lets the lane a step let go of was shown on fall back to its group's
-    /// sample.
+    /// Lets the lane what was let go of was shown on fall back to its
+    /// group's sample.
     fn release_chosen_lane(&mut self) {
         self.keep_in_sample(None);
     }
@@ -1204,7 +1257,7 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 mod tests {
     use super::{
         Chosen, Derivations, HeldChoice, Joined, LoadedProfile, TraceModel, TracedPath, Tracing,
-        clock_source, critical_steps, step_slices,
+        clock_source, critical_steps, nearly_critical_actions, step_slices,
     };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::groups::GROUP_ORDER;
@@ -1217,7 +1270,7 @@ mod tests {
         FlameDirection, FlameLabels, FlameMode, FlameWeight, TimeSelection, TrackFlamer,
         span_between,
     };
-    use bviz_trace_profile::Profile;
+    use bviz_trace_profile::{Profile, TimeSpan};
     use gpui::Task;
     use std::sync::Arc;
 
@@ -1411,6 +1464,12 @@ mod tests {
     /// `[100, 1100)` run on [`IDLE_TID`], then a step of no length, every
     /// track shown.
     fn traced() -> TraceModel {
+        traced_with(None)
+    }
+
+    /// [`traced`], and where `graph` models the build, one whose action
+    /// writing `bazel-out/b.o` ran on [`IDLE_TID`] in `[0, 90)` off the path.
+    fn traced_with(graph: Option<&ActionGraph>) -> TraceModel {
         let mut events = vec![
             r#"{"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}}"#
                 .to_owned(),
@@ -1430,11 +1489,14 @@ mod tests {
             }
         }
         events.push(format!(
-            r#"{{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":{IDLE_TID}}}"#
+            r#"{{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":{IDLE_TID},"out":"bazel-out/a"}}"#
+        ));
+        events.push(format!(
+            r#"{{"cat":"action processing","name":"Compiling b","ph":"X","ts":0,"dur":90,"tid":{IDLE_TID},"out":"bazel-out/b.o"}}"#
         ));
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
         let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
-        let path = CriticalPath::of(&profile, None, None);
+        let path = CriticalPath::of(&profile, None, graph);
         let loaded = Arc::new(TrackFlamer::new(&Arc::new(profile)));
         let mut model = model();
         model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
@@ -1462,7 +1524,7 @@ mod tests {
         assert!(drawn(&model, own.track()));
         assert!(!drawn(&model, span.track()), "left out of the sample");
 
-        assert!(model.adopt_chosen_step(0));
+        assert!(model.adopt_chosen(Chosen::Step(0)));
         assert!(drawn(&model, span.track()));
         assert_eq!(model.group_show_all, [false; GROUP_ORDER.len()]);
 
@@ -1477,7 +1539,7 @@ mod tests {
         selection.set(span_between(5, 50).expect("a region"));
         selection.insert(span_between(2000, 2100).expect("a region"));
         model.time_selection = selection.clone();
-        assert!(model.adopt_chosen_step(0));
+        assert!(model.adopt_chosen(Chosen::Step(0)));
         assert_eq!(model.time_selection, selection);
         model.release_chosen_lane();
         assert_eq!(model.time_selection, selection);
@@ -1486,7 +1548,7 @@ mod tests {
     #[test]
     fn a_replaced_document_holds_no_chosen_step() {
         let mut model = traced();
-        assert!(model.adopt_chosen_step(0));
+        assert!(model.adopt_chosen(Chosen::Step(0)));
         model.chosen = HeldChoice::Alone(Some(Chosen::Step(0)));
         model.replace_source(Source::Loading);
         assert!(matches!(model.chosen, HeldChoice::Alone(None)));
@@ -1519,13 +1581,49 @@ mod tests {
     #[test]
     fn a_step_past_the_path_is_not_chosen() {
         let mut model = traced();
-        assert!(model.adopt_chosen_step(1));
-        assert_eq!(
-            model.step_of(Chosen::Step(1)).map(|(index, _)| index),
-            Some(1)
+        assert!(model.adopt_chosen(Chosen::Step(1)));
+        assert!(model.item_of(Chosen::Step(1)).is_some());
+        assert!(!model.adopt_chosen(Chosen::Step(2)));
+        assert!(model.item_of(Chosen::Step(2)).is_none());
+        assert!(
+            !model.adopt_chosen(Chosen::NearlyCritical(0)),
+            "none modeled"
         );
-        assert!(!model.adopt_chosen_step(2));
-        assert!(model.step_of(Chosen::Step(2)).is_none());
+    }
+
+    #[test]
+    fn a_chosen_nearly_critical_action_opens_the_lane_of_its_span() {
+        let graph = ActionGraph::new(
+            vec![
+                Some("bazel-out/b.o".to_owned()),
+                Some("bazel-out/a".to_owned()),
+            ],
+            vec![(1, 0)],
+        );
+        let mut model = traced_with(Some(&graph));
+        let [action] = model.nearly_critical() else {
+            panic!("one action nearly critical")
+        };
+        let at = action.at;
+        assert_eq!(
+            nearly_critical_actions(model.nearly_critical())[0].primary_output(),
+            Some("bazel-out/b.o")
+        );
+        assert!(!drawn(&model, at.track()), "left out of the sample");
+
+        assert!(model.adopt_chosen(Chosen::NearlyCritical(0)));
+        assert!(drawn(&model, at.track()));
+        let item = model.item_of(Chosen::NearlyCritical(0)).expect("an action");
+        assert_eq!(item.slices(), [at]);
+        let profile = model.profile().expect("a profile").clone();
+        assert_eq!(
+            item.time(&profile),
+            TimeSpan {
+                start_us: 0,
+                end_us: 90
+            }
+        );
+        assert!(!model.adopt_chosen(Chosen::NearlyCritical(1)));
     }
 
     #[test]
