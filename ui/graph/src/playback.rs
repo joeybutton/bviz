@@ -1,33 +1,42 @@
-//! Where the execution attempts of an invocation stood at each instant, and
-//! how they ended, placed on the nodes of a graph.
+//! Where the analysis and the execution attempts of an invocation stood at
+//! each instant, and how the attempts ended, placed on the nodes of a graph.
 
 use crate::status::Landings;
 use crate::timing::Slot;
 use bviz_graph_layout::{Graph, Id, Kind};
 use bviz_invocation::{
-    Attempt, Cache, Done, EpochMicros, MergedAttempts, Phase, SpawnCache, Venue,
+    Analysed, Analysing, Attempt, Cache, ConfiguredTarget, Done, EpochMicros, Interval,
+    MergedAttempts, Phase, Revision, Session, SpawnCache, Venue,
 };
 
-/// Where a node stands at one instant, of the execution attempts landing on
-/// it and on everything it contains.
+/// Where a node stands at one instant, of the analysis and the execution
+/// attempts landing on it and on everything it contains. A node moves only
+/// forward through these states, and stands at an analysis state only where a
+/// source dates the analysis of a target it is or holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum NodeState {
-    /// None has started.
+    /// Nothing has started.
     Pending,
-    /// Some have started and some have yet to end; this is the furthest stage
+    /// Some analysis has started, and no attempt.
+    Analysing,
+    /// All analysis has ended, and no attempt has started.
+    Analysed,
+    /// Some attempts have started and some have yet to end; this is the furthest stage
     /// any of them has entered.
     In(Stage),
-    /// All have ended.
+    /// All attempts have ended.
     Done(Ended),
 }
 
 impl NodeState {
-    const FIRST_IN: usize = 1;
+    const FIRST_IN: usize = 3;
     const FIRST_DONE: usize = Self::FIRST_IN + Stage::COUNT;
 
     /// Every state, at its [`index`](Self::index).
     pub(crate) const ALL: [NodeState; Self::FIRST_DONE + Ended::COUNT] = [
         NodeState::Pending,
+        NodeState::Analysing,
+        NodeState::Analysed,
         NodeState::In(Stage::Preparing),
         NodeState::In(Stage::CheckingCache),
         NodeState::In(Stage::Scheduling),
@@ -44,6 +53,8 @@ impl NodeState {
     const fn index(self) -> usize {
         match self {
             NodeState::Pending => 0,
+            NodeState::Analysing => 1,
+            NodeState::Analysed => 2,
             NodeState::In(stage) => Self::FIRST_IN + stage.index(),
             NodeState::Done(ended) => Self::FIRST_DONE + ended.index(),
         }
@@ -53,6 +64,8 @@ impl NodeState {
     pub(crate) fn label(self) -> &'static str {
         match self {
             NodeState::Pending => "pending",
+            NodeState::Analysing => "analysing",
+            NodeState::Analysed => "analysed",
             NodeState::In(Stage::Preparing) => "preparing",
             NodeState::In(Stage::CheckingCache) => "checking cache",
             NodeState::In(Stage::Scheduling) => "scheduling",
@@ -301,9 +314,10 @@ struct Runs {
 }
 
 /// When the attempts one node holds first entered each phase and when the last
-/// of them ended, which is all its state at any instant is read from.
+/// of them ended, which is all its execution state at any instant is read
+/// from.
 #[derive(Debug, PartialEq)]
-struct Held {
+struct Execution {
     start: EpochMicros,
     end: EpochMicros,
     checking_cache: Option<EpochMicros>,
@@ -312,7 +326,7 @@ struct Held {
     done: Done,
 }
 
-impl Held {
+impl Execution {
     /// What `life` adds up to on a node of `kind`.
     fn of(kind: Option<Kind>, life: Life) -> Self {
         let entered = |phase: Phase| life.entered[phase.index()];
@@ -324,7 +338,7 @@ impl Held {
                 from,
                 running: Running::of(kind, &life),
             });
-        Held {
+        Execution {
             start: life.start,
             end: life.end,
             checking_cache: entered(Phase::CheckingCache),
@@ -378,24 +392,200 @@ impl Held {
     }
 }
 
-/// Where the execution attempts landing on every node of one graph stood at
-/// each instant. Only the nodes an attempt lands on and those containing them
-/// hold any, so a node's attempts are held apart from the dense table finding
-/// them.
+/// When the analysis of the targets a node is or holds went on, as far as any
+/// source dates it: under way from `began` where a source dates a start, and
+/// over at `over`, which `began` never follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Analysis {
+    began: Option<EpochMicros>,
+    over: EpochMicros,
+}
+
+impl Analysis {
+    fn during(during: Interval) -> Self {
+        Analysis {
+            began: Some(during.start()),
+            over: during.end(),
+        }
+    }
+
+    fn over_at(over: EpochMicros) -> Self {
+        Analysis { began: None, over }
+    }
+
+    /// The analysis of a node holding the targets of both: under way from the
+    /// first start either dates, and over once both are.
+    fn absorb(&mut self, other: Analysis) {
+        self.began = match (self.began, other.began) {
+            (Some(one), Some(other)) => Some(one.min(other)),
+            (one, other) => one.or(other),
+        };
+        self.over = self.over.max(other.over);
+    }
+
+    fn at(&self, at: EpochMicros) -> NodeState {
+        if at >= self.over {
+            NodeState::Analysed
+        } else if self.began.is_some_and(|began| at >= began) {
+            NodeState::Analysing
+        } else {
+            NodeState::Pending
+        }
+    }
+
+    /// Every state the node stands at for some time before `until`, where
+    /// something further begins.
+    fn reached(&self, until: Option<EpochMicros>) -> States {
+        let before = |at: EpochMicros| until.is_none_or(|until| at < until);
+        let mut reached = States::default().with(NodeState::Pending);
+        if self
+            .began
+            .is_some_and(|began| began < self.over && before(began))
+        {
+            reached = reached.with(NodeState::Analysing);
+        }
+        if before(self.over) {
+            reached = reached.with(NodeState::Analysed);
+        }
+        reached
+    }
+}
+
+/// Every fact a session dates of the analysis of a target, with the target.
+fn analyses<'a>(
+    analysing: &'a Analysing,
+    analysed: &'a Analysed,
+) -> impl Iterator<Item = (ConfiguredTarget<&'a str>, Analysis)> {
+    analysing
+        .iter()
+        .map(|(target, during)| (target, Analysis::during(during)))
+        .chain(
+            analysed
+                .iter()
+                .map(|(target, over)| (target, Analysis::over_at(over))),
+        )
+}
+
+/// What lands on one node and on everything it contains: analysis, attempts,
+/// or both.
+#[derive(Debug, PartialEq)]
+enum Held<A> {
+    Analysed(Analysis),
+    Attempted {
+        analysis: Option<Analysis>,
+        attempts: A,
+    },
+}
+
+impl Held<Life> {
+    fn absorb_analysis(&mut self, other: Analysis) {
+        match self {
+            Held::Analysed(analysis)
+            | Held::Attempted {
+                analysis: Some(analysis),
+                ..
+            } => analysis.absorb(other),
+            Held::Attempted { analysis, .. } => *analysis = Some(other),
+        }
+    }
+
+    fn absorb_life(&mut self, other: &Life) {
+        match self {
+            Held::Analysed(analysis) => {
+                *self = Held::Attempted {
+                    analysis: Some(*analysis),
+                    attempts: *other,
+                }
+            }
+            Held::Attempted { attempts, .. } => attempts.absorb(other),
+        }
+    }
+
+    /// What this adds up to on a node of `kind`.
+    fn execution(self, kind: Option<Kind>) -> Held<Execution> {
+        match self {
+            Held::Analysed(analysis) => Held::Analysed(analysis),
+            Held::Attempted { analysis, attempts } => Held::Attempted {
+                analysis,
+                attempts: Execution::of(kind, attempts),
+            },
+        }
+    }
+}
+
+impl Held<Execution> {
+    /// Analysis gives the state only until the first attempt starts, so a
+    /// node holding several targets never steps back from executing to
+    /// analysing one.
+    fn at(&self, at: EpochMicros) -> NodeState {
+        match self {
+            Held::Analysed(analysis) => analysis.at(at),
+            Held::Attempted {
+                analysis: Some(analysis),
+                attempts,
+            } if at < attempts.start => analysis.at(at),
+            Held::Attempted { attempts, .. } => attempts.at(at),
+        }
+    }
+
+    fn reached(&self) -> States {
+        match self {
+            Held::Analysed(analysis) => analysis.reached(None),
+            Held::Attempted { analysis, attempts } => analysis
+                .map_or(States::default(), |analysis| {
+                    analysis.reached(Some(attempts.start))
+                })
+                .union(attempts.reached()),
+        }
+    }
+
+    fn done(&self) -> Option<Done> {
+        match self {
+            Held::Analysed(_) => None,
+            Held::Attempted { attempts, .. } => Some(attempts.done),
+        }
+    }
+}
+
+/// Which of a session's reports [`NodeStates`] are read from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StatesRead {
+    attempts: Revision,
+    analysing: Revision,
+    analysed: Revision,
+}
+
+impl StatesRead {
+    pub(crate) fn of(session: &Session) -> Self {
+        StatesRead {
+            attempts: session.attempts_revision(),
+            analysing: session.analysing_revision(),
+            analysed: session.analysed_revision(),
+        }
+    }
+}
+
+/// Where the analysis and the execution attempts landing on every node of one
+/// graph stood at each instant. Only the nodes something lands on and those
+/// containing them hold any, so what a node holds is kept apart from the
+/// dense table finding it.
 #[derive(Debug, PartialEq)]
 pub(crate) struct NodeStates {
-    /// By node id, where in `held` the node's attempts are.
+    /// By node id, where in `held` the node's analysis and attempts are.
     slots: Vec<Option<Slot>>,
-    held: Vec<Held>,
+    held: Vec<Held<Execution>>,
 }
 
 impl NodeStates {
-    /// Places the attempts `attempts` holds on the nodes of `graph` that
-    /// `landings` lands them on; `None` where none lands.
+    /// Places the attempts `attempts` holds and the analysis `analysing` and
+    /// `analysed` date on the nodes of `graph` that `landings` lands them on;
+    /// `None` where none lands.
     pub(crate) fn resolve<'a>(
         landings: &Landings<'a>,
         graph: &Graph,
         attempts: &MergedAttempts<'a>,
+        analysing: &'a Analysing,
+        analysed: &'a Analysed,
     ) -> Option<Self> {
         let recorded = attempts.actions().count()
             + attempts
@@ -415,7 +605,10 @@ impl NodeStates {
                 landed.extend(tried.iter().map(|attempt| (node, Life::of(attempt))));
             }
         }
-        if landed.is_empty() {
+        let analysed: Vec<(Id, Analysis)> = analyses(analysing, analysed)
+            .filter_map(|(target, analysis)| Some((landings.owner(target)?, analysis)))
+            .collect();
+        if landed.is_empty() && analysed.is_empty() {
             return None;
         }
         let mut parent = vec![None; landings.ids()];
@@ -428,7 +621,8 @@ impl NodeStates {
 
         let mut holding = vec![false; parent.len()];
         let mut holders_count = 0;
-        for (node, _) in &landed {
+        let landed_on = landed.iter().map(|(node, _)| node);
+        for node in landed_on.chain(analysed.iter().map(|(node, _)| node)) {
             // A node already counted had every node containing it counted
             // with it.
             for holder in holders(*node) {
@@ -441,28 +635,43 @@ impl NodeStates {
             }
         }
         let mut slots: Vec<Option<Slot>> = vec![None; parent.len()];
-        let mut lives: Vec<(Option<Kind>, Life)> = Vec::with_capacity(holders_count);
+        let mut gathered: Vec<(Option<Kind>, Held<Life>)> = Vec::with_capacity(holders_count);
         for (node, life) in &landed {
             for holder in holders(*node) {
                 match slots[holder.0 as usize] {
-                    Some(slot) => lives[slot.index()].1.absorb(life),
+                    Some(slot) => gathered[slot.index()].1.absorb_life(life),
                     None => {
-                        slots[holder.0 as usize] = Some(Slot::at(lives.len()));
-                        lives.push((kind[holder.0 as usize], *life));
+                        slots[holder.0 as usize] = Some(Slot::at(gathered.len()));
+                        let held = Held::Attempted {
+                            analysis: None,
+                            attempts: *life,
+                        };
+                        gathered.push((kind[holder.0 as usize], held));
+                    }
+                }
+            }
+        }
+        for &(node, analysis) in &analysed {
+            for holder in holders(node) {
+                match slots[holder.0 as usize] {
+                    Some(slot) => gathered[slot.index()].1.absorb_analysis(analysis),
+                    None => {
+                        slots[holder.0 as usize] = Some(Slot::at(gathered.len()));
+                        gathered.push((kind[holder.0 as usize], Held::Analysed(analysis)));
                     }
                 }
             }
         }
         Some(NodeStates {
             slots,
-            held: lives
+            held: gathered
                 .into_iter()
-                .map(|(kind, life)| Held::of(kind, life))
+                .map(|(kind, held)| held.execution(kind))
                 .collect(),
         })
     }
 
-    fn held(&self, id: Id) -> Option<&Held> {
+    fn held(&self, id: Id) -> Option<&Held<Execution>> {
         let slot = (*self.slots.get(id.0 as usize)?)?;
         Some(&self.held[slot.index()])
     }
@@ -470,18 +679,18 @@ impl NodeStates {
     /// How the attempts landing on the node `id` names, and on everything it
     /// contains, ended together; `None` where none lands.
     pub(crate) fn done(&self, id: Id) -> Option<Done> {
-        Some(self.held(id)?.done)
+        self.held(id)?.done()
     }
 
-    /// Where the node `id` names stands at `at`; `None` where no attempt lands
-    /// on it or on anything it contains. An id past the graph's own, as a merge
-    /// group's is, reads as such a node.
+    /// Where the node `id` names stands at `at`; `None` where nothing lands
+    /// on it or on anything it contains. An id past the graph's own, as a
+    /// merge group's is, reads as such a node.
     pub(crate) fn at(&self, id: Id, at: EpochMicros) -> Option<NodeState> {
         Some(self.held(id)?.at(at))
     }
 
-    /// Every state the node `id` names may stand at, none where no attempt
-    /// lands on it or on anything it contains.
+    /// Every state the node `id` names may stand at, none where nothing lands
+    /// on it or on anything it contains.
     pub(crate) fn reached(&self, id: Id) -> States {
         self.held(id).map_or(States::default(), Held::reached)
     }
@@ -493,6 +702,8 @@ pub(crate) mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{Kind, Names};
     use bviz_invocation::{AttemptSource, Attempts};
+
+    const LABEL: &str = "//app:bin";
 
     const ORIGIN_MS: i64 = 1_781_439_245_231;
     const LOCAL: Phase = Phase::Running(Venue::Local);
@@ -520,11 +731,13 @@ pub(crate) mod tests {
     fn progress(state: NodeState) -> usize {
         match state {
             NodeState::Pending => 0,
-            NodeState::In(Stage::Preparing) => 1,
-            NodeState::In(Stage::CheckingCache) => 2,
-            NodeState::In(Stage::Scheduling) => 3,
-            NodeState::In(Stage::Running(_)) => 4,
-            NodeState::Done(_) => 5,
+            NodeState::Analysing => 1,
+            NodeState::Analysed => 2,
+            NodeState::In(Stage::Preparing) => 3,
+            NodeState::In(Stage::CheckingCache) => 4,
+            NodeState::In(Stage::Scheduling) => 5,
+            NodeState::In(Stage::Running(_)) => 6,
+            NodeState::Done(_) => 7,
         }
     }
 
@@ -547,6 +760,8 @@ pub(crate) mod tests {
         target: Id,
         actions: Vec<Id>,
         attempts: Attempts,
+        analysing: Analysing,
+        analysed: Analysed,
     }
 
     impl Built {
@@ -555,7 +770,7 @@ pub(crate) mod tests {
             let mut graph = Graph::new();
             let package = names.intern("pkg:app");
             graph.add_node(Node::new(package, "app", Kind::Package, None));
-            let target = names.intern("target://app:bin");
+            let target = names.intern(&format!("target:{LABEL}"));
             graph.add_node(Node::new(target, "bin", Kind::Target, Some(package)));
             let mut attempts = Attempts::with_capacity(actions.len());
             let actions = actions
@@ -576,13 +791,37 @@ pub(crate) mod tests {
                 target,
                 actions,
                 attempts,
+                analysing: Analysing::default(),
+                analysed: Analysed::default(),
             }
+        }
+
+        /// The target, analysed from [`at`] `start` to `end`.
+        fn analysing(mut self, start: i64, end: i64) -> Self {
+            let during = Interval::new(at(start), at(end)).expect("ordered");
+            let target = ConfiguredTarget::new(LABEL.to_owned(), None);
+            self.analysing.record(target, during);
+            self
+        }
+
+        /// The target, analysed by [`at`] `over`, its start undated.
+        fn analysed(mut self, over: i64) -> Self {
+            let target = ConfiguredTarget::new(LABEL.to_owned(), None);
+            self.analysed.record(target, at(over));
+            self
         }
 
         fn states(&self) -> NodeStates {
             let landings = Landings::new(&self.graph, &self.names, 0);
             let attempts = MergedAttempts::new([(AttemptSource::Profile, &self.attempts)]);
-            NodeStates::resolve(&landings, &self.graph, &attempts).expect("landed")
+            NodeStates::resolve(
+                &landings,
+                &self.graph,
+                &attempts,
+                &self.analysing,
+                &self.analysed,
+            )
+            .expect("landed")
         }
     }
 
@@ -927,9 +1166,87 @@ pub(crate) mod tests {
         attempts.record(Some("bazel-out/gone"), None, attempt(0, 10, &[]));
         let landings = Landings::new(&built.graph, &built.names, 0);
         let attempts = MergedAttempts::new([(AttemptSource::Profile, &attempts)]);
+        let mut analysing = Analysing::default();
+        let during = Interval::new(at(0), at(10)).expect("ordered");
+        analysing.record(ConfiguredTarget::new("//gone".to_owned(), None), during);
         assert_eq!(
-            NodeStates::resolve(&landings, &built.graph, &attempts),
+            NodeStates::resolve(
+                &landings,
+                &built.graph,
+                &attempts,
+                &analysing,
+                &Analysed::default()
+            ),
             None
         );
+    }
+
+    #[test]
+    fn a_target_is_analysing_then_analysed_until_its_first_attempt_starts() {
+        let built =
+            Built::new(&[("bazel-out/a.o", &[attempt(30, 40, &[(LOCAL, 32)])])]).analysing(10, 20);
+        let states = built.states();
+        for node in [built.target, built.package] {
+            let state = |t| states.at(node, at(t));
+            assert_eq!(state(5), Some(NodeState::Pending));
+            assert_eq!(state(10), Some(NodeState::Analysing));
+            assert_eq!(state(19), Some(NodeState::Analysing));
+            assert_eq!(state(20), Some(NodeState::Analysed));
+            assert_eq!(state(29), Some(NodeState::Analysed));
+            assert_eq!(state(30), Some(NodeState::In(Stage::Preparing)));
+            assert_eq!(state(40), Some(NodeState::Done(Ended::Executed)));
+            let reached = states.reached(node);
+            assert!(reached.contains(NodeState::Analysing));
+            assert!(reached.contains(NodeState::Analysed));
+        }
+        let action = built.actions[0];
+        assert_eq!(states.at(action, at(15)), Some(NodeState::Pending));
+        assert!(!states.reached(action).contains(NodeState::Analysing));
+    }
+
+    #[test]
+    fn a_target_whose_analysis_only_ends_is_dated_is_analysed_from_then() {
+        let built = Built::new(&[]).analysed(20);
+        let states = built.states();
+        assert_eq!(states.at(built.target, at(19)), Some(NodeState::Pending));
+        assert_eq!(states.at(built.target, at(20)), Some(NodeState::Analysed));
+        assert_eq!(states.done(built.target), None);
+        let reached = states.reached(built.target);
+        assert!(!reached.contains(NodeState::Analysing));
+        assert!(reached.contains(NodeState::Analysed));
+    }
+
+    #[test]
+    fn a_target_dated_by_several_sources_is_analysing_from_the_first_start_to_the_last_end() {
+        let built = Built::new(&[]).analysing(10, 20).analysed(25);
+        let states = built.states();
+        assert_eq!(states.at(built.target, at(22)), Some(NodeState::Analysing));
+        assert_eq!(states.at(built.target, at(25)), Some(NodeState::Analysed));
+        let all: Vec<NodeState> = NodeState::ALL
+            .into_iter()
+            .filter(|&state| states.reached(built.target).contains(state))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                NodeState::Pending,
+                NodeState::Analysing,
+                NodeState::Analysed
+            ]
+        );
+    }
+
+    /// Analysis still under way once an attempt has started does not take a
+    /// node back from executing.
+    #[test]
+    fn analysis_overlapping_an_attempt_never_takes_a_node_back() {
+        let built =
+            Built::new(&[("bazel-out/a.o", &[attempt(10, 40, &[(LOCAL, 12)])])]).analysing(0, 30);
+        let states = built.states();
+        let state = |t| states.at(built.target, at(t));
+        assert_eq!(state(5), Some(NodeState::Analysing));
+        assert_eq!(state(20), Some(NodeState::In(RUNNING)));
+        assert_eq!(state(35), Some(NodeState::In(RUNNING)));
+        assert!(!states.reached(built.target).contains(NodeState::Analysed));
     }
 }

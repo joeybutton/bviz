@@ -542,7 +542,7 @@ impl GraphPanel {
                 times: loaded.times().ok(),
                 timed: loaded.timed(),
                 states: loaded.states(),
-                attempted: loaded.attempted(),
+                states_read: loaded.states_read(),
             };
             self.legend
                 .card(&drawn, zoom, statuses, resolved, coloured, &palette)

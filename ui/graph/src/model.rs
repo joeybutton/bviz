@@ -2,7 +2,7 @@ use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
 use crate::described::DescribedActions;
-use crate::playback::NodeStates;
+use crate::playback::{NodeStates, StatesRead};
 use crate::point::ConfigNames;
 use crate::report::Report;
 use crate::status::{Holding, Landings, Nodes, Statuses};
@@ -135,10 +135,10 @@ pub(crate) struct Loaded {
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
     targets: Prepared<TargetIndex>,
-    /// Where the execution attempts the invocation's profile recorded stood
-    /// at each instant, placed on the graph's nodes; `None` where none lands.
+    /// Where the invocation's analysis and execution attempts stood at each
+    /// instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
-    attempted: Revision,
+    states_read: StatesRead,
 }
 
 impl Loaded {
@@ -164,7 +164,7 @@ impl Loaded {
             dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
             states: None,
-            attempted: Revision::default(),
+            states_read: StatesRead::default(),
         }
     }
 
@@ -204,10 +204,10 @@ impl Loaded {
         &self.timecard
     }
 
-    /// Which of its session's attempts the [states](Self::states) are read
+    /// Which of its session's reports the [states](Self::states) are read
     /// from, as [`taken_up`](Self::taken_up) is for outcomes.
-    pub(crate) fn attempted(&self) -> Revision {
-        self.attempted
+    pub(crate) fn states_read(&self) -> StatesRead {
+        self.states_read
     }
 
     pub(crate) fn states(&self) -> Option<&NodeStates> {
@@ -220,8 +220,8 @@ impl Loaded {
     fn report(&mut self, session: &Session) -> bool {
         let outcomes = self.take_up_outcomes(session);
         let timings = self.take_up_timings(session);
-        let attempts = self.take_up_attempts(session);
-        outcomes || timings || attempts
+        let states = self.take_up_states(session);
+        outcomes || timings || states
     }
 
     /// Takes the playback clock's time to be `now`, `None` where it has none.
@@ -236,12 +236,12 @@ impl Loaded {
         self.take_up_outcomes(session)
     }
 
-    fn take_up_attempts(&mut self, session: &Session) -> bool {
-        let revision = session.attempts_revision();
-        if self.attempted == revision {
+    fn take_up_states(&mut self, session: &Session) -> bool {
+        let read = StatesRead::of(session);
+        if self.states_read == read {
             return false;
         }
-        self.attempted = revision;
+        self.states_read = read;
         let attempts = session.attempts();
         let Shared {
             base,
@@ -253,7 +253,13 @@ impl Loaded {
         let resolved = attempts.resolve(|action| described.output(action));
         let attempts = attempts.resolved(&resolved);
         let landings = Landings::new(base, names, attempts.held());
-        let states = NodeStates::resolve(&landings, base, &attempts);
+        let states = NodeStates::resolve(
+            &landings,
+            base,
+            &attempts,
+            session.analysing(),
+            session.analysed(),
+        );
         let changed = self.states != states;
         self.states = states;
         changed

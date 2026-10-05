@@ -216,6 +216,14 @@ const PENDING_TINT: StateTint = StateTint {
     blend: 0.445,
     lift: 0.015,
 };
+const ANALYSING_TINT: StateTint = StateTint {
+    blend: 0.69,
+    lift: 0.025,
+};
+const ANALYSED_TINT: StateTint = StateTint {
+    blend: 0.69,
+    lift: -0.025,
+};
 const PREPARING_TINT: StateTint = StateTint {
     blend: 0.65,
     lift: -0.06,
@@ -703,7 +711,9 @@ impl Palette {
     }
 
     /// Fill for a box standing at `state`. A box yet to start keeps to the
-    /// neutral slot; one on its way to running deepens through blues, one
+    /// neutral slot; one being analysed takes a muted violet that settles
+    /// toward the canvas once analysed; one on its way to running deepens
+    /// through blues, one
     /// running warms to the amber of a construction site (an action locally
     /// toward orange and remotely toward yellow, a container between them),
     /// and one done settles to a green low in chroma, a hit in a remote or
@@ -715,6 +725,8 @@ impl Palette {
         let between = bviz_ui_theme::mix;
         let (slot, tint) = match state {
             NodeState::Pending => (d.neutral.into(), PENDING_TINT),
+            NodeState::Analysing => (d.purple.into(), ANALYSING_TINT),
+            NodeState::Analysed => (d.purple.into(), ANALYSED_TINT),
             NodeState::In(Stage::Preparing) => {
                 (between(d.cyan, d.blue, PREPARING_HUE), PREPARING_TINT)
             }
@@ -2757,7 +2769,7 @@ mod colors {
     use super::*;
     use bviz_ui_theme::{
         MIN_DISTINCT_COLOR, MIN_EDGED_STEP, MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST,
-        MIN_VISIBLE_STEP, built_in_themes, contrast_ratio, distance, label_on, level_step,
+        MIN_VISIBLE_STEP, Oklch, built_in_themes, contrast_ratio, distance, label_on, level_step,
         luminance, oklch, over,
     };
     use gpui::SharedString;
@@ -2958,7 +2970,8 @@ mod colors {
     /// A box further along reads as further along: each stage its attempts
     /// enter is deeper in chroma than the one before it, so running stands
     /// out most, and an ended attempt is not as deep as one waiting on its
-    /// turn to run.
+    /// turn to run. Analysis stands off pending likewise, and once over
+    /// settles below the depth it had under way.
     #[test]
     fn an_attempt_deepens_in_chroma_as_it_moves_on_and_settles_once_ended() {
         let running = [
@@ -2986,6 +2999,16 @@ mod colors {
                     "{theme} {stage:?}: {deeper} after {before}"
                 );
             }
+            let [pending, analysing, analysed] = [
+                NodeState::Pending,
+                NodeState::Analysing,
+                NodeState::Analysed,
+            ]
+            .map(chroma);
+            assert!(
+                pending < analysed && analysed < analysing,
+                "{theme}: pending {pending}, analysed {analysed}, analysing {analysing}"
+            );
             let scheduling = chroma(NodeState::In(Stage::Scheduling));
             for settled in [
                 NodeState::Done(Ended::Executed),
@@ -3037,6 +3060,40 @@ mod colors {
                 let apart = distance(fill, p.background);
                 assert!(apart >= MIN_DISTINCT_COLOR, "{theme} {state:?}: {apart}");
                 assert_eq!(side(fill), boxes, "{theme} {state:?}");
+            }
+        }
+    }
+
+    /// Analysis comes before any attempt of an action, so it never outshouts
+    /// one: it is lower in chroma than every stage of running, and no further
+    /// off the canvas than the deepest blue an attempt waits in.
+    #[test]
+    fn analysis_stands_back_from_the_attempts_after_it() {
+        for (theme, p) in palettes() {
+            let canvas = oklch(p.background).lightness;
+            let off_canvas = |fill: Oklch| (fill.lightness - canvas).abs();
+            let scheduling = oklch(p.state_fill(NodeState::In(Stage::Scheduling)));
+            for analysis in [NodeState::Analysing, NodeState::Analysed] {
+                let fill = oklch(p.state_fill(analysis));
+                for running in [
+                    Running::Container,
+                    Running::Action(Venue::Local),
+                    Running::Action(Venue::Remote),
+                ] {
+                    let running = oklch(p.state_fill(NodeState::In(Stage::Running(running))));
+                    assert!(
+                        fill.chroma < running.chroma,
+                        "{theme} {analysis:?}: {} against {}",
+                        fill.chroma,
+                        running.chroma
+                    );
+                }
+                assert!(
+                    off_canvas(fill) < off_canvas(scheduling),
+                    "{theme} {analysis:?}: {} off the canvas against {}",
+                    off_canvas(fill),
+                    off_canvas(scheduling)
+                );
             }
         }
     }
