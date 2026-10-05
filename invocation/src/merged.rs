@@ -160,6 +160,13 @@ impl<'a> MergedAttempts<'a> {
         resolved
     }
 
+    /// Each action a source knows by its description, once for each source
+    /// describing it.
+    pub fn described(&self) -> impl Iterator<Item = DescribedAction<&'a str>> + use<'a> {
+        self.reports()
+            .flat_map(|(_, attempts)| attempts.described().map(|(action, _)| action))
+    }
+
     /// These attempts, with each action a source knows by a description in
     /// `resolved` held by its primary output.
     pub fn resolved(self, resolved: &'a Resolved<'a>) -> Self {

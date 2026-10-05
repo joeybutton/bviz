@@ -1,6 +1,7 @@
 use crate::GraphPanel;
 use crate::build::{build_graph, loaded_inputs};
 use crate::derive::derive_levels;
+use crate::described::DescribedActions;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
@@ -213,8 +214,16 @@ impl Loaded {
         }
         self.attempted = revision;
         let attempts = session.attempts();
-        let base = &self.shared.base;
-        let landings = Landings::new(base, &self.shared.names, attempts.held());
+        let Shared {
+            base,
+            names,
+            facets,
+            ..
+        } = &self.shared;
+        let described = DescribedActions::new(base, names, facets, attempts.described());
+        let resolved = attempts.resolve(|action| described.output(action));
+        let attempts = attempts.resolved(&resolved);
+        let landings = Landings::new(base, names, attempts.held());
         let states = NodeStates::resolve(&landings, base, &attempts);
         let changed = self.states != states;
         self.states = states;

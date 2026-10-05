@@ -32,6 +32,7 @@ mod checklist;
 mod colour;
 mod column;
 mod derive;
+mod described;
 mod drag;
 mod duration;
 mod emphasis;
