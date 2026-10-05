@@ -19,7 +19,8 @@ pub use attempts::{
 };
 pub use merged::{ActionAttempts, AttemptSource, MergedAttempts, Resolved};
 pub use outcomes::{
-    BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
+    BuildOutcome, Cause, ConfiguredTarget, DatedOutcomes, FailedAction, Known, Outcomes, Report,
+    TestOutcome, TestStatus,
 };
 pub use runner::{Runner, Spawns};
 pub use timings::{Profiled, Share, Spent, Timing, Timings};
@@ -212,6 +213,18 @@ fn short(checksum: &str) -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision(u64);
 
+/// What a build reported, where the reports are dated as they became known.
+pub enum HeldOutcomes {
+    Undated(Outcomes),
+    Dated(DatedOutcomes),
+}
+
+impl Default for HeldOutcomes {
+    fn default() -> Self {
+        HeldOutcomes::Undated(Outcomes::default())
+    }
+}
+
 /// What a [`Session`] holds of one kind of report. An invocation writes one of
 /// each output a kind is reported from, so a report stands in place of any
 /// taken before, and the revision moves with each report and nothing else.
@@ -240,7 +253,7 @@ pub struct Session {
     /// stand in place only of those it reported before; `None` until it reports.
     attempts: Reported<[Option<Attempts>; AttemptSource::ALL.len()]>,
     configurations: Configurations,
-    outcomes: Reported<Outcomes>,
+    outcomes: Reported<HeldOutcomes>,
     timings: Reported<Timings>,
     /// Shared, as a derivation off the UI thread reads it. Held, every
     /// spawn's outputs with it, for as long as the session is, whether or
@@ -258,17 +271,35 @@ impl Session {
         self.configurations.extend(described);
     }
 
-    /// What the invocation's build reported.
+    /// What the invocation's build reported, at whatever instant.
     pub fn outcomes(&self) -> &Outcomes {
-        &self.outcomes.value
+        match &self.outcomes.value {
+            HeldOutcomes::Undated(outcomes) => outcomes,
+            HeldOutcomes::Dated(dated) => dated.outcomes(),
+        }
     }
 
+    /// The same, each report dated as it became known; `None` where the
+    /// build's reports are not dated.
+    pub fn dated_outcomes(&self) -> Option<&DatedOutcomes> {
+        match &self.outcomes.value {
+            HeldOutcomes::Undated(_) => None,
+            HeldOutcomes::Dated(dated) => Some(dated),
+        }
+    }
+
+    /// The same for as long as [`outcomes`](Self::outcomes) and
+    /// [`dated_outcomes`](Self::dated_outcomes) are those of one report.
     pub fn outcomes_revision(&self) -> Revision {
         self.outcomes.revision
     }
 
     pub fn report_outcomes(&mut self, reported: Outcomes) {
-        self.outcomes.replace(reported);
+        self.outcomes.replace(HeldOutcomes::Undated(reported));
+    }
+
+    pub fn report_dated_outcomes(&mut self, reported: DatedOutcomes) {
+        self.outcomes.replace(HeldOutcomes::Dated(reported));
     }
 
     /// What the invocation's profile recorded of its actions.
@@ -458,6 +489,29 @@ mod tests {
             session.outcomes().build(app.borrowed()),
             Some(&BuildOutcome::Built)
         );
+    }
+
+    #[test]
+    fn a_session_holds_the_dated_outcomes_last_reported_to_it() {
+        let app = ConfiguredTarget::new("//app".to_owned(), Some("55817e2200e2".to_owned()));
+        let at = EpochMicros::from_millis(1_781_439_245_231);
+        let mut session = Session::default();
+        assert!(session.dated_outcomes().is_none());
+
+        let reports = [(at, Report::Build(app.clone(), BuildOutcome::Built))];
+        session.report_dated_outcomes(DatedOutcomes::new(reports));
+        let dated = session.outcomes_revision();
+        assert_eq!(
+            session.outcomes().build(app.borrowed()),
+            Some(&BuildOutcome::Built)
+        );
+        let held = session.dated_outcomes().expect("dated");
+        assert_eq!(held.known_at(at), held.all_known());
+
+        session.report_outcomes(Outcomes::default());
+        assert_ne!(session.outcomes_revision(), dated);
+        assert!(session.dated_outcomes().is_none());
+        assert!(session.outcomes().is_empty());
     }
 
     #[test]

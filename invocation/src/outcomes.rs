@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::num::{NonZeroI32, NonZeroU32};
 use std::time::Duration;
 
+use crate::EpochMicros;
+
 /// A target in one configuration, as a build names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConfiguredTarget<S = String> {
@@ -149,6 +151,18 @@ pub struct TestOutcome {
     pub run_duration: Duration,
 }
 
+/// One thing a build reports, as [`Outcomes::report`] takes it up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Report {
+    Build(ConfiguredTarget, BuildOutcome),
+    Test(ConfiguredTarget, TestOutcome),
+    FailedAction {
+        primary_output: String,
+        action: FailedAction,
+    },
+    TargetError(ConfiguredTarget, String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailedAction {
     /// The target the action belongs to, where the build names it.
@@ -275,6 +289,19 @@ impl Outcomes {
             .map(|(primary_output, action)| (primary_output.as_str(), action))
     }
 
+    /// Takes up `report` as the `report_*` method of its kind does.
+    pub fn report(&mut self, report: Report) {
+        match report {
+            Report::Build(target, outcome) => self.report_build(target, outcome),
+            Report::Test(target, outcome) => self.report_test(target, outcome),
+            Report::FailedAction {
+                primary_output,
+                action,
+            } => self.report_failed_action(primary_output, action),
+            Report::TargetError(target, error) => self.report_target_error(target, error),
+        }
+    }
+
     /// Reports how building `target`, or applying an aspect to it, ended. The
     /// target's outcome is the most severe of what is reported of it, and
     /// traces back to the causes of every failure reported of it.
@@ -299,6 +326,63 @@ impl Outcomes {
     /// already reported on keeps the error it has.
     pub fn report_target_error(&mut self, target: ConfiguredTarget, error: String) {
         self.target_errors.report(target, error, |_, _| {});
+    }
+}
+
+impl FromIterator<Report> for Outcomes {
+    /// What `reports`, made in the order they come in, tell together.
+    fn from_iter<I: IntoIterator<Item = Report>>(reports: I) -> Self {
+        let mut outcomes = Outcomes::default();
+        for report in reports {
+            outcomes.report(report);
+        }
+        outcomes
+    }
+}
+
+/// How many of the reports of a [`DatedOutcomes`] were known at some
+/// instant: those of the earliest instants, as many as this says. It counts
+/// the reports of the one that gave it, and of no other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Known(usize);
+
+/// What a build reported, each report with the instant it became known.
+pub struct DatedOutcomes {
+    /// By instant, those of one instant in the order reported.
+    reports: Vec<(EpochMicros, Report)>,
+    /// Every report taken up.
+    all: Outcomes,
+}
+
+impl DatedOutcomes {
+    /// The reports a build made, in the order it made them, each with the
+    /// instant it became known.
+    pub fn new(reports: impl IntoIterator<Item = (EpochMicros, Report)>) -> Self {
+        let mut reports: Vec<_> = reports.into_iter().collect();
+        reports.sort_by_key(|&(at, _)| at);
+        let all = reports.iter().map(|(_, report)| report.clone()).collect();
+        Self { reports, all }
+    }
+
+    /// What the build reported, at whatever instant.
+    pub fn outcomes(&self) -> &Outcomes {
+        &self.all
+    }
+
+    /// The reports known at `at`: those that became known at or before it.
+    pub fn known_at(&self, at: EpochMicros) -> Known {
+        Known(self.reports.partition_point(|&(when, _)| when <= at))
+    }
+
+    /// Every report.
+    pub fn all_known(&self) -> Known {
+        Known(self.reports.len())
+    }
+
+    /// What the reports `known`, which this gave, counts tell together.
+    pub fn outcomes_known(&self, known: Known) -> Outcomes {
+        let known = &self.reports[..known.0];
+        known.iter().map(|(_, report)| report.clone()).collect()
     }
 }
 
@@ -550,5 +634,55 @@ mod tests {
             outcomes.failed_actions().collect::<Vec<_>>(),
             [(output, &failed_action("first"))]
         );
+    }
+
+    #[test]
+    fn a_report_is_taken_up_as_its_kind_is_reported() {
+        let app = owned("//app", Some("a7a71f"));
+        let output = "bazel-out/bin/gen.out";
+        let mut outcomes = Outcomes::default();
+        outcomes.report(Report::Build(app.clone(), BuildOutcome::Built));
+        outcomes.report(Report::Test(app.clone(), test_outcome(TestStatus::Passed)));
+        outcomes.report(Report::FailedAction {
+            primary_output: output.into(),
+            action: failed_action("exit 2"),
+        });
+        outcomes.report(Report::TargetError(app.clone(), "not visible".into()));
+        assert_eq!(outcomes.build(app.borrowed()), Some(&BuildOutcome::Built));
+        assert_eq!(
+            outcomes.test(app.borrowed()),
+            Some(&test_outcome(TestStatus::Passed))
+        );
+        assert_eq!(
+            outcomes.failed_action(output),
+            Some(&failed_action("exit 2"))
+        );
+        assert_eq!(outcomes.target_error(app.borrowed()), Some("not visible"));
+    }
+
+    #[test]
+    fn dated_outcomes_tell_what_was_known_at_each_instant() {
+        let at = |millis: i64| EpochMicros::from_millis(1_781_439_245_000 + millis);
+        let app = || owned("//app", Some("a7a71f"));
+        let lib = || owned("//lib", Some("a7a71f"));
+        let dated = DatedOutcomes::new([
+            (at(20), Report::Build(app(), failed(&[]))),
+            (at(10), Report::Build(app(), BuildOutcome::NotBuilt)),
+            (at(10), Report::Build(lib(), BuildOutcome::Built)),
+        ]);
+        assert_eq!(dated.outcomes().build(app().borrowed()), Some(&failed(&[])));
+        assert_eq!(dated.known_at(at(9)), Known::default());
+        assert_eq!(dated.known_at(at(20)), dated.all_known());
+
+        let before = dated.outcomes_known(dated.known_at(at(9)));
+        assert!(before.is_empty());
+        let between = dated.outcomes_known(dated.known_at(at(15)));
+        assert_eq!(
+            between.build(app().borrowed()),
+            Some(&BuildOutcome::NotBuilt)
+        );
+        assert_eq!(between.build(lib().borrowed()), Some(&BuildOutcome::Built));
+        let all = dated.outcomes_known(dated.all_known());
+        assert_eq!(all.build(app().borrowed()), Some(&failed(&[])));
     }
 }
