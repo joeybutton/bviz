@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod paths;
 pub mod provenance;
 pub mod query;
+pub mod query_lang;
 pub mod quotient;
 pub mod reduce;
 pub mod repo;

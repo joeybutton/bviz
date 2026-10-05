@@ -36,3 +36,8 @@ proto_descriptor_set(
     name = "bazel_query_proto_descriptor_set",
     deps = [":bazel_query_proto"],
 )
+
+exports_files(
+    ["LICENSE"],
+    visibility = ["@//LICENSES:__pkg__"],
+)

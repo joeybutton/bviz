@@ -3,8 +3,10 @@ load("@package_metadata//rules:package_metadata.bzl", "package_metadata")
 
 # The terms of work bviz carries in its own tree rather than fetching: source
 # written from an upstream example, a constant taken verbatim, a patch that
-# ships the lines it replaces. Work Bazel fetches declares its own terms from
-# the archive it arrives in.
+# ships the lines it replaces. A text held here is the one the work came with;
+# where Bazel fetches that same text with other work from the same source, the
+# declaration points at the fetched copy instead. Work Bazel fetches declares
+# its own terms from the archive it arrives in.
 
 package_metadata(
     name = "gpui",
@@ -51,4 +53,17 @@ license(
     name = "elk_rs_license",
     kind = "@package_metadata//licenses/spdx:EPL-2.0",
     text = "elk-rs.txt",
+)
+
+package_metadata(
+    name = "bazel",
+    attributes = [":bazel_license"],
+    purl = "pkg:github/bazelbuild/bazel@9.2.0",
+    visibility = ["//graph/layout:__pkg__"],
+)
+
+license(
+    name = "bazel_license",
+    kind = "@package_metadata//licenses/spdx:Apache-2.0",
+    text = "@bazel_query_proto//:LICENSE",
 )
