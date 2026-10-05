@@ -1316,9 +1316,8 @@ struct GutterLanes<'a> {
     shared_names: &'a [bool],
 }
 
-/// Paints the label of each of `layout`'s lanes, drawn in `band`, scrolled with
-/// the lanes and centred on the part of the lane the band shows, so a lane
-/// taller than the band keeps its name on screen. `headed` says, lane by lane,
+/// Paints the label of each of `layout`'s lanes, drawn in `band` where
+/// [`LaneBand::label_centre`] places it. `headed` says, lane by lane,
 /// whether a pool header stands over it. A selected lane's row carries a faint
 /// accent tint and a leading accent bar, so which tracks feed the flame graph
 /// reads at a glance.
@@ -1355,9 +1354,10 @@ fn paint_thread_labels(
                 palette.accent,
             ));
         }
-        let seen_top = top.max(band.top);
-        let seen_bottom = (top + lane.height).min(band.bottom());
-        let ty = (seen_top + seen_bottom - GUTTER_LABEL_SIZE) / 2.0;
+        let Some(centre) = band.label_centre(lane.top, lane.height, GUTTER_LABEL_SIZE) else {
+            continue;
+        };
+        let ty = centre - GUTTER_LABEL_SIZE / 2.0;
         let label = if headed {
             pool_member_label(lanes.profile, lanes.shared_names, lane.track)
         } else {
@@ -1391,8 +1391,9 @@ struct HeaderRow<'a> {
 
 /// Paints a header row of the scrolled lanes' `band`: its count set against the
 /// gutter's trailing edge, clear of what the row reserves there, and its name
-/// truncated into the width left between the two. Returns the row's top in
-/// screen space, and nothing where the band scrolls the row out of view.
+/// truncated into the width left between the two. Returns the window y the
+/// row's text and icons centre on, and nothing where the band shows too little
+/// of the row to hold its icons whole.
 fn paint_header_row(
     g: &GutterPaint,
     band: LaneBand,
@@ -1400,11 +1401,8 @@ fn paint_header_row(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<f32> {
-    let top = band.y_of(row.top);
-    if top + GROUP_BAND_HEIGHT < band.top || top > band.bottom() {
-        return None;
-    }
-    let ty = top + (GROUP_BAND_HEIGHT - GUTTER_LABEL_SIZE) / 2.0;
+    let centre = band.label_centre(row.top, GROUP_BAND_HEIGHT, GROUP_ICON)?;
+    let ty = centre - GUTTER_LABEL_SIZE / 2.0;
     let shape = |text: &str, avail: f32, window: &mut Window| {
         bviz_ui_components::shape_truncated(text, avail, g.font.clone(), g.fs, row.color, window)
     };
@@ -1425,7 +1423,7 @@ fn paint_header_row(
     paint(name, g.left + SLICE_TEXT_PAD + row.indent, window, cx);
     let count_x = g.left + g.width - SLICE_TEXT_PAD - row.reserved - count_width;
     paint(count, count_x, window, cx);
-    Some(top)
+    Some(centre)
 }
 
 /// Paints each group header band's caret, class name, and shown/total lane
@@ -1444,7 +1442,7 @@ fn paint_group_bands(
     for group in &chrome.bands {
         let show_icon = group.capped && !group.collapsed;
         let count = header_count((!group.collapsed).then_some(group.shown), group.total);
-        let Some(top) = paint_header_row(
+        let Some(centre) = paint_header_row(
             g,
             band,
             HeaderRow {
@@ -1471,7 +1469,7 @@ fn paint_group_bands(
                 "caret-down"
             },
             gutter_left + SLICE_TEXT_PAD,
-            top,
+            centre,
             palette.label.into(),
             window,
             cx,
@@ -1485,7 +1483,7 @@ fn paint_group_bands(
             paint_band_icon(
                 name,
                 gutter_left + gutter_width - GROUP_ICON - SLICE_TEXT_PAD,
-                top,
+                centre,
                 palette.marker.into(),
                 window,
                 cx,
@@ -1494,17 +1492,17 @@ fn paint_group_bands(
     }
 }
 
-/// Paints one of a group band's icons, square and vertically centred in the band
-/// whose screen-space top is `top`.
+/// Paints one of a group band's icons, square and vertically centred on window
+/// y `centre`.
 fn paint_band_icon(
     name: &str,
     left: f32,
-    top: f32,
+    centre: f32,
     color: Hsla,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let iy = top + (GROUP_BAND_HEIGHT - GROUP_ICON) / 2.0;
+    let iy = centre - GROUP_ICON / 2.0;
     let _ = window.paint_svg(
         Bounds::new(
             point(px(left), px(iy)),

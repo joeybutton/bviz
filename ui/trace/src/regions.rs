@@ -426,6 +426,18 @@ impl LaneBand {
         self.top + stack_y - self.scroll
     }
 
+    /// The window y a gutter label `line` tall is centred on, for a row
+    /// `height` tall standing `stack_top` down the band: the middle of the part
+    /// of the row the band shows, or `None` where that part cannot hold the
+    /// whole line, so a row the band's edge cuts short never shows a sliver of
+    /// its label.
+    pub(crate) fn label_centre(&self, stack_top: f32, height: f32, line: f32) -> Option<f32> {
+        let top = self.y_of(stack_top);
+        let seen_top = top.max(self.top);
+        let seen_bottom = (top + height).min(self.bottom());
+        (seen_bottom - seen_top >= line).then_some((seen_top + seen_bottom) / 2.0)
+    }
+
     /// How far down the band's stack window y `y` points; `None` outside the
     /// band.
     pub(crate) fn stack_y(&self, y: f32) -> Option<f32> {
@@ -808,5 +820,39 @@ mod tests {
                 DividerPress::Reset(CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT))
             );
         }
+    }
+
+    /// A band from 100 to 300 in window y, its stack scrolled up by 50.
+    const LABEL_BAND: LaneBand = LaneBand {
+        top: 100.0,
+        height: 200.0,
+        scroll: 50.0,
+    };
+    const LINE: f32 = 10.0;
+
+    #[test]
+    fn a_label_centres_on_a_row_the_band_shows_whole() {
+        assert_eq!(LABEL_BAND.label_centre(100.0, 40.0, LINE), Some(170.0));
+    }
+
+    /// A row cut by either edge centres its label on the part still in view,
+    /// so a tall row keeps its name on screen.
+    #[test]
+    fn a_label_centres_on_the_shown_part_of_a_row_cut_by_either_edge() {
+        assert_eq!(LABEL_BAND.label_centre(30.0, 40.0, LINE), Some(110.0));
+        assert_eq!(LABEL_BAND.label_centre(230.0, 40.0, LINE), Some(290.0));
+    }
+
+    /// Down to the last pixel that holds a whole line, the label sits inside
+    /// the band; past it no label is drawn rather than a clipped one.
+    #[test]
+    fn a_label_is_dropped_once_the_shown_part_cannot_hold_a_whole_line() {
+        let centre = |stack_top| LABEL_BAND.label_centre(stack_top, 40.0, LINE);
+        assert_eq!(centre(20.0), Some(100.0 + LINE / 2.0));
+        assert_eq!(centre(19.0), None);
+        assert_eq!(centre(240.0), Some(300.0 - LINE / 2.0));
+        assert_eq!(centre(241.0), None);
+        assert_eq!(LABEL_BAND.label_centre(100.0, LINE - 1.0, LINE), None);
+        assert_eq!(LABEL_BAND.label_centre(400.0, 40.0, LINE), None);
     }
 }
