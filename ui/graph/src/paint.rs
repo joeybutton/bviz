@@ -3,7 +3,7 @@ use crate::colour::Colouring;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
-use crate::playback::{NodeState, NodeStates, Running, Stage};
+use crate::playback::{Ended, NodeState, NodeStates, Running, Stage};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
 use crate::status::{Status, Statuses};
@@ -12,7 +12,7 @@ use crate::{GraphPanel, Palette};
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
 use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
-use bviz_invocation::{Done, EpochMicros, Runner, Venue};
+use bviz_invocation::{EpochMicros, Runner, Venue};
 use gpui::{
     App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
     point, px, quad, size,
@@ -696,8 +696,8 @@ impl Palette {
                 between(d.yellow, d.orange, RUNNING_REMOTELY_HUE),
                 RUNNING_REMOTELY_TINT,
             ),
-            NodeState::Done(Done::Executed) => (d.green.into(), EXECUTED_TINT),
-            NodeState::Done(Done::Cached) => (between(d.green, d.cyan, CACHED_HUE), CACHED_TINT),
+            NodeState::Done(Ended::Executed) => (d.green.into(), EXECUTED_TINT),
+            NodeState::Done(Ended::Cached) => (between(d.green, d.cyan, CACHED_HUE), CACHED_TINT),
         };
         let carried = bviz_ui_theme::mix(slot, self.background, tint.blend);
         bviz_ui_theme::lighten(carried, tint.lift * self.mark_lift().signum())
@@ -2939,8 +2939,8 @@ mod colors {
             }
             let scheduling = chroma(NodeState::In(Stage::Scheduling));
             for settled in [
-                NodeState::Done(Done::Executed),
-                NodeState::Done(Done::Cached),
+                NodeState::Done(Ended::Executed),
+                NodeState::Done(Ended::Cached),
             ] {
                 let settles = chroma(settled);
                 assert!(

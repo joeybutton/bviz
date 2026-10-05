@@ -353,7 +353,10 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_invocation::{Done, EpochMicros, State, Timing};
+    use bviz_invocation::{Cache, Done, EpochMicros, SpawnCache, State, Timing};
+
+    /// How a profile tells an attempt a cache answered: it cannot tell which.
+    const CACHED: Done = Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk));
 
     const ACTION_TIDS: [i64; 2] = [2, 3];
     const MAIN_TID: i64 = 1;
@@ -679,7 +682,7 @@ mod tests {
         );
         assert_eq!(a.state_at(at(3)), State::In(Phase::CheckingCache));
         assert_eq!(a.state_at(at(50)), State::In(Phase::CheckingCache));
-        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+        assert_eq!(a.state_at(at(100)), State::Done(CACHED));
     }
 
     #[test]
@@ -837,7 +840,7 @@ mod tests {
             [(Phase::Preparing, 0), (Phase::CheckingCache, 20)]
         );
         assert_eq!(a.state_at(at(30)), State::In(Phase::CheckingCache));
-        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+        assert_eq!(a.state_at(at(100)), State::Done(CACHED));
     }
 
     #[test]
@@ -881,7 +884,7 @@ mod tests {
             entered(&a),
             [(Phase::Preparing, 0), (Phase::CheckingCache, 20)]
         );
-        assert_eq!(a.state_at(at(100)), State::Done(Done::Cached));
+        assert_eq!(a.state_at(at(100)), State::Done(CACHED));
     }
 
     #[test]
@@ -894,7 +897,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.start(), a.done()))
                 .collect::<Vec<_>>(),
-            [(at(0), Done::Cached), (at(1000), Done::Executed)]
+            [(at(0), CACHED), (at(1000), Done::Executed)]
         );
     }
 }

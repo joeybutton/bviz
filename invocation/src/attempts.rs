@@ -69,13 +69,33 @@ impl Phase {
     }
 }
 
-/// How an attempt that has ended came to its outputs.
+/// How an attempt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Done {
-    /// It ran, or ended without being answered by a cache.
+    /// It ran, or ended without being answered by a cache, and did not fail.
     Executed,
-    /// A cache answered it: it checked one and never ran.
-    Cached,
+    /// A cache answered it: it never ran.
+    Cached(Cache),
+    Failed,
+}
+
+/// The cache that answered an attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Cache {
+    /// Bazel's action cache found the action's outputs up to date, so the
+    /// action ran no spawn at all.
+    Action,
+    /// A cache answered the action's spawn.
+    Spawn(SpawnCache),
+}
+
+/// A cache that answers a spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpawnCache {
+    Remote,
+    Disk,
+    /// A remote or a disk cache, where what saw the hit cannot tell which.
+    RemoteOrDisk,
 }
 
 /// Where an attempt is at one instant.
@@ -97,17 +117,38 @@ pub struct Attempt {
     /// By [`Phase::past_preparing`], when the attempt entered each phase it
     /// entered.
     entered: [Option<EpochMicros>; Phase::ALL.len() - 1],
+    done: Done,
 }
 
 impl Attempt {
     /// The attempt lasting from `start` until `end` that showed each phase of
-    /// `seen` from the instant paired with it. A phase only moves forward, so
-    /// one seen after a further one was entered is not entered; nor is one
-    /// seen again, or outside the attempt.
+    /// `seen` from the instant paired with it, its ending told by the phases
+    /// it entered: one that checked a cache and never ran was answered by a
+    /// remote or disk cache, and any other executed.
     pub fn new(
         start: EpochMicros,
         end: EpochMicros,
         seen: impl IntoIterator<Item = (Phase, EpochMicros)>,
+    ) -> Attempt {
+        let mut attempt = Attempt::ended(start, end, seen, Done::Executed);
+        let ran = Venue::ALL
+            .into_iter()
+            .any(|venue| attempt.entered(Phase::Running(venue)).is_some());
+        if !ran && attempt.entered(Phase::CheckingCache).is_some() {
+            attempt.done = Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk));
+        }
+        attempt
+    }
+
+    /// The attempt lasting from `start` until `end` that showed each phase of
+    /// `seen` from the instant paired with it and ended as `done` says. A
+    /// phase only moves forward, so one seen after a further one was entered
+    /// is not entered; nor is one seen again, or outside the attempt.
+    pub fn ended(
+        start: EpochMicros,
+        end: EpochMicros,
+        seen: impl IntoIterator<Item = (Phase, EpochMicros)>,
+        done: Done,
     ) -> Attempt {
         let end = end.max(start);
         let mut first = [None; Phase::ALL.len()];
@@ -133,6 +174,7 @@ impl Attempt {
             start,
             end,
             entered,
+            done,
         }
     }
 
@@ -154,14 +196,7 @@ impl Attempt {
 
     /// How the attempt ended.
     pub fn done(&self) -> Done {
-        let ran = Venue::ALL
-            .into_iter()
-            .any(|venue| self.entered(Phase::Running(venue)).is_some());
-        if !ran && self.entered(Phase::CheckingCache).is_some() {
-            Done::Cached
-        } else {
-            Done::Executed
-        }
+        self.done
     }
 
     /// Where the attempt is at `at`: it starts at its start, and has ended at
@@ -365,9 +400,23 @@ pub(crate) mod tests {
     #[test]
     fn an_attempt_that_checked_a_cache_and_never_ran_was_cached() {
         let hit = attempt(0, 100, &[(Phase::CheckingCache, 10)]);
-        assert_eq!(hit.state_at(at(100)), State::Done(Done::Cached));
+        assert_eq!(
+            hit.state_at(at(100)),
+            State::Done(Done::Cached(Cache::Spawn(SpawnCache::RemoteOrDisk)))
+        );
         let missed = attempt(0, 100, &[(Phase::CheckingCache, 10), (REMOTE, 20)]);
         assert_eq!(missed.done(), Done::Executed);
+    }
+
+    #[test]
+    fn an_attempt_told_how_it_ended_ends_so_whatever_phases_it_entered() {
+        let seen = [(Phase::CheckingCache, at(10)), (LOCAL, at(20))];
+        let failed = Attempt::ended(at(0), at(100), seen, Done::Failed);
+        assert_eq!(failed.entered(LOCAL), Some(at(20)));
+        assert_eq!(failed.state_at(at(100)), State::Done(Done::Failed));
+        let up_to_date = Done::Cached(Cache::Action);
+        let checked = Attempt::ended(at(0), at(1), [], up_to_date);
+        assert_eq!(checked.state_at(at(1)), State::Done(up_to_date));
     }
 
     #[test]

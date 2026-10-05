@@ -449,14 +449,14 @@ fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<D
 mod tests {
     use super::*;
     use crate::playback::tests::attempt;
-    use crate::playback::{Running, Stage};
+    use crate::playback::{Ended, Running, Stage};
     use crate::status::Nodes;
     use crate::timing::landings;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::reduce::transitive_reduction;
     use bviz_graph_layout::{Connector, Graph, Id, Kind, Names, map_layout};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, Done, Outcomes, Phase, Profiled, Session, Spawns,
+        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Phase, Profiled, Session, Spawns,
         Timings, Venue,
     };
     use std::sync::Arc;
@@ -785,8 +785,8 @@ mod tests {
                     NodeState::In(Stage::CheckingCache),
                     NodeState::In(Stage::Running(Running::Container)),
                     NodeState::In(Stage::Running(Running::Action(Venue::Remote))),
-                    NodeState::Done(Done::Executed),
-                    NodeState::Done(Done::Cached),
+                    NodeState::Done(Ended::Executed),
+                    NodeState::Done(Ended::Cached),
                 ],
                 untimed: true,
             }

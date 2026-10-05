@@ -11,7 +11,7 @@ mod runner;
 pub mod spawn;
 mod timings;
 
-pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
+pub use attempts::{Attempt, Attempts, Cache, Done, Phase, SpawnCache, State, Venue};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };

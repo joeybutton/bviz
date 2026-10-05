@@ -15,8 +15,8 @@ pub(crate) enum NodeState {
     /// Some have started and some have yet to end; this is the furthest stage
     /// any of them has entered.
     In(Stage),
-    /// All have ended; cached where a cache answered every one.
-    Done(Done),
+    /// All have ended.
+    Done(Ended),
 }
 
 impl NodeState {
@@ -32,16 +32,16 @@ impl NodeState {
         NodeState::In(Stage::Running(Running::Container)),
         NodeState::In(Stage::Running(Running::Action(Venue::Local))),
         NodeState::In(Stage::Running(Running::Action(Venue::Remote))),
-        NodeState::Done(Done::Executed),
-        NodeState::Done(Done::Cached),
+        NodeState::Done(Ended::Executed),
+        NodeState::Done(Ended::Cached),
     ];
 
     const fn index(self) -> usize {
         match self {
             NodeState::Pending => 0,
             NodeState::In(stage) => Self::FIRST_IN + stage.index(),
-            NodeState::Done(Done::Executed) => Self::FIRST_DONE,
-            NodeState::Done(Done::Cached) => Self::FIRST_DONE + 1,
+            NodeState::Done(Ended::Executed) => Self::FIRST_DONE,
+            NodeState::Done(Ended::Cached) => Self::FIRST_DONE + 1,
         }
     }
 
@@ -55,8 +55,8 @@ impl NodeState {
             NodeState::In(Stage::Running(Running::Container)) => "running",
             NodeState::In(Stage::Running(Running::Action(Venue::Local))) => "running locally",
             NodeState::In(Stage::Running(Running::Action(Venue::Remote))) => "running remotely",
-            NodeState::Done(Done::Executed) => "done, executed",
-            NodeState::Done(Done::Cached) => "done, cached",
+            NodeState::Done(Ended::Executed) => "done, executed",
+            NodeState::Done(Ended::Cached) => "done, cached",
         }
     }
 }
@@ -68,6 +68,14 @@ const _: () = {
         index += 1;
     }
 };
+
+/// How the attempts a node holds ended, together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Ended {
+    Executed,
+    /// A cache answered every one.
+    Cached,
+}
 
 /// A set of [`NodeState`]s, a bit per [`NodeState::index`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,7 +188,7 @@ impl Life {
             end: attempt.end(),
             entered: Phase::ALL.map(|phase| attempt.entered(phase)),
             running,
-            cached: attempt.done() == Done::Cached,
+            cached: matches!(attempt.done(), Done::Cached(_)),
         }
     }
 
@@ -216,7 +224,7 @@ struct Held {
     checking_cache: Option<EpochMicros>,
     scheduling: Option<EpochMicros>,
     runs: Option<Runs>,
-    done: Done,
+    done: Ended,
 }
 
 impl Held {
@@ -238,8 +246,8 @@ impl Held {
             scheduling: entered(Phase::Scheduling),
             runs,
             done: match life.cached {
-                true => Done::Cached,
-                false => Done::Executed,
+                true => Ended::Cached,
+                false => Ended::Executed,
             },
         }
     }
@@ -507,7 +515,8 @@ pub(crate) mod tests {
             let expected = match compile.state_at(at(t)) {
                 bviz_invocation::State::Pending => NodeState::Pending,
                 bviz_invocation::State::In(phase) => NodeState::In(action_stage(phase)),
-                bviz_invocation::State::Done(done) => NodeState::Done(done),
+                bviz_invocation::State::Done(Done::Cached(_)) => NodeState::Done(Ended::Cached),
+                bviz_invocation::State::Done(_) => NodeState::Done(Ended::Executed),
             };
             assert_eq!(states.at(action, at(t)), Some(expected), "at {t}");
         }
@@ -534,7 +543,7 @@ pub(crate) mod tests {
             assert_eq!(state(99), Some(NodeState::In(Stage::Scheduling)));
             assert_eq!(
                 state(100),
-                Some(NodeState::Done(Done::Executed)),
+                Some(NodeState::Done(Ended::Executed)),
                 "cached only where every attempt was"
             );
             assert!(
@@ -580,7 +589,7 @@ pub(crate) mod tests {
             assert_eq!(state(15), Some(NodeState::In(RUNNING)));
             assert_eq!(state(45), Some(NodeState::In(RUNNING)));
             assert_eq!(state(49), Some(NodeState::In(RUNNING)));
-            assert_eq!(state(50), Some(NodeState::Done(Done::Executed)));
+            assert_eq!(state(50), Some(NodeState::Done(Ended::Executed)));
             let seen = swept
                 .iter()
                 .fold(States::default(), |seen, &state| seen.with(state));
@@ -593,7 +602,7 @@ pub(crate) mod tests {
         let hit = [attempt(0, 10, &[(Phase::CheckingCache, 1)])];
         let built = Built::new(&[("bazel-out/a.o", &hit), ("bazel-out/b.o", &hit)]);
         let state = built.states().at(built.package, at(10));
-        assert_eq!(state, Some(NodeState::Done(Done::Cached)));
+        assert_eq!(state, Some(NodeState::Done(Ended::Cached)));
     }
 
     /// A container's actions each run on a venue of their own, so the
@@ -682,14 +691,14 @@ pub(crate) mod tests {
         assert_eq!(state(10), Some(NodeState::In(Stage::CheckingCache)));
         assert_eq!(state(52), Some(NodeState::In(Stage::CheckingCache)));
         assert_eq!(state(56), Some(NodeState::In(RUNNING_REMOTELY)));
-        assert_eq!(state(60), Some(NodeState::Done(Done::Executed)));
+        assert_eq!(state(60), Some(NodeState::Done(Ended::Executed)));
         let reached = states.reached(action);
         for state in NodeState::ALL {
             let expected = matches!(
                 state,
                 NodeState::Pending
                     | NodeState::In(Stage::Preparing | Stage::CheckingCache | RUNNING_REMOTELY)
-                    | NodeState::Done(Done::Executed)
+                    | NodeState::Done(Ended::Executed)
             );
             assert_eq!(reached.contains(state), expected, "{state:?}");
         }
