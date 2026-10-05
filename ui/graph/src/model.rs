@@ -5,7 +5,7 @@ use crate::described::DescribedActions;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
-use crate::status::{Landings, Nodes, Statuses};
+use crate::status::{Holding, Landings, Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
@@ -16,7 +16,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{Configurations, Revision, Session};
+use bviz_invocation::{Configurations, EpochMicros, Folded, Known, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -107,6 +107,14 @@ pub(crate) struct Loaded {
     pub(crate) shared: Shared,
     pub(crate) opening: Opening,
     measures: Passes<Scope, Measurement>,
+    /// How the graph's nodes hold each other, which every report on them is
+    /// landed and rolled up through.
+    holding: Holding,
+    /// The playback clock's time the outcomes are shown at, as last told.
+    at: Option<EpochMicros>,
+    /// The dated outcomes of the session's report of them at the revision
+    /// it pairs, folded as far as they were last shown.
+    folded: (Revision, Folded),
     /// What the build of the graph's invocation reports of its nodes.
     statuses: Statuses,
     /// What the build of the graph's invocation reported, as the card over
@@ -115,7 +123,7 @@ pub(crate) struct Loaded {
     /// Which of its session's outcomes `statuses` and `reported` are read
     /// from: those of a session no build has reported to, until a report is
     /// taken up.
-    taken_up: Revision,
+    taken_up: OutcomesShown,
     /// How long the actions the invocation's profile recorded took, placed on
     /// the graph's nodes.
     times: Result<NodeTimes, Untimed>,
@@ -141,12 +149,15 @@ impl Loaded {
         });
         Self {
             targets,
+            holding: Holding::of(&shared.base, &shared.names),
+            at: None,
+            folded: Default::default(),
             shared,
             opening,
             measures: Passes::keeping_all(),
             statuses: Statuses::default(),
             reported: Report::default(),
-            taken_up: Revision::default(),
+            taken_up: OutcomesShown::default(),
             times: Err(Untimed::NoProfile),
             timecard: Timecard::default(),
             timed: Revision::default(),
@@ -168,8 +179,14 @@ impl Loaded {
     /// Which of its session's outcomes the [statuses](Self::statuses) say
     /// that of, so that a reader keeping it can tell whether they are still
     /// those it read.
-    pub(crate) fn taken_up(&self) -> Revision {
+    pub(crate) fn taken_up(&self) -> OutcomesShown {
         self.taken_up
+    }
+
+    /// Whether the outcomes shown are those known at the playback clock's
+    /// time, and so change as it moves.
+    pub(crate) fn follows_clock(&self) -> bool {
+        self.taken_up.known.is_some()
     }
 
     /// Which of its session's timings the [times](Self::times) and the
@@ -205,6 +222,18 @@ impl Loaded {
         let timings = self.take_up_timings(session);
         let attempts = self.take_up_attempts(session);
         outcomes || timings || attempts
+    }
+
+    /// Takes the playback clock's time to be `now`, `None` where it has none.
+    fn follow(&mut self, now: Option<EpochMicros>) {
+        self.at = now;
+    }
+
+    /// Takes up the outcomes of `session` known at `now`, and says whether
+    /// that changed anything a view of the graph shows.
+    fn take_up_at(&mut self, session: &Session, now: Option<EpochMicros>) -> bool {
+        self.follow(now);
+        self.take_up_outcomes(session)
     }
 
     fn take_up_attempts(&mut self, session: &Session) -> bool {
@@ -247,19 +276,36 @@ impl Loaded {
         changed
     }
 
+    /// Takes up the outcomes of `session`, as known at the clock's time
+    /// where the build dated them. Moving on to later outcomes folds in only
+    /// those reported since; moving back to earlier ones folds them afresh.
     fn take_up_outcomes(&mut self, session: &Session) -> bool {
+        let dated = session.dated_outcomes();
         let revision = session.outcomes_revision();
-        if self.taken_up == revision {
+        let shown = OutcomesShown {
+            revision,
+            known: dated.zip(self.at).map(|(dated, now)| dated.known_at(now)),
+        };
+        if self.taken_up == shown {
             return false;
         }
-        self.taken_up = revision;
-        let outcomes = session.outcomes();
+        self.taken_up = shown;
+        let outcomes = match dated.zip(shown.known) {
+            Some((dated, known)) if known != dated.all_known() => {
+                let (of, folded) = &mut self.folded;
+                if *of != revision {
+                    (*of, *folded) = (revision, Folded::default());
+                }
+                dated.fold_to(folded, known);
+                folded.outcomes()
+            }
+            _ => session.outcomes(),
+        };
         let (statuses, reported) = match outcomes.is_empty() {
             true => Default::default(),
             false => {
-                let base = &self.shared.base;
-                let nodes = Nodes::new(base, &self.shared.names, outcomes);
-                (Statuses::resolve(&nodes, base), Report::of(&nodes, base))
+                let nodes = Nodes::new(&self.holding, &self.shared.names, outcomes);
+                (Statuses::resolve(&nodes), Report::of(&nodes))
             }
         };
         let changed = self.statuses != statuses || self.reported != reported;
@@ -277,6 +323,26 @@ impl Loaded {
         (self.scope_graphs.entry(scope))
             .or_insert_with(|| Prepared::new(&self.shared, prepare))
             .clone()
+    }
+}
+
+/// Which of a session's outcomes a graph shows: those of one report of them,
+/// and of a dated report those known at the playback clock's time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OutcomesShown {
+    revision: Revision,
+    /// `None` where the report is not dated or the clock has no time.
+    known: Option<Known>,
+}
+
+#[cfg(test)]
+impl OutcomesShown {
+    /// The outcomes of the report at `revision`, shown whole.
+    pub(crate) fn undated(revision: Revision) -> Self {
+        Self {
+            revision,
+            known: None,
+        }
     }
 }
 
@@ -562,6 +628,8 @@ struct Joined {
     session: Entity<Session>,
     /// Takes up what the build reports whenever the session changes.
     _changed: Subscription,
+    /// Takes up the outcomes known at the time a gesture moves the clock to.
+    _clock_moved: Option<Subscription>,
 }
 
 impl EventEmitter<SourceReplaced> for GraphModel {}
@@ -584,6 +652,8 @@ impl GraphModel {
         // changes.
         let joined = session.map(|session| Joined {
             _changed: cx.observe(&session, |model, _, cx| model.take_up(cx)),
+            _clock_moved: (clock.as_ref())
+                .map(|clock| cx.observe(clock.clock(), |model, _, cx| model.take_up_at_clock(cx))),
             session,
         });
         let work = load_in_background(
@@ -618,10 +688,25 @@ impl GraphModel {
         }
     }
 
-    /// Takes up what the session's build reports of the loaded graph.
+    /// Takes up what the session's build reports of the loaded graph, its
+    /// outcomes as known at the playback clock's time.
     fn take_up(&mut self, cx: &mut Context<Self>) {
+        let now = self.clock().and_then(|clock| clock.read(cx).now());
+        if let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source) {
+            loaded.follow(now);
+            if loaded.report(joined.session.read(cx)) {
+                cx.notify();
+            }
+        }
+    }
+
+    /// Takes up the outcomes the session's build had reported by the
+    /// playback clock's time, which moves on without telling anyone while
+    /// the clock plays.
+    pub(crate) fn take_up_at_clock(&mut self, cx: &mut Context<Self>) {
+        let now = self.clock().and_then(|clock| clock.read(cx).now());
         if let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source)
-            && loaded.report(joined.session.read(cx))
+            && loaded.take_up_at(joined.session.read(cx), now)
         {
             cx.notify();
         }
@@ -1002,6 +1087,36 @@ mod tests {
         session.report_attempts(AttemptSource::Profile, Attempts::default());
         assert!(loaded.report(&session));
         assert!(loaded.states().is_none());
+    }
+
+    /// A build that dated its outcomes is shown as far as the time a graph
+    /// is given has come, and whole where it is given none.
+    #[test]
+    fn a_graph_shows_the_dated_outcomes_known_at_the_time_it_is_given() {
+        use bviz_invocation::{DatedOutcomes, Report};
+        let at = |millis: i64| EpochMicros::from_millis(1_781_439_245_000 + millis);
+        let built = ConfiguredTarget::new("//app:bin".to_owned(), None);
+        let mut session = Session::default();
+        session.report_dated_outcomes(DatedOutcomes::new([(
+            at(10),
+            Report::Build(built, BuildOutcome::Built),
+        )]));
+        let mut loaded = loaded();
+        assert!(!loaded.take_up_at(&session, Some(at(9))));
+        assert_eq!(loaded.statuses, Statuses::default());
+        assert!(loaded.follows_clock());
+
+        assert!(loaded.take_up_at(&session, Some(at(10))));
+        assert_ne!(loaded.statuses, Statuses::default());
+        assert!(!loaded.take_up_at(&session, Some(at(20))));
+
+        assert!(!loaded.take_up_at(&session, None), "the whole build again");
+        assert!(!loaded.follows_clock());
+        assert_ne!(loaded.statuses, Statuses::default());
+        assert!(loaded.take_up_at(&session, Some(at(0))));
+        assert_eq!(loaded.statuses, Statuses::default());
+        assert!(loaded.take_up_at(&session, Some(at(10))));
+        assert_ne!(loaded.statuses, Statuses::default());
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.

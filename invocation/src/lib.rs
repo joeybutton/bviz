@@ -19,8 +19,8 @@ pub use attempts::{
 };
 pub use merged::{ActionAttempts, AttemptSource, MergedAttempts, Resolved};
 pub use outcomes::{
-    BuildOutcome, Cause, ConfiguredTarget, DatedOutcomes, FailedAction, Known, Outcomes, Report,
-    TestOutcome, TestStatus,
+    BuildOutcome, Cause, ConfiguredTarget, DatedOutcomes, FailedAction, Folded, Known, Outcomes,
+    Report, TestOutcome, TestStatus,
 };
 pub use runner::{Runner, Spawns};
 pub use timings::{Profiled, Share, Spent, Timing, Timings};

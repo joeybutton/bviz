@@ -76,7 +76,7 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, RevealRequested, SourceReplaced};
+use model::{GraphModel, Loaded, MapPlaced, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -425,7 +425,7 @@ impl GraphPanel {
         });
         let clock_moved = model.read(cx).clock().cloned().map(|clock| {
             cx.observe(&clock, |view, _, cx| {
-                if view.colouring == Colouring::Playback {
+                if view.follows_clock(cx) {
                     view.canvas.update(cx, |_, cx| cx.notify());
                 }
             })
@@ -728,6 +728,24 @@ impl GraphPanel {
         }
     }
 
+    /// Whether the drawing changes as the playback clock moves: its boxes are
+    /// coloured by playback, or the outcomes it badges are those known at the
+    /// clock's time.
+    fn follows_clock(&self, cx: &App) -> bool {
+        self.colouring == Colouring::Playback
+            || (self.model.read(cx).loaded()).is_some_and(Loaded::follows_clock)
+    }
+
+    /// Brings what the panel shows up to the playback clock's time, which
+    /// moves on without telling anyone while the clock plays: the outcomes
+    /// taken up, and the card naming how the hovered box ended.
+    fn keep_up(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, GraphModel::take_up_at_clock);
+        if self.hovered.is_some() && self.colouring == Colouring::Playback {
+            cx.notify();
+        }
+    }
+
     fn toggle_neighborhood(&mut self, cx: &mut Context<Self>) {
         self.neighborhood_enabled = !self.neighborhood_enabled;
         self.invalidate_canvas(cx);
@@ -860,8 +878,17 @@ impl Render for GraphCanvas {
         };
         let clock = view.model.read(cx).clock();
         let at = clock.and_then(|clock| clock.read(cx).now());
-        let playing = clock.filter(|_| view.colouring == Colouring::Playback);
+        let follows = view.follows_clock(cx);
+        let playing = clock.filter(|_| follows);
         Clock::keep_pace(playing, window, cx);
+        if follows {
+            // Taken up between frames: a notify made while a frame is drawn
+            // is lost, which would leave the panel's cards behind the drawing.
+            let parent = parent.downgrade();
+            window.on_next_frame(move |_, cx| {
+                parent.update(cx, GraphPanel::keep_up).ok();
+            });
+        }
         let content = drawn.content();
         let recenter_target = match view.view_zoom(&drawn).and_then(|zoom| drawn.view(zoom)) {
             None => Target::Pending,

@@ -1,8 +1,10 @@
 //! What a build reports of the nodes of its graph.
 
+use bviz_graph_layout::graph::Containment;
 use bviz_graph_layout::{Graph, Id, Kind, Names, Resolver};
 use bviz_invocation::{BuildOutcome, Cause, ConfiguredTarget, Outcomes, TestStatus};
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 /// How the build ended for a node, from the least severe to the most. Of
@@ -91,24 +93,26 @@ impl Status {
 
 /// The [`Status`] of every node of one graph a build reports on. A build
 /// reports on the targets it was asked for, so most nodes of a graph have
-/// none, and both tables are empty where it reports on no node of the graph.
+/// none, and the tables hold only those that have one: resolving them takes
+/// time in what the build reports, whatever the size of the graph.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Statuses {
-    /// By node id, the most severe status the build reports of the node
-    /// itself.
-    own: Vec<Option<Status>>,
-    /// By node id, the most severe status of the node and of every node it
-    /// contains.
-    worst: Vec<Option<Status>>,
+    /// The most severe status the build reports of each node itself.
+    own: FxHashMap<Id, Status>,
+    /// The most severe status of each node and of every node it contains.
+    worst: FxHashMap<Id, Status>,
 }
 
 impl Statuses {
-    /// What the outcomes `nodes` lands report of the nodes of `graph`.
-    pub(crate) fn resolve<'a>(nodes: &Nodes<'a>, graph: &Graph) -> Self {
+    /// What the outcomes `nodes` lands report of the nodes it lands them on.
+    pub(crate) fn resolve<'a>(nodes: &Nodes<'a>) -> Self {
         let outcomes = nodes.outcomes;
+        let reports = outcomes.failed_actions().count()
+            + outcomes.builds().count()
+            + outcomes.tests().count();
         let mut reported = Reported {
             nodes,
-            own: vec![None; nodes.landings.ids()],
+            own: FxHashMap::with_capacity_and_hasher(reports, Default::default()),
         };
         for (primary_output, _) in outcomes.failed_actions() {
             if let Some(action) = nodes.of_action(primary_output) {
@@ -126,11 +130,8 @@ impl Statuses {
                 reported.report(node, Status::of_test(test.status));
             }
         }
-        if reported.own.iter().all(Option::is_none) {
-            return Self::default();
-        }
         Self {
-            worst: rolled_up(reported.own.clone(), graph),
+            worst: rolled_up(&reported.own, nodes.holding),
             own: reported.own,
         }
     }
@@ -138,14 +139,14 @@ impl Statuses {
     /// The status the build reports of the node `id` names itself, whatever
     /// it holds.
     pub(crate) fn own(&self, id: Id) -> Option<Status> {
-        self.own.get(id.0 as usize).copied().flatten()
+        self.own.get(&id).copied()
     }
 
     /// The status the node `id` names stands at, for itself and for what it
     /// holds. An id past the graph's own, as a merge group's is, reads as a
     /// node the build reports nothing of.
     pub(crate) fn get(&self, id: Id) -> Option<Status> {
-        self.worst.get(id.0 as usize).copied().flatten()
+        self.worst.get(&id).copied()
     }
 }
 
@@ -170,12 +171,70 @@ impl Landing {
     }
 }
 
+/// What the shape of one graph alone decides of where reports land on it and
+/// how they roll up, found once for every report on the graph.
+pub(crate) struct Holding {
+    containment: Containment,
+    /// By node id, the node containing the node.
+    parent: Vec<Option<Id>>,
+    /// By node id, the node's kind; `None` for an id no node has.
+    kind: Vec<Option<Kind>>,
+    /// By node id, the configured targets the node holds.
+    configured: Vec<Configured>,
+}
+
+impl Holding {
+    /// How the nodes of `graph`, which `names` names, hold each other.
+    pub(crate) fn of(graph: &Graph, names: &Names) -> Self {
+        let mut parent = vec![None; names.len()];
+        let mut kind = vec![None; names.len()];
+        for node in &graph.nodes {
+            parent[node.id.0 as usize] = node.parent;
+            kind[node.id.0 as usize] = Some(node.kind);
+        }
+        Self {
+            containment: Containment::new(graph),
+            parent,
+            kind,
+            configured: configured(graph, names),
+        }
+    }
+
+    pub(crate) fn containment(&self) -> &Containment {
+        &self.containment
+    }
+
+    pub(crate) fn parent(&self, id: Id) -> Option<Id> {
+        self.parent.get(id.0 as usize).copied().flatten()
+    }
+
+    pub(crate) fn kind(&self, id: Id) -> Option<Kind> {
+        self.kind.get(id.0 as usize).copied().flatten()
+    }
+}
+
+/// By node id of `graph`, which `names` names, the configured targets the
+/// node holds.
+fn configured(graph: &Graph, names: &Names) -> Vec<Configured> {
+    let mut configured = vec![Configured::None; names.len()];
+    for node in &graph.nodes {
+        if let (Kind::ConfiguredTarget, Some(target)) = (node.kind, node.parent) {
+            let held = &mut configured[target.0 as usize];
+            *held = match *held {
+                Configured::None => Configured::Once(node.id),
+                Configured::Once(_) | Configured::Several => Configured::Several,
+            };
+        }
+    }
+    configured
+}
+
 /// Where reports naming configured targets land in one graph. Each target is
 /// found once, however many readers ask for it.
 pub(crate) struct Landings<'a> {
     resolver: Resolver<'a>,
     /// By node id, the configured targets the node holds.
-    configured: Vec<Configured>,
+    configured: Cow<'a, [Configured]>,
     targets: RefCell<FxHashMap<ConfiguredTarget<&'a str>, Landing>>,
 }
 
@@ -191,16 +250,16 @@ impl<'a> Landings<'a> {
     /// The landings in `graph`, which `names` names, sized for reports naming
     /// `targets` configured targets.
     pub(crate) fn new(graph: &Graph, names: &'a Names, targets: usize) -> Self {
-        let mut configured = vec![Configured::None; names.len()];
-        for node in &graph.nodes {
-            if let (Kind::ConfiguredTarget, Some(target)) = (node.kind, node.parent) {
-                let held = &mut configured[target.0 as usize];
-                *held = match *held {
-                    Configured::None => Configured::Once(node.id),
-                    Configured::Once(_) | Configured::Several => Configured::Several,
-                };
-            }
-        }
+        Self::held(Cow::Owned(configured(graph, names)), names, targets)
+    }
+
+    /// The landings in the graph `holding` is found of, which `names` names,
+    /// sized for reports naming `targets` configured targets.
+    pub(crate) fn of(holding: &'a Holding, names: &'a Names, targets: usize) -> Self {
+        Self::held(Cow::Borrowed(&holding.configured), names, targets)
+    }
+
+    fn held(configured: Cow<'a, [Configured]>, names: &'a Names, targets: usize) -> Self {
         Self {
             resolver: Resolver::new(names),
             configured,
@@ -284,6 +343,7 @@ impl<'a> Landings<'a> {
 /// The nodes of a graph a build's outcomes name. Each is found once, however
 /// many readers ask for it.
 pub(crate) struct Nodes<'a> {
+    holding: &'a Holding,
     landings: Landings<'a>,
     outcomes: &'a Outcomes,
     /// By primary output, the node the failure of the action writing it
@@ -292,13 +352,14 @@ pub(crate) struct Nodes<'a> {
 }
 
 impl<'a> Nodes<'a> {
-    /// The nodes `outcomes` names among those of `graph`, which `names`
-    /// names.
-    pub(crate) fn new(graph: &Graph, names: &'a Names, outcomes: &'a Outcomes) -> Self {
+    /// The nodes `outcomes` names among those of the graph `holding` is
+    /// found of, which `names` names.
+    pub(crate) fn new(holding: &'a Holding, names: &'a Names, outcomes: &'a Outcomes) -> Self {
         let targets = outcomes.builds().count() + outcomes.tests().count();
         let actions = outcomes.failed_actions().count();
         Self {
-            landings: Landings::new(graph, names, targets),
+            holding,
+            landings: Landings::of(holding, names, targets),
             outcomes,
             actions: RefCell::new(FxHashMap::with_capacity_and_hasher(
                 actions,
@@ -309,6 +370,10 @@ impl<'a> Nodes<'a> {
 
     pub(crate) fn outcomes(&self) -> &'a Outcomes {
         self.outcomes
+    }
+
+    pub(crate) fn holding(&self) -> &'a Holding {
+        self.holding
     }
 
     pub(crate) fn landing(&self, target: ConfiguredTarget<&'a str>) -> Landing {
@@ -342,16 +407,16 @@ impl<'a> Nodes<'a> {
     }
 }
 
-/// What a build reports of each node itself, by node id.
+/// What a build reports of each node itself.
 struct Reported<'n, 'a> {
     nodes: &'n Nodes<'a>,
-    own: Vec<Option<Status>>,
+    own: FxHashMap<Id, Status>,
 }
 
 impl<'a> Reported<'_, 'a> {
     fn report(&mut self, node: Id, status: Status) {
-        let own = &mut self.own[node.0 as usize];
-        *own = (*own).max(Some(status));
+        let own = self.own.entry(node).or_insert(status);
+        *own = (*own).max(status);
     }
 
     /// The status `outcome` gives the target it is reported of, each node a
@@ -370,26 +435,18 @@ impl<'a> Reported<'_, 'a> {
     }
 }
 
-/// `own` with each node of `graph` raised to the most severe status among
-/// the nodes it contains.
-fn rolled_up(own: Vec<Option<Status>>, graph: &Graph) -> Vec<Option<Status>> {
-    let mut parent = vec![None; own.len()];
-    for node in &graph.nodes {
-        parent[node.id.0 as usize] = node.parent;
-    }
-    let mut worst = own;
-    for node in 0..worst.len() {
-        let status = worst[node];
-        if status.is_none() {
-            continue;
-        }
+/// `own` with each node raised to the most severe status among the nodes it
+/// contains, as `holding` holds them.
+fn rolled_up(own: &FxHashMap<Id, Status>, holding: &Holding) -> FxHashMap<Id, Status> {
+    let mut worst = own.clone();
+    for (&node, &status) in own {
         // A walk stops at the first container already as severe, which either
         // was raised by a walk that went on above it or raises those above it
         // in its own turn.
-        let mut at = parent[node];
-        while let Some(container) = at.filter(|c| worst[c.0 as usize] < status) {
-            worst[container.0 as usize] = status;
-            at = parent[container.0 as usize];
+        let mut at = holding.parent(node);
+        while let Some(container) = at.filter(|c| worst.get(c) < Some(&status)) {
+            worst.insert(container, status);
+            at = holding.parent(container);
         }
     }
     worst
@@ -448,8 +505,8 @@ mod tests {
         }
 
         fn resolve(&self, outcomes: &Outcomes) -> Statuses {
-            let nodes = Nodes::new(&self.graph, &self.names, outcomes);
-            Statuses::resolve(&nodes, &self.graph)
+            let holding = Holding::of(&self.graph, &self.names);
+            Statuses::resolve(&Nodes::new(&holding, &self.names, outcomes))
         }
     }
 
@@ -512,7 +569,8 @@ mod tests {
         let package = built.node("pkg:lib", Kind::Package, None);
         let lib = built.node("target://lib:lib", Kind::Target, Some(package));
         let outcomes = Outcomes::default();
-        let nodes = Nodes::new(&built.graph, &built.names, &outcomes);
+        let holding = Holding::of(&built.graph, &built.names);
+        let nodes = Nodes::new(&holding, &built.names, &outcomes);
         let landing =
             |label, configuration| nodes.landing(ConfiguredTarget::new(label, configuration));
 

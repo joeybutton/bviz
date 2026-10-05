@@ -384,6 +384,34 @@ impl DatedOutcomes {
         let known = &self.reports[..known.0];
         known.iter().map(|(_, report)| report.clone()).collect()
     }
+
+    /// Brings `folded`, which holds reports of this, to what the reports
+    /// `known`, which this gave, counts tell together: taking up only the
+    /// reports past those it holds, and folding afresh where it holds more
+    /// than `known`.
+    pub fn fold_to(&self, folded: &mut Folded, known: Known) {
+        if known < folded.known {
+            *folded = Folded::default();
+        }
+        for (_, report) in &self.reports[folded.known.0..known.0] {
+            folded.outcomes.report(report.clone());
+        }
+        folded.known = known;
+    }
+}
+
+/// What the leading reports of a [`DatedOutcomes`] tell together, kept so
+/// that later reports are taken up onto it.
+#[derive(Default)]
+pub struct Folded {
+    known: Known,
+    outcomes: Outcomes,
+}
+
+impl Folded {
+    pub fn outcomes(&self) -> &Outcomes {
+        &self.outcomes
+    }
 }
 
 #[cfg(test)]
@@ -684,5 +712,28 @@ mod tests {
         assert_eq!(between.build(lib().borrowed()), Some(&BuildOutcome::Built));
         let all = dated.outcomes_known(dated.all_known());
         assert_eq!(all.build(app().borrowed()), Some(&failed(&[])));
+    }
+
+    /// Folding on to later reports tells what folding them all at once does,
+    /// and folding back to earlier ones forgets what came after.
+    #[test]
+    fn dated_outcomes_fold_on_to_later_reports_and_back_to_earlier_ones() {
+        let at = |millis: i64| EpochMicros::from_millis(1_781_439_245_000 + millis);
+        let app = || owned("//app", Some("a7a71f"));
+        let dated = DatedOutcomes::new([
+            (at(10), Report::Build(app(), BuildOutcome::NotBuilt)),
+            (at(20), Report::Build(app(), failed(&[]))),
+        ]);
+        let mut folded = Folded::default();
+        for millis in [10, 20, 10, 0, 20] {
+            let known = dated.known_at(at(millis));
+            dated.fold_to(&mut folded, known);
+            let whole = dated.outcomes_known(known);
+            assert_eq!(
+                folded.outcomes().build(app().borrowed()),
+                whole.build(app().borrowed()),
+                "at {millis}ms"
+            );
+        }
     }
 }

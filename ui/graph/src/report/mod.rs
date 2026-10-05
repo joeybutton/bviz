@@ -2,7 +2,7 @@
 
 use crate::status::{Landing, Nodes, Status, Statuses};
 use bviz_graph_layout::graph::Containment;
-use bviz_graph_layout::{Graph, Id, Kind};
+use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, TestOutcome, TestStatus,
 };
@@ -619,7 +619,7 @@ struct Sayings<'n, 'a> {
     /// By node, what is said of it and the status that ranks it among
     /// whatever else the build reports of the node.
     said: FxHashMap<Id, (Status, Kept)>,
-    containment: Containment,
+    containment: &'n Containment,
     nodes: &'n Nodes<'a>,
 }
 
@@ -700,16 +700,17 @@ impl<'a> Sayings<'_, 'a> {
     }
 }
 
-/// What the card says of each node of `graph` the outcomes `nodes` lands
-/// report on, `root_causes` being the rows of their root causes. A target the
-/// graph draws around its configurations is one box to a reader, so what is
-/// said of a configured target is said of its target too.
-fn sayings(nodes: &Nodes, graph: &Graph, root_causes: &[Row]) -> FxHashMap<Id, Kept> {
+/// What the card says of each node the outcomes `nodes` lands report on,
+/// `root_causes` being the rows of their root causes. A target the graph
+/// draws around its configurations is one box to a reader, so what is said of
+/// a configured target is said of its target too.
+fn sayings(nodes: &Nodes, root_causes: &[Row]) -> FxHashMap<Id, Kept> {
     let outcomes = nodes.outcomes();
     let reported = root_causes.len() + outcomes.builds().count() + outcomes.tests().count();
+    let holding = nodes.holding();
     let mut sayings = Sayings {
         said: FxHashMap::with_capacity_and_hasher(reported, Default::default()),
-        containment: Containment::new(graph),
+        containment: holding.containment(),
         nodes,
     };
     for (listed, root_cause) in root_causes.iter().enumerate() {
@@ -736,10 +737,12 @@ fn sayings(nodes: &Nodes, graph: &Graph, root_causes: &[Row]) -> FxHashMap<Id, K
             sayings.say(node, node, status, Standing::Target(fate), None);
         }
     }
-    for configured in &graph.nodes {
-        if configured.kind == Kind::ConfiguredTarget
-            && let Some(target) = configured.parent
-            && let Some((status, kept)) = sayings.said.get(&configured.id)
+    let configured: Vec<(Id, Id)> = (sayings.said.keys())
+        .filter(|&&node| holding.kind(node) == Some(Kind::ConfiguredTarget))
+        .filter_map(|&node| Some((node, holding.parent(node)?)))
+        .collect();
+    for (configured, target) in configured {
+        if let Some((status, kept)) = sayings.said.get(&configured)
             && !sayings.stands(target, *status, kept.standing.place())
         {
             let (status, kept) = (*status, kept.clone());
@@ -768,8 +771,8 @@ pub(crate) struct Report {
 }
 
 impl Report {
-    /// What the outcomes `nodes` lands report of the nodes of `graph`.
-    pub(crate) fn of(nodes: &Nodes, graph: &Graph) -> Self {
+    /// What the outcomes `nodes` lands report of the nodes it lands them on.
+    pub(crate) fn of(nodes: &Nodes) -> Self {
         let mut builds = BuildTally::default();
         for (_, outcome) in nodes.outcomes().builds() {
             builds.count(outcome);
@@ -779,7 +782,7 @@ impl Report {
             tests.count(test);
         }
         let mut root_causes = root_causes(nodes, builds.failed);
-        let said = sayings(nodes, graph, &root_causes);
+        let said = sayings(nodes, &root_causes);
         let mut troubled = troubled_tests(nodes, tests.troubled());
         tell_apart(&mut root_causes, &mut troubled);
         Self {
@@ -847,8 +850,9 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::Names;
+    use crate::status::Holding;
     use bviz_graph_layout::graph::Node;
+    use bviz_graph_layout::{Graph, Names};
     use bviz_invocation::{Configurations, Outcomes};
     use std::num::{NonZeroI32, NonZeroU32};
     use std::time::Duration;
@@ -979,9 +983,9 @@ mod tests {
     /// and as the graph's boxes are badged.
     pub(super) fn resolved(outcomes: &Outcomes) -> (Report, Statuses) {
         let built = Built::new();
-        let nodes = Nodes::new(&built.graph, &built.names, outcomes);
-        let report = Report::of(&nodes, &built.graph);
-        (report, Statuses::resolve(&nodes, &built.graph))
+        let holding = Holding::of(&built.graph, &built.names);
+        let nodes = Nodes::new(&holding, &built.names, outcomes);
+        (Report::of(&nodes), Statuses::resolve(&nodes))
     }
 
     /// The node `name` names in the fixture's graph.

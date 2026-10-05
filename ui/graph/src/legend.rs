@@ -2,6 +2,7 @@ use crate::Palette;
 use crate::colour::Colouring;
 use crate::derive::{Drawn, ViewKey};
 use crate::duration::lasted;
+use crate::model::OutcomesShown;
 use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
 use crate::playback::{NodeState, NodeStates, States};
 use crate::status::{Status, Statuses};
@@ -245,7 +246,7 @@ pub(crate) struct Legend {
 struct Found {
     view: ViewKey,
     /// Which of a session's outcomes the statuses found were resolved from.
-    resolved: Revision,
+    resolved: OutcomesShown,
     /// Which of a session's timings the reading was found from.
     timed: Revision,
     /// Which of a session's attempts the reading was found from.
@@ -272,7 +273,7 @@ impl Legend {
         drawn: &Drawn,
         zoom: f32,
         statuses: &Statuses,
-        resolved: Revision,
+        resolved: OutcomesShown,
         coloured: Coloured,
         palette: &Palette,
     ) -> Option<Div> {
@@ -285,7 +286,7 @@ impl Legend {
         drawn: &Drawn,
         zoom: f32,
         statuses: &Statuses,
-        resolved: Revision,
+        resolved: OutcomesShown,
         coloured: Coloured,
     ) -> Option<&Found> {
         let view = drawn.view_key(zoom);
@@ -456,7 +457,7 @@ mod tests {
     use super::*;
     use crate::playback::tests::attempt;
     use crate::playback::{Ended, Running, Stage};
-    use crate::status::Nodes;
+    use crate::status::{Holding, Nodes};
     use crate::timing::landings;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::reduce::transitive_reduction;
@@ -487,7 +488,7 @@ mod tests {
     /// The edge kinds `legend` lists for `drawn` at `zoom`, no box of which the
     /// build reports on.
     fn kinds<'a>(legend: &'a mut Legend, drawn: &Drawn, zoom: f32) -> Option<&'a [EdgeKind]> {
-        let unreported = Revision::default();
+        let unreported = OutcomesShown::default();
         Some(
             &legend
                 .found(drawn, zoom, &Statuses::default(), unreported, uncoloured())?
@@ -535,12 +536,12 @@ mod tests {
                 outcomes.report_build(target, outcome);
             }
         }
-        let nodes = Nodes::new(&graph, &names, &outcomes);
-        Statuses::resolve(&nodes, &graph)
+        let holding = Holding::of(&graph, &names);
+        Statuses::resolve(&Nodes::new(&holding, &names, &outcomes))
     }
 
     fn standing_in(legend: &mut Legend, drawn: &Drawn, statuses: &Statuses) -> Vec<Status> {
-        let found = legend.found(drawn, 1.0, statuses, Revision::default(), uncoloured());
+        let found = legend.found(drawn, 1.0, statuses, OutcomesShown::default(), uncoloured());
         found.expect("a derived view").standing.clone()
     }
 
@@ -567,11 +568,11 @@ mod tests {
     #[test]
     fn a_view_is_scanned_again_once_its_statuses_are_resolved_from_other_outcomes() {
         let mut session = Session::default();
-        let unreported = session.outcomes_revision();
+        let unreported = OutcomesShown::undated(session.outcomes_revision());
         session.report_outcomes(Outcomes::default());
-        let first = session.outcomes_revision();
+        let first = OutcomesShown::undated(session.outcomes_revision());
         session.report_outcomes(Outcomes::default());
-        let second = session.outcomes_revision();
+        let second = OutcomesShown::undated(session.outcomes_revision());
         let mut legend = Legend::default();
         let drawn = boxes(1);
         let mut standing = |statuses: &Statuses, resolved| {
@@ -678,7 +679,7 @@ mod tests {
             drawn,
             1.0,
             &Statuses::default(),
-            Revision::default(),
+            OutcomesShown::default(),
             coloured,
         );
         found.expect("a derived view").reading.clone()
@@ -745,7 +746,7 @@ mod tests {
             &drawn,
             1.0,
             &Statuses::default(),
-            Revision::default(),
+            OutcomesShown::default(),
             stale,
         );
         assert_eq!(found.map(|found| &found.reading), Some(&Reading::Kinds));
@@ -773,7 +774,7 @@ mod tests {
             drawn,
             1.0,
             &Statuses::default(),
-            Revision::default(),
+            OutcomesShown::default(),
             coloured,
         );
         found.expect("a derived view").reading.clone()
@@ -902,7 +903,7 @@ mod tests {
                     drawn,
                     1.0,
                     &Statuses::default(),
-                    Revision::default(),
+                    OutcomesShown::default(),
                     uncoloured(),
                 )
                 .map(|found| found.transitions.clone())
