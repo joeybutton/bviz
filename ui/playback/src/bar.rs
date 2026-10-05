@@ -1,12 +1,13 @@
 use crate::{Clock, Speed, TEXT_SIZE, Timeline};
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
-    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, scrubber,
+    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, TextTooltip, TooltipColors,
+    scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, Context, Entity, IntoElement, Pixels, Render, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, App, Context, Div, Entity, IntoElement, Pixels, Render, SharedString, Subscription,
+    Window, div, prelude::*, px, relative,
 };
 use std::time::Duration;
 
@@ -22,6 +23,14 @@ const NAME_MAX_WIDTH: Pixels = px(240.);
 const READOUT_WIDTH: Pixels = px(128.);
 
 const SECONDS_PER_MINUTE: u64 = 60;
+
+/// Size of the name a band of the scrubber is labelled with, small enough to
+/// sit above the knob.
+const BAND_TEXT_SIZE: Pixels = px(10.);
+
+/// How far every other band of the scrubber is carried from the bar's fill
+/// toward its text, so neighbouring bands are told apart.
+const BAND_SHADE: f32 = 0.06;
 
 /// The transport driving a document's [`Clock`], labelled with the document's
 /// name. Draws nothing while the clock has no time.
@@ -105,7 +114,25 @@ impl PlaybackBar {
         ]
     }
 
-    fn scrubber(&self, fraction: f32, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    /// The scrubber, laid over `bands`.
+    fn scrubber(
+        &self,
+        bands: Div,
+        fraction: f32,
+        colors: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .relative()
+            .flex()
+            .flex_1()
+            .h_full()
+            .child(bands)
+            .child(self.track(fraction, colors, cx))
+            .into_any_element()
+    }
+
+    fn track(&self, fraction: f32, colors: &ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         // The played portion and the knob mark a position within the span the
         // track carries, so they take the text they are read among.
         let fills = ScrubberColors {
@@ -137,6 +164,7 @@ impl Render for PlaybackBar {
         let readout = readout(timeline, now);
         let playing = timeline.is_playing();
         let colors = bviz_ui_theme::theme(window, cx).colors;
+        let bands = bands(timeline, &colors);
         div()
             .flex()
             .flex_row()
@@ -163,7 +191,7 @@ impl Render for PlaybackBar {
                     .child(self.name.clone()),
             )
             .children(self.transport(playing))
-            .child(self.scrubber(fraction, &colors, cx))
+            .child(self.scrubber(bands, fraction, &colors, cx))
             .child(
                 div()
                     .w(READOUT_WIDTH)
@@ -174,6 +202,40 @@ impl Render for PlaybackBar {
             .child(self.speed.clone())
             .into_any_element()
     }
+}
+
+/// Each band of `timeline` as the stretch of the scrubber it spans, labelled
+/// with its name, which hovering it shows whole.
+fn bands(timeline: &Timeline, colors: &ThemeColors) -> Div {
+    let range = timeline.range();
+    let tooltip = TooltipColors::from_colors(colors);
+    let shade = bviz_ui_theme::mix(colors.surface, colors.text, BAND_SHADE);
+    let spanning = timeline.bands().iter().filter_map(|band| {
+        let from = range.fraction_at(band.span().start());
+        let to = range.fraction_at(band.span().end());
+        (to > from).then_some((band, from, to))
+    });
+    let spanned = spanning.enumerate().map(|(i, (band, from, to))| {
+        div()
+            .id(("playback-band", i))
+            .absolute()
+            .top_0()
+            .h_full()
+            .left(relative(from))
+            .w(relative(to - from))
+            .when(i % 2 == 1, |band| band.bg(shade))
+            .border_l_1()
+            .border_color(colors.border)
+            .pl_1()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_size(BAND_TEXT_SIZE)
+            .text_color(colors.text_muted)
+            .child(band.name().clone())
+            .tooltip(TextTooltip::builder(band.name().clone(), tooltip))
+    });
+    div().absolute().inset_0().children(spanned)
 }
 
 fn speed_of(clock: &Entity<Clock>, cx: &App) -> Speed {

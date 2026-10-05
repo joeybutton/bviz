@@ -1,5 +1,5 @@
 use bviz_invocation::EpochMicros;
-use gpui::{App, AppContext, Context, Entity, Window};
+use gpui::{App, AppContext, Context, Entity, SharedString, Window};
 use std::time::Instant;
 
 /// The playback speeds, as multiples of real time, in the order stepping
@@ -99,12 +99,35 @@ impl Speed {
     }
 }
 
+/// A named stretch of a timeline, such as one phase of a build.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Band {
+    span: Span,
+    name: SharedString,
+}
+
+impl Band {
+    pub fn new(span: Span, name: SharedString) -> Self {
+        Self { span, name }
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+
+    pub fn name(&self) -> &SharedString {
+        &self.name
+    }
+}
+
 /// What one file of a document gives the document's [`Clock`] to play.
 #[derive(Clone, Debug)]
 pub struct Source {
     span: Span,
     /// The instants a step stops at, ascending, without repeats.
     marks: Vec<EpochMicros>,
+    /// Ascending by start.
+    bands: Vec<Band>,
     approximate: bool,
 }
 
@@ -113,8 +136,16 @@ impl Source {
         Self {
             span,
             marks: Vec::new(),
+            bands: Vec::new(),
             approximate: false,
         }
+    }
+
+    /// This source, its timeline divided into `bands`.
+    pub fn with_bands(mut self, bands: impl IntoIterator<Item = Band>) -> Self {
+        self.bands = bands.into_iter().collect();
+        self.bands.sort_by_key(|band| band.span.start);
+        self
     }
 
     /// This source, a step stopping at each of `marks`.
@@ -144,6 +175,8 @@ struct Shape {
     range: Span,
     /// Every source's marks, ascending, without repeats.
     marks: Vec<EpochMicros>,
+    /// Every source's bands, ascending by start.
+    bands: Vec<Band>,
     /// Whether any source's times are estimates.
     approximate: bool,
 }
@@ -160,10 +193,16 @@ impl Shape {
         }
         marks.sort_unstable();
         marks.dedup();
+        let mut bands = Vec::with_capacity(sources.clone().map(|s| s.bands.len()).sum());
+        for source in sources.clone() {
+            bands.extend_from_slice(&source.bands);
+        }
+        bands.sort_by_key(|band| band.span.start);
         let approximate = sources.clone().any(|source| source.approximate);
         Some(Shape {
             range,
             marks,
+            bands,
             approximate,
         })
     }
@@ -204,6 +243,12 @@ impl Timeline {
 
     pub fn range(&self) -> Span {
         self.shape.range
+    }
+
+    /// The named stretches the sources divide the timeline into, ascending
+    /// by start.
+    pub fn bands(&self) -> &[Band] {
+        &self.shape.bands
     }
 
     /// Whether any source's times are estimates, so the time shown is too.
@@ -583,6 +628,21 @@ mod tests {
         assert_eq!(shape.range, span(0, 8));
         assert_eq!(shape.marks, [at(1), at(3), at(5)]);
         assert!(shape.approximate);
+    }
+
+    #[test]
+    fn the_bands_of_every_source_line_up_by_start() {
+        let band = |start, end, name: &'static str| Band::new(span(start, end), name.into());
+        let shape = shape(&[
+            Source::new(span(0, 10)).with_bands([band(4, 10, "build"), band(0, 4, "load")]),
+            Source::new(span(0, 10)).with_bands([band(2, 3, "fetch")]),
+        ]);
+        let names: Vec<&str> = shape
+            .bands
+            .iter()
+            .map(|band| band.name().as_ref())
+            .collect();
+        assert_eq!(names, ["load", "fetch", "build"]);
     }
 
     #[test]

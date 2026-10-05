@@ -11,7 +11,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
-use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
+use bviz_ui_playback::{Band, Clock, DocumentClock, OnClock, Span};
 use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -753,16 +753,23 @@ impl TraceModel {
     }
 }
 
-/// What `profile` gives a clock: the wall-clock span its events cover, `None`
-/// where it records no wall-clock origin or covers no time.
+/// What `profile` gives a clock: the wall-clock span its events cover,
+/// banded by the build's phases; `None` where it records no wall-clock origin
+/// or covers no time.
 fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
     let origin = profile.metadata().epoch_origin?;
+    let on_clock =
+        |start_us, end_us| Span::new(origin.plus_micros(start_us), origin.plus_micros(end_us));
     let span = profile.span();
-    let covered = Span::new(
-        origin.plus_micros(span.start_us),
-        origin.plus_micros(span.end_us),
-    )?;
-    Some(bviz_ui_playback::Source::new(covered))
+    let covered = on_clock(span.start_us, span.end_us)?;
+    let phases = profile
+        .phase_intervals()
+        .into_iter()
+        .filter_map(|(name, start_us, end_us)| {
+            let name = profile.str(name).to_owned().into();
+            Some(Band::new(on_clock(start_us, end_us)?, name))
+        });
+    Some(bviz_ui_playback::Source::new(covered).with_bands(phases))
 }
 
 #[cfg(test)]
