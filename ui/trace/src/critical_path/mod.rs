@@ -13,9 +13,12 @@ use crate::{
     ChooseNextStep, ChoosePreviousStep, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT,
     STATS_TEXT_SIZE, UnchooseStep, profile_status,
 };
-use bviz_critical_path::{Coverage, CriticalPath, Part, Phase, Spawned, Step};
+use bviz_critical_path::{
+    Coverage, CriticalPath, Modeled, NearlyCritical, Part, Phase, Spawned, Step,
+};
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner, list_scrollbar,
+    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner,
+    list_scrollbar,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use by_height::ByHeight;
@@ -75,8 +78,8 @@ const BAR_COLUMN_WIDTH: f32 = 200.0;
 /// them together.
 const MIN_STRIP_PHASE_WIDTH: f32 = 2.0;
 
-/// One column of the steps table: its title and its fixed width, `None` for
-/// the one flexible column.
+/// One column of a table: its title and its fixed width, `None` for the one
+/// flexible column.
 struct Column {
     title: &'static str,
     width: Option<f32>,
@@ -105,12 +108,30 @@ const COLUMNS: [Column; 7] = [
     column("Wait and own time", Some(BAR_COLUMN_WIDTH)),
 ];
 
+const NEARLY_CRITICAL_COLUMNS: [Column; 3] = [
+    column("Action", None),
+    column("Took", Some(STATS_NUM_COL_WIDTH)),
+    column("Slack", Some(STATS_NUM_COL_WIDTH)),
+];
+
+/// Which list the table under the summary shows.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Listing {
+    #[default]
+    Steps,
+    /// The actions off the path closest to becoming critical, which a path
+    /// held against no modeled build has none of.
+    NearlyCritical,
+}
+
 /// The critical path of the profile: the wall time partitioned along it, an
 /// account of where the time went, and its steps in the order they started.
 pub struct CriticalPathPanel {
     focus: FocusHandle,
     model: Entity<TraceModel>,
+    listing: Listing,
     scroll: ListScroll,
+    nearly_critical_scroll: ListScroll,
     summary_scroll: ListScroll,
     /// Shows the document's load state as it changes.
     _model_observer: Subscription,
@@ -124,14 +145,18 @@ impl CriticalPathPanel {
         let model_observer = cx.observe(&model, |_, _, cx| cx.notify());
         let derived = cx.subscribe(&model, |_, _, _: &CriticalPathDerived, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |panel, _, _: &SourceReplaced, cx| {
+            panel.listing = Listing::Steps;
             panel.scroll.to_top();
+            panel.nearly_critical_scroll.to_top();
             panel.summary_scroll.to_top();
             cx.notify();
         });
         Self {
             focus: cx.focus_handle(),
             model,
+            listing: Listing::Steps,
             scroll: ListScroll::new(),
+            nearly_critical_scroll: ListScroll::new(),
             summary_scroll: ListScroll::new(),
             _model_observer: model_observer,
             _derived: derived,
@@ -141,6 +166,7 @@ impl CriticalPathPanel {
 
     /// Chooses step `index`, keeping its row in view.
     fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.listing = Listing::Steps;
         self.model
             .update(cx, |model, cx| model.choose_step(index, cx));
         self.scroll
@@ -169,7 +195,8 @@ impl CriticalPathPanel {
         self.choose(index, cx);
     }
 
-    /// The path in sum over its table of steps.
+    /// The path in sum over its table of steps, or where the path is held
+    /// against a modeled build, of the steps or the actions nearly critical.
     fn body(
         &self,
         path: &CriticalPath,
@@ -177,18 +204,137 @@ impl CriticalPathPanel {
         fills: &Fills,
         cx: &Context<Self>,
     ) -> ByHeight {
+        let modeled = path.modeled();
+        let listing = match modeled {
+            Some(_) => self.listing,
+            None => Listing::Steps,
+        };
         let body = |legends: bool| {
-            div()
+            let body = div()
                 .flex()
                 .flex_col()
                 .size_full()
                 .child(lead(path, legends, palette))
-                .child(self.summary(path, legends, palette, fills, cx))
-                .child(header_row(path, palette))
-                .child(self.steps(path, palette, fills, cx))
-                .into_any_element()
+                .child(self.summary(path, legends, palette, fills, cx));
+            let choice =
+                || modeled.map(|modeled| self.listing_choice(modeled, listing, palette, cx));
+            match (listing, modeled) {
+                (Listing::NearlyCritical, Some(modeled)) => {
+                    let header = header_row(NEARLY_CRITICAL_COLUMNS.iter(), choice(), palette);
+                    match modeled.nearly_critical().is_empty() {
+                        true => body.child(header).child(
+                            div()
+                                .flex_1()
+                                .px_3()
+                                .py_2()
+                                .text_color(palette.muted_label)
+                                .child(words::NO_NEARLY_CRITICAL),
+                        ),
+                        false => body
+                            .child(header)
+                            .child(self.nearly_critical(modeled, palette, cx)),
+                    }
+                }
+                _ => body
+                    .child(header_row(
+                        COLUMNS
+                            .iter()
+                            .filter(|column| modeled.is_some() || !column.modeled),
+                        choice(),
+                        palette,
+                    ))
+                    .child(self.steps(path, palette, fills, cx)),
+            }
+            .into_any_element()
         };
         ByHeight::new(LEGENDS_MIN_HEIGHT, body(true), body(false))
+    }
+
+    /// The choice of what the table lists, in place of its first column's
+    /// title.
+    fn listing_choice(
+        &self,
+        modeled: &Modeled,
+        listing: Listing,
+        palette: &Palette,
+        cx: &Context<Self>,
+    ) -> Div {
+        let button = |id: &'static str, label: String, tip: &'static str, shows: Listing| {
+            let panel = cx.entity();
+            div()
+                .id(("critical-path-list-choice", shows as usize))
+                .tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+                .child(
+                    Button::new(id, move |_, _, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.listing = shows;
+                            cx.notify();
+                        })
+                    })
+                    .compact()
+                    .selected(listing == shows)
+                    .label(label),
+                )
+        };
+        div()
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .child(button(
+                "critical-path-list-steps",
+                words::STEPS_TITLE.to_owned(),
+                words::STEPS_TIP,
+                Listing::Steps,
+            ))
+            .child(button(
+                "critical-path-list-nearly-critical",
+                words::nearly_critical_title(modeled),
+                words::NEARLY_CRITICAL_TIP,
+                Listing::NearlyCritical,
+            ))
+    }
+
+    /// The actions nearly critical, one row each.
+    fn nearly_critical(&self, modeled: &Modeled, palette: &Palette, cx: &Context<Self>) -> Div {
+        let entity = cx.entity();
+        let palette = *palette;
+        let rows = uniform_list(
+            "critical-path-nearly-critical",
+            modeled.nearly_critical().len(),
+            {
+                let entity = entity.clone();
+                move |range, _, cx| {
+                    let model = entity.read(cx).model.read(cx);
+                    let Some(TracedPath::Traced {
+                        path: Some(path), ..
+                    }) = model.critical_path()
+                    else {
+                        return Vec::new();
+                    };
+                    let Some(modeled) = path.modeled() else {
+                        return Vec::new();
+                    };
+                    range
+                        .map(|index| {
+                            nearly_critical_row(index, &modeled.nearly_critical()[index], &palette)
+                        })
+                        .collect()
+                }
+            },
+        )
+        .flex_1()
+        .w_full()
+        .track_scroll(self.nearly_critical_scroll.uniform_handle());
+        list_pane(
+            rows,
+            entity,
+            |panel| &panel.nearly_critical_scroll,
+            |panel| &mut panel.nearly_critical_scroll,
+            &palette,
+            cx,
+        )
     }
 
     /// The path's bars, with their `legends` or without, scrolling where they
@@ -289,31 +435,46 @@ impl CriticalPathPanel {
         .flex_1()
         .w_full()
         .track_scroll(self.scroll.uniform_handle());
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_grow_1()
-            .flex_basis(px(STEPS_BEFORE_BARS * STATS_ROW_HEIGHT))
-            .flex_shrink(TABLE_YIELD)
-            .min_h(px(STATS_ROW_HEIGHT))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|panel, e: &MouseDownEvent, _, cx| {
-                    if panel.scroll.press(e.position) {
-                        cx.stop_propagation();
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(rows)
-            .child(list_scrollbar(
-                entity,
-                |panel: &CriticalPathPanel| &panel.scroll,
-                |panel: &mut CriticalPathPanel| &mut panel.scroll,
-                palette.scroll,
-            ))
+        list_pane(
+            rows,
+            entity,
+            |panel| &panel.scroll,
+            |panel| &mut panel.scroll,
+            &palette,
+            cx,
+        )
     }
+}
+
+/// `rows` taking the table's room under its header, scrolled through
+/// `scroll` of the panel `entity`.
+fn list_pane(
+    rows: impl IntoElement,
+    entity: Entity<CriticalPathPanel>,
+    scroll: fn(&CriticalPathPanel) -> &ListScroll,
+    scroll_mut: fn(&mut CriticalPathPanel) -> &mut ListScroll,
+    palette: &Palette,
+    cx: &Context<CriticalPathPanel>,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_grow_1()
+        .flex_basis(px(STEPS_BEFORE_BARS * STATS_ROW_HEIGHT))
+        .flex_shrink(TABLE_YIELD)
+        .min_h(px(STATS_ROW_HEIGHT))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |panel, e: &MouseDownEvent, _, cx| {
+                if scroll_mut(panel).press(e.position) {
+                    cx.stop_propagation();
+                }
+                cx.notify();
+            }),
+        )
+        .child(rows)
+        .child(list_scrollbar(entity, scroll, scroll_mut, palette.scroll))
 }
 
 /// What the path took and the levers acting on the most of it, each hovered
@@ -519,8 +680,14 @@ fn swatch(fill: Hsla, edge: Option<Hsla>) -> Div {
     }
 }
 
-/// The header of the steps table of `path`.
-fn header_row(path: &CriticalPath, palette: &Palette) -> Div {
+/// The header of a table of `columns`, the flexible column titled by
+/// `title` where one is given.
+fn header_row<'c>(
+    columns: impl Iterator<Item = &'c Column>,
+    title: Option<Div>,
+    palette: &Palette,
+) -> Div {
+    let mut title = title;
     div()
         .flex()
         .flex_row()
@@ -533,12 +700,10 @@ fn header_row(path: &CriticalPath, palette: &Palette) -> Div {
         .border_color(palette.border)
         .text_size(px(STATS_TEXT_SIZE))
         .text_color(palette.label)
-        .children(
-            COLUMNS
-                .iter()
-                .filter(|column| path.modeled().is_some() || !column.modeled)
-                .map(|column| table_cell(column.width, [column.title])),
-        )
+        .children(columns.map(|column| match (column.width, title.take()) {
+            (None, Some(title)) => table_cell(None, [title.into_any_element()]),
+            (width, _) => table_cell(width, [column.title.into_any_element()]),
+        }))
 }
 
 /// What an execution log tells of a path's steps. Where it records spawns of
@@ -676,6 +841,44 @@ fn step_row(
         })
         .child(table_cell(share.width, [words::share(step.own(), whole)]))
         .child(table_cell(bar_column.width, [div().w_full().child(bar_of)]))
+}
+
+/// Row `index` of the table of actions nearly critical, showing `action`.
+fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette) -> Stateful<Div> {
+    let [name, took, slack] = &NEARLY_CRITICAL_COLUMNS;
+    let ran: Vec<&str> = [action.mnemonic.as_deref(), action.target.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let described = div()
+        .id(("critical-path-nearly-critical-action", index))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .tooltip(TextTooltip::builder(
+            words::nearly_critical_tip(action).into(),
+            palette.tooltip,
+        ))
+        .child(line(action.description.clone()))
+        .when(!ran.is_empty(), |described| {
+            described.child(line(ran.join(" · ")).text_color(palette.muted_label))
+        });
+    div()
+        .id(("critical-path-nearly-critical-row", index))
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(STATS_ROW_HEIGHT))
+        .w_full()
+        .pr(px(SCROLLBAR_THICKNESS))
+        .text_size(px(STATS_TEXT_SIZE))
+        .hover(|row| row.bg(palette.hover))
+        .child(table_cell(name.width, [described]))
+        .child(table_cell(took.width, [words::duration(action.duration)]))
+        .child(table_cell(slack.width, [words::duration(action.slack)]))
 }
 
 /// A line of a cell, cut short where the cell runs out of room for it.

@@ -2,8 +2,8 @@
 
 use crate::chart::format_duration;
 use bviz_critical_path::{
-    Coverage, CriticalPath, Fit, Lever, Modeled, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned,
-    Step, StepModel, Work,
+    Coverage, CriticalPath, Fit, Lever, Modeled, NearlyCritical, Part, Phase, Ran, SpanSplit,
+    SpawnRunner, Spawned, Step, StepModel, Work,
 };
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
@@ -527,6 +527,48 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
     }
 }
 
+/// The title of the list of a path's steps, beside that of the actions
+/// nearly critical.
+pub(crate) const STEPS_TITLE: &str = "Steps";
+
+/// The tooltip of the choice of the list of a path's steps.
+pub(crate) const STEPS_TIP: &str = "The steps of the critical path, in the order they started.";
+
+/// The tooltip of the choice of the list of actions nearly critical.
+pub(crate) const NEARLY_CRITICAL_TIP: &str = "The actions off the path that can become critical once the path's actions are \
+     shortened, least slack first.";
+
+/// The title of the list of actions nearly critical.
+pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {
+    format!("Nearly critical ({})", modeled.nearly_critical().len())
+}
+
+/// What stands in the list of actions nearly critical where it holds none.
+pub(crate) const NO_NEARLY_CRITICAL: &str =
+    "No action off the path can become critical however the path's actions are shortened.";
+
+/// An action nearly critical's tooltip: everything known of it, and its
+/// slack.
+pub(crate) fn nearly_critical_tip(action: &NearlyCritical) -> String {
+    let mut lines = vec![action.description.clone()];
+    let known = [
+        ("Mnemonic", action.mnemonic.as_deref()),
+        ("Target", action.target.as_deref()),
+        ("Output", Some(action.primary_output.as_str())),
+    ];
+    lines.extend(
+        known
+            .into_iter()
+            .filter_map(|(key, value)| Some(format!("{key}: {}", value?))),
+    );
+    lines.push(format!(
+        "Took {}; could have taken {} longer before the modeled build would.",
+        duration(action.duration),
+        duration(action.slack)
+    ));
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,6 +799,18 @@ mod tests {
                  than the build's matches fewer."
             ),
             "{tip}"
+        );
+    }
+
+    #[test]
+    fn an_action_nearly_critical_says_what_it_is_and_its_slack() {
+        let path = modeled_path(&MODELED_OUTPUTS);
+        let modeled = path.modeled().expect("modeled");
+        assert_eq!(nearly_critical_title(modeled), "Nearly critical (2)");
+        assert_eq!(
+            nearly_critical_tip(&modeled.nearly_critical()[1]),
+            "Compiling b.c\nMnemonic: CppCompile\nTarget: //b\nOutput: bazel-out/b.o\n\
+             Took 1.50ms; could have taken 800µs longer before the modeled build would."
         );
     }
 
