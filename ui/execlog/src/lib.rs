@@ -12,19 +12,19 @@ mod summary;
 pub use spawn_time::SpawnTimePanel;
 
 use bviz_execlog::ExecLog;
-use bviz_invocation::InvocationId;
+use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, SharedString, Window, prelude::*, px, size};
-use model::ExecLogModel;
+use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
+use model::{ExecLogModel, Read};
 use summary::Summary;
 
 /// An execution log being read.
 pub struct Load {
-    log: Pending<Summary>,
+    log: Pending<Read>,
     title: SharedString,
 }
 
@@ -40,7 +40,10 @@ impl From<ExecLogSource> for Load {
         Self {
             log: Pending::start(move || {
                 ExecLog::from_path(&source.path)
-                    .map(|log| Summary::of(&log))
+                    .map(|log| Read {
+                        summary: Summary::of(&log),
+                        spawns: log.into_spawns(),
+                    })
                     .map_err(|e| format!("cannot read {}: {e}", source.path.display()))
             }),
             title,
@@ -48,10 +51,17 @@ impl From<ExecLogSource> for Load {
     }
 }
 
-/// The view of the spawn time the log `load` reads.
-pub fn open(load: impl Into<Load>, _window: &mut Window, cx: &mut App) -> Member {
+/// The view of the spawn time the log `load` reads. Where it is opened as
+/// part of an invocation's `session`, the log's spawns are reported to it.
+pub fn open(
+    load: impl Into<Load>,
+    session: Option<Entity<Session>>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> Member {
     let load = load.into();
-    let model = cx.new(|cx| ExecLogModel::reading(load.log, cx));
+    let session = session.as_ref().map(Entity::downgrade);
+    let model = cx.new(|cx| ExecLogModel::reading(load.log, session, cx));
     let view = ViewSpec::new(move |cx| cx.new(|cx| SpawnTimePanel::new(model.clone(), cx)));
     Member::new(load.title, PanelGroup::one(view))
 }
@@ -78,7 +88,7 @@ pub fn run() {
         size(px(1100.), px(720.)),
         first,
         loads.collect(),
-        |load, window, cx| open(load, window, cx).into(),
+        |load, window, cx| open(load, None, window, cx).into(),
         &[],
     );
 }

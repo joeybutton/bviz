@@ -4,7 +4,7 @@ mod fills;
 mod words;
 
 use crate::chart::format_duration;
-use crate::model::{CriticalPathDerived, Derived, SourceReplaced, TraceModel};
+use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
 use crate::stats_panel::table_cell;
 use crate::theme::Palette;
 use crate::{
@@ -144,7 +144,10 @@ impl CriticalPathPanel {
             let entity = entity.clone();
             move |range, _, cx| {
                 let model = entity.read(cx).model.read(cx);
-                let Some(Derived::Derived(Some(path))) = model.critical_path() else {
+                let Some(TracedPath::Traced {
+                    path: Some(path), ..
+                }) = model.critical_path()
+                else {
                     return Vec::new();
                 };
                 let whole = path.path();
@@ -437,17 +440,17 @@ impl Render for CriticalPathPanel {
         let model = self.model.read(cx);
         match model.critical_path() {
             None => panel.children(model.source().placeholder(&theme.colors)),
-            Some(Derived::Deriving { .. }) => panel.child(centered_spinner(
+            Some(TracedPath::Tracing { .. }) => panel.child(centered_spinner(
                 "Tracing the critical path…",
                 &theme.colors,
             )),
-            Some(Derived::Derived(None)) => panel.child(centered_notice(
+            Some(TracedPath::Traced { path: None, .. }) => panel.child(centered_notice(
                 "This profile records no critical path.",
                 &theme.colors,
             )),
-            Some(Derived::Derived(Some(path))) => {
-                panel.child(self.body(path, &palette, &fills, cx))
-            }
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => panel.child(self.body(path, &palette, &fills, cx)),
         }
     }
 }

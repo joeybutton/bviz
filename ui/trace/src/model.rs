@@ -6,14 +6,15 @@ use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_critical_path::CriticalPath;
-use bviz_invocation::Session;
+use bviz_invocation::spawn::LoggedSpawns;
+use bviz_invocation::{Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
-use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity};
+use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,8 +47,7 @@ pub(crate) struct CriticalPathDerived;
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
     working_lanes: Derived<WorkingLanes>,
-    /// `None` for a profile with no critical-path lane.
-    critical_path: Derived<Option<CriticalPath>>,
+    critical_path: TracedPath,
     /// Derives the profile's action timings and attempts and reports them to
     /// its session; held with the profile, so that a profile replaced before
     /// they are ready reports none.
@@ -64,18 +64,136 @@ pub(crate) enum Derived<T> {
     Derived(T),
 }
 
+/// A loaded profile's critical path, as far as it is traced.
+pub(crate) enum TracedPath {
+    Tracing(Tracing),
+    Traced {
+        /// `None` for a profile with no critical-path lane.
+        path: Option<Box<CriticalPath>>,
+        /// The revision of its session's execution-log spawns `path` is
+        /// joined to.
+        joined: Revision,
+        /// Traces the path again, joined to spawns its session learned of
+        /// since; `path` stands until it lands.
+        rejoining: Option<Tracing>,
+    },
+}
+
+/// A tracing of a critical path under way, held with the profile it reads so
+/// that dropping it, once another profile is loaded or other spawns are
+/// logged, cancels it.
+pub(crate) struct Tracing {
+    /// The revision of its session's execution-log spawns the path is traced
+    /// with.
+    joined: Revision,
+    _task: Task<()>,
+}
+
+impl TracedPath {
+    /// The revision of the spawns the path was last asked to be joined to.
+    fn asked(&self) -> Revision {
+        match self {
+            TracedPath::Tracing(tracing)
+            | TracedPath::Traced {
+                rejoining: Some(tracing),
+                ..
+            } => tracing.joined,
+            TracedPath::Traced { joined, .. } => *joined,
+        }
+    }
+
+    /// Has `tracing` take the place of any tracing under way, keeping a path
+    /// already traced until it lands.
+    fn retrace(&mut self, tracing: Tracing) {
+        match self {
+            TracedPath::Tracing(under_way) => *under_way = tracing,
+            TracedPath::Traced { rejoining, .. } => *rejoining = Some(tracing),
+        }
+    }
+
+    /// Takes `path` as traced if it was traced with the spawns of revision
+    /// `joined` by the tracing under way, and says whether it did.
+    fn adopt(&mut self, joined: Revision, path: Option<CriticalPath>) -> bool {
+        let under_way = match self {
+            TracedPath::Tracing(tracing)
+            | TracedPath::Traced {
+                rejoining: Some(tracing),
+                ..
+            } => Some(tracing.joined),
+            TracedPath::Traced { .. } => None,
+        };
+        let own = under_way == Some(joined);
+        if own {
+            *self = TracedPath::Traced {
+                path: path.map(Box::new),
+                joined,
+                rejoining: None,
+            };
+        }
+        own
+    }
+}
+
+/// Traces the critical path of `profile` off the UI thread, joined to
+/// `spawns`, for the model of `cx` to adopt as joined to the spawns of
+/// revision `joined`.
+fn trace(
+    profile: Arc<Profile>,
+    spawns: Option<Arc<LoggedSpawns>>,
+    joined: Revision,
+    cx: &mut Context<TraceModel>,
+) -> Tracing {
+    let task = cx.spawn(async move |model, cx| {
+        let derive = async move {
+            let path = CriticalPath::of(&profile, spawns.as_deref());
+            (profile, path)
+        };
+        let (profile, path) = cx.background_executor().spawn(derive).await;
+        model
+            .update(cx, |model, cx| {
+                if model.adopt_critical_path(&profile, joined, path) {
+                    cx.emit(CriticalPathDerived);
+                }
+            })
+            .ok();
+    });
+    Tracing {
+        joined,
+        _task: task,
+    }
+}
+
+/// The spawns `session` holds of its invocation's execution log, and their
+/// revision.
+fn logged_spawns(session: Option<&Entity<Session>>, cx: &Context<TraceModel>) -> Logged {
+    match session {
+        Some(session) => {
+            let session = session.read(cx);
+            (
+                session.logged_spawns().cloned(),
+                session.logged_spawns_revision(),
+            )
+        }
+        None => (None, Revision::default()),
+    }
+}
+
+/// What [`logged_spawns`] returns.
+type Logged = (Option<Arc<LoggedSpawns>>, Revision);
+
 /// The tasks deriving what a [`LoadedProfile`] derives off the UI thread.
 struct Derivations {
     working_lanes: Task<()>,
-    critical_path: Task<()>,
+    critical_path: Tracing,
 }
 
 impl LoadedProfile {
     /// `profile` as loaded, its working lanes and critical path on their way
-    /// to the model of `cx` and its action timings and attempts to `session`.
+    /// to the model of `cx` and its action timings and attempts to `session`,
+    /// its critical path joined to the spawns `session` holds.
     fn new(
         profile: Profile,
-        session: Option<WeakEntity<Session>>,
+        session: Option<&Entity<Session>>,
         cx: &mut Context<TraceModel>,
     ) -> LoadedProfile {
         let flamer = Arc::new(TrackFlamer::new(&Arc::new(profile)));
@@ -94,22 +212,9 @@ impl LoadedProfile {
                 })
                 .ok();
         });
-        let traced = flamer.profile().clone();
-        let tracing = cx.spawn(async move |model, cx| {
-            let derive = async move {
-                let path = CriticalPath::of(&traced, None);
-                (traced, path)
-            };
-            let (traced, path) = cx.background_executor().spawn(derive).await;
-            model
-                .update(cx, |model, cx| {
-                    if model.adopt_critical_path(&traced, path) {
-                        cx.emit(CriticalPathDerived);
-                    }
-                })
-                .ok();
-        });
-        let reporting_timings = session.map(|session| {
+        let (spawns, joined) = logged_spawns(session, cx);
+        let tracing = trace(flamer.profile().clone(), spawns, joined, cx);
+        let reporting_timings = session.map(Entity::downgrade).map(|session| {
             let timed = flamer.profile().clone();
             cx.spawn(async move |_, cx| {
                 let (timings, attempts) = cx
@@ -143,9 +248,7 @@ impl LoadedProfile {
             working_lanes: Derived::Deriving {
                 _derivation: derivations.working_lanes,
             },
-            critical_path: Derived::Deriving {
-                _derivation: derivations.critical_path,
-            },
+            critical_path: TracedPath::Tracing(derivations.critical_path),
             _reporting_timings: None,
         }
     }
@@ -164,14 +267,15 @@ impl LoadedProfile {
         own
     }
 
-    /// Takes `path` as its own if it was derived from its own profile, and
-    /// says whether it did.
-    fn adopt_critical_path(&mut self, profile: &Arc<Profile>, path: Option<CriticalPath>) -> bool {
-        let own = Arc::ptr_eq(self.profile(), profile);
-        if own {
-            self.critical_path = Derived::Derived(path);
-        }
-        own
+    /// Takes `path` as its own if it was traced from its own profile, joined
+    /// to the spawns it last asked for, and says whether it did.
+    fn adopt_critical_path(
+        &mut self,
+        profile: &Arc<Profile>,
+        joined: Revision,
+        path: Option<CriticalPath>,
+    ) -> bool {
+        Arc::ptr_eq(self.profile(), profile) && self.critical_path.adopt(joined, path)
     }
 }
 
@@ -247,6 +351,8 @@ pub(crate) struct TraceModel {
     agg: Rebuild<u64>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
+    /// Joins the critical path to the spawns `session` learns of.
+    _session_changed: Option<Subscription>,
 }
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
@@ -263,25 +369,42 @@ impl TraceModel {
         clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(
-            session,
-            clock,
-            load_in_background(
-                cx,
-                move || profile.join(),
-                |model, result, cx| {
-                    let source = match result {
-                        Ok(profile) => {
-                            let session = model.session.as_ref().map(Entity::downgrade);
-                            Source::Loaded(LoadedProfile::new(profile, session, cx))
-                        }
-                        Err(err) => Source::Failed(err),
-                    };
-                    model.set_source(source, cx);
-                    model.place_on_clock(cx);
-                },
-            ),
-        )
+        let session_changed = session
+            .as_ref()
+            .map(|session| cx.observe(session, |model, _, cx| model.rejoin(cx)));
+        let load = load_in_background(
+            cx,
+            move || profile.join(),
+            |model, result, cx| {
+                let source = match result {
+                    Ok(profile) => {
+                        let session = model.session.clone();
+                        Source::Loaded(LoadedProfile::new(profile, session.as_ref(), cx))
+                    }
+                    Err(err) => Source::Failed(err),
+                };
+                model.set_source(source, cx);
+                model.place_on_clock(cx);
+            },
+        );
+        Self {
+            _session_changed: session_changed,
+            ..Self::new(session, clock, load)
+        }
+    }
+
+    /// Traces the loaded profile's critical path again where its session
+    /// holds other spawns than it was traced with.
+    fn rejoin(&mut self, cx: &mut Context<Self>) {
+        let (spawns, joined) = logged_spawns(self.session.as_ref(), cx);
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        if loaded.critical_path.asked() == joined {
+            return;
+        }
+        let tracing = trace(loaded.profile().clone(), spawns, joined, cx);
+        loaded.critical_path.retrace(tracing);
     }
 
     fn new(session: Option<Entity<Session>>, clock: Option<DocumentClock>, load: Task<()>) -> Self {
@@ -305,6 +428,7 @@ impl TraceModel {
             aggregates: None,
             agg: Rebuild::new(),
             _load: load,
+            _session_changed: None,
         }
     }
 
@@ -372,18 +496,23 @@ impl TraceModel {
         }
     }
 
-    /// The loaded profile's critical path, as far as it is derived; `None`
+    /// The loaded profile's critical path, as far as it is traced; `None`
     /// until a profile is loaded.
-    pub(crate) fn critical_path(&self) -> Option<&Derived<Option<CriticalPath>>> {
+    pub(crate) fn critical_path(&self) -> Option<&TracedPath> {
         match &self.source {
             Source::Loaded(loaded) => Some(&loaded.critical_path),
             _ => None,
         }
     }
 
-    fn adopt_critical_path(&mut self, profile: &Arc<Profile>, path: Option<CriticalPath>) -> bool {
+    fn adopt_critical_path(
+        &mut self,
+        profile: &Arc<Profile>,
+        joined: Revision,
+        path: Option<CriticalPath>,
+    ) -> bool {
         match &mut self.source {
-            Source::Loaded(loaded) => loaded.adopt_critical_path(profile, path),
+            Source::Loaded(loaded) => loaded.adopt_critical_path(profile, joined, path),
             _ => false,
         }
     }
@@ -831,10 +960,12 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Derivations, Derived, LoadedProfile, TraceModel, clock_source};
+    use super::{Derivations, LoadedProfile, TraceModel, TracedPath, Tracing, clock_source};
     use crate::Source;
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::track_order::TrackSort;
+    use bviz_invocation::spawn::LoggedSpawns;
+    use bviz_invocation::{Revision, Session};
     use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer};
     use bviz_trace_profile::Profile;
     use gpui::Task;
@@ -872,7 +1003,15 @@ mod tests {
     fn derivations() -> Derivations {
         Derivations {
             working_lanes: Task::ready(()),
-            critical_path: Task::ready(()),
+            critical_path: tracing(Revision::default()),
+        }
+    }
+
+    /// A tracing with the spawns of revision `joined` that has finished.
+    fn tracing(joined: Revision) -> Tracing {
+        Tracing {
+            joined,
+            _task: Task::ready(()),
         }
     }
 
@@ -904,23 +1043,66 @@ mod tests {
 
     #[test]
     fn a_critical_path_is_adopted_only_by_the_loaded_profile_it_was_derived_from() {
+        let unlogged = Revision::default();
         let mut model = model();
         let replaced = flamer();
-        assert!(!model.adopt_critical_path(replaced.profile(), None));
+        assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
 
         let loaded = flamer();
         model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
-        assert!(!model.adopt_critical_path(replaced.profile(), None));
+        assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
         assert!(matches!(
             model.critical_path(),
-            Some(Derived::Deriving { .. })
+            Some(TracedPath::Tracing { .. })
         ));
 
-        assert!(model.adopt_critical_path(loaded.profile(), None));
+        assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
         assert!(matches!(
             model.critical_path(),
-            Some(Derived::Derived(None))
+            Some(TracedPath::Traced { path: None, .. })
         ));
+    }
+
+    #[test]
+    fn a_path_traced_before_spawns_were_logged_stands_until_it_is_traced_again_with_them() {
+        let mut session = Session::default();
+        let unlogged = session.logged_spawns_revision();
+        let mut model = model();
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = session.logged_spawns_revision();
+        let Source::Loaded(loaded_profile) = &mut model.source else {
+            panic!("a loaded profile");
+        };
+        loaded_profile.critical_path.retrace(tracing(logged));
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Traced { path: None, .. })
+        ));
+        assert!(!model.adopt_critical_path(loaded.profile(), unlogged, None));
+        assert!(model.adopt_critical_path(loaded.profile(), logged, None));
+    }
+
+    #[test]
+    fn a_tracing_under_way_gives_way_to_one_joined_to_spawns_logged_since() {
+        let mut session = Session::default();
+        let unlogged = session.logged_spawns_revision();
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = session.logged_spawns_revision();
+        let mut model = model();
+        let loaded = flamer();
+        let mut loaded_profile = LoadedProfile::deriving(loaded.clone(), derivations());
+        loaded_profile.critical_path.retrace(tracing(logged));
+        model.source = Source::Loaded(loaded_profile);
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Tracing { .. })
+        ));
+        assert!(!model.adopt_critical_path(loaded.profile(), unlogged, None));
+        assert!(model.adopt_critical_path(loaded.profile(), logged, None));
     }
 
     #[test]
