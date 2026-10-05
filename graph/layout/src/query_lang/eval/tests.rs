@@ -124,7 +124,7 @@ fn a_pattern_names_its_targets_and_a_query_keeps_the_manual_ones() {
     );
     assert_eq!(
         fixture.error("//a/...:x"),
-        "'...' can only be used with wildcard targets"
+        "Invalid target pattern //a/...:x: '...' can only be used with wildcard targets"
     );
 }
 

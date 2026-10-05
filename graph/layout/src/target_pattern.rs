@@ -106,7 +106,12 @@ impl TargetPattern {
             let rules_only = match wildcard {
                 None if target.is_empty() => true,
                 Some(wildcard) => wildcard.rules_only(),
-                None => return Err(DOTS_WITHOUT_WILDCARD.to_string()),
+                None => {
+                    return Err(format!(
+                        "Invalid target pattern {raw}: '...' can only be used with wildcard \
+                         targets"
+                    ));
+                }
             };
             return Ok(TargetPattern::Below {
                 repo,
@@ -145,9 +150,6 @@ struct Parts {
 
 /// The package segment standing for a directory and everything beneath it.
 const DOTS: &str = "...";
-
-/// Why Bazel rejects a target that is no wildcard after a [`DOTS`] segment.
-const DOTS_WITHOUT_WILDCARD: &str = "'...' can only be used with wildcard targets";
 
 impl Parts {
     fn parse(raw: &str) -> Result<Self, String> {
@@ -488,7 +490,11 @@ mod tests {
     fn an_ellipsis_takes_no_target_but_a_wildcard() {
         assert_eq!(
             TargetPattern::parse("//foo/...:bar"),
-            Err("'...' can only be used with wildcard targets".to_string())
+            Err(
+                "Invalid target pattern //foo/...:bar: '...' can only be used with wildcard \
+                 targets"
+                    .to_string()
+            )
         );
         assert!(TargetPattern::parse("//.../foo").is_err());
     }
