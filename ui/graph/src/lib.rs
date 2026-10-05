@@ -93,6 +93,10 @@ actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, Dismiss]);
 const KEY_CONTEXT: &str = "Graph";
 
 pub fn register_keys(cx: &mut App) {
+    cx.bind_keys(bindings());
+}
+
+fn bindings() -> Vec<KeyBinding> {
     // A bare letter types into the search field rather than dispatching, so the
     // panel's own bindings stand down inside it.
     let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
@@ -105,7 +109,7 @@ pub fn register_keys(cx: &mut App) {
         exclusive::ROOTS_KEY_CONTEXT
     );
     let outside_roots = Some(exclusive.as_str());
-    cx.bind_keys([
+    vec![
         KeyBinding::new("h", ToggleNeighborhood, outside_search),
         KeyBinding::new("r", ToggleReduce, outside_search),
         KeyBinding::new("escape", Dismiss, outside_search),
@@ -132,7 +136,7 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
-    ]);
+    ]
 }
 
 /// Padding around the graph, in layout pixels.
@@ -1152,6 +1156,44 @@ mod tests {
             compound: false,
             group: false,
         }
+    }
+
+    /// The action `keys` dispatch with focus in the innermost of `contexts`,
+    /// under the panel's bindings and those of the text field.
+    fn dispatched(keys: &str, contexts: &[&str]) -> Option<std::boxed::Box<dyn gpui::Action>> {
+        let mut bindings = bindings();
+        bindings.extend(bviz_ui_components::text_input::bindings());
+        let keymap = gpui::Keymap::new(bindings);
+        let stack: Vec<gpui::KeyContext> = contexts
+            .iter()
+            .map(|context| gpui::KeyContext::parse(context).expect("a key context"))
+            .collect();
+        let keystroke = gpui::Keystroke::parse(keys).expect("a keystroke");
+        let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
+        matched
+            .first()
+            .map(|binding| binding.action().boxed_clone())
+    }
+
+    fn is<A: gpui::Action>(action: Option<std::boxed::Box<dyn gpui::Action>>, expected: A) -> bool {
+        action.is_some_and(|action| action.partial_eq(&expected))
+    }
+
+    const IN_PANEL: &[&str] = &[KEY_CONTEXT];
+    const IN_SEARCH: &[&str] = &[
+        KEY_CONTEXT,
+        search::KEY_CONTEXT,
+        bviz_ui_components::text_input::KEY_CONTEXT,
+    ];
+
+    /// A letter typed into the search field is text, not one of the panel's
+    /// keys.
+    #[test]
+    fn the_panels_letters_stand_down_in_the_search_field() {
+        assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
+        assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
+        assert!(dispatched("h", IN_SEARCH).is_none());
+        assert!(dispatched("r", IN_SEARCH).is_none());
     }
 
     #[test]
