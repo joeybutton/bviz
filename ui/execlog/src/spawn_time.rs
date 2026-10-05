@@ -1,6 +1,6 @@
 use crate::format::{duration, exact_duration, phase_name, share};
-use crate::model::ExecLogModel;
 use crate::model::Source;
+use crate::model::{ExecLogModel, LogKind};
 use crate::palette::Palette;
 use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, PhaseTiming};
@@ -15,6 +15,10 @@ use gpui::{
 };
 use std::cmp::Ordering;
 use std::time::Duration;
+
+/// The title of the view of an execution graph log, told apart from that of an
+/// execution log a document may hold beside it.
+const GRAPH_LOG_TITLE: &str = "Spawn time by phase, graph log";
 
 const ROW_HEIGHT: Pixels = px(24.);
 const TWO_LINE_ROW_HEIGHT: Pixels = px(44.);
@@ -648,8 +652,11 @@ impl Panel for SpawnTimePanel {
         }
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+    fn title(&self, cx: &App) -> SharedString {
+        match self.model.read(cx).log() {
+            LogKind::Execution => Self::kind().label.into(),
+            LogKind::ExecutionGraph => GRAPH_LOG_TITLE.into(),
+        }
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

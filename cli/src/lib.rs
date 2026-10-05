@@ -42,7 +42,8 @@ pub struct Cli {
 }
 
 /// The flags of [`Cli`] that name a file, for the command line that gives none.
-const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile, --bep or --exec_log";
+const SOURCE_FLAGS: &str =
+    "--aquery, --cquery, --query, --profile, --bep, --exec_log or --exec_graph_log";
 
 impl Cli {
     /// What this command line names to open.
@@ -52,7 +53,7 @@ impl Cli {
     /// with the per-viewer binaries, where a different flag is the required one.
     pub fn sources(self) -> Result<Sources, clap::Error> {
         let mut files = Vec::with_capacity(
-            self.trace.profile.len() + self.console.bep.len() + self.exec_log.exec_log.len(),
+            self.trace.profile.len() + self.console.bep.len() + self.exec_log.len(),
         );
         files.extend(self.trace.sources().map(Source::Trace));
         files.extend(self.console.sources().map(Source::Console));
@@ -74,8 +75,8 @@ impl Cli {
     }
 }
 
-/// A file a viewer reads on its own: a profile, a build event stream or an
-/// execution log.
+/// A file a viewer reads on its own: a profile, a build event stream, an
+/// execution log or an execution graph log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Trace(TraceSource),
@@ -135,7 +136,11 @@ mod tests {
     }
 
     fn exec_log(path: &str) -> Source {
-        Source::ExecLog(ExecLogSource { path: path.into() })
+        Source::ExecLog(ExecLogSource::Spawns(path.into()))
+    }
+
+    fn exec_graph_log(path: &str) -> Source {
+        Source::ExecLog(ExecLogSource::Graph(path.into()))
     }
 
     /// A window with nothing to show is refused, in the terms clap refuses a
@@ -176,6 +181,10 @@ mod tests {
         assert_eq!(
             sources(&["--exec_log", "e.zst"]).unwrap(),
             files(exec_log("e.zst"), Vec::new())
+        );
+        assert_eq!(
+            sources(&["--exec_graph_log", "g.zst"]).unwrap(),
+            files(exec_graph_log("g.zst"), Vec::new())
         );
         assert_eq!(
             sources(&["--profile", "one.gz", "--profile", "two.gz"]).unwrap(),
@@ -219,6 +228,7 @@ mod tests {
             "--profile",
             "--bep",
             "--exec_log",
+            "--exec_graph_log",
         ] {
             assert!(
                 help.contains(&format!("{flag} <FILE>")),

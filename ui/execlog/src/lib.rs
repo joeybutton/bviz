@@ -1,7 +1,8 @@
 //! Shows where the spawns of a Bazel build spent their time, read from a
-//! compact execution log (`--execution_log_compact_file`): the time Bazel's
-//! spawn metrics report for each phase of a spawn's run, summed by runner and
-//! by mnemonic, and the spawns that spent longest in one phase.
+//! compact execution log (`--execution_log_compact_file`) or an execution graph
+//! log (`--experimental_enable_execution_graph_log`): the time Bazel's spawn
+//! metrics report for each phase of a spawn's run, summed by runner and by
+//! mnemonic, and the spawns that spent longest in one phase.
 
 mod format;
 mod model;
@@ -12,6 +13,7 @@ mod summary;
 pub use spawn_time::SpawnTimePanel;
 
 use bviz_execlog::ExecLog;
+use bviz_execlog::graph::GraphLog;
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
@@ -23,38 +25,54 @@ use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
 use model::{ExecLogModel, Read};
 use summary::Summary;
 
-/// An execution log being read.
+/// A log being read.
 pub struct Load {
-    log: Pending<Read>,
+    log: Reading,
     title: SharedString,
 }
 
-/// The invocation that wrote the execution log at `source`, read from the head
-/// of the file alone.
+enum Reading {
+    Spawns(Pending<Read>),
+    Graph(Pending<Summary>),
+}
+
+/// The invocation that wrote the log at `source`, read from the head of the
+/// file alone; `None` for an execution graph log, which names none.
 pub fn invocation_id(source: &ExecLogSource) -> Option<InvocationId> {
-    bviz_execlog::probe_invocation_id(&source.path)
+    match source {
+        ExecLogSource::Spawns(path) => bviz_execlog::probe_invocation_id(path),
+        ExecLogSource::Graph(_) => None,
+    }
 }
 
 impl From<ExecLogSource> for Load {
     fn from(source: ExecLogSource) -> Self {
-        let title = document_label(&source.path);
-        Self {
-            log: Pending::start(move || {
-                ExecLog::from_path(&source.path)
+        let title = document_label(source.path());
+        let cannot_read =
+            |path: &std::path::Path, e| format!("cannot read {}: {e}", path.display());
+        let log = match source {
+            ExecLogSource::Spawns(path) => Reading::Spawns(Pending::start(move || {
+                ExecLog::from_path(&path)
                     .map(|log| Read {
                         summary: Summary::of(&log),
                         spawns: log.into_spawns(),
                     })
-                    .map_err(|e| format!("cannot read {}: {e}", source.path.display()))
-            }),
-            title,
-        }
+                    .map_err(|e| cannot_read(&path, e))
+            })),
+            ExecLogSource::Graph(path) => Reading::Graph(Pending::start(move || {
+                GraphLog::from_path(&path)
+                    .map(|log| Summary::of(log.spawns()))
+                    .map_err(|e| cannot_read(&path, e))
+            })),
+        };
+        Self { log, title }
     }
 }
 
 /// The view of the spawn time the log `load` reads. Where it is opened as
-/// part of an invocation's `session`, the log's spawns are reported to it;
-/// where its document plays back on `clock`, the log plays there.
+/// part of an invocation's `session`, an execution log's spawns are reported
+/// to it; where its document plays back on `clock`, an execution log plays
+/// there.
 pub fn open(
     load: impl Into<Load>,
     session: Option<Entity<Session>>,
@@ -63,8 +81,12 @@ pub fn open(
     cx: &mut App,
 ) -> Member {
     let load = load.into();
-    let session = session.as_ref().map(Entity::downgrade);
-    let model = cx.new(|cx| ExecLogModel::reading(load.log, session, clock, cx));
+    let model = cx.new(|cx| match load.log {
+        Reading::Spawns(log) => {
+            ExecLogModel::reading(log, session.as_ref().map(Entity::downgrade), clock, cx)
+        }
+        Reading::Graph(log) => ExecLogModel::reading_graph(log, cx),
+    });
     let view = ViewSpec::new(move |cx| cx.new(|cx| SpawnTimePanel::new(model.clone(), cx)));
     Member::new(load.title, PanelGroup::one(view))
 }
@@ -83,7 +105,10 @@ pub fn run() {
     let mut loads = Cli::parse().exec_log.sources().map(Load::from);
     let Some(first) = loads.next() else {
         Cli::command()
-            .error(ErrorKind::MissingRequiredArgument, "--exec_log is required")
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                "--exec_log or --exec_graph_log is required",
+            )
             .exit()
     };
     bviz_ui_workspace::run_panels(

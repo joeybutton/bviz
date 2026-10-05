@@ -13,13 +13,21 @@ pub(crate) struct Read {
     pub(crate) spawns: LoggedSpawns,
 }
 
-/// The summary of an execution log, held apart from the panel showing it so
-/// the panel can close and be shown again without the log being read afresh.
+/// The summary of a log, held apart from the panel showing it so the panel
+/// can close and be shown again without the log being read afresh.
 pub(crate) struct ExecLogModel {
+    log: LogKind,
     source: Source,
     on_clock: Option<OnClock>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
+}
+
+/// Which kind of log a model reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LogKind {
+    Execution,
+    ExecutionGraph,
 }
 
 impl ExecLogModel {
@@ -35,6 +43,7 @@ impl ExecLogModel {
     ) -> Self {
         let dating = session.is_some() || clock.is_some();
         Self {
+            log: LogKind::Execution,
             source: Source::Loading,
             on_clock: clock.map(OnClock::new),
             _load: load_in_background(
@@ -72,8 +81,31 @@ impl ExecLogModel {
         }
     }
 
+    /// The summary of the execution graph log `log` reads.
+    pub(crate) fn reading_graph(log: Pending<Summary>, cx: &mut Context<Self>) -> Self {
+        Self {
+            log: LogKind::ExecutionGraph,
+            source: Source::Loading,
+            on_clock: None,
+            _load: load_in_background(
+                cx,
+                move || log.join(),
+                move |model, result, _| {
+                    model.source = match result {
+                        Ok(summary) => Source::Loaded(summary),
+                        Err(why) => Source::Failed(why),
+                    };
+                },
+            ),
+        }
+    }
+
     pub(crate) fn source(&self) -> &Source {
         &self.source
+    }
+
+    pub(crate) fn log(&self) -> LogKind {
+        self.log
     }
 }
 
