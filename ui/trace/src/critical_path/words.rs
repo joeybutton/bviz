@@ -1,7 +1,9 @@
 //! How the parts of a critical path read on screen.
 
 use crate::chart::format_duration;
-use bviz_critical_path::{Coverage, CriticalPath, Part, Phase, Step, Work};
+use bviz_critical_path::{
+    Coverage, CriticalPath, Fit, Part, Phase, Ran, SpanSplit, SpawnRunner, Spawned, Step, Work,
+};
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
 
@@ -25,23 +27,87 @@ pub(crate) fn part_name(part: Part) -> &'static str {
     }
 }
 
-/// A word on what the profile says a step did, where its span leaves
-/// something to say.
-pub(crate) fn work_tag(work: Work) -> Option<&'static str> {
+/// A word on what ran a step, where its action span leaves something to
+/// say. `logged` says whether an execution log of the invocation was given.
+pub(crate) fn work_tag(work: Work, logged: bool) -> Option<&'static str> {
     match work {
-        Work::Spanned(_) => None,
+        Work::Spanned(SpanSplit {
+            span: Ran::Spawned(spawned),
+            ..
+        })
+        | Work::Unspanned(Ran::Spawned(spawned)) => Some(runner_name(spawned.runner())),
+        Work::Spanned(_) => logged.then_some("no spawn"),
         Work::Unspanned(_) => Some("no span"),
         Work::ChangePruned => Some("pruned"),
     }
 }
 
-/// What [`work_tag`] stands for.
-fn work_note(work: Work) -> Option<&'static str> {
-    match work {
-        Work::Spanned(_) => None,
-        Work::Unspanned(_) => Some("No action span: an action-cache hit, or not recorded."),
-        Work::ChangePruned => Some("Change pruned: its inputs were unchanged, so it did not run."),
+fn runner_name(runner: SpawnRunner) -> &'static str {
+    match runner {
+        SpawnRunner::RemoteExecution => "remote",
+        SpawnRunner::Worker => "worker",
+        SpawnRunner::Sandboxed => "sandbox",
+        SpawnRunner::Local => "local",
+        SpawnRunner::RemoteCacheHit => "remote cache",
+        SpawnRunner::DiskCacheHit => "disk cache",
+        SpawnRunner::Deduplicated => "deduplicated",
     }
+}
+
+/// How an action `runner` answered came by its result.
+fn runner_phrase(runner: SpawnRunner) -> &'static str {
+    match runner {
+        SpawnRunner::RemoteExecution => "run remotely",
+        SpawnRunner::Worker => "run on a persistent worker",
+        SpawnRunner::Sandboxed => "run in a local sandbox",
+        SpawnRunner::Local => "run locally",
+        SpawnRunner::RemoteCacheHit => "answered by the remote cache",
+        SpawnRunner::DiskCacheHit => "answered by the disk cache",
+        SpawnRunner::Deduplicated => "answered by the outputs of an identical spawn",
+    }
+}
+
+/// What [`work_tag`] stands for.
+fn work_note(work: Work, logged: bool) -> Option<String> {
+    let note = match (work, logged) {
+        (
+            Work::Spanned(SpanSplit {
+                span: Ran::Spawned(spawned),
+                ..
+            })
+            | Work::Unspanned(Ran::Spawned(spawned)),
+            _,
+        ) => return Some(spawned_note(&spawned)),
+        (Work::Spanned(_), false) => return None,
+        (Work::Spanned(_), true) => {
+            "An action span but no logged spawn: the action ran none, as writing a file \
+             or a symlink does, or its spawn was not logged."
+        }
+        (Work::Unspanned(_), false) => "No action span: an action-cache hit, or not recorded.",
+        (Work::Unspanned(_), true) => {
+            "Neither an action span nor a logged spawn: an action-cache hit, or not recorded."
+        }
+        (Work::ChangePruned, _) => "Change pruned: its inputs were unchanged, so it did not run.",
+    };
+    Some(note.to_owned())
+}
+
+/// What the execution log says of a step's spawns.
+fn spawned_note(spawned: &Spawned) -> String {
+    let spawns = spawned.spawns();
+    let mut note = format!(
+        "Its action was {}: {spawns} {}, {} as Bazel measured {}.",
+        runner_phrase(spawned.runner()),
+        if spawns == 1 { "spawn" } else { "spawns" },
+        duration(spawned.logged()),
+        if spawns == 1 { "it" } else { "them" },
+    );
+    if spawned.fit() == Fit::Scaled {
+        note.push_str(
+            " Their phases add up past the action's time, so they are scaled to fill it.",
+        );
+    }
+    note
 }
 
 pub(crate) fn duration(d: Duration) -> String {
@@ -237,8 +303,9 @@ pub(crate) fn part_account(part: Part, path: &CriticalPath) -> String {
     )
 }
 
-/// A step's tooltip: everything known of what it ran.
-pub(crate) fn step_tip(step: &Step) -> String {
+/// A step's tooltip: everything known of what it ran. `logged` says whether
+/// an execution log of the invocation was given.
+pub(crate) fn step_tip(step: &Step, logged: bool) -> String {
     let mut lines = vec![step.name().to_owned()];
     let known = [
         ("Mnemonic", step.mnemonic()),
@@ -250,7 +317,7 @@ pub(crate) fn step_tip(step: &Step) -> String {
             .into_iter()
             .filter_map(|(key, value)| Some(format!("{key}: {}", value?))),
     );
-    lines.extend(work_note(step.work()).map(str::to_owned));
+    lines.extend(work_note(step.work(), logged));
     lines.join("\n")
 }
 
@@ -300,6 +367,62 @@ mod tests {
             headline(&path),
             "Wall time 10.00ms · critical path 400µs (4.0% of it) over 1 step · \
              spawns logged for 0.0% of it"
+        );
+    }
+
+    /// A path of three steps: one whose span's output a remote spawn lists,
+    /// one with a span no spawn is logged of, and one with neither.
+    fn logged_path(logged: bool) -> CriticalPath {
+        use bviz_invocation::spawn::{Builder, Logged, PhaseTiming, REPORTED_PHASES};
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}},
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"Main Thread"}},
+            {"name":"thread_name","ph":"M","tid":2,"args":{"name":"skyframe-evaluator-execution-0"}},
+            {"cat":"general information","name":"buildTargets","ph":"X","ts":0,"dur":10000,"tid":1},
+            {"cat":"critical path component","name":"action 'Compiling a.c'","ph":"X","ts":1000,"dur":2000,"tid":0},
+            {"cat":"critical path component","name":"action 'Writing file b'","ph":"X","ts":3000,"dur":100,"tid":0},
+            {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":4000,"dur":400,"tid":0},
+            {"cat":"action processing","name":"Compiling a.c","ph":"X","ts":1001,"dur":2000,"tid":2,"out":"bazel-out/a.o"},
+            {"cat":"action processing","name":"Writing file b","ph":"X","ts":3001,"dur":99,"tid":2}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let mut builder = Builder::with_capacity(1, 1, 0);
+        builder.output("bazel-out/a.o");
+        builder.push(Logged {
+            runner: "remote",
+            mnemonic: "CppCompile",
+            target_label: "//a",
+            cache_hit: false,
+            timing: PhaseTiming::new(ms(3), [Duration::ZERO; REPORTED_PHASES]),
+        });
+        let log = builder.finish();
+        CriticalPath::of(&profile, logged.then_some(&log)).expect("path")
+    }
+
+    #[test]
+    fn a_step_is_tagged_by_what_ran_it_as_far_as_the_log_tells() {
+        let tags = |logged| -> Vec<Option<&str>> {
+            logged_path(logged)
+                .steps()
+                .iter()
+                .map(|step| work_tag(step.work(), logged))
+                .collect()
+        };
+        assert_eq!(
+            tags(true),
+            [Some("remote"), Some("no spawn"), Some("no span")]
+        );
+        assert_eq!(tags(false), [None, None, Some("no span")]);
+    }
+
+    #[test]
+    fn spawns_adding_up_past_their_action_say_they_were_scaled() {
+        let path = logged_path(true);
+        let note = work_note(path.steps()[0].work(), true).expect("a note");
+        assert_eq!(
+            note,
+            "Its action was run remotely: 1 spawn, 3.00ms as Bazel measured it. Their \
+             phases add up past the action's time, so they are scaled to fill it."
         );
     }
 

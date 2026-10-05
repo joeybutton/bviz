@@ -162,7 +162,7 @@ impl CriticalPathPanel {
                     return Vec::new();
                 };
                 let whole = path.path();
-                let tiered = path.coverage().is_some_and(|coverage| coverage.steps() > 0);
+                let logged = Logged::of(path);
                 range
                     .map(|index| {
                         step_row(
@@ -170,7 +170,7 @@ impl CriticalPathPanel {
                             &path.steps()[index],
                             whole,
                             longest,
-                            tiered,
+                            logged,
                             &palette,
                             &fills,
                         )
@@ -366,16 +366,38 @@ fn header_row(palette: &Palette) -> Div {
         )
 }
 
+/// What an execution log tells of a path's steps. Where it records spawns of
+/// any, every step's bar leaves room beneath it for a strip of their phases.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Logged {
+    NoLog,
+    NoStepJoined,
+    StepsJoined,
+}
+
+impl Logged {
+    fn of(path: &CriticalPath) -> Logged {
+        match path.coverage() {
+            None => Logged::NoLog,
+            Some(coverage) if coverage.steps() == 0 => Logged::NoStepJoined,
+            Some(_) => Logged::StepsJoined,
+        }
+    }
+
+    fn given(self) -> bool {
+        self != Logged::NoLog
+    }
+}
+
 /// Row `index` of the steps table, showing `step`, its own time a share of
 /// the path's `whole` and its bar as long against `longest` as its wait and
-/// own time are. A `tiered` bar draws the spawn phases of the step's action
-/// in a strip beneath its parts, where the execution log records spawns of it.
+/// own time are.
 fn step_row(
     index: usize,
     step: &Step,
     whole: Duration,
     longest: Duration,
-    tiered: bool,
+    logged: Logged,
     palette: &Palette,
     fills: &Fills,
 ) -> Stateful<Div> {
@@ -384,7 +406,7 @@ fn step_row(
         .into_iter()
         .flatten()
         .collect();
-    let tag = words::work_tag(step.work()).map(|tag| {
+    let tag = words::work_tag(step.work(), logged.given()).map(|tag| {
         div()
             .flex_shrink_0()
             .px_1()
@@ -403,7 +425,7 @@ fn step_row(
         .w_full()
         .min_w_0()
         .tooltip(TextTooltip::builder(
-            words::step_tip(step).into(),
+            words::step_tip(step, logged.given()).into(),
             palette.tooltip,
         ))
         .child(line(step.name().to_owned()))
@@ -425,7 +447,7 @@ fn step_row(
         SEGMENT_GAP,
         palette,
     );
-    let bar_of = match (tiered, step.work().spawned()) {
+    let bar_of = match (logged == Logged::StepsJoined, step.work().spawned()) {
         (false, _) => parts_bar.h(BAR_HEIGHT).into_any_element(),
         (true, spawned) => div()
             .flex()
