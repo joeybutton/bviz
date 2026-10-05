@@ -26,6 +26,7 @@ pub mod provenance;
 pub mod query;
 pub mod query_lang;
 pub mod quotient;
+mod reach;
 pub mod reduce;
 pub mod repo;
 pub mod select;
