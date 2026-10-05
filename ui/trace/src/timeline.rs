@@ -8,8 +8,9 @@ use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
     MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, TIMELINE_KEY_CONTEXT, TimelineBars, TracePanel,
-    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_markers, paint_ruler,
-    paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip, thumb_offset,
+    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_marker_band, paint_markers,
+    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
+    thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -1528,7 +1529,7 @@ fn slice_paint(
                 );
             }
         }
-        paint_markers(&profile, tv, regions, show_counters, &palette, window, cx);
+        paint_markers(&profile, tv, regions, show_counters, &palette, window);
         scrollbar_geom(
             profile.span(),
             tv,
@@ -1556,6 +1557,7 @@ fn slice_paint(
         );
 
         paint_ruler(&ticks, regions, bounds, &palette, window, cx);
+        paint_marker_band(&profile, tv, regions, &palette, window, cx);
     }
 }
 

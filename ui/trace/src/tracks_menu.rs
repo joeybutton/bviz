@@ -4,7 +4,7 @@ use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, RULER_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
+    GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
     TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
@@ -498,7 +498,7 @@ impl Render for TracksMenu {
             .left_0()
             .top_0()
             .w(px(gutter_width))
-            .h(px(RULER_HEIGHT))
+            .h(px(TICK_BAND_HEIGHT))
             .child(trigger)
             .children(self.popover(viewport, palette, cx))
             .into_any_element()

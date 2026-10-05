@@ -51,8 +51,8 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseDownEvent, Pixels, Point, Position, Render,
-    ScrollHandle, SharedString, Style, Subscription, TextAlign, TransformationMatrix, Window, div,
-    fill, point, prelude::*, px, relative, size,
+    ScrollHandle, ShapedLine, SharedString, Style, Subscription, TextAlign, TransformationMatrix,
+    Window, div, fill, point, prelude::*, px, relative, size,
 };
 use std::borrow::Cow;
 
@@ -159,14 +159,23 @@ const MIN_DRAG_PX: f32 = 3.0;
 /// instead of shrinking each plot until none of them can be read.
 const COUNTER_LANE_HEIGHT: f32 = METRICS.header_height + METRICS.counter_height;
 
-/// Height of the time ruler band at the top of the timeline.
-const RULER_HEIGHT: f32 = 20.0;
+/// Height of the time ruler's band of tick labels.
+const TICK_BAND_HEIGHT: f32 = 20.0;
+/// Height of the band under the ticks that the phase markers' labels stand
+/// in, so that no label covers a lane.
+const MARKER_BAND_HEIGHT: f32 = MARKER_LABEL_SIZE + 4.0;
+/// Height of the time ruler at the top of the timeline: its ticks over the
+/// phase markers' labels.
+const RULER_HEIGHT: f32 = TICK_BAND_HEIGHT + MARKER_BAND_HEIGHT;
 /// Rough pixel spacing aimed for between ruler ticks; the actual step is rounded
 /// to a 1/2/5 multiple near this.
 const RULER_TARGET_TICK_PX: f64 = 120.0;
 
 /// Font size of a phase-marker label.
 const MARKER_LABEL_SIZE: f32 = 11.0;
+/// The narrowest room a phase-marker label is cut short to; a label with
+/// less room is left out, its line still drawn.
+const MIN_MARKER_LABEL_WIDTH: f32 = 24.0;
 
 /// Height of the band between the flame chart and the counters strip that a
 /// press takes hold of to resize the strip, wide enough to aim a press at where
@@ -799,10 +808,6 @@ fn set_list_thumb(handle: &ScrollHandle, offset: f32) {
     handle.set_offset(o);
 }
 
-/// Picks the lowest of `rows` whose last occupied right-extent leaves room for a
-/// label spanning `[left, right]`, adding a new row when none is clear, and
-/// records the label's extent in the chosen row. Keeps clustered labels visible
-/// by staggering them down across as many rows as the cluster needs.
 /// The left x of a `label_w`-wide label placed `gap` right of `anchor`, flipped
 /// to `gap` left of it when the right placement would spill past `right_limit`.
 pub(crate) fn label_x(anchor: f32, label_w: f32, gap: f32, right_limit: f32) -> f32 {
@@ -813,22 +818,76 @@ pub(crate) fn label_x(anchor: f32, label_w: f32, gap: f32, right_limit: f32) -> 
     }
 }
 
-fn assign_marker_row(rows: &mut Vec<f32>, left: f32, right: f32) -> usize {
-    let row = (0..rows.len())
-        .find(|&r| left >= rows[r])
-        .unwrap_or_else(|| {
-            rows.push(f32::MIN);
-            rows.len() - 1
-        });
-    rows[row] = right;
-    row
+/// Where a phase marker's label stands in the marker band: from `left`,
+/// within `width`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MarkerLabel {
+    left: f32,
+    width: f32,
 }
 
-/// Draws each build-phase boundary as a vertical line spanning both sections
-/// with its name labeled near the top, confined to the time axis and skipping
-/// any off-screen. A label that would run past the right edge is flipped to the
-/// left of its line; clustered labels stagger across a few stacked rows so none
-/// is dropped.
+/// Places the labels of markers at `lines`, each its x and its label's full
+/// width in order of x, in the one row of the marker band between
+/// `left_limit` and `right_limit`. A label stands right of its line up to the next line; where
+/// it does not fit there, left of its line where that keeps clear of the
+/// label and line before it; and otherwise cut short to the room right of its
+/// line, or left out where that room is narrower than
+/// [`MIN_MARKER_LABEL_WIDTH`].
+fn place_marker_labels(
+    lines: &[(f32, f32)],
+    gap: f32,
+    left_limit: f32,
+    right_limit: f32,
+) -> Vec<Option<MarkerLabel>> {
+    let mut placed = Vec::with_capacity(lines.len());
+    let mut clear_from = left_limit;
+    for (i, &(x, width)) in lines.iter().enumerate() {
+        let next = lines.get(i + 1).map_or(right_limit, |&(next, _)| next);
+        let room = next - x - 2.0 * gap;
+        let label = if width <= room {
+            Some(MarkerLabel {
+                left: x + gap,
+                width,
+            })
+        } else if x - gap - width >= clear_from {
+            Some(MarkerLabel {
+                left: x - gap - width,
+                width,
+            })
+        } else if room >= MIN_MARKER_LABEL_WIDTH {
+            Some(MarkerLabel {
+                left: x + gap,
+                width: room,
+            })
+        } else {
+            None
+        };
+        clear_from = match label {
+            Some(label) => label.left + label.width + gap,
+            None => x + gap,
+        };
+        placed.push(label);
+    }
+    placed
+}
+
+/// The window x of each build-phase boundary on the time axis, in order of
+/// time, with its name; any off-screen left out.
+fn shown_markers(
+    profile: &Profile,
+    tv: TimeView,
+    regions: Regions,
+) -> impl Iterator<Item = (f32, &str)> {
+    profile.phase_markers().iter().filter_map(move |marker| {
+        let x = tv.x_of(marker.start_us);
+        (0.0..=regions.time_w)
+            .contains(&x)
+            .then(|| (regions.content_left + x, profile.str(marker.name)))
+    })
+}
+
+/// Draws each build-phase boundary as a vertical line down through both
+/// sections, confined to the time axis.
 fn paint_markers(
     profile: &Profile,
     tv: TimeView,
@@ -836,24 +895,13 @@ fn paint_markers(
     show_counters: bool,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut App,
 ) {
-    let top = regions.flame_top;
-    let height = regions.flame_bottom - regions.flame_top;
-    let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(MARKER_LABEL_SIZE);
-    let row_h = MARKER_LABEL_SIZE + 2.0;
-    // Each row's last occupied right-extent, growing as a cluster needs more rows,
-    // so a label drops to the lowest row that clears the previous label there.
-    let mut rows: Vec<f32> = Vec::new();
-    for marker in profile.phase_markers() {
-        let x = tv.x_of(marker.start_us);
-        if x < 0.0 || x > regions.time_w {
-            continue;
-        }
-        let lx = regions.content_left + x;
+    for (x, _) in shown_markers(profile, tv, regions) {
         window.paint_quad(fill(
-            Bounds::new(point(px(lx), px(top)), size(px(1.), px(height))),
+            Bounds::new(
+                point(px(x), px(regions.flame_top)),
+                size(px(1.), px(regions.flame_h())),
+            ),
             palette.marker,
         ));
         // Continue the marker line through the counters strip, which shares the
@@ -861,24 +909,77 @@ fn paint_markers(
         if show_counters {
             window.paint_quad(fill(
                 Bounds::new(
-                    point(px(lx), px(regions.counters_top)),
+                    point(px(x), px(regions.counters_top)),
                     size(px(1.), px(regions.counters_h())),
                 ),
                 palette.marker,
             ));
         }
-        let line = bviz_ui_assets::shape_line(
-            window,
-            profile.str(marker.name).to_string(),
-            font.clone(),
-            fs,
-            palette.marker.into(),
-        );
-        let label_w = f32::from(line.width());
-        let left = label_x(lx, label_w, SLICE_TEXT_PAD, regions.time_right);
-        let row = assign_marker_row(&mut rows, left, left + label_w + SLICE_TEXT_PAD);
+    }
+}
+
+/// Draws the build-phase boundaries into the ruler's marker band: each
+/// line's stretch there and its name as [`place_marker_labels`] places it.
+/// Painted over the ruler, whose band it is.
+fn paint_marker_band(
+    profile: &Profile,
+    tv: TimeView,
+    regions: Regions,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let band_top = regions.flame_top - MARKER_BAND_HEIGHT;
+    let font = bviz_ui_assets::text_metrics(window).font;
+    let fs = px(MARKER_LABEL_SIZE);
+    let mut shown: Vec<(f32, &str, ShapedLine)> = shown_markers(profile, tv, regions)
+        .map(|(x, name)| {
+            let line = bviz_ui_assets::shape_line(
+                window,
+                name.to_string(),
+                font.clone(),
+                fs,
+                palette.marker.into(),
+            );
+            (x, name, line)
+        })
+        .collect();
+    shown.sort_by(|(a, ..), (b, ..)| a.total_cmp(b));
+    let lines: Vec<(f32, f32)> = shown
+        .iter()
+        .map(|(x, _, line)| (*x, f32::from(line.width())))
+        .collect();
+    let placed = place_marker_labels(
+        &lines,
+        SLICE_TEXT_PAD,
+        regions.content_left,
+        regions.time_right,
+    );
+    let label_top = band_top + (MARKER_BAND_HEIGHT - MARKER_LABEL_SIZE) / 2.0;
+    for ((x, name, line), label) in shown.into_iter().zip(placed) {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(px(x), px(band_top)),
+                size(px(1.), px(MARKER_BAND_HEIGHT)),
+            ),
+            palette.marker,
+        ));
+        let Some(label) = label else {
+            continue;
+        };
+        let line = match label.width < f32::from(line.width()) {
+            true => bviz_ui_components::shape_truncated(
+                name,
+                label.width,
+                font.clone(),
+                fs,
+                palette.marker.into(),
+                window,
+            ),
+            false => line,
+        };
         let _ = line.paint(
-            point(px(left), px(top + 2.0 + row as f32 * row_h)),
+            point(px(label.left), px(label_top)),
             fs,
             TextAlign::Left,
             None,
@@ -938,12 +1039,12 @@ fn paint_ruler(
     let band = Bounds::new(bounds.origin, size(bounds.size.width, px(RULER_HEIGHT)));
     window.paint_quad(fill(band, palette.header_band));
     let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(RULER_HEIGHT - 2. * SLICE_TEXT_PAD);
-    let ty = bounds.origin.y + px((RULER_HEIGHT - f32::from(fs)) / 2.);
+    let fs = px(TICK_BAND_HEIGHT - 2. * SLICE_TEXT_PAD);
+    let ty = bounds.origin.y + px((TICK_BAND_HEIGHT - f32::from(fs)) / 2.);
     for (x, label) in ticks {
         let tx = px(regions.content_left + *x);
         let tick = Bounds::new(
-            point(tx, bounds.origin.y + px(RULER_HEIGHT - 4.)),
+            point(tx, bounds.origin.y + px(TICK_BAND_HEIGHT - 4.)),
             size(px(1.), px(4.)),
         );
         window.paint_quad(fill(tick, palette.label));
@@ -1880,18 +1981,28 @@ mod tests {
     }
 
     #[test]
-    fn assign_marker_row_staggers_overlaps() {
-        let mut rows: Vec<f32> = Vec::new();
-        // The first label takes row 0.
-        assert_eq!(assign_marker_row(&mut rows, 0.0, 50.0), 0);
-        // Overlapping labels keep adding rows as the cluster needs them.
-        assert_eq!(assign_marker_row(&mut rows, 10.0, 60.0), 1);
-        assert_eq!(assign_marker_row(&mut rows, 20.0, 70.0), 2);
-        assert_eq!(assign_marker_row(&mut rows, 30.0, 80.0), 3);
-        assert_eq!(rows.len(), 4);
-        // A label clear of row 0's extent reuses it rather than adding a row.
-        assert_eq!(assign_marker_row(&mut rows, 60.0, 100.0), 0);
-        assert_eq!(rows.len(), 4);
+    fn a_marker_label_stands_right_then_left_of_its_line_then_cut_short_or_left_out() {
+        let label = |left, width| Some(MarkerLabel { left, width });
+        // Room up to the next line: right of the line.
+        assert_eq!(
+            place_marker_labels(&[(0.0, 50.0), (100.0, 50.0)], 2.0, 0.0, 500.0),
+            [label(2.0, 50.0), label(102.0, 50.0)]
+        );
+        // Too little room right but clear room left: left of the line.
+        assert_eq!(
+            place_marker_labels(&[(100.0, 50.0), (110.0, 50.0)], 2.0, 0.0, 500.0),
+            [label(48.0, 50.0), label(112.0, 50.0)]
+        );
+        // Neither: cut short to the room right, or left out with too little.
+        assert_eq!(
+            place_marker_labels(&[(0.0, 50.0), (40.0, 80.0), (45.0, 50.0)], 2.0, 0.0, 500.0),
+            [label(2.0, 36.0), None, label(47.0, 50.0)]
+        );
+        // The last line's room runs to the right limit.
+        assert_eq!(
+            place_marker_labels(&[(490.0, 50.0)], 2.0, 0.0, 500.0),
+            [label(438.0, 50.0)]
+        );
     }
 
     const BUILD_US: i64 = 40_000_000;
