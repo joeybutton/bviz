@@ -30,33 +30,126 @@ impl Filter {
             false => Carried::default(),
         };
         let written = WrittenRepos::of(facets);
-        let rules: Vec<Resolved> = self
-            .rules
-            .iter()
-            .map(|rule| Resolved::of(rule, names, facets, &written, &carried, ids))
+        let rules: Vec<Resolved> = (0u32..)
+            .zip(&self.rules)
+            .map(|(index, rule)| Resolved::of(index, rule, names, facets, &written, &carried, ids))
             .collect();
 
-        let mut stated: Vec<Option<Visibility>> = vec![None; ids];
+        let mut stated: Vec<Option<Stated>> = vec![None; ids];
         for node in &graph.nodes {
             if let Some(rule) = rules.iter().rev().find(|rule| rule.matches(node, facets)) {
-                stated[node.id.0 as usize] = Some(rule.visibility);
+                stated[node.id.0 as usize] = Some(Stated::Rule {
+                    index: rule.index,
+                    visibility: rule.visibility,
+                });
             }
         }
         for (&id, &pinned) in &self.pins {
             if let Some(stated) = stated.get_mut(id.0 as usize) {
-                *stated = Some(pinned);
+                *stated = Some(Stated::Pin(pinned));
             }
         }
 
-        let unmatched = Verdict::from(self.base.visibility());
-        let mut by_id: Vec<Verdict> = stated
+        let unmatched = Reached::of(self.base.visibility(), Hiding::Base);
+        let mut by_id: Vec<Reached> = stated
             .iter()
-            .map(|stated| stated.map_or(unmatched, Verdict::from))
+            .map(|stated| stated.map_or(unmatched, Stated::reached))
             .collect();
         let parents = Parents::of(graph, ids);
         hide_empty_frames(graph, &parents, &mut by_id);
         frame_drawn_nodes(graph, &parents, &stated, &mut by_id);
         Verdicts { by_id, unmatched }
+    }
+}
+
+/// What decided one node's visibility before where it sits in the containment
+/// forest was weighed.
+#[derive(Clone, Copy, Debug)]
+enum Stated {
+    Pin(Visibility),
+    Rule { index: u32, visibility: Visibility },
+}
+
+impl Stated {
+    fn reached(self) -> Reached {
+        match self {
+            Stated::Pin(visibility) => Reached::of(visibility, Hiding::Pin),
+            Stated::Rule { index, visibility } => Reached::of(visibility, Hiding::Rule(index)),
+        }
+    }
+}
+
+/// What a filter hides a node by.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Hiding {
+    /// The node's own pin.
+    Pin,
+    /// The rule at this index of [`Filter::rules`], the last one matching the
+    /// node.
+    Rule(u32),
+    /// The filter's [`Base`](crate::select::Base), no rule or pin having
+    /// matched the node.
+    Base,
+    /// The node is a frame and nothing it holds is drawn, which no rule or pin
+    /// over the frame itself can change.
+    NothingToFrame,
+}
+
+/// A [`Verdict`] with what hid the node where it is hidden, packed into one
+/// word, since a caller may keep one for every node of a graph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Reached(u32);
+
+impl Reached {
+    const SHOWN: Reached = Reached(0);
+    const FADED: Reached = Reached(1);
+    const CONTEXT: Reached = Reached(2);
+    const BY_PIN: u32 = 3;
+    const BY_BASE: u32 = 4;
+    const BY_NOTHING_TO_FRAME: u32 = 5;
+    /// The code of [`Hiding::Rule`]`(0)`; each later rule counts on from it.
+    const BY_FIRST_RULE: u32 = 6;
+
+    fn hidden(hiding: Hiding) -> Self {
+        Reached(match hiding {
+            Hiding::Pin => Self::BY_PIN,
+            Hiding::Base => Self::BY_BASE,
+            Hiding::NothingToFrame => Self::BY_NOTHING_TO_FRAME,
+            Hiding::Rule(index) => Self::BY_FIRST_RULE + index,
+        })
+    }
+
+    /// The verdict `visibility` gives a node, hidden by `hiding` where it hides.
+    fn of(visibility: Visibility, hiding: Hiding) -> Self {
+        match visibility {
+            Visibility::Shown => Self::SHOWN,
+            Visibility::Hidden => Self::hidden(hiding),
+            Visibility::Faded => Self::FADED,
+        }
+    }
+
+    /// What hid the node; `None` where it is drawn.
+    fn hiding(self) -> Option<Hiding> {
+        match self.0 {
+            0..Self::BY_PIN => None,
+            Self::BY_PIN => Some(Hiding::Pin),
+            Self::BY_BASE => Some(Hiding::Base),
+            Self::BY_NOTHING_TO_FRAME => Some(Hiding::NothingToFrame),
+            rule => Some(Hiding::Rule(rule - Self::BY_FIRST_RULE)),
+        }
+    }
+
+    fn verdict(self) -> Verdict {
+        match self {
+            Self::SHOWN => Verdict::Shown,
+            Self::FADED => Verdict::Faded,
+            Self::CONTEXT => Verdict::Context,
+            _ => Verdict::Hidden,
+        }
+    }
+
+    fn drawn(self) -> bool {
+        self.verdict().drawn()
     }
 }
 
@@ -117,7 +210,7 @@ impl Parents {
 /// around empty space. A filter discriminating on a target name leaves one —
 /// a pattern naming one target, and text a reader is part way through typing,
 /// each cover no package at all.
-fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Verdict]) {
+fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Reached]) {
     let mut framing: Vec<bool> = vec![false; by_id.len()];
     for node in &graph.nodes {
         let id = node.id.0 as usize;
@@ -135,7 +228,7 @@ fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Verdict]) {
     for node in &graph.nodes {
         let id = node.id.0 as usize;
         if node.kind.is_frame() && !framing[id] {
-            by_id[id] = Verdict::Hidden;
+            by_id[id] = Reached::hidden(Hiding::NothingToFrame);
         }
     }
 }
@@ -147,8 +240,8 @@ fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Verdict]) {
 fn frame_drawn_nodes(
     graph: &Graph,
     parents: &Parents,
-    stated: &[Option<Visibility>],
-    by_id: &mut [Verdict],
+    stated: &[Option<Stated>],
+    by_id: &mut [Reached],
 ) {
     for node in &graph.nodes {
         let id = node.id.0 as usize;
@@ -158,7 +251,7 @@ fn frame_drawn_nodes(
         let mut at = parents.above(id);
         while let Some(ancestor) = at {
             if stated[ancestor].is_none() && !by_id[ancestor].drawn() {
-                by_id[ancestor] = Verdict::Context;
+                by_id[ancestor] = Reached::CONTEXT;
             }
             at = parents.above(ancestor);
         }
@@ -168,14 +261,33 @@ fn frame_drawn_nodes(
 /// What a filter made of every node of one graph, by node id.
 #[derive(Clone, Debug)]
 pub struct Verdicts {
-    by_id: Vec<Verdict>,
-    unmatched: Verdict,
+    by_id: Vec<Reached>,
+    unmatched: Reached,
+}
+
+impl Default for Verdicts {
+    /// The verdicts of a filter deciding nothing, which shows every node.
+    fn default() -> Self {
+        Verdicts {
+            by_id: Vec::new(),
+            unmatched: Reached::SHOWN,
+        }
+    }
 }
 
 impl Verdicts {
     /// The verdict for the node `id` names. An id the evaluated graph does not
     /// name reads as the verdict of a node no rule reached.
     pub fn get(&self, id: Id) -> Verdict {
+        self.reached(id).verdict()
+    }
+
+    /// What hid the node `id` names; `None` where the filter draws it.
+    pub fn hiding(&self, id: Id) -> Option<Hiding> {
+        self.reached(id).hiding()
+    }
+
+    fn reached(&self, id: Id) -> Reached {
         self.by_id
             .get(id.0 as usize)
             .copied()
@@ -198,11 +310,14 @@ struct Resolved<'a> {
     tags: Option<Column>,
     aspects: Option<Column>,
     admitted: Option<Admitted>,
+    /// Where the rule stands in [`Filter::rules`].
+    index: u32,
     visibility: Visibility,
 }
 
 impl<'a> Resolved<'a> {
     fn of(
+        index: u32,
         rule: &'a Rule,
         names: &Names,
         facets: &Facets,
@@ -232,6 +347,7 @@ impl<'a> Resolved<'a> {
                 .as_ref()
                 .map(|aspects| aspect_column(aspects, facets, ids)),
             admitted: Admitted::of(predicate, names, written, carried),
+            index,
             visibility: rule.visibility,
         }
     }
@@ -1144,5 +1260,114 @@ mod tests {
         assert_eq!(verdicts.get(fixture.id(OTHER_PACKAGE)), Verdict::Hidden);
         assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
         assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Context);
+    }
+
+    /// Each hidden node names what hid it: the last rule matching it, its own
+    /// pin, or the base where neither reached it.
+    #[test]
+    fn a_hidden_node_names_what_hid_it() {
+        let fixture = Nested::new();
+        let filter = Filter {
+            base: Base::HideAll,
+            rules: vec![
+                Rule {
+                    predicate: Predicate {
+                        kinds: Values::new([Kind::Action]),
+                        ..Predicate::default()
+                    },
+                    visibility: Visibility::Shown,
+                },
+                Rule {
+                    predicate: Predicate {
+                        kinds: Values::new([Kind::Action]),
+                        ..Predicate::default()
+                    },
+                    visibility: Visibility::Hidden,
+                },
+            ],
+            pins: [(fixture.id(OTHER_ACTION), Visibility::Hidden)]
+                .into_iter()
+                .collect(),
+        };
+
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.hiding(fixture.id(COMPILE)), Some(Hiding::Rule(1)));
+        assert_eq!(verdicts.hiding(fixture.id(OTHER_ACTION)), Some(Hiding::Pin));
+        assert_eq!(
+            verdicts.hiding(fixture.id(OTHER_TARGET)),
+            Some(Hiding::Base)
+        );
+    }
+
+    #[test]
+    fn a_drawn_node_names_nothing_hiding_it() {
+        let fixture = Nested::new();
+        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
+
+        for drawn in [COMPILE, TARGET, PACKAGE] {
+            assert_eq!(verdicts.hiding(fixture.id(drawn)), None);
+        }
+    }
+
+    /// A frame whose contents are all hidden is hidden for that alone, so even
+    /// a pin showing the frame is not what decides it.
+    #[test]
+    fn an_emptied_frame_is_hidden_by_having_nothing_to_frame() {
+        let fixture = Nested::new();
+        let filter = Filter {
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target, Kind::Action]),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
+            }],
+            pins: [(fixture.id(PACKAGE), Visibility::Shown)]
+                .into_iter()
+                .collect(),
+            ..Filter::default()
+        };
+
+        let verdicts = fixture.evaluate(&filter);
+
+        for package in [PACKAGE, OTHER_PACKAGE] {
+            assert_eq!(
+                verdicts.hiding(fixture.id(package)),
+                Some(Hiding::NothingToFrame)
+            );
+        }
+    }
+
+    #[test]
+    fn a_packed_verdict_reads_back_what_hid_the_node() {
+        for hiding in [
+            Hiding::Pin,
+            Hiding::Base,
+            Hiding::NothingToFrame,
+            Hiding::Rule(0),
+            Hiding::Rule(70_000),
+        ] {
+            let reached = Reached::of(Visibility::Hidden, hiding);
+            assert_eq!(reached.hiding(), Some(hiding));
+            assert_eq!(reached.verdict(), Verdict::Hidden);
+        }
+        for (visibility, verdict) in [
+            (Visibility::Shown, Verdict::Shown),
+            (Visibility::Faded, Verdict::Faded),
+        ] {
+            let reached = Reached::of(visibility, Hiding::Base);
+            assert_eq!(reached.hiding(), None);
+            assert_eq!(reached.verdict(), verdict);
+        }
+        assert_eq!(Reached::CONTEXT.hiding(), None);
+    }
+
+    #[test]
+    fn the_verdicts_of_no_filter_show_every_node() {
+        let verdicts = Verdicts::default();
+
+        assert_eq!(verdicts.get(Id(0)), Verdict::Shown);
+        assert_eq!(verdicts.hiding(Id(0)), None);
     }
 }

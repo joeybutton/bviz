@@ -18,7 +18,7 @@ use crate::facets::{RuleCategory, Tri};
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
-pub use eval::{Verdict, Verdicts};
+pub use eval::{Hiding, Verdict, Verdicts};
 use pattern::{PackagePrefix, Pattern};
 
 /// What a filter says is to become of one node.
