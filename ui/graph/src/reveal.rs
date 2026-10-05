@@ -2,7 +2,8 @@
 //! panel's filter or its dependency paths leave that node undrawn.
 
 use crate::derive::{self, Hidden};
-use crate::framing::Frame;
+use crate::framing::{Frame, Held};
+use crate::history::History;
 use crate::mode::LayoutMode;
 use crate::rules::{self, Term};
 use crate::search::{self, Act};
@@ -102,11 +103,82 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
     }
 }
 
+/// One place the panel's view has been moved to.
+#[derive(Clone, Copy, PartialEq)]
+enum Stop {
+    Node(Id),
+    /// Where the view stood, with no node selected, as the first jump left it.
+    View(Held),
+}
+
+/// The places the panel has been moved to by name, walked back and forth.
+#[derive(Default)]
+pub(crate) struct Jumps(Option<History<Stop>>);
+
+impl Jumps {
+    /// Records a jump onto `id`; the first also records `origin`, where the
+    /// view stood as it left.
+    fn visit(&mut self, id: Id, origin: Option<Stop>) {
+        let onto = Stop::Node(id);
+        match (&mut self.0, origin) {
+            (Some(history), _) => history.push(onto),
+            (None, Some(origin)) => {
+                let mut history = History::new(origin);
+                history.push(onto);
+                self.0 = Some(history);
+            }
+            (None, None) => self.0 = Some(History::new(onto)),
+        }
+    }
+
+    fn back(&mut self) -> Option<Stop> {
+        self.0.as_mut()?.back().copied()
+    }
+
+    fn forward(&mut self) -> Option<Stop> {
+        self.0.as_mut()?.forward().copied()
+    }
+}
+
 /// Selects `id` and moves the view onto it, opening what holds it in a layered
 /// drawing, and asks for the panel to be shown. A node the drawing leaves out is
-/// offered to be revealed anyway instead.
+/// offered to be revealed anyway instead. The node is the jump [`back`] returns
+/// from.
 pub(crate) fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    ask(view, id, Ask::Show, cx);
+    let origin = match view.selection.node() {
+        Some(selected) => Some(Stop::Node(selected)),
+        None => view.framing.hold().map(Stop::View),
+    };
+    view.jumps.visit(id, origin);
+    revisit(view, Stop::Node(id), cx);
+}
+
+/// Returns to where the view stood before the last jump.
+pub(crate) fn back(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if let Some(stop) = view.jumps.back() {
+        revisit(view, stop, cx);
+    }
+}
+
+/// Returns to where the view stood after the jump [`back`] returned from.
+pub(crate) fn forward(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if let Some(stop) = view.jumps.forward() {
+        revisit(view, stop, cx);
+    }
+}
+
+/// Moves the view to `stop`, leaving the jumps as they stand: a node as
+/// [`reveal`] moves onto it, and a view the first jump left by easing back
+/// to it with nothing selected.
+fn revisit(view: &mut GraphPanel, stop: Stop, cx: &mut Context<GraphPanel>) {
+    match stop {
+        Stop::Node(id) => ask(view, id, Ask::Show, cx),
+        Stop::View(held) => {
+            dismiss(view);
+            view.selection.clear();
+            view.framing.return_to(held);
+        }
+    }
     cx.emit(PanelEvent::Activate);
     view.invalidate_canvas(cx);
 }
@@ -201,9 +273,11 @@ pub(crate) fn dismiss(view: &mut GraphPanel) -> bool {
     pending
 }
 
-/// Forgets the reveal, which named a node of a graph that has been replaced.
+/// Forgets the reveal and the jumps, which named nodes of a graph that has
+/// been replaced.
 pub(crate) fn reset(view: &mut GraphPanel) {
     view.reveal = Reveal::Idle;
+    view.jumps = Jumps::default();
 }
 
 /// The offer to reveal a node the drawing leaves out, naming what hides it, for
@@ -329,6 +403,43 @@ mod tests {
 
         assert_eq!(filtered(&only, Hiding::Base), HiddenBy::Search);
         assert_eq!(filtered(&Filter::default(), Hiding::Base), HiddenBy::Base);
+    }
+
+    /// The node a stop names, where it names one.
+    fn node(stop: Option<Stop>) -> Option<Id> {
+        match stop? {
+            Stop::Node(id) => Some(id),
+            Stop::View(_) => None,
+        }
+    }
+
+    #[test]
+    fn the_jumps_walk_back_and_forth_and_a_new_jump_drops_those_ahead() {
+        let mut jumps = Jumps::default();
+        assert!(jumps.back().is_none());
+        for id in [1, 2, 3] {
+            jumps.visit(Id(id), None);
+        }
+        assert_eq!(node(jumps.back()), Some(Id(2)));
+        assert_eq!(node(jumps.back()), Some(Id(1)));
+        assert!(jumps.back().is_none());
+        assert_eq!(node(jumps.forward()), Some(Id(2)));
+        jumps.visit(Id(4), None);
+        assert!(jumps.forward().is_none());
+        assert_eq!(node(jumps.back()), Some(Id(2)));
+    }
+
+    /// The first jump keeps where the view stood as it left, so stepping back
+    /// after a single jump returns there; later jumps leave from a stop the
+    /// history holds.
+    #[test]
+    fn the_first_jump_keeps_where_the_view_stood() {
+        let mut jumps = Jumps::default();
+        jumps.visit(Id(5), Some(Stop::Node(Id(1))));
+        jumps.visit(Id(6), Some(Stop::Node(Id(9))));
+        assert_eq!(node(jumps.back()), Some(Id(5)));
+        assert_eq!(node(jumps.back()), Some(Id(1)));
+        assert!(jumps.back().is_none());
     }
 
     #[test]

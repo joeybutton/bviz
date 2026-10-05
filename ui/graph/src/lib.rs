@@ -88,7 +88,16 @@ use scroll::{scrollbar_hit, start_scroll_drag};
 use search::Search;
 use selection::Selection;
 
-actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, Dismiss]);
+actions!(
+    bviz_graph,
+    [
+        ToggleNeighborhood,
+        ToggleReduce,
+        Dismiss,
+        JumpBack,
+        JumpForward
+    ]
+);
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
@@ -117,6 +126,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("h", ToggleNeighborhood, outside_text),
         KeyBinding::new("r", ToggleReduce, outside_text),
         KeyBinding::new("escape", Dismiss, outside_text),
+        KeyBinding::new("alt-left", JumpBack, outside_text),
+        KeyBinding::new("alt-right", JumpForward, outside_text),
         KeyBinding::new("cmd-f", jump::Open, graph),
         KeyBinding::new("ctrl-f", jump::Open, graph),
         KeyBinding::new("/", jump::Open, outside_text),
@@ -313,6 +324,7 @@ pub struct GraphPanel {
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
     reveal: reveal::Reveal,
+    jumps: reveal::Jumps,
     report: report::Card,
     timecard: timecard::Card,
     /// The dependency paths asked for, which the panel draws in place of its
@@ -513,6 +525,7 @@ impl GraphPanel {
             missing_open: false,
             pins: pins::Pins::new(),
             reveal: reveal::Reveal::Idle,
+            jumps: reveal::Jumps::default(),
             report: report::Card::new(),
             timecard: timecard::Card::new(),
             why: why::Why::new(),
@@ -841,6 +854,14 @@ impl Render for GraphPanel {
             )
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &JumpBack, _, cx| {
+                jump::dismiss(view, cx);
+                reveal::back(view, cx);
+            }))
+            .on_action(cx.listener(|view, _: &JumpForward, _, cx| {
+                jump::dismiss(view, cx);
+                reveal::forward(view, cx);
+            }))
             .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
@@ -1245,6 +1266,26 @@ mod tests {
         assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
         assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
         assert!(is(dispatched("shift-tab", IN_PALETTE), jump::PreviousScope));
+    }
+
+    /// The panel's own jumps and the exclusive view's foci are walked by the
+    /// same keys, each in its own panel, and a text field keeps them.
+    #[test]
+    fn alt_arrows_walk_the_history_of_the_panel_holding_focus() {
+        assert!(is(dispatched("alt-left", IN_PANEL), JumpBack));
+        assert!(is(dispatched("alt-right", IN_PANEL), JumpForward));
+        for keys in ["alt-left", "alt-right"] {
+            for field in [IN_PALETTE, IN_SEARCH] {
+                assert!(!is(dispatched(keys, field), JumpBack), "{keys}");
+                assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
+            }
+        }
+        let exclusive = &[exclusive::KEY_CONTEXT];
+        assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
+        assert!(is(
+            dispatched("alt-right", exclusive),
+            exclusive::FocusForward
+        ));
     }
 
     #[test]

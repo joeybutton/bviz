@@ -31,7 +31,7 @@ pub(crate) enum Target {
 }
 
 /// A view a [`Framing`] stood at, to be returned to.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Held {
     camera: Camera,
     chosen_zoom: f32,

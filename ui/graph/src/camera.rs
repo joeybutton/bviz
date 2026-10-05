@@ -146,7 +146,7 @@ pub(crate) struct Settle {
 
 /// The pan/zoom viewport transform: `zoom` scales layout units to pixels and
 /// `pan` is the screen offset of the content's near edges.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Camera {
     pub(crate) zoom: f32,
     pub(crate) pan: (f32, f32),
