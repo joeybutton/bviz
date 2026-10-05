@@ -1,16 +1,19 @@
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
+    AnyView, App, AppContext, BorderStyle, Bounds, Context, Font, Hsla, IntoElement, ParentElement,
     Pixels, Point, Render, Rgba, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div,
-    point, px, quad, size,
+    font, point, px, quad, size,
 };
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
 /// Inset of the text block from the panel's edges.
 const TOOLTIP_PAD: f32 = 6.0;
-/// Leading added below each line.
+/// Leading between the panel's lines.
 const TOOLTIP_LINE_GAP: f32 = 4.0;
 const TOOLTIP_LINE_HEIGHT: f32 = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
+/// Widest a line of the panel's text runs before it wraps, a measure that
+/// reads in one sweep of the eye.
+const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 /// How far from its anchor the panel is placed along each axis, clear of it.
 const TOOLTIP_OFFSET: f32 = 12.0;
 /// Corner radius of the panel.
@@ -104,25 +107,34 @@ pub fn paint_tooltip_box(
     );
 }
 
-/// Each of `lines` shaped as a tooltip panel reads it.
+/// The rows of `text` set in `font` as a tooltip panel reads them, wrapped
+/// at [`TOOLTIP_MAX_WIDTH`].
+fn shape_rows(text: &str, font: Font, color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
+    bviz_ui_assets::shape_wrapped(
+        window,
+        text,
+        font,
+        px(TOOLTIP_TEXT_SIZE),
+        color,
+        px(TOOLTIP_MAX_WIDTH),
+    )
+}
+
+/// Each of `lines` shaped as [`shape_rows`] shapes it.
 fn shape_lines(lines: &[String], color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
     let font = bviz_ui_assets::text_metrics(window).font;
-    let fs = px(TOOLTIP_TEXT_SIZE);
     lines
         .iter()
-        .map(|line| bviz_ui_assets::shape_line(window, line.clone(), font.clone(), fs, color))
+        .flat_map(|line| shape_rows(line, font.clone(), color, window))
         .collect()
 }
 
-/// The extent of the padded panel around `shaped`.
-fn panel_extent(shaped: &[ShapedLine]) -> Size<Pixels> {
-    let text_w = shaped
-        .iter()
-        .map(|l| f32::from(l.width()))
-        .fold(0.0_f32, f32::max);
+/// The extent of the padded panel around `rows`.
+fn panel_extent(rows: &[ShapedLine]) -> Size<Pixels> {
+    let text_w = rows.iter().map(|row| row.width()).fold(px(0.), Pixels::max);
     size(
-        px(text_w + 2.0 * TOOLTIP_PAD),
-        px(shaped.len() as f32 * TOOLTIP_LINE_HEIGHT + 2.0 * TOOLTIP_PAD),
+        text_w + px(2.0 * TOOLTIP_PAD),
+        px(rows.len() as f32 * TOOLTIP_LINE_HEIGHT + 2.0 * TOOLTIP_PAD),
     )
 }
 
@@ -153,18 +165,16 @@ pub fn paint_tooltip(
         Hsla::from(colors.border),
         BorderStyle::Solid,
     ));
-    let fs = px(TOOLTIP_TEXT_SIZE);
-    for (i, line) in shaped.into_iter().enumerate() {
-        let offset = point(
-            px(TOOLTIP_PAD),
-            px(TOOLTIP_PAD + i as f32 * TOOLTIP_LINE_HEIGHT),
-        );
-        let _ = line.paint(origin + offset, fs, TextAlign::Left, None, window, cx);
+    let line_height = px(TOOLTIP_LINE_HEIGHT);
+    let mut top = origin + point(px(TOOLTIP_PAD), px(TOOLTIP_PAD));
+    for row in shaped {
+        let _ = row.paint(top, line_height, TextAlign::Left, None, window, cx);
+        top.y += line_height;
     }
 }
 
-/// A line of text in the panel [`paint_tooltip_box`] paints, as a view an
-/// element's own tooltip can show.
+/// Text in the panel [`paint_tooltip_box`] paints, as a view an element's own
+/// tooltip can show. Each `\n` in it starts a line.
 pub struct TextTooltip {
     text: SharedString,
     colors: TooltipColors,
@@ -184,7 +194,13 @@ impl TextTooltip {
 }
 
 impl Render for TextTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let rows = shape_rows(
+            &self.text,
+            font(bviz_ui_assets::UI),
+            self.colors.label.into(),
+            window,
+        );
         // A tooltip view is drawn outside the element tree that sets the UI
         // face, so it inherits none.
         div()
@@ -195,8 +211,12 @@ impl Render for TextTooltip {
             .border_color(self.colors.border)
             .bg(self.colors.panel)
             .text_size(px(TOOLTIP_TEXT_SIZE))
+            .line_height(px(TOOLTIP_LINE_HEIGHT))
             .text_color(self.colors.label)
-            .child(self.text.clone())
+            .flex()
+            .flex_col()
+            .whitespace_nowrap()
+            .children(rows.into_iter().map(|row| row.text))
     }
 }
 

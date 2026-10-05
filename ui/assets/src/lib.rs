@@ -10,6 +10,8 @@ use gpui::{
 };
 use std::borrow::Cow;
 
+pub mod wrap;
+
 /// UI font family.
 pub const UI: &str = "Inter";
 /// Monospace font family.
@@ -44,17 +46,52 @@ pub fn shape_line(
     color: Hsla,
 ) -> ShapedLine {
     let text = text.into();
-    let run = TextRun {
+    let run = plain_run(&text, font, color);
+    window
+        .text_system()
+        .shape_line(text, font_size, &[run], None)
+}
+
+/// Shape `text` as [`shape_line`] does, one line per row of it: each
+/// `\n`-separated line broken into rows at most `wrap_width` wide where
+/// [`wrap::rows`] breaks it.
+pub fn shape_wrapped(
+    window: &mut Window,
+    text: &str,
+    font: Font,
+    font_size: Pixels,
+    color: Hsla,
+    wrap_width: Pixels,
+) -> Vec<ShapedLine> {
+    let mut shaped = Vec::new();
+    for line in text.split('\n') {
+        let whole = shape_line(window, line.to_owned(), font.clone(), font_size, color);
+        let rows = wrap::rows(
+            line,
+            |ix| f32::from(whole.x_for_index(ix)),
+            f32::from(wrap_width),
+        );
+        if rows.len() == 1 {
+            shaped.push(whole);
+        } else {
+            shaped.extend(rows.into_iter().map(|row| {
+                shape_line(window, line[row].to_owned(), font.clone(), font_size, color)
+            }));
+        }
+    }
+    shaped
+}
+
+/// One undecorated run over all of `text`.
+fn plain_run(text: &str, font: Font, color: Hsla) -> TextRun {
+    TextRun {
         len: text.len(),
         font,
         color,
         background_color: None,
         underline: None,
         strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text, font_size, &[run], None)
+    }
 }
 
 macro_rules! embedded {
