@@ -30,6 +30,26 @@ pub enum Visibility {
     Faded,
 }
 
+/// An override a filter holds for one node, by who set it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Pin {
+    /// Set by a reader, deciding the node until they take it back.
+    Set(Visibility),
+    /// Shows a node the rules hide for a view that was asked to show it, held
+    /// apart from a reader's own pins so it can be withdrawn without touching
+    /// them.
+    Revealed,
+}
+
+impl Pin {
+    pub fn visibility(self) -> Visibility {
+        match self {
+            Pin::Set(visibility) => visibility,
+            Pin::Revealed => Visibility::Shown,
+        }
+    }
+}
+
 /// The verdict a filter reaches for a node no rule of it matches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Base {
@@ -68,7 +88,7 @@ pub struct Rule {
 pub struct Filter {
     pub base: Base,
     pub rules: Vec<Rule>,
-    pub pins: HashMap<Id, Visibility>,
+    pub pins: HashMap<Id, Pin>,
 }
 
 /// The values one term admits, of which a node's facet must carry one.
@@ -543,7 +563,9 @@ mod tests {
         let filter = Filter {
             base: Base::HideAll,
             rules: vec![hide_targets()],
-            pins: [(fixture.id(app), Visibility::Shown)].into_iter().collect(),
+            pins: [(fixture.id(app), Pin::Set(Visibility::Shown))]
+                .into_iter()
+                .collect(),
         };
 
         assert_eq!(fixture.verdict(&filter, app), Verdict::Shown);

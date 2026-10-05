@@ -46,7 +46,7 @@ impl Filter {
         }
         for (&id, &pinned) in &self.pins {
             if let Some(stated) = stated.get_mut(id.0 as usize) {
-                *stated = Some(Stated::Pin(pinned));
+                *stated = Some(Stated::Pin(pinned.visibility()));
             }
         }
 
@@ -662,8 +662,8 @@ mod tests {
     use super::*;
     use crate::facets::{FacetsBuilder, RuleCategory};
     use crate::repo::{RepoCategory, RepoName};
-    use crate::select::Base;
     use crate::select::pattern::{PackagePrefix, Pattern};
+    use crate::select::{Base, Pin};
 
     /// A graph holding, in the main repository, a `cc_test` target with the
     /// configured target, action, and output artifact it owns, all of which
@@ -994,14 +994,32 @@ mod tests {
             kinds: Values::new([Kind::Target]),
             ..Predicate::default()
         });
-        filter.pins.insert(fixture.id(APP), Visibility::Faded);
-        filter.pins.insert(fixture.id(SOURCE), Visibility::Shown);
+        filter
+            .pins
+            .insert(fixture.id(APP), Pin::Set(Visibility::Faded));
+        filter
+            .pins
+            .insert(fixture.id(SOURCE), Pin::Set(Visibility::Shown));
 
         let verdicts = fixture.evaluate(&filter);
         assert_eq!(verdicts.get(fixture.id(APP)), Verdict::Faded);
         assert_eq!(verdicts.get(fixture.id(SOURCE)), Verdict::Shown);
         assert_eq!(verdicts.get(fixture.id(LIB)), Verdict::Shown);
         assert_eq!(verdicts.get(fixture.id(ACTION)), Verdict::Hidden);
+    }
+
+    #[test]
+    fn a_revealed_pin_shows_the_node_the_rules_hide() {
+        let fixture = Fixture::new();
+        let mut filter = showing(Predicate {
+            kinds: Values::new([Kind::Target]),
+            ..Predicate::default()
+        });
+        filter.pins.insert(fixture.id(ACTION), Pin::Revealed);
+
+        let verdicts = fixture.evaluate(&filter);
+        assert_eq!(verdicts.get(fixture.id(ACTION)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(OUTPUT)), Verdict::Hidden);
     }
 
     /// A filter whose rules overlap, so that the order they are read in decides
@@ -1063,7 +1081,7 @@ mod tests {
                     Visibility::Shown,
                 ),
             ],
-            pins: [(fixture.id(OUTPUT), Visibility::Faded)]
+            pins: [(fixture.id(OUTPUT), Pin::Set(Visibility::Faded))]
                 .into_iter()
                 .collect(),
         }
@@ -1139,7 +1157,9 @@ mod tests {
         fn showing_one(&self, name: &str) -> Filter {
             Filter {
                 base: Base::HideAll,
-                pins: [(self.id(name), Visibility::Shown)].into_iter().collect(),
+                pins: [(self.id(name), Pin::Set(Visibility::Shown))]
+                    .into_iter()
+                    .collect(),
                 ..Filter::default()
             }
         }
@@ -1248,7 +1268,7 @@ mod tests {
                 },
                 visibility: Visibility::Shown,
             }],
-            pins: [(fixture.id(OTHER_ACTION), Visibility::Hidden)]
+            pins: [(fixture.id(OTHER_ACTION), Pin::Set(Visibility::Hidden))]
                 .into_iter()
                 .collect(),
         };
@@ -1285,7 +1305,7 @@ mod tests {
                     visibility: Visibility::Hidden,
                 },
             ],
-            pins: [(fixture.id(OTHER_ACTION), Visibility::Hidden)]
+            pins: [(fixture.id(OTHER_ACTION), Pin::Set(Visibility::Hidden))]
                 .into_iter()
                 .collect(),
         };
@@ -1323,7 +1343,7 @@ mod tests {
                 },
                 visibility: Visibility::Hidden,
             }],
-            pins: [(fixture.id(PACKAGE), Visibility::Shown)]
+            pins: [(fixture.id(PACKAGE), Pin::Set(Visibility::Shown))]
                 .into_iter()
                 .collect(),
             ..Filter::default()

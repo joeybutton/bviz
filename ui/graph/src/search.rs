@@ -15,7 +15,7 @@ use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
-use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
+use bviz_graph_layout::select::{Base, Filter, Pin, Predicate, Rule, Visibility};
 use bviz_ui_components::{Button, QueryField, QueryFieldEvent};
 use gpui::{
     ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels,
@@ -474,7 +474,7 @@ fn row(
     cx: &mut Context<GraphPanel>,
 ) -> Stateful<Div> {
     let target = matched.target;
-    let kept = pins::pinned(filter, target) == Some(Visibility::Shown);
+    let kept = pins::pinned(filter, target) == Some(Pin::Set(Visibility::Shown));
     div()
         .id(("search-match", target.0 as usize))
         .flex()

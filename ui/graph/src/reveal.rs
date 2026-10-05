@@ -34,7 +34,7 @@ pub(crate) enum HiddenBy {
 impl HiddenBy {
     /// Whether a reveal can bring the node into the drawing.
     pub(crate) fn revealable(self) -> bool {
-        matches!(self, HiddenBy::Paths | HiddenBy::Pin)
+        self != HiddenBy::NothingToFrame
     }
 
     pub(crate) fn describe(self) -> &'static str {
@@ -112,8 +112,9 @@ pub(crate) fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>
 }
 
 /// As [`reveal`], bringing a node the drawing leaves out into it: a node off
-/// the dependency paths drawn returns the drawing to the filter, and one the
-/// reader's own pin hides loses that pin. A node that cannot be revealed stays
+/// the dependency paths drawn returns the drawing to the filter, one the
+/// reader's own pin hides loses that pin, and one the rest of the filter hides
+/// is pinned with [`pins::reveal`]. A node that cannot be revealed stays
 /// offered, with the reason.
 pub(crate) fn reveal_anyway(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     ask(view, id, Ask::Anyway, cx);
@@ -151,13 +152,16 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
             view.reveal = Reveal::Waiting(id, Ask::Show);
             pins::unpin(view, id, cx);
         }
-        (Some(HiddenBy::Paths), Ask::Anyway) => {
+        (Some(by), Ask::Anyway) if by.revealable() => {
             view.reveal = Reveal::Waiting(id, Ask::Anyway);
             // Set ahead of the request below, whose derivation reads it.
             if view.mode == LayoutMode::Layered {
                 view.derived.open_onto_next(id);
             }
-            why::clear(view, cx);
+            match by {
+                HiddenBy::Paths => why::clear(view, cx),
+                _ => pins::reveal(view, id, cx),
+            }
         }
         (Some(by), _) => view.reveal = Reveal::Offered(id, by),
     }
@@ -328,12 +332,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_paths_and_a_readers_pin_can_be_undone_by_a_reveal() {
-        for revealable in [HiddenBy::Paths, filtered(&Filter::default(), Hiding::Pin)] {
+    fn only_a_frame_with_nothing_drawn_inside_cannot_be_revealed() {
+        assert!(!filtered(&Filter::default(), Hiding::NothingToFrame).revealable());
+        for revealable in [
+            HiddenBy::Paths,
+            filtered(&Filter::default(), Hiding::Pin),
+            filtered(&Filter::default(), Hiding::Base),
+        ] {
             assert!(revealable.revealable());
-        }
-        for kept in [Hiding::Base, Hiding::NothingToFrame] {
-            assert!(!filtered(&Filter::default(), kept).revealable());
         }
     }
 }

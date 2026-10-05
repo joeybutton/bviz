@@ -1223,7 +1223,7 @@ mod tests {
     use crate::selection::Selection;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::labels::LabelIndex;
-    use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
+    use bviz_graph_layout::select::{Pin, Predicate, Rule, Values, Visibility};
     use bviz_graph_layout::{EdgeKind, Facets, Kind};
 
     /// [`document_placing`] with its map landed.
@@ -1463,7 +1463,9 @@ mod tests {
         let (kept, hidden) = (id(&loaded, "//a:t"), id(&loaded, "//b:t"));
         let expanded: HashSet<Id> = [kept, hidden].into_iter().collect();
         let filter = Filter {
-            pins: [(hidden, Visibility::Hidden)].into_iter().collect(),
+            pins: [(hidden, Pin::Set(Visibility::Hidden))]
+                .into_iter()
+                .collect(),
             ..Filter::default()
         };
 

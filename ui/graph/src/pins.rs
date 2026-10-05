@@ -8,7 +8,7 @@
 
 use crate::{GraphPanel, Palette, checklist};
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::select::{Filter, Visibility};
+use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
 use gpui::{
@@ -29,24 +29,39 @@ const MAX_HEIGHT_SHARE: f32 = 0.6;
 /// leaves so the labels line up.
 const MARK: Pixels = px(12.);
 
-/// How a reader is offered the override `pin`.
-fn label(pin: Visibility) -> &'static str {
+/// How a reader is offered the override `pin`, and how it is listed.
+fn label(pin: Pin) -> &'static str {
     match pin {
-        Visibility::Shown => "always show",
-        Visibility::Hidden => "always hide",
-        Visibility::Faded => "always fade",
+        Pin::Set(Visibility::Shown) => "always show",
+        Pin::Set(Visibility::Hidden) => "always hide",
+        Pin::Set(Visibility::Faded) => "always fade",
+        Pin::Revealed => "revealed",
     }
 }
 
-/// `filter` with `node` pinned to `pin`, or with its pin dropped where it
-/// already carries that one, so the same gesture puts the override away.
-pub(crate) fn toggle(filter: &Filter, node: Id, pin: Visibility) -> Filter {
+/// `filter` with `node` pinned to `visibility`, or with its pin dropped where
+/// it already carries that one, so the same gesture puts the override away.
+pub(crate) fn toggle(filter: &Filter, node: Id, visibility: Visibility) -> Filter {
+    let pin = Pin::Set(visibility);
     let mut pins = filter.pins.clone();
     if pins.get(&node) == Some(&pin) {
         pins.remove(&node);
     } else {
         pins.insert(node, pin);
     }
+    Filter {
+        pins,
+        ..filter.clone()
+    }
+}
+
+/// `filter` with `node` revealed in place of any node revealed before it, which
+/// keeps one view's request to be shown a node from piling up behind the next.
+/// A pin the reader set on `node` stands, and decides it.
+pub(crate) fn revealing(filter: &Filter, node: Id) -> Filter {
+    let mut pins = filter.pins.clone();
+    pins.retain(|_, pin| *pin != Pin::Revealed);
+    pins.entry(node).or_insert(Pin::Revealed);
     Filter {
         pins,
         ..filter.clone()
@@ -64,7 +79,7 @@ fn unpinned(filter: &Filter, node: Id) -> Filter {
 }
 
 /// The override `filter` holds for `node`.
-pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Visibility> {
+pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Pin> {
     filter.pins.get(&node).copied()
 }
 
@@ -103,7 +118,7 @@ impl Pins {
 struct Held {
     node: Id,
     label: SharedString,
-    pin: Visibility,
+    pin: Pin,
 }
 
 /// The overrides `filter` holds, by the name each is listed under.
@@ -121,6 +136,12 @@ fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
 /// Pins `node` to `pin`, or takes that override back off.
 pub(crate) fn set(view: &mut GraphPanel, node: Id, pin: Visibility, cx: &mut Context<GraphPanel>) {
     let filter = toggle(view.derived.filter(), node, pin);
+    checklist::set_filter(view, filter, cx);
+}
+
+/// Shows `node` whatever the rules say, as [`revealing`] pins it.
+pub(crate) fn reveal(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
+    let filter = revealing(view.derived.filter(), node);
     checklist::set_filter(view, filter, cx);
 }
 
@@ -157,7 +178,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option
             cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, Visibility::Hidden, cx)),
         )
         .ghost()
-        .label(label(Visibility::Hidden)),
+        .label(label(Pin::Set(Visibility::Hidden))),
     )
 }
 
@@ -256,7 +277,7 @@ fn listed(
 
 /// One listed override, which a click takes back off.
 fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<Div> {
-    let (node, pin) = (held.node, held.pin);
+    let node = held.node;
     div()
         .id(("pinned", node.0 as usize))
         .flex()
@@ -265,7 +286,7 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
         .cursor_pointer()
         .text_xs()
         .text_color(palette.label)
-        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, pin, cx)))
+        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| unpin(view, node, cx)))
         .child(
             div()
                 .flex_1()
@@ -275,7 +296,7 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
                 .text_ellipsis()
                 .child(held.label),
         )
-        .child(div().flex_none().child(label(pin)))
+        .child(div().flex_none().child(label(held.pin)))
 }
 
 #[cfg(test)]
@@ -374,7 +395,10 @@ mod tests {
             rules: hiding_actions().rules,
             ..pinning.clone()
         };
-        assert_eq!(pinned(&reduced, dropped), Some(Visibility::Hidden));
+        assert_eq!(
+            pinned(&reduced, dropped),
+            Some(Pin::Set(Visibility::Hidden))
+        );
         assert_eq!(
             fixture.verdict(&reduced, "target://lib:main"),
             Verdict::Hidden
@@ -409,10 +433,10 @@ mod tests {
         let node = Id(0);
         let shown = toggle(&Filter::default(), node, Visibility::Shown);
 
-        assert_eq!(pinned(&shown, node), Some(Visibility::Shown));
+        assert_eq!(pinned(&shown, node), Some(Pin::Set(Visibility::Shown)));
         assert_eq!(
             pinned(&toggle(&shown, node, Visibility::Hidden), node),
-            Some(Visibility::Hidden)
+            Some(Pin::Set(Visibility::Hidden))
         );
         assert_eq!(toggle(&shown, node, Visibility::Shown), Filter::default());
     }
@@ -432,7 +456,7 @@ mod tests {
             Visibility::Hidden,
         );
 
-        let listed: Vec<(String, Visibility)> = held(&filter, &fixture.names, &fixture.facets)
+        let listed: Vec<(String, Pin)> = held(&filter, &fixture.names, &fixture.facets)
             .into_iter()
             .map(|held| (held.label.to_string(), held.pin))
             .collect();
@@ -440,9 +464,51 @@ mod tests {
         assert_eq!(
             listed,
             [
-                ("//app:main".to_string(), Visibility::Hidden),
-                ("//lib:main".to_string(), Visibility::Shown),
+                ("//app:main".to_string(), Pin::Set(Visibility::Hidden)),
+                ("//lib:main".to_string(), Pin::Set(Visibility::Shown)),
             ]
         );
+    }
+
+    /// A node revealed shows whatever the rules say, and is told from a pin
+    /// the reader set, which revealing another node leaves alone while the
+    /// earlier reveal is withdrawn.
+    #[test]
+    fn revealing_a_node_withdraws_the_one_revealed_before_and_keeps_the_readers_pins() {
+        let fixture = Fixture::new();
+        let first = fixture.id("//app:main#compile");
+        let second = fixture.id("//lib:main#compile");
+        let kept = fixture.id("target://app:main");
+        let pinned_by_reader = toggle(&hiding_actions(), kept, Visibility::Faded);
+
+        let once = revealing(&pinned_by_reader, first);
+        assert_eq!(pinned(&once, first), Some(Pin::Revealed));
+        assert_eq!(fixture.verdict(&once, "//app:main#compile"), Verdict::Shown);
+
+        let twice = revealing(&once, second);
+        assert_eq!(pinned(&twice, first), None);
+        assert_eq!(pinned(&twice, second), Some(Pin::Revealed));
+        assert_eq!(pinned(&twice, kept), Some(Pin::Set(Visibility::Faded)));
+        assert_eq!(
+            fixture.verdict(&twice, "//app:main#compile"),
+            Verdict::Hidden
+        );
+    }
+
+    /// Revealing a node the reader pinned leaves their pin deciding it, and
+    /// asking to always show a revealed node makes the pin the reader's own.
+    #[test]
+    fn a_reveal_never_replaces_a_readers_pin() {
+        let node = Id(0);
+        let hidden = toggle(&Filter::default(), node, Visibility::Hidden);
+
+        let revealed = revealing(&hidden, node);
+        assert_eq!(revealed, hidden);
+
+        let revealed = revealing(&Filter::default(), node);
+        assert_eq!(pinned(&revealed, node), Some(Pin::Revealed));
+        let kept = toggle(&revealed, node, Visibility::Shown);
+        assert_eq!(pinned(&kept, node), Some(Pin::Set(Visibility::Shown)));
+        assert_eq!(pinned(&unpinned(&kept, node), node), None);
     }
 }
