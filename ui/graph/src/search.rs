@@ -24,8 +24,8 @@ use gpui::{
 
 actions!(bviz_graph, [DismissResults]);
 
-/// The key context the search field carries, by which the panel's own
-/// single-key bindings stand down while a pattern is being typed into it.
+/// The key context the search field carries, scoping the keys that act on the
+/// card of its results.
 pub(crate) const KEY_CONTEXT: &str = "GraphSearch";
 
 /// How many matches the result list names. It is a sample of what the pattern

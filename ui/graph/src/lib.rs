@@ -7,7 +7,7 @@ use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
-    cached_layer, overlay_canvas,
+    cached_layer, overlay_canvas, text_input,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -97,10 +97,10 @@ pub fn register_keys(cx: &mut App) {
 }
 
 fn bindings() -> Vec<KeyBinding> {
-    // A bare letter types into the search field rather than dispatching, so the
-    // panel's own bindings stand down inside it.
-    let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
-    let outside_search = Some(predicate.as_str());
+    // A bare character typed into a text field is text, so the panel's own
+    // bindings stand down inside one.
+    let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let outside_text = Some(outside_text.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
     let exclusive = format!(
@@ -110,9 +110,9 @@ fn bindings() -> Vec<KeyBinding> {
     );
     let outside_roots = Some(exclusive.as_str());
     vec![
-        KeyBinding::new("h", ToggleNeighborhood, outside_search),
-        KeyBinding::new("r", ToggleReduce, outside_search),
-        KeyBinding::new("escape", Dismiss, outside_search),
+        KeyBinding::new("h", ToggleNeighborhood, outside_text),
+        KeyBinding::new("r", ToggleReduce, outside_text),
+        KeyBinding::new("escape", Dismiss, outside_text),
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
@@ -1162,7 +1162,7 @@ mod tests {
     /// under the panel's bindings and those of the text field.
     fn dispatched(keys: &str, contexts: &[&str]) -> Option<std::boxed::Box<dyn gpui::Action>> {
         let mut bindings = bindings();
-        bindings.extend(bviz_ui_components::text_input::bindings());
+        bindings.extend(text_input::bindings());
         let keymap = gpui::Keymap::new(bindings);
         let stack: Vec<gpui::KeyContext> = contexts
             .iter()
@@ -1180,20 +1180,19 @@ mod tests {
     }
 
     const IN_PANEL: &[&str] = &[KEY_CONTEXT];
-    const IN_SEARCH: &[&str] = &[
-        KEY_CONTEXT,
-        search::KEY_CONTEXT,
-        bviz_ui_components::text_input::KEY_CONTEXT,
-    ];
+    const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_SEARCH: &[&str] = &[KEY_CONTEXT, search::KEY_CONTEXT, text_input::KEY_CONTEXT];
 
-    /// A letter typed into the search field is text, not one of the panel's
+    /// A letter typed into any text field is text, not one of the panel's
     /// keys.
     #[test]
-    fn the_panels_letters_stand_down_in_the_search_field() {
+    fn the_panels_letters_stand_down_in_any_text_field() {
         assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
         assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
-        assert!(dispatched("h", IN_SEARCH).is_none());
-        assert!(dispatched("r", IN_SEARCH).is_none());
+        for field in [IN_SEARCH, IN_FIELD] {
+            assert!(dispatched("h", field).is_none());
+            assert!(dispatched("r", field).is_none());
+        }
     }
 
     #[test]
