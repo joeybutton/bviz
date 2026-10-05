@@ -64,6 +64,12 @@ impl ExecLog {
         read::read_path(path)
     }
 
+    /// The log's spawns, for readers that join them to what other outputs of
+    /// the invocation record.
+    pub fn into_spawns(self) -> LoggedSpawns {
+        self.spawns
+    }
+
     pub fn spawn_count(&self) -> usize {
         self.spawns.len()
     }

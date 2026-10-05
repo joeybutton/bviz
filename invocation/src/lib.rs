@@ -18,6 +18,8 @@ pub use outcomes::{
 pub use runner::{Runner, Spawns};
 pub use timings::{Profiled, Share, Spent, Timing, Timings};
 
+use spawn::LoggedSpawns;
+
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
 
@@ -160,6 +162,10 @@ pub struct Session {
     configurations: Configurations,
     outcomes: Reported<Outcomes>,
     timings: Reported<Timings>,
+    /// Shared, as a derivation off the UI thread reads it. Held, every
+    /// spawn's outputs with it, for as long as the session is, whether or
+    /// not a view of the invocation reads them.
+    logged_spawns: Reported<Option<Arc<LoggedSpawns>>>,
 }
 
 impl Session {
@@ -210,6 +216,25 @@ impl Session {
 
     pub fn report_attempts(&mut self, reported: Attempts) {
         self.attempts.replace(reported);
+    }
+
+    /// The spawns the invocation's execution log records, `None` until one
+    /// is reported.
+    pub fn logged_spawns(&self) -> Option<&Arc<LoggedSpawns>> {
+        self.logged_spawns.value.as_ref()
+    }
+
+    /// The same for as long as [`logged_spawns`](Self::logged_spawns) are
+    /// those of one report, whatever else the session learns meanwhile.
+    pub fn logged_spawns_revision(&self) -> Revision {
+        self.logged_spawns.revision
+    }
+
+    /// Takes `reported` for the spawns the invocation's execution log records.
+    /// An invocation writes one execution log, so these stand in place of any
+    /// reported before.
+    pub fn report_logged_spawns(&mut self, reported: LoggedSpawns) {
+        self.logged_spawns.replace(Some(Arc::new(reported)));
     }
 }
 
@@ -403,6 +428,29 @@ mod tests {
         session.report_attempts(Attempts::default());
         assert_ne!(session.attempts_revision(), attempted);
         assert!(session.attempts().is_empty());
+    }
+
+    #[test]
+    fn a_sessions_logged_spawns_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let unlogged = session.logged_spawns_revision();
+        assert!(session.logged_spawns().is_none());
+        session.report_timings(Timings::default());
+        assert_eq!(session.logged_spawns_revision(), unlogged);
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = session.logged_spawns_revision();
+        assert_ne!(logged, unlogged);
+        assert!(
+            session
+                .logged_spawns()
+                .is_some_and(|spawns| spawns.is_empty())
+        );
+        session.report_outcomes(Outcomes::default());
+        assert_eq!(session.logged_spawns_revision(), logged);
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        assert_ne!(session.logged_spawns_revision(), logged);
     }
 
     #[test]
