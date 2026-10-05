@@ -10,15 +10,14 @@ use crate::theme::Palette;
 use crate::{
     STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE, profile_status,
 };
-use bviz_critical_path::{CriticalPath, Part, Step};
+use bviz_critical_path::{Coverage, CriticalPath, Part, Phase, Spawned, Step};
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, centered_notice, centered_spinner,
-    list_scrollbar,
+    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner, list_scrollbar,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use fills::{Fills, outside};
 use gpui::{
-    App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
     MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Subscription, Window, div,
     prelude::*, px, relative, uniform_list,
 };
@@ -28,9 +27,17 @@ const KEY_CONTEXT: &str = "TraceCriticalPath";
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
+/// A step's bar of parts where a strip of spawn phases may stand beneath it.
+const TIER_HEIGHT: Pixels = px(8.);
+const TIER_GAP: Pixels = px(2.);
+/// A strip of spawn phases.
+const STRIP_HEIGHT: Pixels = px(6.);
 /// The canvas showing between two segments of a bar, so neighbouring parts
 /// part by more than their colours.
 const SEGMENT_GAP: Pixels = px(2.);
+/// The same between the phases of a step's strip, narrower so that the many
+/// phases of a short step still leave room for their fills.
+const STRIP_GAP: Pixels = px(1.);
 /// The narrowest a step's bar is drawn, so even the shortest step's bar can
 /// be hovered for its parts.
 const MIN_BAR_WIDTH: Pixels = px(4.);
@@ -39,6 +46,10 @@ const SWATCH: Pixels = px(10.);
 const SHARE_WIDTH: f32 = 72.0;
 /// Width of the column holding a step's bar of parts.
 const BAR_COLUMN_WIDTH: f32 = 200.0;
+/// The narrowest a phase is drawn in a step's strip, in pixels; narrower
+/// phases are folded into one remainder, whose fill and tooltip stand for
+/// them together.
+const MIN_STRIP_PHASE_WIDTH: f32 = 2.0;
 
 /// One column of the steps table: its title and its fixed width, `None` for
 /// the one flexible column.
@@ -151,6 +162,7 @@ impl CriticalPathPanel {
                     return Vec::new();
                 };
                 let whole = path.path();
+                let tiered = path.coverage().is_some_and(|coverage| coverage.steps() > 0);
                 range
                     .map(|index| {
                         step_row(
@@ -158,6 +170,7 @@ impl CriticalPathPanel {
                             &path.steps()[index],
                             whole,
                             longest,
+                            tiered,
                             &palette,
                             &fills,
                         )
@@ -194,7 +207,8 @@ impl CriticalPathPanel {
 }
 
 /// The wall time partitioned along the path as one bar and its legend, each
-/// part's segment and entry hovered for what its time went to.
+/// part's segment and entry hovered for what its time went to; and where the
+/// execution log accounts for steps, their actions' time by spawn phase.
 fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
     let parts: Vec<(Part, Duration, SharedString)> = Part::ALL
         .into_iter()
@@ -203,19 +217,22 @@ fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
         .map(|(part, time)| (part, time, words::part_account(part, path).into()))
         .collect();
     let legend = parts.iter().map(|(part, time, account)| {
-        div()
-            .id(("critical-path-legend", part.index()))
-            .flex()
-            .items_center()
-            .gap_1()
-            .tooltip(TextTooltip::builder(account.clone(), palette.tooltip))
-            .child(swatch(*part, fills))
-            .child(format!(
-                "{} {}",
-                words::part_name(*part),
-                words::duration(*time)
-            ))
+        legend_entry(
+            ("critical-path-legend", part.index()),
+            part_swatch(*part, fills),
+            format!("{} {}", words::part_name(*part), words::duration(*time)),
+            account.clone(),
+            palette,
+        )
     });
+    let segments = parts
+        .iter()
+        .map(|(part, time, account)| part_segment(*part, *time, account.clone(), fills));
+    let path_bar = bar("path", segments, path.wall(), SEGMENT_GAP, palette).h(PATH_BAR_HEIGHT);
+    let spawned = path
+        .coverage()
+        .filter(|coverage| coverage.steps() > 0)
+        .map(|coverage| spawned_summary(&coverage, palette, fills));
     div()
         .flex()
         .flex_col()
@@ -224,35 +241,109 @@ fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
         .px_3()
         .py_2()
         .child(div().text_base().child(words::headline(path)))
-        .child(
-            parts_bar(
-                "path",
-                parts.clone().into_iter(),
-                path.wall(),
-                fills,
-                palette.tooltip,
-            )
-            .w_full()
-            .h(PATH_BAR_HEIGHT),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_3()
-                .text_color(palette.muted_label)
-                .children(legend),
-        )
+        .child(path_bar.w_full())
+        .child(legend_row(palette).children(legend))
+        .children(spawned)
 }
 
-fn swatch(part: Part, fills: &Fills) -> Div {
-    div()
-        .size(SWATCH)
-        .flex_shrink_0()
-        .bg(fills.part(part))
-        .when(outside(part), |swatch| {
-            swatch.border_1().border_color(fills.outside_edge)
+/// The time the actions of the steps `coverage` holds spent in each spawn
+/// phase and around their spawns, as a titled bar over its legend: a scale
+/// of its own, apart from the path's bar above it.
+fn spawned_summary(coverage: &Coverage, palette: &Palette, fills: &Fills) -> Div {
+    let phases: Vec<(Phase, Duration, SharedString)> = Phase::ALL
+        .into_iter()
+        .map(|phase| (phase, coverage.phase(phase)))
+        .filter(|(_, time)| !time.is_zero())
+        .map(|(phase, time)| (phase, time, words::phase_account(phase, coverage).into()))
+        .collect();
+    let around = (!coverage.around().is_zero()).then(|| {
+        (
+            coverage.around(),
+            SharedString::from(words::around_account(coverage)),
+        )
+    });
+    let segments = phases
+        .iter()
+        .map(|(phase, time, account)| phase_segment(*phase, *time, account.clone(), fills))
+        .chain(
+            around
+                .clone()
+                .map(|(time, account)| around_segment(time, account, fills)),
+        );
+    let legend = phases
+        .iter()
+        .map(|(phase, time, account)| {
+            legend_entry(
+                ("critical-path-phase-legend", phase.index()),
+                swatch(fills.phase(*phase), None),
+                format!("{} {}", words::phase_name(*phase), words::duration(*time)),
+                account.clone(),
+                palette,
+            )
         })
+        .chain(around.map(|(time, account)| {
+            legend_entry(
+                ("critical-path-phase-legend", Phase::ALL.len()),
+                swatch(fills.around_spawns(), Some(fills.outside_edge)),
+                format!("{} {}", words::AROUND_SPAWNS, words::duration(time)),
+                account,
+                palette,
+            )
+        }))
+        .collect::<Vec<_>>();
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .mt_1()
+        .child(div().child(words::spawned_title(coverage)))
+        .child(
+            bar("spawned", segments, coverage.action(), SEGMENT_GAP, palette)
+                .w_full()
+                .h(PATH_BAR_HEIGHT),
+        )
+        .child(legend_row(palette).children(legend))
+}
+
+fn legend_row(palette: &Palette) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_x_3()
+        .text_color(palette.muted_label)
+}
+
+fn legend_entry(
+    id: impl Into<ElementId>,
+    swatch: Div,
+    label: String,
+    account: SharedString,
+    palette: &Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .tooltip(TextTooltip::builder(account, palette.tooltip))
+        .child(swatch)
+        .child(label)
+}
+
+fn part_swatch(part: Part, fills: &Fills) -> Div {
+    swatch(
+        fills.part(part),
+        outside(part).then_some(fills.outside_edge),
+    )
+}
+
+/// A legend's sample of `fill`, edged in `edge` where it has one.
+fn swatch(fill: Hsla, edge: Option<Hsla>) -> Div {
+    let swatch = div().size(SWATCH).flex_shrink_0().bg(fill);
+    match edge {
+        Some(edge) => swatch.border_1().border_color(edge),
+        None => swatch,
+    }
 }
 
 fn header_row(palette: &Palette) -> Div {
@@ -277,16 +368,18 @@ fn header_row(palette: &Palette) -> Div {
 
 /// Row `index` of the steps table, showing `step`, its own time a share of
 /// the path's `whole` and its bar as long against `longest` as its wait and
-/// own time are.
+/// own time are. A `tiered` bar draws the spawn phases of the step's action
+/// in a strip beneath its parts, where the execution log records spawns of it.
 fn step_row(
     index: usize,
     step: &Step,
     whole: Duration,
     longest: Duration,
+    tiered: bool,
     palette: &Palette,
     fills: &Fills,
 ) -> Stateful<Div> {
-    let [name, start, waited, own, share, bar] = &COLUMNS;
+    let [name, start, waited, own, share, bar_column] = &COLUMNS;
     let ran: Vec<&str> = [step.mnemonic(), step.target()]
         .into_iter()
         .flatten()
@@ -319,20 +412,33 @@ fn step_row(
             described.child(line(ran.join(" · ")).text_color(palette.muted_label))
         });
     let total = step.gap() + step.own();
-    let parts = step.parts().map(|(part, time)| {
+    let parts: Vec<(Part, Duration)> = step.parts().collect();
+    let segments = parts.iter().map(|&(part, time)| {
         let tip = words::part_tip(part, time, total, "the step's wait and own time");
-        (part, time, tip.into())
+        part_segment(part, time, tip.into(), fills)
     });
-    let bar_of = parts_bar(
+    let width = relative(words::fraction(total, longest) as f32);
+    let parts_bar = bar(
         ("critical-path-step-bar", index),
-        parts,
+        segments,
         total,
-        fills,
-        palette.tooltip,
-    )
-    .h(BAR_HEIGHT)
-    .min_w(MIN_BAR_WIDTH)
-    .w(relative(words::fraction(total, longest) as f32));
+        SEGMENT_GAP,
+        palette,
+    );
+    let bar_of = match (tiered, step.work().spawned()) {
+        (false, _) => parts_bar.h(BAR_HEIGHT).into_any_element(),
+        (true, spawned) => div()
+            .flex()
+            .flex_col()
+            .gap(TIER_GAP)
+            .child(parts_bar.h(TIER_HEIGHT))
+            .children(spawned.map(|spawned| {
+                spawn_strip(index, &parts, total, longest, spawned, palette, fills).h(STRIP_HEIGHT)
+            }))
+            .h(TIER_HEIGHT + TIER_GAP + STRIP_HEIGHT)
+            .into_any_element(),
+    };
+    let bar_of = div().min_w(MIN_BAR_WIDTH).w(width).child(bar_of);
     div()
         .id(("critical-path-row", index))
         .flex()
@@ -348,7 +454,7 @@ fn step_row(
         .child(table_cell(waited.width, [words::waited(index, step.gap())]))
         .child(table_cell(own.width, [words::duration(step.own())]))
         .child(table_cell(share.width, [words::share(step.own(), whole)]))
-        .child(table_cell(bar.width, [div().w_full().child(bar_of)]))
+        .child(table_cell(bar_column.width, [div().w_full().child(bar_of)]))
 }
 
 /// A line of a cell, cut short where the cell runs out of room for it.
@@ -361,33 +467,138 @@ fn line(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// `parts` as a bar, each segment as long against the bar as its time is
-/// against `total`, and hovered for its tooltip.
-fn parts_bar(
-    id: impl Into<ElementId>,
-    parts: impl Iterator<Item = (Part, Duration, SharedString)>,
+/// The spawn phases of a step's action under the step's bar of `parts`,
+/// each phase as long against the strip as its time is against the step's
+/// `total`, so the strip spans the action's segment above it. The bar is as
+/// long against its column as `total` is against `longest`, which sizes the
+/// phases folded into the remainder.
+fn spawn_strip(
+    index: usize,
+    parts: &[(Part, Duration)],
     total: Duration,
+    longest: Duration,
+    spawned: &Spawned,
+    palette: &Palette,
     fills: &Fills,
-    tooltip: TooltipColors,
 ) -> Stateful<Div> {
-    let fills = *fills;
-    let segments = parts.map(move |(part, time, tip)| {
-        div()
-            .id(part.index())
+    let action = spawned.time();
+    let of = "the action's time on the path";
+    let drawn_width = |time| BAR_COLUMN_WIDTH * words::fraction(time, longest) as f32;
+    let (wide, narrow): (Vec<_>, Vec<_>) = Phase::ALL
+        .into_iter()
+        .map(|phase| (phase, spawned.phase(phase)))
+        .filter(|(_, time)| !time.is_zero())
+        .partition(|&(_, time)| drawn_width(time) >= MIN_STRIP_PHASE_WIDTH);
+    let phases = wide.into_iter().map(|(phase, time)| {
+        let tip = words::named_tip(words::phase_name(phase), time, action, of);
+        phase_segment(phase, time, tip.into(), fills)
+    });
+    let folded = (!narrow.is_empty()).then(|| {
+        let time = narrow.iter().map(|&(_, time)| time).sum();
+        let names: Vec<&str> = narrow
+            .iter()
+            .map(|&(phase, _)| words::phase_name(phase))
+            .collect();
+        let tip = words::named_tip(&words::folded(&names), time, action, of);
+        Segment {
+            fill: fills.folded_phases(),
+            edge: None,
+            time,
+            tip: tip.into(),
+        }
+    });
+    let around = Some(spawned.around())
+        .filter(|around| !around.is_zero())
+        .map(|time| {
+            let tip = words::named_tip(words::AROUND_SPAWNS, time, action, of);
+            around_segment(time, tip.into(), fills)
+        });
+    let mut strip = Some(
+        bar(
+            ("critical-path-step-phases", index),
+            phases.chain(around).chain(folded),
+            action,
+            STRIP_GAP,
+            palette,
+        )
+        .size_full(),
+    );
+    let slots = parts.iter().map(|&(part, time)| {
+        let slot = div()
             .h_full()
-            .w(relative(words::fraction(time, total) as f32))
-            .bg(fills.part(part))
-            .when(outside(part), |segment| {
-                segment.border_1().border_color(fills.outside_edge)
-            })
-            .tooltip(TextTooltip::builder(tip, tooltip))
+            .w(relative(words::fraction(time, total) as f32));
+        match part {
+            Part::Action | Part::Unspanned => slot.children(strip.take()),
+            _ => slot,
+        }
     });
     div()
-        .id(id)
+        .id(("critical-path-step-strip", index))
         .flex()
         .flex_row()
         .gap(SEGMENT_GAP)
-        .children(segments)
+        .children(slots.collect::<Vec<_>>())
+}
+
+/// A stretch of a bar, hovered for `tip`.
+struct Segment {
+    fill: Hsla,
+    /// Edged as time outside what the bar breaks down.
+    edge: Option<Hsla>,
+    time: Duration,
+    tip: SharedString,
+}
+
+fn part_segment(part: Part, time: Duration, tip: SharedString, fills: &Fills) -> Segment {
+    Segment {
+        fill: fills.part(part),
+        edge: outside(part).then_some(fills.outside_edge),
+        time,
+        tip,
+    }
+}
+
+fn phase_segment(phase: Phase, time: Duration, tip: SharedString, fills: &Fills) -> Segment {
+    Segment {
+        fill: fills.phase(phase),
+        edge: None,
+        time,
+        tip,
+    }
+}
+
+fn around_segment(time: Duration, tip: SharedString, fills: &Fills) -> Segment {
+    Segment {
+        fill: fills.around_spawns(),
+        edge: Some(fills.outside_edge),
+        time,
+        tip,
+    }
+}
+
+/// `segments` as a bar, each as long against the bar as its time is against
+/// `total`, and hovered for its tooltip.
+fn bar(
+    id: impl Into<ElementId>,
+    segments: impl Iterator<Item = Segment>,
+    total: Duration,
+    gap: Pixels,
+    palette: &Palette,
+) -> Stateful<Div> {
+    let tooltip = palette.tooltip;
+    let segments = segments.enumerate().map(move |(i, segment)| {
+        let drawn = div()
+            .id(i)
+            .h_full()
+            .w(relative(words::fraction(segment.time, total) as f32))
+            .bg(segment.fill)
+            .tooltip(TextTooltip::builder(segment.tip, tooltip));
+        match segment.edge {
+            Some(edge) => drawn.border_1().border_color(edge),
+            None => drawn,
+        }
+    });
+    div().id(id).flex().flex_row().gap(gap).children(segments)
 }
 
 impl EventEmitter<PanelEvent> for CriticalPathPanel {}

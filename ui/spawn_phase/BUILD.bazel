@@ -5,7 +5,10 @@ rust_library(
     name = "spawn_phase",
     srcs = glob(["src/*.rs"]),
     crate_name = "bviz_ui_spawn_phase",
-    visibility = ["//ui/execlog:__pkg__"],
+    visibility = [
+        "//ui/execlog:__pkg__",
+        "//ui/trace:__pkg__",
+    ],
     deps = [
         "//invocation",
         "//ui/theme",

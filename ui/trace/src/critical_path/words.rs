@@ -1,11 +1,16 @@
 //! How the parts of a critical path read on screen.
 
 use crate::chart::format_duration;
-use bviz_critical_path::{CriticalPath, Part, Step, Work};
+use bviz_critical_path::{Coverage, CriticalPath, Part, Phase, Step, Work};
+pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
 
 /// What a share of the wall time is a share of, in a part's tooltip.
 const OF_THE_WALL_TIME: &str = "the wall time";
+/// What a share of the spawn phases' time is a share of, in a phase's tooltip.
+pub(crate) const OF_THE_ACTIONS: &str = "these actions' time";
+/// The name of an action's time outside its spawns.
+pub(crate) const AROUND_SPAWNS: &str = "around spawns";
 /// What a step's Waited cell shows where it waited no time.
 const NO_WAIT: &str = "—";
 
@@ -67,11 +72,18 @@ pub(crate) fn fraction(part: Duration, whole: Duration) -> f64 {
     }
 }
 
-/// The path in sum: the wall time, the steps' own time and their count.
+/// The path in sum: the wall time, the steps' own time and their count, and
+/// how much of it the execution log accounts for where one is given.
 pub(crate) fn headline(path: &CriticalPath) -> String {
     let steps = path.steps().len();
+    let logged = path.coverage().map_or(String::new(), |coverage| {
+        format!(
+            " · spawns logged for {} of it",
+            share(coverage.own(), path.path())
+        )
+    });
     format!(
-        "Wall time {} · critical path {} ({} of it) over {steps} {}",
+        "Wall time {} · critical path {} ({} of it) over {steps} {}{logged}",
         duration(path.wall()),
         duration(path.path()),
         share(path.path(), path.wall()),
@@ -81,11 +93,99 @@ pub(crate) fn headline(path: &CriticalPath) -> String {
 
 /// `part` with its time and share `of` what `whole` is, for its tooltip.
 pub(crate) fn part_tip(part: Part, time: Duration, whole: Duration, of: &str) -> String {
+    named_tip(part_name(part), time, whole, of)
+}
+
+/// What is `named`, with its time and share `of` what `whole` is.
+pub(crate) fn named_tip(named: &str, time: Duration, whole: Duration, of: &str) -> String {
     format!(
-        "{}: {} ({} of {of})",
-        part_name(part),
+        "{named}: {} ({} of {of})",
         duration(time),
         share(time, whole)
+    )
+}
+
+/// What the bar of the spawn phases shows: the logged actions' time on the
+/// path, a scale apart from the wall time's.
+pub(crate) fn spawned_title(coverage: &Coverage) -> String {
+    let steps = coverage.steps();
+    format!(
+        "Logged actions on the path by spawn phase — {steps} {}, {}",
+        if steps == 1 { "step" } else { "steps" },
+        duration(coverage.action())
+    )
+}
+
+/// The phases `names` lists, taken together.
+pub(crate) fn folded(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => (*name).to_owned(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    }
+}
+
+/// What an action's time in `phase` went to.
+fn phase_explanation(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Parse => {
+            "Building spawns' remote execution requests, mostly their input Merkle trees."
+        }
+        Phase::Upload => {
+            "Uploading inputs the remote cache lacked, beyond the time in calls to the cache."
+        }
+        Phase::Network => {
+            "Calls to the remote cache outstanding: action-cache lookups, checks for missing \
+             inputs, and the bytes of uploads and downloads."
+        }
+        Phase::Queue => {
+            "Waiting for a remote executor to start the spawn, or for the local resources \
+             to run it."
+        }
+        Phase::Setup => {
+            "Preparing to run: a remote executor staging inputs, or Bazel fetching inputs \
+             and setting up a local sandbox or worker."
+        }
+        Phase::Execute => "Running the spawns' commands.",
+        Phase::ProcessOutputs => {
+            "Moving outputs out: a remote executor uploading them to its cache, a local \
+             sandbox or worker copying them into place."
+        }
+        Phase::Fetch => "Downloading outputs, beyond the time in calls to the cache.",
+        Phase::Retry => "Earlier attempts of spawns that were run again.",
+        Phase::Other => {
+            "Spawn time Bazel's metrics put in no phase, such as waiting on a remote \
+             execution beyond what the executor reports."
+        }
+    }
+}
+
+/// The tooltip of `phase` in the spawn phases' bar and legend.
+pub(crate) fn phase_account(phase: Phase, coverage: &Coverage) -> String {
+    format!(
+        "{}\n{}",
+        named_tip(
+            phase_name(phase),
+            coverage.phase(phase),
+            coverage.action(),
+            OF_THE_ACTIONS
+        ),
+        phase_explanation(phase)
+    )
+}
+
+/// The tooltip of the time around spawns in the spawn phases' bar and legend.
+pub(crate) fn around_account(coverage: &Coverage) -> String {
+    format!(
+        "{}\nThe actions' time outside their spawns' metrics: deleting stale outputs, \
+         looking a spawn up in the cache when it misses, storing a locally run spawn's \
+         result in the cache, writing the execution log, and checking the outputs.",
+        named_tip(
+            AROUND_SPAWNS,
+            coverage.around(),
+            coverage.action(),
+            OF_THE_ACTIONS
+        )
     )
 }
 
@@ -182,6 +282,33 @@ mod tests {
         assert_eq!(
             headline(&path()),
             "Wall time 10.00ms · critical path 2.40ms (24.0% of it) over 2 steps"
+        );
+    }
+
+    #[test]
+    fn the_headline_says_how_much_of_the_path_a_given_log_accounts_for() {
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}},
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"Main Thread"}},
+            {"cat":"general information","name":"buildTargets","ph":"X","ts":0,"dur":10000,"tid":1},
+            {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":9000,"dur":400,"tid":0}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let unrelated = bviz_invocation::spawn::LoggedSpawns::default();
+        let path = CriticalPath::of(&profile, Some(&unrelated)).expect("path");
+        assert_eq!(
+            headline(&path),
+            "Wall time 10.00ms · critical path 400µs (4.0% of it) over 1 step · \
+             spawns logged for 0.0% of it"
+        );
+    }
+
+    #[test]
+    fn folded_phases_are_listed_together() {
+        assert_eq!(folded(&["parse"]), "parse");
+        assert_eq!(
+            folded(&["parse", "network", "fetch"]),
+            "parse, network and fetch"
         );
     }
 
