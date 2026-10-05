@@ -284,7 +284,7 @@ fn time_at_x(view: TimeView, span: TimeSpan, x_px: f32) -> i64 {
 enum TimelineDrag {
     None,
     /// A press on the flame chart pans the timeline (and scrolls its lanes).
-    Pan,
+    Pan(PanDrag),
     /// A press on the lane vertical, time horizontal, or counters vertical
     /// scroll thumb/track, holding the grab offset from the thumb's leading edge.
     VThumb(f32),
@@ -293,6 +293,37 @@ enum TimelineDrag {
     /// A press on the ruler, or a shift-press on the flame lanes, selecting the
     /// time the flame graph and stats aggregate over.
     TimeRegion(RegionDrag),
+}
+
+/// A pan in progress.
+#[derive(Clone, Copy)]
+struct PanDrag {
+    /// Window position of the press, which the click threshold measures from.
+    press: Point<Pixels>,
+    /// Whether the cursor has passed [`MIN_DRAG_PX`] from the press, latched
+    /// so a pan that returns to the press point stays a pan.
+    moved: bool,
+}
+
+impl PanDrag {
+    fn at(press: Point<Pixels>) -> PanDrag {
+        PanDrag {
+            press,
+            moved: false,
+        }
+    }
+
+    fn follow(&mut self, to: Point<Pixels>) {
+        let dx = f32::from(to.x - self.press.x).abs();
+        let dy = f32::from(to.y - self.press.y).abs();
+        self.moved |= dx.max(dy) > MIN_DRAG_PX;
+    }
+
+    /// Whether the pan, ended as `end`, was a click: let go of where it was
+    /// pressed, give or take the click threshold.
+    fn clicked(self, end: DragEnd) -> bool {
+        !self.moved && matches!(end, DragEnd::Released)
+    }
 }
 
 impl TimelineDrag {
@@ -854,7 +885,7 @@ impl Timeline {
             self.counters_thumb_to(pos, grab, cx);
             return;
         }
-        self.drag = TimelineDrag::Pan;
+        self.drag = TimelineDrag::Pan(PanDrag::at(pos));
         self.last_mouse = pos;
     }
 
@@ -963,7 +994,8 @@ impl Timeline {
     /// The timeline's mouse/scroll/hover wiring: a press on a group header folds
     /// or shows-all it, on a track label selects that track, on a scroll
     /// thumb/track drives that bar, on the ruler (or with shift on the lanes)
-    /// selects time regions, anywhere else pans; the wheel zooms/pans/scrolls,
+    /// selects time regions, anywhere else pans, a click there letting go of
+    /// the chosen critical-path step; the wheel zooms/pans/scrolls,
     /// and a move updates the crosshair and hover. Holds the content focus and
     /// the chart's actions, so after a press here [`SelectAllTracks`] selects all
     /// tracks and [`ClearTimeSelection`] widens the aggregate to the whole
@@ -1062,7 +1094,9 @@ fn timeline_on_drag(
     let moves_slices = !matches!(timeline.drag, TimelineDrag::TimeRegion(_));
     let before = timeline.view;
     match timeline.drag {
-        TimelineDrag::Pan => {
+        TimelineDrag::Pan(mut pan) => {
+            pan.follow(position);
+            timeline.drag = TimelineDrag::Pan(pan);
             let dx = f32::from(position.x) - f32::from(timeline.last_mouse.x);
             let dy = f32::from(position.y) - f32::from(timeline.last_mouse.y);
             if timeline.model.read(cx).lane_layout().is_none() {
@@ -1106,12 +1140,18 @@ fn timeline_end_drag(
     _: &mut Window,
     cx: &mut Context<Timeline>,
 ) {
-    match std::mem::replace(&mut timeline.drag, TimelineDrag::None).region() {
-        Some(drag) => {
+    match std::mem::replace(&mut timeline.drag, TimelineDrag::None) {
+        TimelineDrag::TimeRegion(drag) => {
             timeline.commit_time_region(drag, end, cx);
             cx.notify();
         }
-        None => timeline.invalidate_canvas(cx),
+        TimelineDrag::Pan(pan) if pan.clicked(end) => {
+            timeline
+                .model
+                .update(cx, |model, cx| model.unchoose_step(cx));
+            timeline.invalidate_canvas(cx);
+        }
+        _ => timeline.invalidate_canvas(cx),
     }
 }
 
@@ -2412,9 +2452,22 @@ mod tests {
     }
 
     #[test]
+    fn a_pan_let_go_of_within_the_click_threshold_is_a_click() {
+        let press = point(px(100.), px(100.));
+        let mut pan = PanDrag::at(press);
+        pan.follow(point(px(100. + MIN_DRAG_PX), px(100. - MIN_DRAG_PX)));
+        assert!(pan.clicked(DragEnd::Released));
+        assert!(!pan.clicked(DragEnd::Abandoned), "no release, no click");
+
+        pan.follow(point(px(100.), px(101. + MIN_DRAG_PX)));
+        pan.follow(press);
+        assert!(!pan.clicked(DragEnd::Released), "moved, then came back");
+    }
+
+    #[test]
     fn cancelling_with_no_drag_under_way_reports_nothing_to_abandon() {
         assert!(!TimelineDrag::None.cancel_region());
-        assert!(!TimelineDrag::Pan.cancel_region());
+        assert!(!TimelineDrag::Pan(PanDrag::at(Point::default())).cancel_region());
     }
 
     /// A viewport split with a gutter of [`TEST_GUTTER`] and no counter lanes,

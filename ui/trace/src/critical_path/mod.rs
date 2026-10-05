@@ -175,6 +175,22 @@ impl CriticalPathPanel {
         cx.notify();
     }
 
+    /// Lets go of step `index` where it is the chosen one, and chooses it
+    /// otherwise.
+    fn toggle(&mut self, index: usize, cx: &mut Context<Self>) {
+        let chosen = self
+            .model
+            .read(cx)
+            .chosen_step(cx)
+            .map(|(chosen, _)| chosen);
+        match chosen == Some(index) {
+            true => {
+                self.model.update(cx, |model, cx| model.unchoose_step(cx));
+            }
+            false => self.choose(index, cx),
+        }
+    }
+
     /// Chooses the step `by` rows from the chosen one, or the first where
     /// none is chosen, stopping at either end of the table.
     fn choose_by(&mut self, by: isize, cx: &mut Context<Self>) {
@@ -426,7 +442,7 @@ impl CriticalPathPanel {
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |panel, cx| {
                                     panel.focus.focus(window, cx);
-                                    panel.choose(index, cx)
+                                    panel.toggle(index, cx)
                                 })
                             })
                     })
