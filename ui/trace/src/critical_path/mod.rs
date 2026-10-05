@@ -1,5 +1,6 @@
 //! Where the wall time of the profile's build went along its critical path.
 
+mod by_height;
 mod fills;
 mod words;
 
@@ -15,6 +16,7 @@ use bviz_ui_components::{
     ListScroll, SCROLLBAR_THICKNESS, TextTooltip, centered_notice, centered_spinner, list_scrollbar,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use by_height::ByHeight;
 use fills::{Fills, outside};
 use gpui::{
     App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
@@ -27,6 +29,23 @@ const KEY_CONTEXT: &str = "TraceCriticalPath";
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
+/// The steps the table keeps in view before the summary's bars give up room
+/// for more of them.
+const STEPS_BEFORE_BARS: f32 = 5.0;
+/// How much faster the summary's bars give up their height than the table
+/// does, so that in a short pane the bars scroll away before the table falls
+/// below its few steps.
+const BARS_YIELD: f32 = 1000.0;
+/// How much faster the table gives up its height than the headline and
+/// levers do, so that they clip only once the table is down to a single
+/// step. No yield is below one: flex items whose shrink factors sum below
+/// one take only that share of the overflow, and leave the rest of it
+/// overflowing.
+const TABLE_YIELD: f32 = 1000.0;
+/// The panel height under which the summary leaves out its legends, whose
+/// entries the bars' segments repeat in their tooltips, and the headline
+/// and levers take less room.
+const LEGENDS_MIN_HEIGHT: Pixels = px(400.);
 /// How many levers the summary names.
 const LEVERS_SHOWN: usize = 3;
 /// A step's bar of parts where a strip of spawn phases may stand beneath it.
@@ -93,6 +112,7 @@ pub struct CriticalPathPanel {
     focus: FocusHandle,
     model: Entity<TraceModel>,
     scroll: ListScroll,
+    summary_scroll: ListScroll,
     /// Shows the document's load state as it changes.
     _model_observer: Subscription,
     _derived: Subscription,
@@ -106,12 +126,14 @@ impl CriticalPathPanel {
         let derived = cx.subscribe(&model, |_, _, _: &CriticalPathDerived, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |panel, _, _: &SourceReplaced, cx| {
             panel.scroll.to_top();
+            panel.summary_scroll.to_top();
             cx.notify();
         });
         Self {
             focus: cx.focus_handle(),
             model,
             scroll: ListScroll::new(),
+            summary_scroll: ListScroll::new(),
             _model_observer: model_observer,
             _derived: derived,
             _source_replaced: source_replaced,
@@ -125,15 +147,62 @@ impl CriticalPathPanel {
         palette: &Palette,
         fills: &Fills,
         cx: &Context<Self>,
+    ) -> ByHeight {
+        let body = |legends: bool| {
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(lead(path, legends, palette))
+                .child(self.summary(path, legends, palette, fills, cx))
+                .child(header_row(palette))
+                .child(self.steps(path, palette, fills, cx))
+                .into_any_element()
+        };
+        ByHeight::new(LEGENDS_MIN_HEIGHT, body(true), body(false))
+    }
+
+    /// The path's bars, with their `legends` or without, scrolling where they
+    /// would leave the steps less than their room.
+    fn summary(
+        &self,
+        path: &CriticalPath,
+        legends: bool,
+        palette: &Palette,
+        fills: &Fills,
+        cx: &Context<Self>,
     ) -> Div {
         div()
+            .relative()
             .flex()
             .flex_col()
-            .flex_1()
+            .flex_shrink(BARS_YIELD * TABLE_YIELD)
             .min_h_0()
-            .child(summary(path, palette, fills))
-            .child(header_row(palette))
-            .child(self.steps(path, palette, fills, cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|panel, e: &MouseDownEvent, _, cx| {
+                    if panel.summary_scroll.press(e.position) {
+                        cx.stop_propagation();
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("critical-path-summary")
+                    .flex_1()
+                    .min_h_0()
+                    .pr(px(SCROLLBAR_THICKNESS))
+                    .overflow_y_scroll()
+                    .track_scroll(self.summary_scroll.handle())
+                    .child(summary(path, legends, palette, fills)),
+            )
+            .child(list_scrollbar(
+                cx.entity(),
+                |panel: &CriticalPathPanel| &panel.summary_scroll,
+                |panel: &mut CriticalPathPanel| &mut panel.summary_scroll,
+                palette.scroll,
+            ))
     }
 
     /// The steps, one row each, every bar as long against the longest as the
@@ -187,8 +256,10 @@ impl CriticalPathPanel {
             .relative()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
+            .flex_grow_1()
+            .flex_basis(px(STEPS_BEFORE_BARS * STATS_ROW_HEIGHT))
+            .flex_shrink(TABLE_YIELD)
+            .min_h(px(STATS_ROW_HEIGHT))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|panel, e: &MouseDownEvent, _, cx| {
@@ -208,10 +279,35 @@ impl CriticalPathPanel {
     }
 }
 
+/// What the path took and the levers acting on the most of it, each hovered
+/// for what pulling it involves: the point of the panel, so kept in view
+/// down to a pane too short for it beside a single step, where the levers
+/// are clipped first. Where the pane is not `roomy`, the headline is set
+/// smaller and the levers keep to one line.
+fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
+    let headline = div().flex_shrink_0().child(words::headline(path));
+    div()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .overflow_hidden()
+        .gap_1()
+        .px_3()
+        .map(|lead| match roomy {
+            true => lead.pt_2().child(headline.text_base()),
+            false => lead.pt_1().child(headline.text_sm()),
+        })
+        .child(
+            levers(path, palette)
+                .flex_shrink_0()
+                .when(!roomy, |levers| levers.flex_nowrap().overflow_hidden()),
+        )
+}
+
 /// The wall time partitioned along the path as one bar and its legend, each
 /// part's segment and entry hovered for what its time went to; and where the
 /// execution log accounts for steps, their actions' time by spawn phase.
-fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
+fn summary(path: &CriticalPath, legends: bool, palette: &Palette, fills: &Fills) -> Div {
     let parts: Vec<(Part, Duration, SharedString)> = Part::ALL
         .into_iter()
         .map(|part| (part, path.time_in(part)))
@@ -234,23 +330,22 @@ fn summary(path: &CriticalPath, palette: &Palette, fills: &Fills) -> Div {
     let spawned = path
         .coverage()
         .filter(|coverage| coverage.steps() > 0)
-        .map(|coverage| spawned_summary(&coverage, palette, fills));
+        .map(|coverage| spawned_summary(&coverage, legends, palette, fills));
     div()
         .flex()
         .flex_col()
         .flex_shrink_0()
         .gap_1()
         .px_3()
-        .py_2()
-        .child(div().text_base().child(words::headline(path)))
-        .child(levers(path, palette))
+        .pt_1()
+        .pb_2()
         .child(path_bar.w_full())
-        .child(legend_row(palette).children(legend))
+        .when(legends, |summary| {
+            summary.child(legend_row(palette).children(legend))
+        })
         .children(spawned)
 }
 
-/// The levers acting on the most of the path's time, each hovered for what
-/// pulling it involves.
 fn levers(path: &CriticalPath, palette: &Palette) -> Div {
     let levers = path
         .levers()
@@ -274,7 +369,7 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
 /// The time the actions of the steps `coverage` holds spent in each spawn
 /// phase and around their spawns, as a titled bar over its legend: a scale
 /// of its own, apart from the path's bar above it.
-fn spawned_summary(coverage: &Coverage, palette: &Palette, fills: &Fills) -> Div {
+fn spawned_summary(coverage: &Coverage, legends: bool, palette: &Palette, fills: &Fills) -> Div {
     let phases: Vec<(Phase, Duration, SharedString)> = Phase::ALL
         .into_iter()
         .map(|phase| (phase, coverage.phase(phase)))
@@ -327,7 +422,9 @@ fn spawned_summary(coverage: &Coverage, palette: &Palette, fills: &Fills) -> Div
                 .w_full()
                 .h(PATH_BAR_HEIGHT),
         )
-        .child(legend_row(palette).children(legend))
+        .when(legends, |spawned| {
+            spawned.child(legend_row(palette).children(legend))
+        })
 }
 
 fn legend_row(palette: &Palette) -> Div {
