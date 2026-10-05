@@ -1,5 +1,6 @@
 use bviz_invocation::{
-    AttemptSource, Attempts, Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Session,
+    AttemptSource, Attempts, Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Interval,
+    Session,
 };
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
@@ -17,7 +18,12 @@ pub(crate) struct Stream {
     /// Of the build's actions, those the stream records an attempt of, where
     /// the replay stands on the wall clock.
     attempts: Attempts,
+    attempted: Attempted,
 }
+
+/// When the attempts a stream records took place, from the first start to
+/// the last end of those it gives a span of; `None` where it gives none.
+type Attempted = Option<Interval>;
 
 impl Stream {
     pub(crate) fn parse(stream: &[u8]) -> Result<Self, String> {
@@ -26,6 +32,7 @@ impl Stream {
         let configurations = std::mem::take(&mut output.configurations);
         let reports = std::mem::take(&mut output.reports);
         let recorded = std::mem::take(&mut output.attempts);
+        let attempted = recorded.span();
         let replay = Replay::from_output(output);
         let (outcomes, attempts) = match replay.dating() {
             Some(dating) => (
@@ -45,6 +52,7 @@ impl Stream {
             configurations,
             outcomes,
             attempts,
+            attempted,
         })
     }
 
@@ -68,6 +76,9 @@ const UNRECORDED_ORIGIN: EpochMicros = EpochMicros::from_millis(0);
 /// being read and reconstructed afresh.
 pub(crate) struct ConsoleModel {
     source: Source,
+    /// Played on the clock together with the replay, which may end before
+    /// the last of them does.
+    attempted: Attempted,
     on_clock: Option<OnClock>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
@@ -87,13 +98,16 @@ impl ConsoleModel {
             move || stream.join(),
             move |model, result, cx| {
                 model.source = match result {
-                    Ok(stream) => Source::Loaded(match session {
-                        Some(session) => session.update(cx, |session, cx| {
-                            cx.notify();
-                            stream.replay_telling(session)
-                        }),
-                        None => stream.replay,
-                    }),
+                    Ok(stream) => {
+                        model.attempted = stream.attempted;
+                        Source::Loaded(match session {
+                            Some(session) => session.update(cx, |session, cx| {
+                                cx.notify();
+                                stream.replay_telling(session)
+                            }),
+                            None => stream.replay,
+                        })
+                    }
                     Err(err) => Source::Failed(err),
                 };
                 model.place_on_clock(cx);
@@ -105,6 +119,7 @@ impl ConsoleModel {
     fn new(load: Task<()>, clock: Option<DocumentClock>) -> Self {
         Self {
             source: Source::Loading,
+            attempted: None,
             on_clock: clock.map(OnClock::new),
             _load: load,
         }
@@ -117,9 +132,8 @@ impl ConsoleModel {
             return;
         };
         let played = match &self.source {
-            Source::Loaded(replay) => {
-                origin(replay, on_clock.document_clock()).and_then(|at| clock_source(replay, at))
-            }
+            Source::Loaded(replay) => origin(replay, on_clock.document_clock())
+                .and_then(|at| clock_source(replay, at, self.attempted)),
             _ => None,
         };
         on_clock.place(played, cx);
@@ -199,10 +213,19 @@ fn last_reached(
     reached.saturating_sub(1)
 }
 
-/// What `replay` gives a clock with its time zero at `origin`: its span, a step
-/// stopping at each frame, `None` where all its frames share one instant.
-fn clock_source(replay: &Replay, origin: EpochMicros) -> Option<bviz_ui_playback::Source> {
-    let span = Span::new(origin, origin.plus_secs_f64(replay.duration()))?;
+/// What `replay` gives a clock with its time zero at `origin`: its span, held
+/// out over the `attempted` too, and a step stopping at each frame; `None`
+/// where its frames and the attempts all share one instant.
+fn clock_source(
+    replay: &Replay,
+    origin: EpochMicros,
+    attempted: Attempted,
+) -> Option<bviz_ui_playback::Source> {
+    let (start, end) = (origin, origin.plus_secs_f64(replay.duration()));
+    let span = match attempted {
+        Some(attempted) => Span::new(start.min(attempted.start()), end.max(attempted.end()))?,
+        None => Span::new(start, end)?,
+    };
     let frames = (0..replay.frame_count()).map(|frame| origin.plus_secs_f64(replay.time_of(frame)));
     let source = bviz_ui_playback::Source::new(span).with_marks(frames);
     Some(if replay.real_time() {
@@ -504,7 +527,17 @@ mod tests {
     #[test]
     fn a_replay_of_one_instant_gives_a_clock_nothing_to_play() {
         let stream = Stream::parse(&progress_event("Loading: \n")).expect("the stream parses");
-        assert!(clock_source(&stream.replay, UNRECORDED_ORIGIN).is_none());
+        assert!(clock_source(&stream.replay, UNRECORDED_ORIGIN, None).is_none());
+    }
+
+    /// The attempts a stream records may end after its last frame is shown,
+    /// and a clock plays them to their end.
+    #[test]
+    fn a_replay_of_one_instant_gives_a_clock_the_attempts_it_records() {
+        let stream = Stream::parse(&progress_event("Loading: \n")).expect("the stream parses");
+        let attempted = Interval::new(UNRECORDED_ORIGIN, UNRECORDED_ORIGIN.plus_micros(1));
+        let source = clock_source(&stream.replay, UNRECORDED_ORIGIN, attempted);
+        assert!(source.is_some());
     }
 
     /// Every progress event of the stream read is a frame the reader can seek to.

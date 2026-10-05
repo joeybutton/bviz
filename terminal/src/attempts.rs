@@ -6,7 +6,7 @@ use std::collections::hash_map::Entry;
 use std::time::Duration;
 
 use bviz_invocation::{
-    Attempt, Attempts, Cache, ConfiguredTarget, Done, EpochMicros, SpawnCache, TEST_LOG,
+    Attempt, Attempts, Cache, ConfiguredTarget, Done, EpochMicros, Interval, SpawnCache, TEST_LOG,
 };
 
 use crate::bep::build_event_stream::{
@@ -167,6 +167,18 @@ impl RecordedAttempts {
                 false => answered,
             },
         });
+    }
+
+    /// From the first start to the last end of the attempts the stream gives
+    /// a span of this build's; `None` where it gives none.
+    pub fn span(&self) -> Option<Interval> {
+        self.0
+            .iter()
+            .filter_map(|recorded| match recorded.when {
+                When::Took { start, end } => Interval::new(start, end.max(start)),
+                When::EndedAt(_) => None,
+            })
+            .reduce(Interval::hull)
     }
 
     /// The attempts on the wall clock `dating` places the stream's events
