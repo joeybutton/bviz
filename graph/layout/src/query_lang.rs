@@ -4,8 +4,11 @@
 //! can be pointed at where it was written.
 
 mod ast;
+mod eval;
+mod functions;
 mod lex;
 mod parse;
+mod universe;
 
 #[cfg(test)]
 mod bazel_goldens;
@@ -14,7 +17,9 @@ use std::fmt;
 use std::ops::Range;
 
 pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Word};
+pub use eval::EvalError;
 pub use parse::parse;
+pub use universe::Universe;
 
 /// Where an expression fails to scan or parse, with the message Bazel gives for
 /// it word for word, but for two cases. A long expression Bazel quotes cut

@@ -180,8 +180,47 @@ impl Index {
         }
     }
 
-    fn ids(&self) -> usize {
+    /// One past the largest id the index spans.
+    pub(crate) fn ids(&self) -> usize {
         self.parent.len()
+    }
+
+    pub(crate) fn kind(&self, id: Id) -> Option<Kind> {
+        self.kind[id.0 as usize]
+    }
+
+    pub(crate) fn level(&self, id: Id) -> Option<Level> {
+        self.level[id.0 as usize]
+    }
+
+    pub(crate) fn parent(&self, id: Id) -> Option<Id> {
+        self.parent[id.0 as usize]
+    }
+
+    /// Whether `id` stands above `ceiling`, so that a walk held to it passes
+    /// through `id` without covering it.
+    pub(crate) fn above(&self, id: Id, ceiling: Level) -> bool {
+        self.level(id).is_some_and(|level| level < ceiling)
+    }
+
+    /// The nodes `id` holds.
+    pub(crate) fn children(&self, id: Id) -> impl Iterator<Item = Id> + '_ {
+        self.children
+            .of(id.0 as usize)
+            .iter()
+            .map(|&child| Id(child))
+    }
+
+    /// The nodes depending on `id` by an edge of their own.
+    pub(crate) fn dependents(&self, id: Id) -> impl Iterator<Item = Id> + '_ {
+        let edges = self.outgoing.of(id.0 as usize).iter();
+        edges.map(|&edge| Id(self.ends[edge as usize][1]))
+    }
+
+    /// The dependency and the dependent the edge at `edge` of the graph's edge
+    /// list joins.
+    pub(crate) fn ends(&self, edge: u32) -> [Id; 2] {
+        self.ends[edge as usize].map(Id)
     }
 
     /// Which nodes `root`'s subtree holds, by id.
@@ -225,7 +264,7 @@ impl Index {
         let mut walk = Walk {
             fewest: vec![UNREACHED; 2 * self.ids()],
         };
-        let above = |id: usize| self.level[id].is_some_and(|level| level < bounds.ceiling);
+        let above = |id: usize| self.above(Id(id as u32), bounds.ceiling);
         let kept = |state: usize| {
             let id = State::id(state);
             above(id) || bounds.within.is_none_or(|within| within.contains(id))
@@ -355,7 +394,7 @@ impl State {
         2 * id + 1
     }
 
-    fn id(state: usize) -> usize {
+    pub(crate) fn id(state: usize) -> usize {
         state / 2
     }
 
@@ -405,13 +444,19 @@ impl Walk {
             .filter(|&state| self.fewest[state] != UNREACHED)
             .min_by_key(|&state| self.fewest[state])
     }
+
+    /// The fewest edges the walk took to `state`, `None` where it never
+    /// reached it.
+    pub(crate) fn fewest(&self, state: usize) -> Option<u32> {
+        Some(self.fewest[state]).filter(|&edges| edges != UNREACHED)
+    }
 }
 
 impl Routed {
-    /// The nodes the walk passed on its way from `start`'s subtree to `end`, a
-    /// state of `finish`: `start`, the ends of each edge it took, and `finish`,
-    /// each named once where consecutive.
-    pub(crate) fn chain(&self, graph: &Graph, end: usize, start: Id, finish: Id) -> Vec<Id> {
+    /// The seed state the walk reached the state `end` from, and the edges it
+    /// took on the way, by position in the graph's edge list, the first taken
+    /// first.
+    pub(crate) fn route(&self, end: usize) -> (usize, Vec<u32>) {
         let mut taken: Vec<u32> = Vec::with_capacity(self.walk.fewest[end] as usize);
         let mut at = end;
         loop {
@@ -424,9 +469,18 @@ impl Routed {
                 }
             }
         }
+        taken.reverse();
+        (at, taken)
+    }
+
+    /// The nodes the walk passed on its way from `start`'s subtree to `end`, a
+    /// state of `finish`: `start`, the ends of each edge it took, and `finish`,
+    /// each named once where consecutive.
+    pub(crate) fn chain(&self, graph: &Graph, end: usize, start: Id, finish: Id) -> Vec<Id> {
+        let (_, taken) = self.route(end);
         let mut chain: Vec<Id> = Vec::with_capacity(2 * taken.len() + 2);
         chain.push(start);
-        let ends = taken.iter().rev().flat_map(|&edge| {
+        let ends = taken.iter().flat_map(|&edge| {
             let edge = &graph.edges[edge as usize];
             [edge.from, edge.to]
         });
