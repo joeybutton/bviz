@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::model::ConsoleModel;
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
-use bviz_ui_components::{Button, Scrollbar, TextInput};
+use bviz_ui_components::{Button, Scrollbar, TextInput, text_input};
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -50,6 +50,8 @@ pub fn register_keys(cx: &mut App) {
     let grid_unless_find = format!("{GRID_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
     let grid_unless_find = Some(grid_unless_find.as_str());
     let console = Some(CONSOLE_KEY_CONTEXT);
+    let outside_text = format!("{CONSOLE_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let outside_text = Some(outside_text.as_str());
     let find = Some(FIND_KEY_CONTEXT);
     cx.bind_keys([
         // Inert while the find field has focus, so they don't hijack cursor
@@ -65,6 +67,7 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", Copy, console),
         KeyBinding::new("cmd-f", Find, console),
         KeyBinding::new("ctrl-f", Find, console),
+        KeyBinding::new("/", Find, outside_text),
         KeyBinding::new("enter", FindNext, find),
         KeyBinding::new("shift-enter", FindPrev, find),
         KeyBinding::new("escape", FindClose, find),
