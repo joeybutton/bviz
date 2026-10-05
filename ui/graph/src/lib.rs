@@ -176,6 +176,10 @@ const CARD_MAX_SHARE: f32 = 0.45;
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
 
+/// The most a frame request zooms in to show what it names, at which a label
+/// reads at a comfortable size however small the box framed.
+const MAX_FRAME_ZOOM: f32 = 1.5;
+
 /// Factor one wheel notch scales the zoom by, small enough that a notch nudges
 /// the view rather than jumping it.
 const ZOOM_PER_NOTCH: f32 = 1.1;

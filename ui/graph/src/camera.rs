@@ -1,5 +1,5 @@
 use crate::emphasis::Emphasis;
-use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
+use crate::{FIT_MARGIN, MARGIN, MAX_FRAME_ZOOM, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
 use bviz_graph_layout::LaidOut;
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::ops::RangeInclusive;
@@ -313,10 +313,10 @@ pub(crate) fn settle_view(
 }
 
 /// The zoom and pan that put `target` on screen centered and at the size it
-/// fills the viewport to, held between the whole-graph fit and [`MAX_ZOOM`].
-/// The viewport's top `covered`, which an overlay hides, is left out of what
-/// it fills, and the pan may carry the graph that much further down to keep
-/// `target` below it.
+/// fills the viewport to, held between the whole-graph fit and
+/// [`MAX_FRAME_ZOOM`]. The viewport's top `covered`, which an overlay hides,
+/// is left out of what it fills, and the pan may carry the graph that much
+/// further down to keep `target` below it.
 ///
 /// Where a settle disturbs the view as little as bringing its target into frame
 /// allows, this moves the view onto `target` outright: it answers a gesture that
@@ -333,8 +333,8 @@ pub(crate) fn frame_view(
         height: viewport.height - covered,
     };
     let zoom = fit_rect_zoom(target, clear)
-        .unwrap_or(MAX_ZOOM)
-        .clamp(fit_zoom(viewport, content), MAX_ZOOM);
+        .unwrap_or(MAX_FRAME_ZOOM)
+        .clamp(fit_zoom(viewport, content), MAX_FRAME_ZOOM);
     let (vw, vh) = (f32::from(clear.width), f32::from(clear.height));
     let center = |near: f64, extent: f64| (near + extent / 2.) as f32 + MARGIN as f32;
     let (cx, cy) = (center(target.x, target.w), center(target.y, target.h));
@@ -501,7 +501,17 @@ mod tests {
         };
         assert_eq!(
             frame_view(speck, vp(800., 600.), px(0.), WIDE_CONTENT).0,
-            MAX_ZOOM
+            MAX_FRAME_ZOOM
+        );
+        let leaf = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: 120.0,
+            h: 30.0,
+        };
+        assert_eq!(
+            frame_view(leaf, vp(800., 600.), px(0.), WIDE_CONTENT).0,
+            MAX_FRAME_ZOOM
         );
 
         let whole = Rect {
