@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::graph::{Graph, Kind, id_span};
+use crate::graph::{EdgeKind, Graph, Kind, id_span};
 use crate::intern::Id;
 
 /// Which way along its edges a walk runs.
@@ -54,7 +54,9 @@ pub(crate) struct Index<'g> {
     parent: Vec<Option<Id>>,
     kind: Vec<Option<Kind>>,
     children: CompressedSparseRows,
-    /// The edges leaving each node, by position in the graph's edge list.
+    /// The edges leaving each node, by position in the graph's edge list, but
+    /// for those standing in for a path through nodes a filter dropped, which
+    /// a walk would cross twice.
     outgoing: CompressedSparseRows,
     /// The edges landing on each node, likewise.
     incoming: CompressedSparseRows,
@@ -85,6 +87,7 @@ impl<'g> Index<'g> {
                 .edges
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| e.kind != EdgeKind::Transitive)
                 .map(|(i, e)| (e.from.0 as usize, i as u32))
         });
         let incoming = CompressedSparseRows::new(ids, || {
@@ -92,6 +95,7 @@ impl<'g> Index<'g> {
                 .edges
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| e.kind != EdgeKind::Transitive)
                 .map(|(i, e)| (e.to.0 as usize, i as u32))
         });
         Index {

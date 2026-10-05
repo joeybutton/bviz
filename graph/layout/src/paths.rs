@@ -9,7 +9,7 @@
 //! A path may pass through a cycle, and every edge of a cycle one passes
 //! through is kept, whether or not a path repeating no node could use it.
 
-use crate::graph::{Edge, Graph, id_span};
+use crate::graph::{Edge, EdgeKind, Graph, id_span};
 use crate::intern::Id;
 use crate::reach::{Index, State, Toward};
 
@@ -75,7 +75,7 @@ pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
     let edges: Vec<Edge> = graph
         .edges
         .iter()
-        .filter(|e| reach.reached(e.from) && !within(&seeds, e))
+        .filter(|e| walked(e) && reach.reached(e.from) && !within(&seeds, e))
         .cloned()
         .collect();
     Paths {
@@ -101,7 +101,8 @@ pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> 
         .edges
         .iter()
         .filter(|e| {
-            forward.reached(e.from)
+            walked(e)
+                && forward.reached(e.from)
                 && backward.arrived(e.to)
                 && !within(&from, e)
                 && !within(&to, e)
@@ -130,6 +131,12 @@ fn arrivals(members: &[bool]) -> Vec<usize> {
     states
 }
 
+/// Whether a walk takes `edge`, which it does unless the edge stands in for a
+/// path through nodes a filter dropped.
+fn walked(edge: &Edge) -> bool {
+    edge.kind != EdgeKind::Transitive
+}
+
 /// Whether both ends of `edge` lie in the subtree `members` marks.
 fn within(members: &[bool], edge: &Edge) -> bool {
     members[edge.from.0 as usize] && members[edge.to.0 as usize]
@@ -148,7 +155,7 @@ fn spanned(endpoints: &[Id], edges: &[Edge]) -> Vec<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{EdgeKind, Kind, Node};
+    use crate::graph::{Kind, Node};
 
     fn graph(nodes: &[(u32, Kind, Option<u32>)], edges: &[(u32, u32)]) -> Graph {
         let mut graph = Graph::new();
@@ -410,6 +417,25 @@ mod tests {
         );
         let pairs: Vec<(u32, u32)> = drawn.edges.iter().map(|e| (e.from.0, e.to.0)).collect();
         assert_eq!(pairs, [(12, 13)]);
+    }
+
+    #[test]
+    fn an_edge_standing_in_for_a_path_lies_on_no_path() {
+        let mut graph = diamond();
+        graph.add_edge(Id(0), Id(5), EdgeKind::Transitive);
+        assert_eq!(
+            edges(&dependents(&graph, Id(0))),
+            [(0, 1), (0, 2), (1, 3), (2, 3), (3, 5)]
+        );
+        let found = between(&graph, Id(0), Id(5)).expect("a path");
+        assert_eq!(found.shortest.len(), 4);
+        assert!(
+            !found
+                .paths
+                .edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Transitive)
+        );
     }
 
     #[test]
