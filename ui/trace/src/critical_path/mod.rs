@@ -2,6 +2,7 @@
 
 mod by_height;
 mod fills;
+mod whole;
 mod words;
 
 use crate::chart::format_duration;
@@ -25,6 +26,7 @@ use gpui::{
     Subscription, Window, div, prelude::*, px, relative, uniform_list,
 };
 use std::time::Duration;
+use whole::whole_or_none;
 
 pub(crate) const KEY_CONTEXT: &str = "TraceCriticalPath";
 
@@ -324,8 +326,8 @@ impl CriticalPathPanel {
 
 /// What the path took and the levers acting on the most of it, each hovered
 /// for what pulling it involves: the point of the panel, so kept in view
-/// down to a pane too short for it beside a single step, where the levers
-/// are clipped first. Where the pane is not `roomy`, the headline is set
+/// down to a pane too short for it beside a single step, where its lines are
+/// left out from the last. Where the pane is not `roomy`, the headline is set
 /// smaller and the levers keep to one line.
 fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
     let headline = div().flex_shrink_0().child(words::headline(path));
@@ -337,14 +339,14 @@ fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
         .gap_1()
         .px_3()
         .map(|lead| match roomy {
-            true => lead.pt_2().child(headline.text_base()),
-            false => lead.pt_1().child(headline.text_sm()),
+            true => lead.pt_2().child(whole_or_none(headline.text_base())),
+            false => lead.pt_1().child(whole_or_none(headline.text_sm())),
         })
-        .child(
+        .child(whole_or_none(
             levers(path, palette)
                 .flex_shrink_0()
                 .when(!roomy, |levers| levers.flex_nowrap().overflow_hidden()),
-        )
+        ))
 }
 
 /// The wall time partitioned along the path as one bar and its legend, each
