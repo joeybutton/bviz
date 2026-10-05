@@ -40,6 +40,7 @@ mod emphasis;
 mod exclusive;
 mod framing;
 mod hints;
+mod history;
 mod hue;
 mod jump;
 mod legend;
