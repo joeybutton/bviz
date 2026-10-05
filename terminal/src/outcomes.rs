@@ -550,6 +550,7 @@ mod tests {
                 vec![],
                 Payload::Action(ActionExecuted {
                     success,
+                    start_time: Some(ANCHORED),
                     end_time: Some(ANCHORED),
                     ..Default::default()
                 }),
@@ -886,6 +887,7 @@ mod tests {
                         seconds: 0,
                         nanos: 80_000_000,
                     }),
+                    first_start_time: Some(ANCHORED),
                     last_stop_time: Some(ANCHORED),
                     ..Default::default()
                 }),

@@ -82,6 +82,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut outcomes = Outcomes::default();
     let mut columns = None;
     let mut show_timestamps = false;
+    let mut began = Began::default();
     while !stream.is_empty() {
         let BuildEvent {
             id,
@@ -99,14 +100,22 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
                 bytes.extend_from_slice(progress.stdout.as_bytes());
                 frames.push(bytes.len());
             }
-            Some(Payload::Started(s)) => record(&mut anchors, frame, epoch_opt(s.start_time)),
+            Some(Payload::Started(s)) => {
+                let start = epoch_opt(s.start_time);
+                began.0 = began.0.or(start);
+                record(&mut anchors, frame, start);
+            }
             Some(Payload::Finished(f)) => record(&mut anchors, frame, epoch_opt(f.finish_time)),
             Some(Payload::Action(a)) => {
-                record(&mut anchors, frame, epoch_opt(a.end_time));
+                if began.took(epoch_opt(a.start_time)) {
+                    record(&mut anchors, frame, epoch_opt(a.end_time));
+                }
                 outcomes::action(&mut outcomes, id, a);
             }
             Some(Payload::TestSummary(s)) => {
-                record(&mut anchors, frame, epoch_opt(s.last_stop_time));
+                if began.took(epoch_opt(s.first_start_time)) {
+                    record(&mut anchors, frame, epoch_opt(s.last_stop_time));
+                }
                 outcomes::test_summary(&mut outcomes, id, s);
             }
             Some(Payload::Completed(c)) => {
@@ -192,6 +201,24 @@ fn read_length_delimiter(stream: &mut impl Read) -> Option<usize> {
         }
     }
     None
+}
+
+/// When the build began, in seconds since the Unix epoch; `None` for a stream
+/// that does not say.
+#[derive(Clone, Copy, Default)]
+struct Began(Option<f64>);
+
+impl Began {
+    /// Whether a span the stream says began at `start` is one this build
+    /// took. A cache answering an action or a test hands back the times of
+    /// the run it recorded, which began before this build did.
+    fn took(self, start: Option<f64>) -> bool {
+        match (self.0, start) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(began), Some(start)) => start >= began,
+        }
+    }
 }
 
 /// Record a wall-clock anchor at a frame boundary, skipping events whose
@@ -296,6 +323,56 @@ mod tests {
         assert_eq!(known.name(NULL_CONFIGURATION), None);
         assert_eq!(known.name(""), None);
         assert_eq!(known.name("0c3d9a77").as_deref(), Some("k8-opt-exec"));
+    }
+
+    fn timestamp(seconds: i64) -> Option<Timestamp> {
+        Some(Timestamp { seconds, nanos: 0 })
+    }
+
+    /// A length-delimited event carrying `payload` and no id.
+    fn payload_event(payload: Payload) -> Vec<u8> {
+        BuildEvent {
+            payload: Some(payload),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn a_span_a_cache_recorded_before_the_build_anchors_nothing() {
+        const BEGAN: i64 = 1_790_952_715;
+        let action = |start, end| {
+            payload_event(Payload::Action(bes::ActionExecuted {
+                start_time: timestamp(start),
+                end_time: timestamp(end),
+                ..Default::default()
+            }))
+        };
+        let test = |start, stop| {
+            payload_event(Payload::TestSummary(bes::TestSummary {
+                first_start_time: timestamp(start),
+                last_stop_time: timestamp(stop),
+                ..Default::default()
+            }))
+        };
+        let stream = [
+            payload_event(Payload::Started(BuildStarted {
+                start_time: timestamp(BEGAN),
+                ..Default::default()
+            })),
+            action(BEGAN - 600, BEGAN - 590),
+            action(BEGAN + 1, BEGAN + 3),
+            payload_event(Payload::Action(bes::ActionExecuted::default())),
+            test(BEGAN - 600, BEGAN - 580),
+            test(BEGAN + 4, BEGAN + 6),
+        ]
+        .concat();
+        let output = parse(&stream).expect("parse stream");
+        let times: Vec<f64> = output.anchors.iter().map(|a| a.time).collect();
+        assert_eq!(
+            times,
+            [BEGAN, BEGAN + 3, BEGAN + 6].map(|seconds| seconds as f64)
+        );
     }
 
     #[test]
