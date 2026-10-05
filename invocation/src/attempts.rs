@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::outcomes::PerTarget;
-use crate::{ConfiguredTarget, EpochMicros};
+use crate::{ConfiguredTarget, EpochMicros, Interval};
 
 /// Where an attempt's spawn runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,6 +128,23 @@ pub enum SpawnCache {
     RemoteOrDisk,
 }
 
+impl SpawnCache {
+    /// The cache a spawn answered by a cache was answered by, as the name of
+    /// the runner Bazel gives the spawn's result tells:
+    /// <https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/remote/util/Utils.java#L159>
+    pub fn answering(runner: &str) -> SpawnCache {
+        match runner {
+            "remote cache hit" => SpawnCache::Remote,
+            "disk cache hit" => SpawnCache::Disk,
+            _ => SpawnCache::RemoteOrDisk,
+        }
+    }
+}
+
+/// The name of a test's log, the primary output of the test's action, in the
+/// directory the test's other outputs are written to.
+pub const TEST_LOG: &str = "test.log";
+
 /// Where an attempt is at one instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum State {
@@ -216,6 +233,14 @@ impl Attempt {
         self.end
     }
 
+    /// From the attempt's start to its end.
+    pub fn span(&self) -> Interval {
+        Interval {
+            start: self.start,
+            end: self.end,
+        }
+    }
+
     /// When the attempt entered `phase`; `None` for one it never entered.
     pub fn entered(&self, phase: Phase) -> Option<EpochMicros> {
         match phase.past_preparing() {
@@ -232,6 +257,19 @@ impl Attempt {
     /// The attempt, ended as `done` says.
     pub(crate) fn ending(self, done: Done) -> Attempt {
         Attempt { done, ..self }
+    }
+
+    /// The attempt carried on by `later`, a step of the same execution: it
+    /// lasts until `later` ends, and fails where `later` fails.
+    fn continued(self, later: Attempt) -> Attempt {
+        Attempt {
+            end: self.end.max(later.end),
+            done: match later.done {
+                Done::Failed => Done::Failed,
+                _ => self.done,
+            },
+            ..self
+        }
     }
 
     /// Where the attempt is at `at`: it starts at its start, and has ended at
@@ -314,6 +352,24 @@ impl Attempts {
                     });
             }
             (None, None) => {}
+        }
+    }
+
+    /// Records `later`, a step of the attempt recorded last of the action
+    /// `primary_output` names, as [carrying on](Attempt::continued) that
+    /// attempt; where none is recorded, as [`record`](Self::record) does.
+    pub(crate) fn record_continued(
+        &mut self,
+        primary_output: Option<&str>,
+        owner: Option<ConfiguredTarget<&str>>,
+        later: Attempt,
+    ) {
+        let last = primary_output
+            .and_then(|primary_output| self.actions.get_mut(primary_output))
+            .and_then(|attempted| attempted.attempts.last_mut());
+        match last {
+            Some(last) => *last = last.continued(later),
+            None => self.record(primary_output, owner, later),
         }
     }
 

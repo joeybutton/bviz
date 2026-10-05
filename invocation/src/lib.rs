@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 mod attempts;
 mod merged;
@@ -12,7 +13,9 @@ mod runner;
 pub mod spawn;
 mod timings;
 
-pub use attempts::{Attempt, Attempts, Cache, Done, HeldAction, Phase, SpawnCache, State, Venue};
+pub use attempts::{
+    Attempt, Attempts, Cache, Done, HeldAction, Phase, SpawnCache, State, TEST_LOG, Venue,
+};
 pub use merged::{ActionAttempts, AttemptSource, MergedAttempts};
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
@@ -74,6 +77,57 @@ impl EpochMicros {
     /// NaN.
     pub fn plus_secs_f64(self, seconds: f64) -> EpochMicros {
         self.plus_micros((seconds * MICROS_PER_SECOND).round() as i64)
+    }
+
+    /// The instant `duration` after this one, to the microsecond below and
+    /// saturating at the representable range.
+    pub fn after(self, duration: Duration) -> EpochMicros {
+        self.plus_micros(whole_micros(duration))
+    }
+
+    /// The instant `duration` before this one, to the microsecond above and
+    /// saturating at the representable range.
+    pub fn before(self, duration: Duration) -> EpochMicros {
+        EpochMicros(self.0.saturating_sub(whole_micros(duration)))
+    }
+}
+
+fn whole_micros(duration: Duration) -> i64 {
+    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+}
+
+/// A stretch of wall-clock time, starting no later than it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interval {
+    start: EpochMicros,
+    end: EpochMicros,
+}
+
+impl Interval {
+    /// The stretch from `start` to `end`; `None` where `end` comes first.
+    pub fn new(start: EpochMicros, end: EpochMicros) -> Option<Interval> {
+        (start <= end).then_some(Interval { start, end })
+    }
+
+    /// The stretch of no time at `at`.
+    pub fn at(at: EpochMicros) -> Interval {
+        Interval { start: at, end: at }
+    }
+
+    pub fn start(self) -> EpochMicros {
+        self.start
+    }
+
+    pub fn end(self) -> EpochMicros {
+        self.end
+    }
+
+    /// The least interval holding both.
+    pub fn hull(self, other: Interval) -> Interval {
+        Interval {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
     }
 }
 
@@ -281,6 +335,26 @@ mod tests {
         assert_eq!(EpochMicros::from_millis(-2).micros(), -2_000);
         assert_eq!(EpochMicros::from_millis(i64::MAX).micros(), i64::MAX);
         assert_eq!(EpochMicros::from_millis(i64::MIN).micros(), i64::MIN);
+    }
+
+    #[test]
+    fn an_interval_starts_no_later_than_it_ends() {
+        let at = |millis: i64| EpochMicros::from_millis(1_781_439_245_000 + millis);
+        assert_eq!(Interval::new(at(2), at(1)), None);
+        let instant = Interval::at(at(1));
+        assert_eq!(Interval::new(at(1), at(1)), Some(instant));
+        assert_eq!((instant.start(), instant.end()), (at(1), at(1)));
+        let later = Interval::new(at(5), at(8)).expect("ordered");
+        assert_eq!(instant.hull(later), Interval::new(at(1), at(8)).unwrap());
+    }
+
+    #[test]
+    fn a_duration_moves_an_instant_by_whole_microseconds() {
+        let at = EpochMicros::from_micros(1_000);
+        let lasted = Duration::from_nanos(2_500);
+        assert_eq!(at.after(lasted), EpochMicros::from_micros(1_002));
+        assert_eq!(at.before(lasted), EpochMicros::from_micros(998));
+        assert_eq!(EpochMicros::from_timestamp(1, 2_999).micros(), 1_000_002);
     }
 
     #[test]
