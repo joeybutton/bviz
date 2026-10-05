@@ -64,6 +64,7 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
         expandable: Arc::new(expandable),
         coarsest: Level::opening(Arc::new(HashSet::new())),
         finer,
+        kept: None,
     }
 }
 
@@ -106,6 +107,9 @@ pub struct MapLayout {
     coarsest: Level,
     /// Ascending by the scale each view takes over from.
     finer: Vec<(f64, Level)>,
+    /// Which ids a restriction keeps, indexed by id; `None` for a map of the
+    /// whole placed graph, which keeps every node it places.
+    kept: Option<Vec<bool>>,
 }
 
 impl MapLayout {
@@ -170,7 +174,12 @@ impl MapLayout {
         reduced: Arc<Graph>,
         transitions: Arc<Transitions>,
     ) -> MapLayout {
+        let mut kept = vec![false; id_span(&base)];
+        for node in &base.nodes {
+            kept[node.id.0 as usize] = true;
+        }
         MapLayout {
+            kept: Some(kept),
             base,
             reduced,
             transitions,
@@ -197,9 +206,14 @@ impl MapLayout {
     }
 
     /// Where every level drawing `id` draws it; `None` for an id the placed
-    /// graph holds no node of.
+    /// graph holds no node of, and for one a restriction drops, which no level
+    /// draws.
     pub fn placed(&self, id: Id) -> Option<Placed> {
-        self.drawing.placed(id)
+        let kept = self
+            .kept
+            .as_ref()
+            .is_none_or(|kept| kept.get(id.0 as usize).copied().unwrap_or(false));
+        self.drawing.placed(id).filter(|_| kept)
     }
 }
 
@@ -1065,6 +1079,31 @@ mod tests {
             box_of(finest, &names, "wide.5").is_some() && box_of(finest, &names, "mid.0").is_none(),
             "the fixture's restriction drops nothing the finest level drew",
         );
+    }
+
+    /// A node a restriction drops keeps its place in the shared drawing, but
+    /// the restricted map places nothing there, so nothing is framed on the
+    /// hole it leaves.
+    #[test]
+    fn a_restriction_places_none_of_the_nodes_it_drops() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let dropped = names.get("wide.2").unwrap();
+        let kept = names.get("wide.3").unwrap();
+        let keep: HashSet<Id> = base
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|&id| id != dropped)
+            .collect();
+        let restricted = crate::filter::filter(&base, &map.reduced, &keep);
+        let reduced = reduce::transitive_reduction(&restricted);
+
+        let sliced = map.restricted(Arc::new(restricted), Arc::new(reduced), Arc::default());
+
+        assert!(map.placed(dropped).is_some());
+        assert_eq!(sliced.placed(dropped), None);
+        assert_eq!(sliced.placed(kept), map.placed(kept));
     }
 
     #[test]
