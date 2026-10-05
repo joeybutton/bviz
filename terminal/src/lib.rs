@@ -47,8 +47,8 @@ pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::Side;
 pub use alacritty_terminal::selection::SelectionType;
 pub use display::{CellPos, DisplaySource, SelectionSpan, Terminal, Url};
-pub use output::{BuildOutput, parse, probe_invocation_id};
-pub use replay::Replay;
+pub use output::{BuildOutput, Position, parse, probe_invocation_id};
+pub use replay::{Dating, Replay};
 
 /// The terminal cell and its styling vocabulary, re-exported from
 /// `alacritty_terminal` so renderers can read cells while depending only on this

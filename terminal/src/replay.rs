@@ -13,7 +13,7 @@ use std::cmp::Reverse;
 use bviz_invocation::EpochMicros;
 
 use crate::display::DisplaySource;
-use crate::output::{Anchor, BuildOutput};
+use crate::output::{Anchor, BuildOutput, Position};
 
 /// One playback frame: the output reconstructs the terminal at byte offset `end`,
 /// shown `time` seconds into the build.
@@ -113,6 +113,15 @@ impl Replay {
         self.epoch_origin
     }
 
+    /// The replay on the wall clock; `None` where the stream timestamps no
+    /// event.
+    pub fn dating(&self) -> Option<Dating<'_>> {
+        Some(Dating {
+            replay: self,
+            origin: self.epoch_origin?,
+        })
+    }
+
     /// The time in seconds at which a frame is shown.
     pub fn time_of(&self, frame: usize) -> f64 {
         self.frames[frame.min(self.frames.len() - 1)].time
@@ -128,6 +137,23 @@ impl Replay {
     pub fn display_at(&self, frame: usize) -> DisplaySource {
         let end = self.frames[frame.min(self.frames.len() - 1)].end;
         DisplaySource::from_bytes(&self.bytes[..end], self.columns)
+    }
+}
+
+/// A replay's frames placed on the wall clock, by which any event of its
+/// stream is dated.
+#[derive(Clone, Copy)]
+pub struct Dating<'a> {
+    replay: &'a Replay,
+    origin: EpochMicros,
+}
+
+impl Dating<'_> {
+    /// When the event at `position` happened: when the frame it precedes is
+    /// shown, which is the frame an event's own time anchors; the last frame
+    /// for one past them all.
+    pub fn instant_at(self, position: Position) -> EpochMicros {
+        self.origin.plus_secs_f64(self.replay.time_of(position.0))
     }
 }
 
@@ -631,6 +657,32 @@ mod tests {
                 "{utc_offset}"
             );
         }
+    }
+
+    #[test]
+    fn an_event_is_dated_when_the_frame_it_precedes_is_shown() {
+        let replay = Replay::from_output(BuildOutput {
+            frames: vec![1, 2, 3],
+            anchors: vec![
+                Anchor {
+                    frame: 0,
+                    time: 1_000.0,
+                },
+                Anchor {
+                    frame: 2,
+                    time: 1_010.0,
+                },
+            ],
+            ..BuildOutput::from_bytes(40, b"abc".to_vec())
+        });
+        let dating = replay.dating().expect("on the wall clock");
+        let at = |frame| dating.instant_at(Position(frame));
+        assert_eq!(at(0), EpochMicros::from_secs_f64(1_000.0));
+        assert_eq!(at(1), EpochMicros::from_secs_f64(1_005.0));
+        assert_eq!(at(3), EpochMicros::from_secs_f64(1_010.0));
+
+        let unanchored = Replay::from_output(BuildOutput::from_bytes(40, b"abc".to_vec()));
+        assert!(unanchored.dating().is_none());
     }
 
     #[test]

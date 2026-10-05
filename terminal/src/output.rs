@@ -5,7 +5,7 @@
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use bviz_invocation::{Configurations, InvocationId, Outcomes};
+use bviz_invocation::{Configurations, InvocationId, Outcomes, Report};
 use prost::Message;
 
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
@@ -17,7 +17,9 @@ use crate::outcomes::{self, checksum};
 pub struct BuildOutput {
     /// The configurations the stream describes (its `Configuration` events).
     pub configurations: Configurations,
-    pub outcomes: Outcomes,
+    /// What the stream reports of the build's outcomes, in stream order, each
+    /// where the stream reports it.
+    pub reports: Vec<(Position, Report)>,
     /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
     pub columns: u16,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
@@ -43,6 +45,21 @@ pub struct BuildOutput {
     pub(crate) show_timestamps: bool,
 }
 
+/// Where an event stands in its stream: after as many progress frames as
+/// this counts, so at an index into [`BuildOutput::frames`] or one past them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position(pub(crate) usize);
+
+impl BuildOutput {
+    /// What the stream reports of the build's outcomes together.
+    pub fn outcomes(&self) -> Outcomes {
+        self.reports
+            .iter()
+            .map(|(_, report)| report.clone())
+            .collect()
+    }
+}
+
 /// A wall-clock time tied to a position in the progress-frame sequence.
 pub(crate) struct Anchor {
     /// The number of progress frames emitted before the anchoring event, i.e. an
@@ -59,7 +76,7 @@ impl BuildOutput {
     pub(crate) fn from_bytes(columns: u16, bytes: Vec<u8>) -> BuildOutput {
         BuildOutput {
             configurations: Configurations::default(),
-            outcomes: Outcomes::default(),
+            reports: Vec::new(),
             columns,
             frames: vec![bytes.len()],
             bytes,
@@ -79,7 +96,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
     let mut configurations = Configurations::default();
-    let mut outcomes = Outcomes::default();
+    let mut reports = Vec::new();
     let mut columns = None;
     let mut show_timestamps = false;
     let mut began = Began::default();
@@ -94,6 +111,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         // An anchoring event ties its time to the frame boundary it falls on: the
         // number of progress frames already emitted.
         let frame = frames.len();
+        let mut report = |report| reports.push((Position(frame), report));
         match payload {
             Some(Payload::Progress(progress)) => {
                 bytes.extend_from_slice(progress.stderr.as_bytes());
@@ -110,18 +128,18 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
                 if began.took(epoch_opt(a.start_time)) {
                     record(&mut anchors, frame, epoch_opt(a.end_time));
                 }
-                outcomes::action(&mut outcomes, id, a);
+                outcomes::action(&mut report, id, a);
             }
             Some(Payload::TestSummary(s)) => {
                 if began.took(epoch_opt(s.first_start_time)) {
                     record(&mut anchors, frame, epoch_opt(s.last_stop_time));
                 }
-                outcomes::test_summary(&mut outcomes, id, s);
+                outcomes::test_summary(&mut report, id, s);
             }
             Some(Payload::Completed(c)) => {
-                outcomes::completed(&mut outcomes, id, children, c.success)
+                outcomes::completed(&mut report, id, children, c.success)
             }
-            Some(Payload::Aborted(a)) => outcomes::aborted(&mut outcomes, id, children, a),
+            Some(Payload::Aborted(a)) => outcomes::aborted(&mut report, id, children, a),
             Some(Payload::Configuration(c)) => {
                 if let Some(Id::Configuration(id)) = id
                     && let Some(checksum) = checksum(Some(id))
@@ -138,7 +156,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     }
     Ok(BuildOutput {
         configurations,
-        outcomes,
+        reports,
         columns: columns.unwrap_or(DEFAULT_COLUMNS),
         bytes,
         frames,
@@ -373,6 +391,44 @@ mod tests {
             times,
             [BEGAN, BEGAN + 3, BEGAN + 6].map(|seconds| seconds as f64)
         );
+    }
+
+    #[test]
+    fn a_report_stands_after_the_progress_frames_before_it() {
+        let progress = |text: &str| {
+            payload_event(Payload::Progress(bes::Progress {
+                stderr: text.into(),
+                ..Default::default()
+            }))
+        };
+        let built = |label: &str| {
+            BuildEvent {
+                id: Some(BuildEventId {
+                    id: Some(Id::TargetCompleted(build_event_id::TargetCompletedId {
+                        label: label.into(),
+                        ..Default::default()
+                    })),
+                }),
+                payload: Some(Payload::Completed(bes::TargetComplete {
+                    success: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }
+            .encode_length_delimited_to_vec()
+        };
+        let stream = [
+            built("//a"),
+            progress("x"),
+            progress("y"),
+            built("//b"),
+            progress("z"),
+        ]
+        .concat();
+        let output = parse(&stream).expect("parse stream");
+        let positions: Vec<Position> = output.reports.iter().map(|(at, _)| *at).collect();
+        assert_eq!(positions, [Position(0), Position(2)]);
+        assert_eq!(output.outcomes().builds().count(), 2);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use bviz_invocation::{Configurations, EpochMicros, Outcomes, Session};
+use bviz_invocation::{Configurations, DatedOutcomes, EpochMicros, HeldOutcomes, Session};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
@@ -10,7 +10,8 @@ pub(crate) type Source = bviz_ui_components::Source<Replay>;
 pub(crate) struct Stream {
     replay: Replay,
     configurations: Configurations,
-    outcomes: Outcomes,
+    /// Dated where the replay of the stream stands on the wall clock.
+    outcomes: HeldOutcomes,
 }
 
 impl Stream {
@@ -18,9 +19,17 @@ impl Stream {
         let mut output = bviz_terminal::parse(stream)
             .map_err(|e| format!("cannot parse build event stream: {e}"))?;
         let configurations = std::mem::take(&mut output.configurations);
-        let outcomes = std::mem::take(&mut output.outcomes);
+        let reports = std::mem::take(&mut output.reports);
+        let replay = Replay::from_output(output);
+        let outcomes = match replay.dating() {
+            Some(dating) => HeldOutcomes::Dated(DatedOutcomes::new(
+                (reports.into_iter())
+                    .map(|(position, report)| (dating.instant_at(position), report)),
+            )),
+            None => HeldOutcomes::Undated(reports.into_iter().map(|(_, report)| report).collect()),
+        };
         Ok(Self {
-            replay: Replay::from_output(output),
+            replay,
             configurations,
             outcomes,
         })
@@ -28,7 +37,10 @@ impl Stream {
 
     fn replay_telling(self, session: &mut Session) -> Replay {
         session.add_configurations(self.configurations);
-        session.report_outcomes(self.outcomes);
+        match self.outcomes {
+            HeldOutcomes::Undated(outcomes) => session.report_outcomes(outcomes),
+            HeldOutcomes::Dated(dated) => session.report_dated_outcomes(dated),
+        }
         self.replay
     }
 }
@@ -347,6 +359,57 @@ mod tests {
         stream.replay_telling(&mut session);
         let app = ConfiguredTarget::new("//app", Some(CONFIGURATION));
         assert_eq!(session.outcomes().build(app), Some(&BuildOutcome::Built));
+        assert!(
+            session.dated_outcomes().is_none(),
+            "a stream timing nothing"
+        );
+    }
+
+    #[test]
+    fn a_stream_on_the_wall_clock_reports_when_each_outcome_became_known() {
+        use bviz_invocation::EpochMicros;
+        use bviz_terminal::bep::build_event_stream::{
+            BuildEvent, BuildFinished, BuildStarted, build_event::Payload,
+        };
+        use bviz_terminal::bep::timestamp_proto::google::protobuf::Timestamp;
+        use prost::Message;
+
+        const STARTED: i64 = 1_790_952_715;
+        const TOOK: i64 = 10;
+        let at = |seconds| Some(Timestamp { seconds, nanos: 0 });
+        let event = |payload| {
+            BuildEvent {
+                payload: Some(payload),
+                ..Default::default()
+            }
+            .encode_length_delimited_to_vec()
+        };
+        let stream = [
+            event(Payload::Started(BuildStarted {
+                start_time: at(STARTED),
+                ..Default::default()
+            })),
+            progress_event("Loading: \n"),
+            built_event("//app", CONFIGURATION),
+            progress_event("Built\n"),
+            event(Payload::Finished(BuildFinished {
+                finish_time: at(STARTED + TOOK),
+                ..Default::default()
+            })),
+        ]
+        .concat();
+        let stream = Stream::parse(&stream).expect("the stream parses");
+        let mut session = Session::default();
+        stream.replay_telling(&mut session);
+        let app = ConfiguredTarget::new("//app", Some(CONFIGURATION));
+        assert_eq!(session.outcomes().build(app), Some(&BuildOutcome::Built));
+        let dated = session.dated_outcomes().expect("dated");
+        let known = |seconds| {
+            let at = EpochMicros::from_millis(seconds * 1_000);
+            dated.outcomes_known(dated.known_at(at)).build(app).cloned()
+        };
+        assert_eq!(known(STARTED + TOOK - 1), None);
+        assert_eq!(known(STARTED + TOOK), Some(BuildOutcome::Built));
     }
 
     /// A stream describing no configuration leaves a session knowing what it

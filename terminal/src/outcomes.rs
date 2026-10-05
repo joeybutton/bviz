@@ -1,10 +1,11 @@
-//! Reads a build's [`Outcomes`] out of the events of its build event stream.
+//! Reads the outcomes a build reports out of the events of its build event
+//! stream.
 
 use std::num::{NonZeroI32, NonZeroU32};
 use std::time::Duration;
 
 use bviz_invocation::{
-    BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
+    BuildOutcome, Cause, ConfiguredTarget, FailedAction, Report, TestOutcome, TestStatus,
 };
 
 use crate::bep::build_event_stream::{
@@ -47,7 +48,7 @@ fn causes(children: Vec<BuildEventId>) -> Vec<Cause> {
 
 /// A `TargetComplete` event, of a target or of an aspect on it.
 pub(crate) fn completed(
-    outcomes: &mut Outcomes,
+    report: &mut impl FnMut(Report),
     id: Option<Id>,
     children: Vec<BuildEventId>,
     success: bool,
@@ -61,12 +62,12 @@ pub(crate) fn completed(
             causes: causes(children),
         },
     };
-    outcomes.report_build(target(id.label, id.configuration), outcome);
+    report(Report::Build(target(id.label, id.configuration), outcome));
 }
 
 /// An `Aborted` event, which stands in for the event its id announced.
 pub(crate) fn aborted(
-    outcomes: &mut Outcomes,
+    report: &mut impl FnMut(Report),
     id: Option<Id>,
     children: Vec<BuildEventId>,
     aborted: Aborted,
@@ -78,10 +79,10 @@ pub(crate) fn aborted(
         // configuration: the one a target is under when its analysis fails.
         Some(Id::TargetConfigured(id)) => target(id.label, None),
         Some(Id::ConfiguredLabel(id)) => {
-            return root_cause(outcomes, target(id.label, id.configuration), aborted);
+            return root_cause(report, target(id.label, id.configuration), aborted);
         }
         Some(Id::UnconfiguredLabel(id)) => {
-            return root_cause(outcomes, target(id.label, None), aborted);
+            return root_cause(report, target(id.label, None), aborted);
         }
         _ => return,
     };
@@ -94,12 +95,12 @@ pub(crate) fn aborted(
         // and gives no reason for those a failure elsewhere stopped.
         _ => BuildOutcome::NotBuilt,
     };
-    outcomes.report_build(target, outcome);
+    report(Report::Build(target, outcome));
 }
 
 /// An `Aborted` event under the id of the root cause `cause`, which describes
 /// what went wrong loading or analysing it.
-fn root_cause(outcomes: &mut Outcomes, cause: ConfiguredTarget, aborted: Aborted) {
+fn root_cause(report: &mut impl FnMut(Report), cause: ConfiguredTarget, aborted: Aborted) {
     // A build that ends early aborts a root cause it announced and did not
     // come to, under the reason and the description of its ending.
     let described = matches!(
@@ -107,13 +108,13 @@ fn root_cause(outcomes: &mut Outcomes, cause: ConfiguredTarget, aborted: Aborted
         AbortReason::AnalysisFailure | AbortReason::LoadingFailure
     );
     if described && !aborted.description.is_empty() {
-        outcomes.report_target_error(cause, aborted.description);
+        report(Report::TargetError(cause, aborted.description));
     }
 }
 
 /// An `ActionExecuted` event, which a stream holds for a successful action
 /// too under `--build_event_publish_all_actions`.
-pub(crate) fn action(outcomes: &mut Outcomes, id: Option<Id>, action: ActionExecuted) {
+pub(crate) fn action(report: &mut impl FnMut(Report), id: Option<Id>, action: ActionExecuted) {
     let Some(Id::ActionCompleted(id)) = id else {
         return;
     };
@@ -133,18 +134,18 @@ pub(crate) fn action(outcomes: &mut Outcomes, id: Option<Id>, action: ActionExec
         }
         None => (String::new(), None),
     };
-    outcomes.report_failed_action(
-        id.primary_output,
-        FailedAction {
+    report(Report::FailedAction {
+        primary_output: id.primary_output,
+        action: FailedAction {
             owner,
             mnemonic: action.r#type,
             exit_code,
             message,
         },
-    );
+    });
 }
 
-pub(crate) fn test_summary(outcomes: &mut Outcomes, id: Option<Id>, summary: TestSummary) {
+pub(crate) fn test_summary(report: &mut impl FnMut(Report), id: Option<Id>, summary: TestSummary) {
     let Some(Id::TestSummary(id)) = id else {
         return;
     };
@@ -164,7 +165,7 @@ pub(crate) fn test_summary(outcomes: &mut Outcomes, id: Option<Id>, summary: Tes
                 )
             }),
     };
-    outcomes.report_test(target(id.label, id.configuration), outcome);
+    report(Report::Test(target(id.label, id.configuration), outcome));
 }
 
 fn status(status: bes::TestStatus) -> TestStatus {
@@ -202,6 +203,7 @@ mod tests {
     use crate::bep::duration_proto::google::protobuf::Duration as ProtoDuration;
     use crate::bep::failure_details::{FailureDetail, Spawn};
     use crate::bep::timestamp_proto::google::protobuf::Timestamp;
+    use bviz_invocation::Outcomes;
 
     const BUILD_CONFIG: &str = "a7a71fd16b14";
     const TEST_CONFIG: &str = "5d1c0e7fb2a9";
@@ -230,7 +232,7 @@ mod tests {
     fn outcomes(events: &[Vec<u8>]) -> Outcomes {
         crate::parse(&events.concat())
             .expect("parse stream")
-            .outcomes
+            .outcomes()
     }
 
     /// How many things `outcomes` reports on.
@@ -557,11 +559,11 @@ mod tests {
             )
         };
         let succeeded = crate::parse(&executed(true)).expect("parse stream");
-        assert_eq!(reported(&succeeded.outcomes), 0);
+        assert_eq!(reported(&succeeded.outcomes()), 0);
         assert_eq!(succeeded.anchors.len(), 1);
 
         let failed = crate::parse(&executed(false)).expect("parse stream");
-        assert_eq!(failed.outcomes.failed_actions().count(), 1);
+        assert_eq!(failed.outcomes().failed_actions().count(), 1);
         assert_eq!(failed.anchors.len(), 1);
     }
 
@@ -914,7 +916,9 @@ mod tests {
         let output = crate::parse(&stream).expect("parse stream");
         assert_eq!(output.anchors.len(), 1);
         assert_eq!(
-            output.outcomes.test(at("//tests:flaky", Some(TEST_CONFIG))),
+            output
+                .outcomes()
+                .test(at("//tests:flaky", Some(TEST_CONFIG))),
             Some(&TestOutcome {
                 status: TestStatus::Flaky,
                 attempts: 2,
@@ -927,7 +931,7 @@ mod tests {
         );
         assert_eq!(
             output
-                .outcomes
+                .outcomes()
                 .test(at("//tests:sharded", Some(TEST_CONFIG))),
             Some(&TestOutcome {
                 status: TestStatus::Passed,
@@ -939,7 +943,7 @@ mod tests {
                 run_duration: Duration::from_millis(2_745),
             })
         );
-        assert_eq!(output.outcomes.builds().count(), 0);
+        assert_eq!(output.outcomes().builds().count(), 0);
     }
 
     #[test]
