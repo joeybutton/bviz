@@ -393,7 +393,7 @@ new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl"
 new_git_repository(
     name = "bazel_query_proto",
     build_file = "//3rd-party:bazel_query_proto.BUILD",
-    commit = "8220c6198837d5c13d53fea211cf3282aa12408a",  # 9.2.0
+    commit = "594339dc6b64cc643bf5207ae78f69db0f80d8d3",  # 10.0.0-pre.20260723.1
     remote = "https://github.com/bazelbuild/bazel.git",
     sparse_checkout_patterns = [
         "/LICENSE",
