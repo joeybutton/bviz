@@ -28,6 +28,53 @@ pub(crate) struct Standing {
     pub(crate) weight: u32,
 }
 
+/// The chars after which a segment of a candidate's text starts: a part of
+/// a path or a label, or of a name made of words.
+const SEGMENT_STARTS: &[char] = &['/', ':', '@', '.', '-', '_', '+', ' '];
+
+/// Where a query stands whole in a candidate's text.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Anchor {
+    /// Nowhere: its characters are matched apart.
+    Fuzzy,
+    /// Where a segment of the text starts.
+    Segment,
+    /// Where the text starts.
+    Start,
+}
+
+/// Where `query` stands whole in `text`, compared in smart case as the
+/// matcher compares: ignoring case unless the query holds an uppercase
+/// letter.
+fn anchor(text: Utf32Str<'_>, query: &[char]) -> Anchor {
+    let sensitive = query.iter().any(|c| c.is_uppercase());
+    let same = |a: char, b: char| match sensitive {
+        true => a == b,
+        false => a.to_lowercase().eq(b.to_lowercase()),
+    };
+    let len = text.len();
+    if query.is_empty() || query.len() > len {
+        return Anchor::Fuzzy;
+    }
+    let stands_at = |start: usize| {
+        (query.iter().enumerate()).all(|(at, &c)| same(text.get((start + at) as u32), c))
+    };
+    if stands_at(0) {
+        return Anchor::Start;
+    }
+    let segment = (1..=len - query.len())
+        .any(|start| SEGMENT_STARTS.contains(&text.get(start as u32 - 1)) && stands_at(start));
+    match segment {
+        true => Anchor::Segment,
+        false => Anchor::Fuzzy,
+    }
+}
+
+/// What a row is ranked by, first to last: where the query stands whole,
+/// where its matched characters fall, the matcher's score, whether the
+/// candidate is drawn, and its weight.
+type Key = (Anchor, Hit, u32, bool, u32);
+
 /// Where in a candidate's text a query's matched characters fall.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Hit {
@@ -46,20 +93,24 @@ pub(crate) struct Row {
     pub(crate) matched: Vec<u32>,
 }
 
-/// The rows for the matches in `found`, best scored first, each candidate
-/// given by its index and the text it was matched by, in the order a list
-/// lists them: a hit on the candidate's own name before one reaching into
-/// its path, then by the matcher's score, then those drawn, then the
-/// weightiest, as `standing` tells of each index. Only the first of `found`
-/// are ranked: the [`WINDOW`] and every match tying its last score, up to
-/// [`MAX_WINDOW`].
+/// The rows for the matches in `found` of `query`, parsed as `pattern`, best
+/// scored first, each candidate given by its index and the text it was
+/// matched by, in the order a list lists them: the query written whole where
+/// the text starts, then where a segment of it starts, before its
+/// characters matched apart; then a hit on the candidate's own name before
+/// one reaching into its path, then by the matcher's score, then those
+/// drawn, then the weightiest, as `standing` tells of each index. Only the
+/// first of `found` are ranked: the [`WINDOW`] and every match tying its
+/// last score, up to [`MAX_WINDOW`].
 pub(crate) fn rank<'a>(
     found: impl Iterator<Item = (u32, Utf32Str<'a>)>,
+    query: &str,
     pattern: &Pattern,
     matcher: &mut Matcher,
     standing: impl Fn(u32) -> Standing,
 ) -> Vec<Row> {
-    let mut ranked: Vec<((Hit, u32, bool, u32), Row)> = Vec::with_capacity(WINDOW);
+    let query: Vec<char> = query.chars().collect();
+    let mut ranked: Vec<(Key, Row)> = Vec::with_capacity(WINDOW);
     let mut last = None;
     for (index, text) in found.take(MAX_WINDOW) {
         let mut matched: Vec<u32> = Vec::with_capacity(pattern.atoms.len());
@@ -77,7 +128,13 @@ pub(crate) fn rank<'a>(
             true => Hit::Path,
             false => Hit::Name,
         };
-        let key = (hit, score, standing.drawn, standing.weight);
+        let key = (
+            anchor(text, &query),
+            hit,
+            score,
+            standing.drawn,
+            standing.weight,
+        );
         ranked.push((
             key,
             Row {
@@ -132,7 +189,7 @@ mod tests {
                 weight: candidate.weight,
             }
         };
-        rank(found, &pattern, &mut matcher, standing)
+        rank(found, query, &pattern, &mut matcher, standing)
             .into_iter()
             .map(|row| candidates[row.candidate as usize].text.clone())
             .collect()
@@ -199,6 +256,62 @@ mod tests {
                 "Genrule bazel-out/k8/bin/javac/out.jar"
             ]
         );
+    }
+
+    /// A query written whole where a candidate's text starts, as a pattern
+    /// being typed is, ranks before one whose characters are matched apart,
+    /// however the name and the score fall.
+    #[test]
+    fn a_query_where_the_text_starts_comes_first() {
+        let listed = ranked(
+            vec![
+                candidate(
+                    "@sdk//Versions/Current/Headers/IOKit/graphics:GTrace.hpp",
+                    20,
+                    0,
+                ),
+                candidate("//ui/graph/...", 5, 0),
+                candidate("//ui/graph:*", 5, 0),
+            ],
+            "//ui/gr",
+            &[0],
+        );
+        assert_eq!(
+            &listed[2],
+            "@sdk//Versions/Current/Headers/IOKit/graphics:GTrace.hpp"
+        );
+    }
+
+    /// A query written whole where a segment starts ranks before one matched
+    /// apart, and after one where the whole text starts.
+    #[test]
+    fn a_query_where_a_segment_starts_comes_next() {
+        let listed = ranked(
+            vec![
+                candidate("//a:open_the_edges", 4, 9),
+                candidate("//graph:openedges_test", 8, 0),
+                candidate("openedges", 0, 0),
+            ],
+            "openedges",
+            &[0],
+        );
+        assert_eq!(
+            listed,
+            ["openedges", "//graph:openedges_test", "//a:open_the_edges"]
+        );
+    }
+
+    /// An uppercase letter makes the comparison mind case, as it makes the
+    /// matcher's.
+    #[test]
+    fn an_anchor_is_found_in_smart_case() {
+        let text = Utf32String::from("//app:Lib");
+        let chars = |query: &str| query.chars().collect::<Vec<char>>();
+        assert_eq!(anchor(text.slice(..), &chars("lib")), Anchor::Segment);
+        assert_eq!(anchor(text.slice(..), &chars("Lib")), Anchor::Segment);
+        assert_eq!(anchor(text.slice(..), &chars("LIB")), Anchor::Fuzzy);
+        assert_eq!(anchor(text.slice(..), &chars("//APP")), Anchor::Fuzzy);
+        assert_eq!(anchor(text.slice(..), &chars("//ap")), Anchor::Start);
     }
 
     /// Matches tying the score at the end of the window are ranked too, so a

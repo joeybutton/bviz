@@ -176,6 +176,7 @@ impl Matching {
             .map(|item| (*item.data, item.matcher_columns[0].slice(..)));
         self.rows = rank::rank(
             found,
+            &self.query,
             snapshot.pattern().column_pattern(0),
             &mut self.matcher,
             standing,
