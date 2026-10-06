@@ -902,7 +902,7 @@ impl Render for GraphPanel {
                     relaying: self.derived.deriving(),
                 };
                 chrome
-                    .child(toolbar::toolbar(controls, &palette, cx))
+                    .child(toolbar::toolbar(controls, &palette, &self.focus_handle, cx))
                     .child(
                         div()
                             .flex_1()

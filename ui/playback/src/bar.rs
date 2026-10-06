@@ -1,12 +1,12 @@
-use crate::{Clock, Speed, TEXT_SIZE, Timeline};
+use crate::{Clock, PlayPause, Speed, StepBack, StepForward, TEXT_SIZE, Timeline};
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
     Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, Context, Entity, IntoElement, Pixels, Render, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    Action, AnyElement, App, Context, Entity, IntoElement, Pixels, Render, SharedString,
+    Subscription, Window, div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -83,25 +83,30 @@ impl PlaybackBar {
     }
 
     fn transport(&self, playing: bool) -> [Button; 3] {
-        let drive =
-            |id: &'static str, icon: &'static str, gesture: fn(&mut Clock, &mut Context<Clock>)| {
-                let clock = self.clock.clone();
-                Button::new(id, move |_, _, cx| clock.update(cx, gesture))
-                    .ghost()
-                    .icon(icon)
-            };
+        let drive = |id: &'static str,
+                     icon: &'static str,
+                     action: &dyn Action,
+                     gesture: fn(&mut Clock, &mut Context<Clock>)| {
+            let clock = self.clock.clone();
+            Button::new(id, move |_, _, cx| clock.update(cx, gesture))
+                .ghost()
+                .icon(icon)
+                .keys_for_focused(action)
+        };
+        let icon = if playing { "pause" } else { "play" };
         [
-            drive("playback-step-back", "skip-back", |clock, cx| {
+            drive("playback-step-back", "skip-back", &StepBack, |clock, cx| {
                 clock.step(false, cx);
             }),
+            drive("playback-play-pause", icon, &PlayPause, Clock::play_pause),
             drive(
-                "playback-play-pause",
-                if playing { "pause" } else { "play" },
-                Clock::play_pause,
+                "playback-step-forward",
+                "skip-forward",
+                &StepForward,
+                |clock, cx| {
+                    clock.step(true, cx);
+                },
             ),
-            drive("playback-step-forward", "skip-forward", |clock, cx| {
-                clock.step(true, cx);
-            }),
         ]
     }
 

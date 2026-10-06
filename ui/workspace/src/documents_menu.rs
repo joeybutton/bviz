@@ -1,4 +1,4 @@
-use crate::workspace::ResetArrangement;
+use crate::workspace::{ResetArrangement, ToggleDocuments};
 use crate::{DocumentId, Documents, OpenDocument, ViewId, ViewState, Workspace};
 use bviz_ui_components::{Button, action_label, key_text_in, menu_chrome};
 use bviz_ui_theme::{ThemeColors, over};
@@ -223,6 +223,7 @@ impl DocumentsMenu {
         .compact()
         .label("Documents")
         .icon(if self.open { "caret-down" } else { "caret-up" })
+        .keys_for(&ToggleDocuments, &self.focus_handle)
     }
 
     /// The open menu, laid out above the trigger: the status bar it opens from

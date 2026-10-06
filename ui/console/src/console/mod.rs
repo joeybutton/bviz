@@ -671,6 +671,7 @@ impl ConsolePanel {
             format!("{} / {}", cur.unwrap_or(0), total)
         };
 
+        let find_focus = input.read(cx).focus_handle(cx);
         let view = cx.entity();
         let prev_view = view.clone();
         let next_view = view.clone();
@@ -705,21 +706,24 @@ impl ConsolePanel {
                         prev_view.update(cx, |this, cx| this.select_prev_match(cx))
                     })
                     .ghost()
-                    .icon("caret-up"),
+                    .icon("caret-up")
+                    .keys_for(&FindPrev, &find_focus),
                 )
                 .child(
                     Button::new("find-next", move |_, _, cx| {
                         next_view.update(cx, |this, cx| this.select_next_match(cx))
                     })
                     .ghost()
-                    .icon("caret-down"),
+                    .icon("caret-down")
+                    .keys_for(&FindNext, &find_focus),
                 )
                 .child(
                     Button::new("find-close", move |_, window, cx| {
                         close_view.update(cx, |this, cx| this.find_close(&FindClose, window, cx))
                     })
                     .ghost()
-                    .icon("x"),
+                    .icon("x")
+                    .keys_for(&FindClose, &find_focus),
                 )
                 .into_any_element(),
         )

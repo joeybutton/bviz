@@ -1,12 +1,17 @@
-use crate::{Controls, GraphPanel, Palette};
+use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood, ToggleReduce};
 use bviz_ui_components::{Button, Toolbar, spinner};
-use gpui::{ClickEvent, Context, Div, IntoElement, Pixels, div, prelude::*, px};
+use gpui::{ClickEvent, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
 /// The panel's controls in three strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
 /// how the graph is drawn, then the checklists over its facets, then the
 /// query bar.
-pub(crate) fn toolbar(controls: Controls, palette: &Palette, cx: &mut Context<GraphPanel>) -> Div {
+pub(crate) fn toolbar(
+    controls: Controls,
+    palette: &Palette,
+    focus: &FocusHandle,
+    cx: &mut Context<GraphPanel>,
+) -> Div {
     let mut view = Toolbar::new()
         .one_row("graph-view-controls")
         .child(controls.picker)
@@ -17,7 +22,8 @@ pub(crate) fn toolbar(controls: Controls, palette: &Palette, cx: &mut Context<Gr
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
             )
             .label("neighbors")
-            .selected(controls.neighborhood_enabled),
+            .selected(controls.neighborhood_enabled)
+            .keys_for(&ToggleNeighborhood, focus),
         );
     // The strip only ever offers a control the mode's layout can answer, so
     // everything on it acts on what is drawn.
@@ -28,7 +34,8 @@ pub(crate) fn toolbar(controls: Controls, palette: &Palette, cx: &mut Context<Gr
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
             )
             .label("reduce")
-            .selected(reduced),
+            .selected(reduced)
+            .keys_for(&ToggleReduce, focus),
         );
     }
     if let Some(enabled) = controls.critical_path {

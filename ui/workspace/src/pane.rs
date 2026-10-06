@@ -1,11 +1,13 @@
 use crate::drop::Band;
+use crate::panel::keys_focus;
+use crate::workspace::{ClosePanel, ToggleMaximize};
 use crate::{AnyPanel, PanelEvent};
 use bviz_ui_components::{Button, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, EntityId, EventEmitter,
-    IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, Subscription,
-    Window, div, prelude::*, px,
+    FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render,
+    Subscription, Window, div, prelude::*, px,
 };
 use std::cmp::Ordering;
 
@@ -98,6 +100,9 @@ pub struct Pane {
     tabs: Vec<Tab>,
     active: usize,
     framing: Framing,
+    /// Whether this is the window's active pane, whose panel on show the
+    /// window's panel keys act on.
+    window_active: bool,
     /// Whether the click the pane last took was on the control that gives the
     /// window's body back.
     restore_clicked: bool,
@@ -169,6 +174,7 @@ impl Pane {
             }],
             active: 0,
             framing: Framing::Lone { elsewhere: false },
+            window_active: false,
             restore_clicked: false,
             joined_by_drag: false,
             band: None,
@@ -218,6 +224,17 @@ impl Pane {
 
     pub(crate) fn set_framing(&mut self, framing: Framing) {
         self.framing = framing;
+    }
+
+    pub(crate) fn set_window_active(&mut self, active: bool) {
+        self.window_active = active;
+    }
+
+    /// The focus this pane's control acting on `panel` looks up the keys it
+    /// names in, as [`keys_focus`] gives it.
+    fn keys_focus(&self, panel: EntityId, cx: &App) -> Option<FocusHandle> {
+        let active = self.window_active.then(|| self.active_panel());
+        keys_focus(panel, active, cx)
     }
 
     pub(crate) fn set_joined_by_drag(&mut self, joined: bool) {
@@ -449,7 +466,12 @@ impl Pane {
             )
             .ghost()
             .icon(RESTORE_ICON)
-            .compact(),
+            .compact()
+            .keys_in(
+                &ToggleMaximize,
+                self.keys_focus(self.active_panel().entity_id(), cx)
+                    .as_ref(),
+            ),
         ))
     }
 
@@ -469,7 +491,8 @@ impl Pane {
             )
             .ghost()
             .icon(MENU_ICON)
-            .compact(),
+            .compact()
+            .tooltip("Panel menu"),
         )
     }
 
@@ -605,7 +628,8 @@ impl Pane {
                         )
                         .ghost()
                         .icon("x")
-                        .compact(),
+                        .compact()
+                        .keys_in(&ClosePanel, self.keys_focus(panel.entity_id(), cx).as_ref()),
                     ),
             )
             .into_any_element()

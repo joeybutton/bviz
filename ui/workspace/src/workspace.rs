@@ -34,7 +34,7 @@ actions!(
         NextTab,
         /// Show previous tab
         PreviousTab,
-        /// Close the active panel
+        /// Close panel
         ClosePanel,
         /// Move panel to new window
         DetachPanel,
@@ -1278,10 +1278,10 @@ impl Workspace {
         }
     }
 
-    /// Tells every pane how the window frames it. The arrangement is the
-    /// workspace's to know, and a frame draws a window from its root, so every
-    /// pane hears this before it draws itself.
-    fn tell_panes_how_they_are_framed(&self, cx: &mut Context<Self>) {
+    /// Tells every pane how the window frames it and whether it is the active
+    /// pane. The arrangement is the workspace's to know, and a frame draws a
+    /// window from its root, so every pane hears this before it draws itself.
+    fn tell_panes_where_they_stand(&self, cx: &mut Context<Self>) {
         let here = cx.entity_id();
         let elsewhere = Documents::global(cx).read(cx).holds_another_window(here);
         let layout = self.arrangement.layout();
@@ -1294,7 +1294,11 @@ impl Workspace {
             } else {
                 Framing::Beside
             };
-            pane.update(cx, |pane, _| pane.set_framing(framing));
+            let active = *pane == self.active;
+            pane.update(cx, |pane, _| {
+                pane.set_framing(framing);
+                pane.set_window_active(active);
+            });
         }
     }
 
@@ -1980,7 +1984,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let panel = self.active_panel(cx);
-        self.tell_panes_how_they_are_framed(cx);
+        self.tell_panes_where_they_stand(cx);
         self.aim_panel_drag(window, cx);
         // The room the chrome's bands leave, asked for as the room left rather
         // than as the whole of the window, which would squeeze those bands out

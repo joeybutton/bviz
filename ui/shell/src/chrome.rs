@@ -112,7 +112,14 @@ impl RenderOnce for Chrome {
             .text_color(colors.text)
             .when(client, |this| decorate(this, &colors, tiling, shadow))
             .when(client, |this| {
-                this.child(title_bar(&colors, radius, band, self.title, move_latch))
+                this.child(title_bar(
+                    &colors,
+                    radius,
+                    band,
+                    self.title,
+                    move_latch,
+                    &self.focus_handle,
+                ))
             })
             .child(self.body.unwrap_or_else(|| div().into_any_element()))
             .child(status_bar(&colors, radius, band, self.menu, self.status));
@@ -232,6 +239,7 @@ fn title_bar(
     band: Rgba,
     title: SharedString,
     latch: MoveLatch,
+    focus: &FocusHandle,
 ) -> impl IntoElement {
     div()
         .id("title-bar")
@@ -284,17 +292,20 @@ fn title_bar(
                 .child(
                     Button::new("minimize", |_, window, _| window.minimize_window())
                         .ghost()
-                        .icon("minus"),
+                        .icon("minus")
+                        .tooltip("Minimize window"),
                 )
                 .child(
                     Button::new("maximize", |_, window, _| window.zoom_window())
                         .ghost()
-                        .icon("square"),
+                        .icon("square")
+                        .tooltip("Maximize or restore window"),
                 )
                 .child(
                     Button::new("close", |_, window, _| window.remove_window())
                         .ghost()
-                        .icon("x"),
+                        .icon("x")
+                        .keys_for(&CloseWindow, focus),
                 ),
         )
 }

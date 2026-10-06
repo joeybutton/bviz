@@ -16,6 +16,8 @@ const TOOLTIP_LINE_HEIGHT: f32 = TOOLTIP_TEXT_SIZE + TOOLTIP_LINE_GAP;
 const TOOLTIP_MAX_WIDTH: f32 = 480.0;
 /// How far from its anchor the panel is placed along each axis, clear of it.
 const TOOLTIP_OFFSET: f32 = 12.0;
+/// Room between a tooltip's text and the keys named beside it.
+const TOOLTIP_KEYS_GAP: f32 = 12.0;
 /// Corner radius of the panel.
 const TOOLTIP_RADIUS: f32 = 4.0;
 /// Width of the panel's border.
@@ -28,6 +30,8 @@ pub struct TooltipColors {
     pub panel: Rgba,
     pub border: Rgba,
     pub label: Rgba,
+    /// The ink of the keys a [`TextTooltip`] names beside its text.
+    pub keys: Rgba,
 }
 
 impl TooltipColors {
@@ -36,6 +40,7 @@ impl TooltipColors {
             panel: colors.panel.into(),
             border: colors.border.into(),
             label: colors.text.into(),
+            keys: colors.text_muted.into(),
         }
     }
 }
@@ -177,6 +182,8 @@ pub fn paint_tooltip(
 /// tooltip can show. Each `\n` in it starts a line.
 pub struct TextTooltip {
     text: SharedString,
+    /// The keys that do what the text names, set beside its first line.
+    keys: Option<SharedString>,
     colors: TooltipColors,
 }
 
@@ -186,10 +193,17 @@ impl TextTooltip {
         text: SharedString,
         colors: TooltipColors,
     ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-        move |_, cx| {
-            let text = text.clone();
-            cx.new(|_| TextTooltip { text, colors }).into()
-        }
+        move |_, cx| Self::view(text.clone(), None, colors, cx)
+    }
+
+    /// The tooltip showing `text`, and `keys` beside it where given.
+    pub fn view(
+        text: SharedString,
+        keys: Option<SharedString>,
+        colors: TooltipColors,
+        cx: &mut App,
+    ) -> AnyView {
+        cx.new(|_| TextTooltip { text, keys, colors }).into()
     }
 }
 
@@ -214,9 +228,19 @@ impl Render for TextTooltip {
             .line_height(px(TOOLTIP_LINE_HEIGHT))
             .text_color(self.colors.label)
             .flex()
-            .flex_col()
+            .gap(px(TOOLTIP_KEYS_GAP))
             .whitespace_nowrap()
-            .children(rows.into_iter().map(|row| row.text))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(rows.into_iter().map(|row| row.text)),
+            )
+            .children(
+                self.keys
+                    .clone()
+                    .map(|keys| div().text_color(self.colors.keys).child(keys)),
+            )
     }
 }
 
