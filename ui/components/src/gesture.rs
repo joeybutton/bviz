@@ -380,6 +380,13 @@ impl<I: Copy> Gestures<I> {
     }
 }
 
+/// The factor a pinch scales a view by: the exponential of its delta, which is
+/// close to `1 + delta` for the small steps a pinch reports and stays positive
+/// however large a step is.
+pub fn pinch_factor(event: &PinchEvent) -> f32 {
+    event.delta.exp()
+}
+
 /// A pointer event as a [`Gestures`] table matches it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Pointer {
@@ -574,6 +581,20 @@ mod tests {
         );
         assert_eq!(range.text(KeyStyle::Words), "Alt+Shift+Scroll");
         assert_eq!(range.text(KeyStyle::Glyphs), "⌥⇧ Scroll");
+    }
+
+    #[test]
+    fn a_pinch_scales_by_a_positive_factor_that_undoes_its_opposite() {
+        let pinch = |delta| {
+            pinch_factor(&PinchEvent {
+                delta,
+                ..Default::default()
+            })
+        };
+        assert!(pinch(0.1) > 1.0);
+        assert!(pinch(-0.1) < 1.0);
+        assert!(pinch(-5.0) > 0.0);
+        assert!((pinch(0.3) * pinch(-0.3) - 1.0).abs() < 1e-6);
     }
 
     #[derive(Clone, Copy)]

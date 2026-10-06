@@ -10,7 +10,9 @@ use bviz_trace_layout::{
     FlamePlacement, FlameRemainder, FlameView, FlameWeight, RemainderSiblings, ScopeAggregate,
     flame_height, lay_out_flame,
 };
-use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Held, Input, Place, Pointer};
+use bviz_ui_components::gesture::{
+    self, Entry, GestureRow, Gestures, Held, Input, Place, Pointer, pinch_factor,
+};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
     cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
@@ -19,9 +21,9 @@ use bviz_ui_components::{
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, fill,
-    point, prelude::*, px, quad, size,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PinchEvent, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas,
+    div, fill, point, prelude::*, px, quad, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -43,6 +45,12 @@ enum FlameIntent {
 const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
     Entry::new(
         Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        FlameIntent::Zoom,
+    ),
+    Entry::new(
+        Input::PINCH,
         Place::Anywhere,
         "Zoom about pointer",
         FlameIntent::Zoom,
@@ -771,17 +779,12 @@ impl FlamePanel {
         };
         let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
-        let (mut fv, left, width) = (fl.view, fl.left, fl.width);
+        let (mut fv, width) = (fl.view, fl.width);
         GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
                 FlameIntent::Zoom => {
                     let dy_lines = dy / LINE_SCROLL_PX;
-                    fv.zoom_at(
-                        f32::from(e.position.x) - left,
-                        width,
-                        ZOOM_PER_NOTCH.powf(dy_lines as f64),
-                    );
-                    self.flame_view = fv;
+                    self.zoom_about(e.position.x, ZOOM_PER_NOTCH.powf(dy_lines as f64), cx);
                 }
                 FlameIntent::PanAcross => {
                     fv.pan_px(dx + dy, width);
@@ -796,6 +799,27 @@ impl FlamePanel {
             }
             true
         });
+        self.invalidate_canvas(cx);
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+            FlameIntent::Zoom => {
+                self.zoom_about(e.position.x, pinch_factor(e).into(), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the window-space `x`.
+    fn zoom_about(&mut self, x: Pixels, factor: f64, cx: &mut Context<Self>) {
+        let Some(fl) = self.layout(cx) else {
+            return;
+        };
+        let mut fv = fl.view;
+        fv.zoom_at(f32::from(x) - fl.left, fl.width, factor);
+        self.flame_view = fv;
         self.invalidate_canvas(cx);
     }
 
@@ -820,6 +844,10 @@ impl FlamePanel {
         )
         .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
             this.on_scroll_wheel(e, cx);
+            cx.stop_propagation();
+        }))
+        .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
+            this.on_pinch(e, cx);
             cx.stop_propagation();
         }))
         .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {

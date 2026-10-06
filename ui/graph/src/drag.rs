@@ -66,6 +66,12 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
         CanvasIntent::Zoom,
     ),
     Entry::new(
+        Input::PINCH,
+        Place::Anywhere,
+        "Zoom about pointer",
+        CanvasIntent::Zoom,
+    ),
+    Entry::new(
         Input::SCROLL.holding(Held::SHIFT),
         Place::Anywhere,
         "Pan across",

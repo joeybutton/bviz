@@ -19,13 +19,16 @@ use bviz_trace_layout::{
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
-use bviz_ui_components::gesture::{Button, Entry, Gestures, Held, Input, Place, Pointer};
+use bviz_ui_components::gesture::{
+    Button, Entry, Gestures, Held, Input, Place, Pointer, pinch_factor,
+};
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
 use bviz_ui_playback::Clock;
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent,
-    Stateful, Subscription, WeakEntity, Window, canvas, div, fill, point, prelude::*, px, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PinchEvent, Pixels, Point, Render, Rgba,
+    ScrollWheelEvent, Stateful, Subscription, WeakEntity, Window, canvas, div, fill, point,
+    prelude::*, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -144,6 +147,12 @@ pub(crate) const TIMELINE_GESTURES: Gestures<TimelineIntent> = Gestures::new(&[
     ),
     Entry::new(
         Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        TimelineIntent::Zoom,
+    ),
+    Entry::new(
+        Input::PINCH,
         Place::Anywhere,
         "Zoom about pointer",
         TimelineIntent::Zoom,
@@ -1113,14 +1122,13 @@ impl Timeline {
         TIMELINE_GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
                 TimelineIntent::Zoom => {
-                    let rel_x = f32::from(e.position.x) - content_left;
                     let dy_lines = dy / LINE_SCROLL_PX;
-                    self.view
-                        .zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
-                    self.view.px_per_us = self
-                        .view
-                        .px_per_us
-                        .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
+                    self.scale_view(
+                        f32::from(e.position.x) - content_left,
+                        ZOOM_PER_NOTCH.powf(dy_lines as f64),
+                        span,
+                        time_w,
+                    );
                 }
                 TimelineIntent::PanTime => self.view.pan_px(dx + dy),
                 TimelineIntent::Scroll => {
@@ -1138,6 +1146,48 @@ impl Timeline {
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
             true
         });
+        self.release_if_moved(before);
+        self.invalidate_canvas(cx);
+    }
+
+    /// Scales the time axis `factor` times closer about `x` px into the time
+    /// axis, holding the zoom between the fit of `span` to `time_w` and the
+    /// closest the axis goes.
+    fn scale_view(&mut self, x: f32, factor: f64, span: TimeSpan, time_w: f32) {
+        self.view.zoom_at(x, factor);
+        self.view.px_per_us = self
+            .view
+            .px_per_us
+            .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        TIMELINE_GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+            TimelineIntent::Zoom => {
+                self.zoom_about(e.position.x, pinch_factor(e).into(), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms the time axis `factor` times closer about the window-space `x`.
+    fn zoom_about(&mut self, x: Pixels, factor: f64, cx: &mut Context<Self>) {
+        if self.model.read(cx).chart_lanes().is_none() {
+            return;
+        }
+        let Some(span) = self.model.read(cx).profile().map(|profile| profile.span()) else {
+            return;
+        };
+        let regions = self.regions(cx);
+        let before = self.view;
+        self.scale_view(
+            f32::from(x) - regions.content_left,
+            factor,
+            span,
+            regions.time_w,
+        );
+        self.view.clamp_to(span, regions.time_w, EDGE_MARGIN_PX);
         self.release_if_moved(before);
         self.invalidate_canvas(cx);
     }
@@ -1240,6 +1290,7 @@ impl Timeline {
                 }),
             )
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_pinch(cx.listener(Self::on_pinch))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {

@@ -4,7 +4,7 @@
 
 use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
-use bviz_ui_components::gesture::{GestureRow, Pointer};
+use bviz_ui_components::gesture::{GestureRow, Pointer, pinch_factor};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
     ScrollbarColors, cached_layer, declare_scopes, overlay_canvas, text_input,
@@ -19,9 +19,9 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
-    canvas, div, prelude::*, px, size,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+    Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity,
+    Window, actions, canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -70,7 +70,7 @@ mod toolbar;
 mod unit_picker;
 mod why;
 
-use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
+use camera::{Camera, Rect, from_screen, recenter_rect, scale_about};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
@@ -660,6 +660,7 @@ impl GraphPanel {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_hover(cx.listener(Self::on_hover))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_pinch(cx.listener(Self::on_pinch))
             // Track the shared focus handle here too (the chrome already tracks
             // it on an ancestor) so a press on the canvas brings the focus back
             // here from whichever control last took it. Key events bubble from
@@ -796,21 +797,31 @@ impl GraphPanel {
     }
 
     fn zoom_by_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let Some(content) = self.drawn().map(|d| d.content()) else {
-            return;
-        };
         let notches = match e.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
         };
+        self.zoom_about(e.position, ZOOM_PER_NOTCH.powf(notches), cx);
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+            CanvasIntent::Zoom => {
+                self.zoom_about(e.position, pinch_factor(e), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the window-space point `at`.
+    fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
+        let Some(content) = self.drawn().map(|d| d.content()) else {
+            return;
+        };
         let viewport = self.framing.viewport();
-        self.framing.move_to(zoom_step(
-            e.position,
-            self.camera(),
-            notches,
-            viewport,
-            content,
-        ));
+        self.framing
+            .move_to(scale_about(at, self.camera(), factor, viewport, content));
         self.invalidate_canvas(cx);
     }
 
@@ -1929,6 +1940,23 @@ mod tests {
                 .into_iter()
                 .map(move |b| point(px(ox + a * w), px(oy + b * h)))
         })
+    }
+
+    /// The camera a wheel step of `notches` lands on.
+    fn zoom_step(
+        cursor: Point<Pixels>,
+        camera: Camera,
+        notches: f32,
+        bounds: Bounds<Pixels>,
+        content: (f32, f32),
+    ) -> Camera {
+        scale_about(
+            cursor,
+            camera,
+            ZOOM_PER_NOTCH.powf(notches),
+            bounds,
+            content,
+        )
     }
 
     /// How far the layout point under `cursor` travels on screen across one wheel

@@ -37,9 +37,10 @@ use bviz_ui_components::{
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rems,
-    Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
-    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+    Point, Rems, Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    Stateful, Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems,
+    uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -398,9 +399,23 @@ impl ScatterPanel {
             ScrollDelta::Lines(lines) => lines.y,
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
         };
+        self.zoom_about(e.position, ZOOM_PER_NOTCH.powf(notches), cx);
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(gesture::Pointer::pinch(e), |intent| match intent {
+            ScatterIntent::Zoom => {
+                self.zoom_about(e.position, gesture::pinch_factor(e), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the window-space point `at`.
+    fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
         if let Some(area) = self.area() {
-            let zoom = area.zoomed(e.position, ZOOM_PER_NOTCH.powf(notches));
-            self.zoom_to(zoom, e.position, cx);
+            self.zoom_to(area.zoomed(at, factor), at, cx);
         }
     }
 
@@ -893,6 +908,12 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         ScatterIntent::Zoom,
     ),
     Entry::new(
+        gesture::Input::PINCH,
+        Place::Anywhere,
+        "Zoom about pointer",
+        ScatterIntent::Zoom,
+    ),
+    Entry::new(
         gesture::Input::SCROLL.holding(Held::SHIFT),
         Place::Anywhere,
         "Pan across",
@@ -1193,6 +1214,7 @@ impl Render for ScatterPanel {
                 .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
                     view.on_scroll_wheel(e, cx);
                 }))
+                .on_pinch(cx.listener(|view, e: &PinchEvent, _, cx| view.on_pinch(e, cx)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),

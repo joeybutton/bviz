@@ -1,5 +1,5 @@
 use crate::emphasis::Emphasis;
-use crate::{FIT_MARGIN, MARGIN, MAX_FRAME_ZOOM, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
+use crate::{FIT_MARGIN, MARGIN, MAX_FRAME_ZOOM, MAX_ZOOM, RECENTER_PAD};
 use bviz_graph_layout::LaidOut;
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::ops::RangeInclusive;
@@ -197,7 +197,7 @@ pub(crate) fn fit_zoom(viewport: Size<Pixels>, content: (f32, f32)) -> f32 {
 /// the share a fitted graph itself spans, so a fit or a settle is a pan position
 /// in its own right; measured against the extent, so a graph smaller than the
 /// viewport keeps that share of itself visible however far it is pushed, and a
-/// cursor-anchored [`zoom_step`] keeps play to hold its anchor where the flush
+/// cursor-anchored [`scale_about`] keeps play to hold its anchor where the flush
 /// interval collapses to a point.
 ///
 /// This is the whole of where the view can pan: a gesture is bounded by it, and a
@@ -226,23 +226,22 @@ pub(crate) fn clamp_pan(
     )
 }
 
-/// The camera a wheel step of `notches` lands on. The zoom scales about
-/// `cursor` (a window-space position), holding the layout point under it in
-/// place, and spans the whole-graph fit up to [`MAX_ZOOM`]. Where the anchored
-/// pan would carry the graph past what [`clamp_pan`] permits, the bound takes
-/// over and the anchor slips by exactly the amount it holds back.
-pub(crate) fn zoom_step(
+/// The camera `factor` times closer, a factor below one farther out. The zoom
+/// scales about `cursor` (a window-space position), holding the layout point
+/// under it in place, and spans the whole-graph fit up to [`MAX_ZOOM`]. Where
+/// the anchored pan would carry the graph past what [`clamp_pan`] permits, the
+/// bound takes over and the anchor slips by exactly the amount it holds back.
+pub(crate) fn scale_about(
     cursor: Point<Pixels>,
     camera: Camera,
-    notches: f32,
+    factor: f32,
     viewport: Bounds<Pixels>,
     content: (f32, f32),
 ) -> Camera {
     let Camera { zoom, pan } = camera;
     let lx = f32::from(cursor.x) - f32::from(viewport.origin.x);
     let ly = f32::from(cursor.y) - f32::from(viewport.origin.y);
-    let scaled =
-        (zoom * ZOOM_PER_NOTCH.powf(notches)).clamp(fit_zoom(viewport.size, content), MAX_ZOOM);
+    let scaled = (zoom * factor).clamp(fit_zoom(viewport.size, content), MAX_ZOOM);
     let anchored = (
         lx - (lx - pan.0) / zoom * scaled,
         ly - (ly - pan.1) / zoom * scaled,
