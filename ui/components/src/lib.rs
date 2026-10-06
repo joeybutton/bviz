@@ -6,6 +6,7 @@ mod canvas;
 mod divider;
 mod drag;
 mod dropdown;
+mod find_keys;
 pub mod gesture;
 mod key_scope;
 mod keys;
@@ -32,6 +33,7 @@ pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
 pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
+pub use find_keys::find_key_bindings;
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{KeyStyle, action_label, binding_text, key_text, key_text_in, keystroke_text};
 pub use keys_help::{

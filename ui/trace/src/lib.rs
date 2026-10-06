@@ -41,8 +41,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, overlay_canvas, text_input, track_drag,
-    zoom_key_bindings,
+    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, find_key_bindings, overlay_canvas, text_input,
+    track_drag, zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -77,6 +77,8 @@ gpui::actions!(
         ShowWholeTimeline,
         /// Show whole flame graph
         ShowWholeFlameGraph,
+        /// Filter tracks
+        FilterTracks,
     ]
 );
 
@@ -109,6 +111,7 @@ pub fn register_keys(cx: &mut App) {
     ]);
     cx.bind_keys(zoom_key_bindings(TIMELINE_KEY_CONTEXT));
     cx.bind_keys(zoom_key_bindings(flame_panel::FLAME_KEY_CONTEXT));
+    cx.bind_keys(find_key_bindings(TIMELINE_KEY_CONTEXT, FilterTracks));
 }
 
 /// The key context of the trace panel, enclosing every sub-surface's.
@@ -660,6 +663,10 @@ impl Render for TracePanel {
                     .unaligned()
                     .then(|| unaligned_note("profile", &theme.colors));
                 chrome
+                    .on_action(cx.listener(|view, _: &FilterTracks, window, cx| {
+                        view.tracks_menu
+                            .update(cx, |menu, cx| menu.open_filtering(window, cx));
+                    }))
                     .children(unaligned)
                     .child(self.trace_body(palette, cx))
             }

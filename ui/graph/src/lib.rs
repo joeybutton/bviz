@@ -7,8 +7,8 @@ use bviz_invocation::Session;
 use bviz_ui_components::gesture::{GestureRow, Pointer, pinch_factor};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
-    ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes, overlay_canvas,
-    text_input, zoom_key_bindings,
+    ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
+    find_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -130,7 +130,6 @@ fn bindings() -> Vec<KeyBinding> {
     // bindings stand down inside one.
     let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let outside_text = Some(outside_text.as_str());
-    let graph = Some(KEY_CONTEXT.id());
     let jumping = Some(jump::KEY_CONTEXT);
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
@@ -148,9 +147,6 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", reveal::Accept, outside_text),
         KeyBinding::new("alt-left", JumpBack, outside_text),
         KeyBinding::new("alt-right", JumpForward, outside_text),
-        KeyBinding::new("cmd-f", jump::Open, graph),
-        KeyBinding::new("ctrl-f", jump::Open, graph),
-        KeyBinding::new("/", jump::Open, outside_text),
         KeyBinding::new("up", jump::Previous, jumping),
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
@@ -184,6 +180,11 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(chips::bindings(outside_text));
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
+    bindings.extend(find_key_bindings(
+        exclusive::KEY_CONTEXT,
+        exclusive::FocusRoots,
+    ));
     bindings
 }
 
@@ -1360,10 +1361,8 @@ mod tests {
         assert!(is(dispatched("/", IN_PANEL), jump::Open));
         assert!(dispatched("/", IN_CHIP_FIELD).is_none());
         assert!(dispatched("/", IN_PALETTE).is_none());
-        for find in ["ctrl-f", "cmd-f"] {
-            assert!(is(dispatched(find, IN_PANEL), jump::Open), "{find}");
-            assert!(is(dispatched(find, IN_CHIP_FIELD), jump::Open), "{find}");
-        }
+        assert!(is(dispatched("secondary-f", IN_PANEL), jump::Open));
+        assert!(is(dispatched("secondary-f", IN_CHIP_FIELD), jump::Open));
     }
 
     /// A letter typed into the palette's field is text, and the keys moving

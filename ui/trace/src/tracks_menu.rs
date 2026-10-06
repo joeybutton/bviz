@@ -10,8 +10,8 @@ use crate::{
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, TextInput, list_scrollbar};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
+    Pixels, Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
 };
 
 /// Side of the menu's caret icons.
@@ -74,6 +74,24 @@ impl TracksMenu {
             model,
             shell,
         }
+    }
+
+    /// Opens the menu with the cursor in its filter.
+    pub(crate) fn open_filtering(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = true;
+        self.filter.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the menu, handing focus the filter held back to the timeline.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = false;
+        if self.filter.read(cx).focus_handle(cx).is_focused(window)
+            && let Some(shell) = self.shell.upgrade()
+        {
+            shell.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
     }
 
     /// Resets the view-local fold state and list scroll for a freshly loaded
@@ -448,10 +466,9 @@ impl TracksMenu {
             .h(viewport.size.height)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.open = false;
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.close(window, cx);
                     cx.stop_propagation();
-                    cx.notify();
                 }),
             )
     }
@@ -486,9 +503,13 @@ impl Render for TracksMenu {
             .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
                 cx.stop_propagation()
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.open = !this.open;
-                cx.notify();
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.open {
+                    this.close(window, cx);
+                } else {
+                    this.open = true;
+                    cx.notify();
+                }
             }))
             .child(
                 div()

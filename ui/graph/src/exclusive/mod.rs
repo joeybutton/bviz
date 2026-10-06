@@ -126,6 +126,8 @@ gpui::actions!(
         FocusUp,
         /// Leave roots field
         LeaveRoots,
+        /// Focus roots field
+        FocusRoots,
         /// Select previous cell
         SelectPrevious,
         /// Select next cell
@@ -1770,6 +1772,11 @@ impl Render for ExclusivePanel {
         }
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
+        let root = root.when(self.picker.is_some(), |root| {
+            root.on_action(cx.listener(|view, _: &FocusRoots, window, cx| {
+                view.roots_field.read(cx).focus_handle(cx).focus(window, cx);
+            }))
+        });
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());

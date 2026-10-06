@@ -10,7 +10,7 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Button, KeyScope, Nesting, Scrollbar, TextInput, declare_scopes, text_input,
+    Button, KeyScope, Nesting, Scrollbar, TextInput, declare_scopes, find_key_bindings,
 };
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
@@ -123,8 +123,6 @@ pub fn register_keys(cx: &mut App) {
     let grid_unless_find = format!("{GRID_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
     let grid_unless_find = Some(grid_unless_find.as_str());
     let console = Some(CONSOLE_KEY_CONTEXT.id());
-    let outside_text = format!("{CONSOLE_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
-    let outside_text = Some(outside_text.as_str());
     let find = Some(FIND_KEY_CONTEXT.id());
     cx.bind_keys([
         // Inert while the find field has focus, so they don't hijack cursor
@@ -137,13 +135,11 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("pageup", ScrollPageUp, console),
         KeyBinding::new("pagedown", ScrollPageDown, console),
         KeyBinding::new("secondary-c", Copy, console),
-        KeyBinding::new("cmd-f", Find, console),
-        KeyBinding::new("ctrl-f", Find, console),
-        KeyBinding::new("/", Find, outside_text),
         KeyBinding::new("enter", FindNext, find),
         KeyBinding::new("shift-enter", FindPrev, find),
         KeyBinding::new("escape", FindClose, find),
     ]);
+    cx.bind_keys(find_key_bindings(CONSOLE_KEY_CONTEXT, Find));
 }
 
 /// Lines moved per arrow-key press while the terminal is focused.
