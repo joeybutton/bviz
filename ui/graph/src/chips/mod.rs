@@ -31,26 +31,46 @@ use std::sync::Arc;
 actions!(
     bviz_graph_chips,
     [
+        /// Focus query field
         Focus,
+        /// Add text as chip
         Commit,
+        /// Apply query
         Apply,
+        /// Leave query bar
         Leave,
+        /// Select previous chip
         SelectPrevious,
+        /// Select next chip
         SelectNext,
+        /// Enable or disable chip
         Toggle,
+        /// Negate chip
         Negate,
+        /// Move chip back
         MoveBack,
+        /// Move chip forward
         MoveForward,
+        /// Remove chip
         Remove,
+        /// Edit chip
         Edit,
+        /// Copy chip
         CopyChip,
+        /// Copy as Bazel query
         CopyStack,
+        /// Clear query
         ClearQuery,
+        /// Revert query
         RevertQuery,
+        /// Aim at previous completion
         CompletePrevious,
+        /// Aim at next completion
         CompleteNext,
+        /// Accept completion
         AcceptCompletion,
-        CloseCompletion
+        /// Close completions
+        CloseCompletion,
     ]
 );
 

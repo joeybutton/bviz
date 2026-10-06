@@ -58,16 +58,27 @@ pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 gpui::actions!(
     bviz_graph,
     [
+        /// Show whole build
         ShowWholeBuild,
+        /// Go up one level
         FocusUp,
+        /// Leave roots field
         LeaveRoots,
+        /// Select previous cell
         SelectPrevious,
+        /// Select next cell
         SelectNext,
+        /// Select parent cell
         SelectParent,
+        /// Select heaviest child cell
         SelectChild,
+        /// Focus cell
         FocusSelected,
+        /// Show cell in graph
         ShowSelected,
+        /// Go back
         FocusBack,
+        /// Go forward
         FocusForward,
     ]
 );

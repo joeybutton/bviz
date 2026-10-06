@@ -61,11 +61,16 @@ use std::borrow::Cow;
 gpui::actions!(
     bviz_trace,
     [
+        /// Select all visible tracks
         SelectAllTracks,
+        /// Clear time selection
         ClearTimeSelection,
+        /// Choose previous row
         ChoosePrevious,
+        /// Choose next row
         ChooseNext,
-        Unchoose
+        /// Clear chosen row
+        Unchoose,
     ]
 );
 

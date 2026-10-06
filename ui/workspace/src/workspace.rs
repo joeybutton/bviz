@@ -27,39 +27,66 @@ use std::sync::OnceLock;
 actions!(
     bviz_workspace,
     [
+        /// Show next tab
         NextTab,
+        /// Show previous tab
         PreviousTab,
+        /// Close the active panel
         ClosePanel,
+        /// Move panel to new window
         DetachPanel,
+        /// Maximize or restore pane
         ToggleMaximize,
+        /// Open or close Documents menu
         ToggleDocuments,
+        /// Focus left pane
         FocusLeft,
+        /// Focus right pane
         FocusRight,
+        /// Focus pane above
         FocusUp,
+        /// Focus pane below
         FocusDown,
+        /// Move panel left
         MovePanelLeft,
+        /// Move panel right
         MovePanelRight,
+        /// Move panel up
         MovePanelUp,
+        /// Move panel down
         MovePanelDown,
+        /// Split panel left
         SplitLeft,
+        /// Split panel right
         SplitRight,
+        /// Split panel up
         SplitUp,
+        /// Split panel down
         SplitDown,
+        /// Even out split
         EvenSplit,
-        ResetArrangement
+        /// Reset to opening arrangement
+        ResetArrangement,
     ]
 );
 
 actions!(
     bviz_playback,
     [
+        /// Play or pause
         PlayPause,
+        /// Step back
         StepBack,
+        /// Step forward
         StepForward,
+        /// Jump to the start
         SeekStart,
+        /// Jump to the end
         SeekEnd,
+        /// Play faster
         SpeedUp,
-        SpeedDown
+        /// Play slower
+        SpeedDown,
     ]
 );
 

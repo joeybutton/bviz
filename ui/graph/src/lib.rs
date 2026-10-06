@@ -90,11 +90,16 @@ use selection::Selection;
 actions!(
     bviz_graph,
     [
+        /// Toggle neighbor highlighting
         ToggleNeighborhood,
+        /// Toggle transitive reduction
         ToggleReduce,
+        /// Dismiss card, selection or paths
         Dismiss,
+        /// Go back
         JumpBack,
-        JumpForward
+        /// Go forward
+        JumpForward,
     ]
 );
 

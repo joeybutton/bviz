@@ -32,16 +32,26 @@ use rustc_hash::FxHashSet;
 actions!(
     bviz_graph_jump,
     [
+        /// Open jump palette
         Open,
+        /// Preview previous match
         Previous,
+        /// Preview next match
         Next,
+        /// Jump to match
         Go,
+        /// Show why match is in build
         AskWhy,
+        /// Always show match
         AlwaysShow,
+        /// Add match as query chip
         AddChip,
+        /// Close palette and go back
         Close,
+        /// Search next scope
         NextScope,
-        PreviousScope
+        /// Search previous scope
+        PreviousScope,
     ]
 );
 

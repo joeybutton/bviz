@@ -15,21 +15,36 @@ use std::ops::Range;
 gpui::actions!(
     bviz_text_input,
     [
+        /// Delete before cursor
         Backspace,
+        /// Delete after cursor
         Delete,
+        /// Move cursor left
         Left,
+        /// Move cursor right
         Right,
+        /// Extend selection left
         SelectLeft,
+        /// Extend selection right
         SelectRight,
+        /// Select all
         SelectAll,
+        /// Move cursor to start
         Home,
+        /// Move cursor to end
         End,
+        /// Select to start
         SelectHome,
+        /// Select to end
         SelectEnd,
+        /// Copy selection
         Copy,
+        /// Cut selection
         Cut,
+        /// Paste
         Paste,
-        ShowCharacterPalette
+        /// Show character palette
+        ShowCharacterPalette,
     ]
 );
 

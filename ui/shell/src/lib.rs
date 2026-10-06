@@ -9,7 +9,19 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, actions, px,
 };
 
-actions!(bviz_window, [Quit, CloseWindow, Tab, TabPrev]);
+actions!(
+    bviz_window,
+    [
+        /// Quit application
+        Quit,
+        /// Close window
+        CloseWindow,
+        /// Focus next control
+        Tab,
+        /// Focus previous control
+        TabPrev,
+    ]
+);
 
 /// The key context of the window frame, the outermost of every context in the
 /// window. gpui prefers the binding whose context matches deepest, and a

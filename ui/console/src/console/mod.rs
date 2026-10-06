@@ -22,17 +22,28 @@ use element::TerminalElement;
 actions!(
     bviz_console,
     [
+        /// Scroll up
         ScrollLineUp,
+        /// Scroll down
         ScrollLineDown,
+        /// Scroll page up
         ScrollPageUp,
+        /// Scroll page down
         ScrollPageDown,
+        /// Scroll to top
         ScrollToTop,
+        /// Scroll to bottom
         ScrollToBottom,
+        /// Copy selection
         Copy,
+        /// Find in output
         Find,
+        /// Go to next match
         FindNext,
+        /// Go to previous match
         FindPrev,
-        FindClose
+        /// Close find bar
+        FindClose,
     ]
 );
 

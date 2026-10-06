@@ -58,7 +58,18 @@ pub(crate) const PICKING: &str = "picking";
 
 gpui::actions!(
     bviz_graph,
-    [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
+    [
+        /// Show whole plot
+        ShowWholePlot,
+        /// Aim at previous point
+        AimUp,
+        /// Aim at next point
+        AimDown,
+        /// Show point in graph
+        RevealAimed,
+        /// Close pick list
+        ClosePickList,
+    ]
 );
 
 /// What the panel reads while the graph is being measured.

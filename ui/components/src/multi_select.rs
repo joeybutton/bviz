@@ -15,7 +15,15 @@ use gpui::{
 use std::collections::HashSet;
 use std::ops::Range;
 
-gpui::actions!(bviz_multi_select, [Toggle, Dismiss]);
+gpui::actions!(
+    bviz_multi_select,
+    [
+        /// Open or close list
+        Toggle,
+        /// Close list
+        Dismiss,
+    ]
+);
 
 /// The key context scoping the control's own bindings, so a key pressed while
 /// it has focus works the control rather than an enclosing binding.

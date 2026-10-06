@@ -13,7 +13,13 @@ use bviz_ui_components::Button;
 use bviz_ui_workspace::PanelEvent;
 use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
 
-actions!(bviz_graph_reveal, [Accept]);
+actions!(
+    bviz_graph_reveal,
+    [
+        /// Reveal offered node
+        Accept,
+    ]
+);
 
 /// What keeps a node out of the drawing, as a reader names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
