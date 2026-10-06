@@ -140,21 +140,38 @@ impl Universe {
     /// it holds, and the files each action among those writes, which the graph
     /// holds beside the action in its configured target.
     pub(super) fn scope_nodes(&self, value: &FixedBitSet) -> FixedBitSet {
-        let mut scope = value.clone();
-        let mut open: Vec<Id> = value.ones().map(|id| Id(id as u32)).collect();
+        self.closure(value, true)
+    }
+
+    /// `value` with every node its members hold, at any depth: what each
+    /// operand of `intersect` and the right operand of `except` stands for. An
+    /// action belongs to the configured target running it, as aquery projects
+    /// actions from configured targets, so taking a target out of a set or
+    /// keeping it takes or keeps its configured targets, their actions and the
+    /// files those hold.
+    pub(super) fn with_held(&self, value: &FixedBitSet) -> FixedBitSet {
+        self.closure(value, false)
+    }
+
+    /// `value` with every node its members hold, and, where `writes`, the
+    /// files each action reached writes along with what those hold.
+    fn closure(&self, value: &FixedBitSet, writes: bool) -> FixedBitSet {
+        let mut closure = value.clone();
+        let mut open: Vec<Id> = Vec::with_capacity(value.count_ones(..));
+        open.extend(value.ones().map(|id| Id(id as u32)));
         while let Some(id) = open.pop() {
-            let written = (self.index.kind(id) == Some(Kind::Action))
+            let written = (writes && self.index.kind(id) == Some(Kind::Action))
                 .then(|| self.index.dependents(id))
                 .into_iter()
                 .flatten()
                 .filter(|&file| self.index.kind(file) == Some(Kind::Artifact));
             for reached in self.index.children(id).chain(written) {
-                if !scope.put(reached.0 as usize) {
+                if !closure.put(reached.0 as usize) {
                     open.push(reached);
                 }
             }
         }
-        scope
+        closure
     }
 
     pub(super) fn members(&self) -> &FixedBitSet {

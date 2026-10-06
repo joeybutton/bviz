@@ -64,9 +64,16 @@ impl Universe {
                 for operand in rest {
                     let operand = self.eval(operand, scope)?;
                     match op {
-                        BinaryOp::Intersect | BinaryOp::Caret => value.intersect_with(&operand),
+                        BinaryOp::Intersect | BinaryOp::Caret => {
+                            let mut kept = operand.clone();
+                            kept.intersect_with(&self.with_held(&value));
+                            value.intersect_with(&self.with_held(&operand));
+                            value.union_with(&kept);
+                        }
                         BinaryOp::Union | BinaryOp::Plus => value.union_with(&operand),
-                        BinaryOp::Except | BinaryOp::Minus => value.difference_with(&operand),
+                        BinaryOp::Except | BinaryOp::Minus => {
+                            value.difference_with(&self.with_held(&operand));
+                        }
                     }
                 }
                 Ok(value)

@@ -1027,3 +1027,112 @@ fn a_canonical_name_with_plus_names_its_repository_bare_or_quoted() {
     assert_eq!(fixture.ok(&format!("{repo}//...")), named);
     assert_eq!(fixture.ok(&format!("\"{repo}//...\"")), named);
 }
+
+/// Package `a` holds the rules `//a:gen` and `//a:app`, each with a
+/// configured target running an action, the source `//a:in.c` that `gen`'s
+/// action reads, and the labeled output `//a:gen.out` with its configured copy
+/// holding the file the action writes. `app`'s action reads that file and
+/// writes the unlabeled `out:app`.
+fn held() -> (Universe, Names) {
+    let mut graph = Graph::new();
+    let mut names = Names::default();
+    let mut builder = FacetsBuilder::default();
+    let package = names.intern("pkg:a");
+    graph.add_node(Node::new(package, "//a", Kind::Package, None));
+    let mut node = |name: &str, kind, parent: Id| {
+        let id = names.intern(name);
+        graph.add_node(Node::new(id, name, kind, Some(parent)));
+        id
+    };
+    let rule = node("target://a:gen", Kind::Target, package);
+    let app = node("target://a:app", Kind::Target, package);
+    let source = node("target://a:in.c", Kind::Source, package);
+    let output = node("target://a:gen.out", Kind::Artifact, package);
+    let rule_ct = node("ct:gen", Kind::ConfiguredTarget, rule);
+    let app_ct = node("ct:app", Kind::ConfiguredTarget, app);
+    let output_ct = node("ct:gen.out", Kind::ConfiguredTarget, output);
+    let generate = node("act:gen", Kind::Action, rule_ct);
+    let link = node("act:app", Kind::Action, app_ct);
+    let written = node("file:gen.out", Kind::Artifact, output_ct);
+    let linked = node("out:app", Kind::Artifact, app_ct);
+    for (target, label) in [
+        (rule, "//a:gen"),
+        (app, "//a:app"),
+        (source, "//a:in.c"),
+        (output, "//a:gen.out"),
+    ] {
+        builder.describe_label(target, Some(package), label);
+    }
+    for (child, holder) in [
+        (rule_ct, rule),
+        (app_ct, app),
+        (output_ct, output),
+        (generate, rule_ct),
+        (link, app_ct),
+        (written, output_ct),
+        (linked, app_ct),
+    ] {
+        builder.facets().inherit(child, holder);
+    }
+    for (from, to, kind) in [
+        (source, rule, EdgeKind::Query),
+        (rule, output, EdgeKind::Query),
+        (output, app, EdgeKind::Query),
+        (rule_ct, output_ct, EdgeKind::Cquery),
+        (output_ct, app_ct, EdgeKind::Cquery),
+        (source, generate, EdgeKind::Aquery),
+        (generate, written, EdgeKind::Aquery),
+        (written, link, EdgeKind::Aquery),
+        (link, linked, EdgeKind::Aquery),
+    ] {
+        graph.add_edge(from, to, kind);
+    }
+    let (facets, capabilities) = builder.seal();
+    (
+        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        names,
+    )
+}
+
+#[test]
+fn taking_out_rules_takes_out_their_actions_and_unlabeled_outputs() {
+    let (universe, names) = held();
+    let left = universe
+        .evaluate(&parse("deps(//a:app) - //...").unwrap())
+        .unwrap();
+    assert_eq!(
+        labels(&names, &left),
+        ["//a:gen.out", "//a:in.c", "ct:gen.out", "file:gen.out"]
+    );
+}
+
+#[test]
+fn keeping_rules_keeps_their_actions_and_unlabeled_outputs() {
+    let (universe, names) = held();
+    let kept = universe
+        .evaluate(&parse("deps(//a:app) ^ //...").unwrap())
+        .unwrap();
+    assert_eq!(
+        labels(&names, &kept),
+        [
+            "//a:app", "//a:gen", "act:app", "act:gen", "ct:app", "ct:gen", "out:app"
+        ]
+    );
+}
+
+#[test]
+fn an_intersection_keeps_what_either_side_holds_of_the_other() {
+    let (universe, names) = held();
+    let one = |text: &str| labels(&names, &universe.evaluate(&parse(text).unwrap()).unwrap());
+    assert_eq!(one("//... ^ deps(//a:app)"), one("deps(//a:app) ^ //..."));
+    assert_eq!(one("deps(//a:app) ^ deps(//a:app)"), one("deps(//a:app)"));
+}
+
+#[test]
+fn a_union_takes_in_no_more_than_its_operands_name() {
+    let (universe, names) = held();
+    let named = universe
+        .evaluate(&parse("//a:in.c + //a:gen").unwrap())
+        .unwrap();
+    assert_eq!(labels(&names, &named), ["//a:gen", "//a:in.c", "ct:gen"]);
+}
