@@ -1,11 +1,12 @@
 //! Which nodes of a graph a filter shows, stated as rules over their facets.
 //!
 //! A node is read by the last [`Rule`] matching it, by the filter's [`Base`]
-//! where no rule does, and by its pin where it carries one; [`Verdict`] names
+//! where no rule does, as hidden where it lies outside the filter's [`Scope`],
+//! and by its pin where it carries one; [`Verdict`] names
 //! what those readings, taken with where the node sits in the containment
-//! forest, leave of it. The set of shown nodes is therefore a result the rules
-//! reach rather than state of its own, and survives a graph being rebuilt, which
-//! the ids in such a set would not.
+//! forest, leave of it. Rules and the base name no node by id, so they hold
+//! of a graph rebuilt from the same inputs; a scope and the pins name nodes by
+//! id, so they hold only of the graph they were made over.
 
 mod eval;
 pub mod labels;
@@ -13,6 +14,10 @@ pub mod pattern;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+use fixedbitset::FixedBitSet;
 
 use crate::facets::{RuleCategory, Tri};
 use crate::graph::Kind;
@@ -81,14 +86,59 @@ pub struct Rule {
 /// it without either being rewritten. A rule constraining [`Predicate::label`]
 /// and nothing besides stands first, ahead of every rule over a node's other
 /// facets, so that a label pattern selects within what those leave rather than
-/// drawing back what they hide. `pins` decide the nodes they name whatever the
-/// rules say, which is what lets a node shown or hidden on its own outlast a
-/// change to a rule that has nothing to do with it.
+/// drawing back what they hide. The scope hides what lies outside it ahead of
+/// every rule, so no rule draws back a node the scope leaves out. `pins`
+/// decide the nodes they name whatever the scope and the rules say, which is
+/// what lets a node shown or hidden on its own outlast a change to a rule that
+/// has nothing to do with it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Filter {
     pub base: Base,
+    pub scope: Option<Scope>,
     pub rules: Vec<Rule>,
     pub pins: HashMap<Id, Pin>,
+}
+
+/// The nodes a query names, outside which a filter draws nothing but the
+/// frames around what it draws. A frame — a package box, a merge group —
+/// stands for no part of the build, so a scope neither holds nor hides one.
+///
+/// The nodes are ids of the one graph the query was evaluated over, so a scope
+/// does not outlive that graph as the rules do.
+///
+/// A scope is made only by [`Universe::scope`](crate::query_lang::Universe::scope),
+/// over the graph whose ids it holds.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Scope {
+    query: Arc<str>,
+    nodes: Arc<FixedBitSet>,
+}
+
+impl Scope {
+    pub(crate) fn new(query: Arc<str>, nodes: FixedBitSet) -> Self {
+        Scope {
+            query,
+            nodes: Arc::new(nodes),
+        }
+    }
+
+    /// The query naming the nodes, as the scope's maker wrote it.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn holds(&self, node: &crate::graph::Node) -> bool {
+        node.kind.is_frame() || self.nodes.contains(node.id.0 as usize)
+    }
+}
+
+impl fmt::Debug for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Scope")
+            .field("query", &self.query)
+            .field("nodes", &self.nodes.count_ones(..))
+            .finish()
+    }
 }
 
 /// The values one term admits, of which a node's facet must carry one.
@@ -562,6 +612,7 @@ mod tests {
         let (app, lib) = ("target://foo:app", "target:@@rules_foo+//bar:lib");
         let filter = Filter {
             base: Base::HideAll,
+            scope: None,
             rules: vec![hide_targets()],
             pins: [(fixture.id(app), Pin::Set(Visibility::Shown))]
                 .into_iter()

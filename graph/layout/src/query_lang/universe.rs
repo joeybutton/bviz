@@ -14,6 +14,7 @@ use crate::facets::Facets;
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
 use crate::reach::{Index, Level};
+use crate::select::Scope;
 use crate::select::labels::LabelIndex;
 use crate::target_pattern::TargetIndex;
 
@@ -117,6 +118,32 @@ impl Universe {
             }
         }
         counts
+    }
+
+    /// A filter's scope over `value`, which `query` named.
+    pub fn scope(&self, query: impl Into<Arc<str>>, value: &FixedBitSet) -> Scope {
+        Scope::new(query.into(), self.scope_nodes(value))
+    }
+
+    /// What a scope over `value` holds: each node of `value` with every node
+    /// it holds, and the files each action among those writes, which the graph
+    /// holds beside the action in its configured target.
+    pub(super) fn scope_nodes(&self, value: &FixedBitSet) -> FixedBitSet {
+        let mut scope = value.clone();
+        let mut open: Vec<Id> = value.ones().map(|id| Id(id as u32)).collect();
+        while let Some(id) = open.pop() {
+            let written = (self.index.kind(id) == Some(Kind::Action))
+                .then(|| self.index.dependents(id))
+                .into_iter()
+                .flatten()
+                .filter(|&file| self.index.kind(file) == Some(Kind::Artifact));
+            for reached in self.index.children(id).chain(written) {
+                if !scope.put(reached.0 as usize) {
+                    open.push(reached);
+                }
+            }
+        }
+        scope
     }
 
     pub(super) fn members(&self) -> &FixedBitSet {

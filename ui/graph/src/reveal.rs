@@ -22,6 +22,8 @@ pub(crate) enum HiddenBy {
     Pin,
     /// The search's pattern, hiding what it names or every node it does not.
     Search,
+    /// The query the filter is scoped to, which does not name the node.
+    Query,
     /// The rule a toolbar control writes over its term.
     Control(Term),
     /// A rule no control wrote, at its index among the filter's rules.
@@ -43,6 +45,7 @@ impl HiddenBy {
             HiddenBy::Paths => "hidden by the dependency paths drawn",
             HiddenBy::Pin => "hidden by its pin",
             HiddenBy::Search => "hidden by the search",
+            HiddenBy::Query => "outside the query",
             HiddenBy::Control(Term::Kind) => "hidden by the class filter",
             HiddenBy::Control(Term::RepoCategory | Term::Repo) => "hidden by the repository filter",
             HiddenBy::Control(Term::RuleCategory | Term::Mnemonic | Term::ToolConfiguration) => {
@@ -88,6 +91,7 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
         Hidden::OffPaths => HiddenBy::Paths,
         Hidden::Filtered { filter, hiding } => match hiding {
             Hiding::Pin => HiddenBy::Pin,
+            Hiding::Scope => HiddenBy::Query,
             Hiding::Rule(index) => {
                 let rule = &filter.rules[index as usize];
                 if search::wrote(rule) {
@@ -405,6 +409,15 @@ mod tests {
         assert_eq!(filtered(&Filter::default(), Hiding::Base), HiddenBy::Base);
     }
 
+    /// A pin outranks the scope, so revealing a node the query leaves out
+    /// draws it.
+    #[test]
+    fn a_node_outside_the_query_is_hidden_by_it_and_revealable() {
+        let by = filtered(&Filter::default(), Hiding::Scope);
+        assert_eq!(by, HiddenBy::Query);
+        assert!(by.revealable());
+    }
+
     /// The node a stop names, where it names one.
     fn node(stop: Option<Stop>) -> Option<Id> {
         match stop? {
@@ -449,6 +462,7 @@ mod tests {
             HiddenBy::Paths,
             filtered(&Filter::default(), Hiding::Pin),
             filtered(&Filter::default(), Hiding::Base),
+            filtered(&Filter::default(), Hiding::Scope),
         ] {
             assert!(revealable.revealable());
         }

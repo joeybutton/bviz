@@ -427,6 +427,34 @@ fn an_aquery_filter_keeps_the_actions_matching_in_full() {
     assert_eq!(query("inputs('p/in.txt', //p:all)").unwrap(), [genrule]);
 }
 
+/// A scope over an action holds the files it writes, which stand beside it in
+/// its configured target, and a scope over a target holds all it holds.
+#[test]
+fn a_scope_holds_what_a_node_holds_and_what_an_action_writes() {
+    let (universe, names) = actions();
+    let scope = |expr: &str| {
+        let value = universe.evaluate(&parse(expr).unwrap()).unwrap();
+        labels(&names, &universe.scope_nodes(&value))
+    };
+    let genrule = scope("mnemonic(Genrule, //p:gen)");
+    assert_eq!(genrule.len(), 3, "{genrule:?}");
+    assert!(genrule.contains(&"action:bazel-out/k8-fastbuild/bin/p/out.h".to_string()));
+    assert_eq!(
+        genrule
+            .iter()
+            .filter(|name| name.starts_with("artifact"))
+            .count(),
+        2,
+        "{genrule:?}"
+    );
+    let target = scope("//p:gen");
+    assert!(target.len() > genrule.len(), "{target:?}");
+    assert!(
+        genrule.iter().all(|name| target.contains(name)),
+        "{target:?}"
+    );
+}
+
 #[test]
 fn an_aquery_filter_may_stand_inside_another_function() {
     let (universe, names) = actions();
