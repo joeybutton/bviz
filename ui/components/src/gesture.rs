@@ -3,9 +3,17 @@
 
 use crate::keys::{KeyStyle, glyphs, words};
 use gpui::{
-    ClickEvent, Modifiers, MouseButton, MouseDownEvent, NavigationDirection, PinchEvent,
-    ScrollWheelEvent,
+    ClickEvent, Modifiers, MouseButton, MouseDownEvent, NavigationDirection, PinchEvent, Pixels,
+    Point, ScrollWheelEvent, px,
 };
+
+/// How far one line of wheel scroll pans a view, for the devices that report a
+/// delta in lines rather than in pixels.
+pub const LINE_SCROLL_PX: f32 = 24.0;
+
+/// Factor one line of wheel scroll scales a zoomable view by, small enough that
+/// a notch nudges the view rather than jumping it.
+pub const ZOOM_PER_NOTCH: f32 = 1.1;
 
 /// The modifier keys a gesture is made holding.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -378,6 +386,17 @@ impl<I: Copy> Gestures<I> {
             .map(|(_, entry)| entry.row)
             .collect()
     }
+}
+
+/// How far `event` scrolls a view, a line counted as [`LINE_SCROLL_PX`].
+pub fn scroll_pixels(event: &ScrollWheelEvent) -> Point<Pixels> {
+    event.delta.pixel_delta(px(LINE_SCROLL_PX))
+}
+
+/// The factor `event` zooms a view by: [`ZOOM_PER_NOTCH`] for each line its
+/// vertical scroll makes, a scroll in pixels counted in lines as it pans.
+pub fn wheel_zoom_factor(event: &ScrollWheelEvent) -> f32 {
+    ZOOM_PER_NOTCH.powf(f32::from(scroll_pixels(event).y) / LINE_SCROLL_PX)
 }
 
 /// The factor a pinch scales a view by: the exponential of its delta, which is

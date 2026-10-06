@@ -4,7 +4,9 @@
 
 use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
-use bviz_ui_components::gesture::{GestureRow, Pointer, pinch_factor};
+use bviz_ui_components::gesture::{
+    GestureRow, Pointer, pinch_factor, scroll_pixels, wheel_zoom_factor,
+};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
     ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
@@ -21,8 +23,8 @@ use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity,
-    Window, actions, canvas, div, prelude::*, px, size,
+    Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
+    canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -204,18 +206,6 @@ const MAX_ZOOM: f32 = 4.0;
 /// The most a frame request zooms in to show what it names, at which a label
 /// reads at a comfortable size however small the box framed.
 const MAX_FRAME_ZOOM: f32 = 1.5;
-
-/// Factor one wheel notch scales the zoom by, small enough that a notch nudges
-/// the view rather than jumping it.
-const ZOOM_PER_NOTCH: f32 = 1.1;
-
-/// Scroll delta one wheel notch amounts to, for the devices that report a delta
-/// in pixels rather than in lines.
-const PIXELS_PER_NOTCH: f32 = 120.0;
-
-/// How far one line of wheel scroll pans a view, for the devices that report a
-/// delta in lines rather than in pixels.
-const LINE_SCROLL_PX: f32 = 24.0;
 
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
@@ -815,25 +805,17 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let delta = scroll_pixels(e);
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
-                CanvasIntent::Zoom => self.zoom_by_wheel(e, cx),
+                CanvasIntent::Zoom => self.zoom_about(e.position, wheel_zoom_factor(e), cx),
                 CanvasIntent::PanAcross => pan_by(self, (dx + dy, 0.0), cx),
                 CanvasIntent::Scroll => pan_by(self, (dx, dy), cx),
                 _ => return false,
             }
             true
         });
-    }
-
-    fn zoom_by_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let notches = match e.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
-        };
-        self.zoom_about(e.position, ZOOM_PER_NOTCH.powf(notches), cx);
     }
 
     fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1300,6 +1282,7 @@ mod tests {
     };
     use crate::paint::lane_polyline;
     use bviz_graph_layout::Box;
+    use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
     use gpui::{Bounds, Size, point};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {

@@ -173,16 +173,9 @@ const SLICE_TEXT_PAD: f32 = 3.0;
 /// Deepest horizontal zoom, in pixels per microsecond.
 const MAX_PX_PER_US: f64 = 50.0;
 
-/// Horizontal zoom multiplier per wheel notch, shared by the chart's time axis
-/// and the graph's width so a notch feels the same in both views.
-const ZOOM_PER_NOTCH: f64 = 1.1;
-
 /// Empty space kept reachable past each end of the timeline so its start and end
 /// stand clear of the window edges.
 const EDGE_MARGIN_PX: f32 = 24.0;
-
-/// Pixels scrolled per wheel line.
-const LINE_SCROLL_PX: f32 = 24.0;
 
 /// How far the left-edge seam is mixed from a box's fill toward the background:
 /// enough to read as a muted divider against any fill on either theme.
@@ -1817,6 +1810,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use bviz_invocation::Configurations;
+    use bviz_ui_components::gesture::LINE_SCROLL_PX;
 
     #[test]
     fn every_divider_gesture_is_reachable() {

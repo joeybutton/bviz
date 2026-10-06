@@ -2,8 +2,8 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
 use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
-    LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ShowWholeFlameGraph, ZOOM_PER_NOTCH,
-    drawn_scroll, profile_status, scroll_request, thumb_offset, time_window_chip,
+    METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ShowWholeFlameGraph, drawn_scroll, profile_status,
+    scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
     FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
@@ -801,14 +801,14 @@ impl FlamePanel {
         let Some(fl) = self.layout(cx) else {
             return;
         };
-        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let delta = gesture::scroll_pixels(e);
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         let (mut fv, width) = (fl.view, fl.width);
         GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
                 FlameIntent::Zoom => {
-                    let dy_lines = dy / LINE_SCROLL_PX;
-                    self.zoom_about(e.position.x, ZOOM_PER_NOTCH.powf(dy_lines as f64), cx);
+                    let factor = f64::from(gesture::wheel_zoom_factor(e));
+                    self.zoom_about(e.position.x, factor, cx);
                 }
                 FlameIntent::PanAcross => {
                     fv.pan_px(dx + dy, width);

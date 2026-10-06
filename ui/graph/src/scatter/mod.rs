@@ -21,7 +21,6 @@ use crate::point::{
 use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
-use crate::{LINE_SCROLL_PX, PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
@@ -39,9 +38,8 @@ use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, Rems, Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
-    Stateful, Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems,
-    uniform_list,
+    Point, Rems, Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -376,11 +374,11 @@ impl ScatterPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let delta = gesture::scroll_pixels(e);
         GESTURES.dispatch(gesture::Pointer::scroll(e), |intent| {
             let by = match intent {
                 ScatterIntent::Zoom => {
-                    self.zoom_by_wheel(e, cx);
+                    self.zoom_about(e.position, gesture::wheel_zoom_factor(e), cx);
                     return true;
                 }
                 ScatterIntent::PanAcross => point(delta.x + delta.y, px(0.)),
@@ -392,15 +390,6 @@ impl ScatterPanel {
             }
             true
         });
-    }
-
-    /// Zooms about the pointer by as many notches as the wheel turned.
-    fn zoom_by_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let notches = match e.delta {
-            ScrollDelta::Lines(lines) => lines.y,
-            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
-        };
-        self.zoom_about(e.position, ZOOM_PER_NOTCH.powf(notches), cx);
     }
 
     fn on_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {

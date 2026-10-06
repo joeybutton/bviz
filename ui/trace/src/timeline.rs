@@ -8,11 +8,11 @@ use crate::regions::{CountersStrip, LaneBand, Regions};
 use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
-    GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, ShowWholeTimeline, TIMELINE_KEY_CONTEXT,
-    TimelineBars, TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter,
-    paint_marker_band, paint_markers, paint_ruler, paint_slice, ruler_ticks, scroll_request,
-    scrollbar_geom, slice_tooltip, thumb_offset,
+    GROUP_BAND_HEIGHT, GROUP_ICON, MAX_PX_PER_US, METRICS, MIN_DRAG_PX, MIN_SLICE_PX,
+    SLICE_TEXT_PAD, SelectAllTracks, ShowWholeTimeline, TIMELINE_KEY_CONTEXT, TimelineBars,
+    TracePanel, drawn_scroll, paint_gridlines, paint_gutter, paint_marker_band, paint_markers,
+    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
+    thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -21,6 +21,7 @@ use bviz_trace_layout::{
 use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
 use bviz_ui_components::gesture::{
     Button, Clicks, Entry, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
+    scroll_pixels, wheel_zoom_factor,
 };
 use bviz_ui_components::{
     DragEnd, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, overlay_canvas, paint_tooltip_box,
@@ -1148,15 +1149,14 @@ impl Timeline {
         let time_w = regions.time_w;
         let content_left = regions.content_left;
         let before = self.view;
-        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let delta = scroll_pixels(e);
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         TIMELINE_GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
                 TimelineIntent::Zoom => {
-                    let dy_lines = dy / LINE_SCROLL_PX;
                     self.scale_view(
                         f32::from(e.position.x) - content_left,
-                        ZOOM_PER_NOTCH.powf(dy_lines as f64),
+                        f64::from(wheel_zoom_factor(e)),
                         span,
                         time_w,
                     );

@@ -532,8 +532,9 @@ pub(crate) fn group_label(class: LaneClass) -> &'static str {
 mod tests {
     use super::*;
     use crate::test_profile::profile_of;
-    use crate::{LINE_SCROLL_PX, drawn_scroll, scroll_request};
+    use crate::{drawn_scroll, scroll_request};
     use bviz_trace_layout::lay_out_lanes;
+    use bviz_ui_components::gesture::LINE_SCROLL_PX;
 
     /// Stacks one band per group, each followed by its `(track, height)` lanes,
     /// in the geometry the flame chart draws. Every group holds a single pool, so
