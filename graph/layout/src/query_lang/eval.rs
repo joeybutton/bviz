@@ -12,7 +12,7 @@ use std::ops::Range;
 use fixedbitset::FixedBitSet;
 use regex_automata::meta::Regex;
 
-use super::ast::{Arg, BinaryOp, Expr, ExprKind, Function, Word};
+use super::ast::{Arg, BinaryOp, Evaluable, Expr, ExprKind, Function, Word};
 use super::universe::Universe;
 use crate::target_pattern::TargetPattern;
 
@@ -125,25 +125,20 @@ impl Universe {
             message,
             span: call.span.clone(),
         };
-        let needs = |what: &str| {
-            let name = function.name();
-            Err(fail(format!(
-                "{name}() needs {what}, which bviz does not load into its graph"
-            )))
-        };
+        let evaluable = function.evaluable().map_err(fail)?;
         // The parser admits a call only with the arguments its signature
         // declares, so each position holds the type the function reads there.
         let mut arguments = || self.arguments(args, scope);
-        match function {
-            Function::Deps => {
+        match evaluable {
+            Evaluable::Deps => {
                 let (values, depth) = arguments()?;
                 Ok(self.deps(&values[0], depth))
             }
-            Function::AllRdeps => {
+            Evaluable::AllRdeps => {
                 let (values, depth) = arguments()?;
                 Ok(self.rdeps(None, &values[0], depth))
             }
-            Function::Rdeps => {
+            Evaluable::Rdeps => {
                 let (values, depth) = arguments()?;
                 if values[1].is_clear() {
                     return Ok(self.empty());
@@ -151,59 +146,52 @@ impl Universe {
                 let universe = self.deps(&values[0], None);
                 Ok(self.rdeps(Some(&universe), &values[1], depth))
             }
-            Function::AllPaths => {
+            Evaluable::AllPaths => {
                 let (values, _) = arguments()?;
                 Ok(self.all_paths(&values[0], &values[1]))
             }
-            Function::SomePath => {
+            Evaluable::SomePath => {
                 let (values, _) = arguments()?;
                 Ok(self.some_path(&values[0], &values[1]))
             }
-            Function::Siblings => Ok(self.siblings(&arguments()?.0[0])),
-            Function::SamePkgDirectRdeps => {
+            Evaluable::Siblings => Ok(self.siblings(&arguments()?.0[0])),
+            Evaluable::SamePkgDirectRdeps => {
                 let (values, _) = arguments()?;
                 self.same_package_direct_rdeps(&values[0]).map_err(fail)
             }
-            Function::Some => {
+            Evaluable::Some => {
                 let (values, count) = arguments()?;
                 let some = self.some(&values[0], count.unwrap_or(1));
                 some.ok_or_else(|| fail("argument set is empty".to_string()))
             }
-            Function::Labels => needs("the labels each rule's attributes name"),
-            Function::Visible => needs("each target's visibility"),
-            Function::Tests => needs("the tests each test suite names"),
-            Function::BuildFiles | Function::LoadFiles | Function::RBuildFiles => {
-                needs("the BUILD and .bzl files of each package")
-            }
-            Function::Executables => needs("which rules are executable"),
             // Bazel compiles the pattern before it evaluates the expression
             // filtered, so a pattern it cannot compile fails first.
-            Function::Kind => {
+            Evaluable::Kind => {
                 let regex = self.regex(function, words(args)[0]).map_err(fail)?;
                 let (values, _) = arguments()?;
                 Ok(self.kind(&regex, &values[0]))
             }
-            Function::Filter => {
+            Evaluable::Filter => {
                 let regex = self.regex(function, words(args)[0]).map_err(fail)?;
                 let (values, _) = arguments()?;
                 Ok(self.filter(&regex, &values[0]))
             }
-            Function::Attr => {
+            Evaluable::Attr => {
                 let words = words(args);
                 let regex = self.regex(function, words[1]).map_err(fail)?;
                 let attribute = self.attribute(words[0]).map_err(fail)?;
                 let (values, _) = arguments()?;
                 Ok(self.attr(attribute, &regex, &values[0]))
             }
-            Function::Config => {
+            Evaluable::Config => {
                 let (values, _) = arguments()?;
                 let written = expressions(args)[0].to_string();
                 let config = self.config(&values[0], words(args)[0], &written);
                 config.map_err(fail)
             }
-            Function::Mnemonic => self.filter_actions(call, function, args, scope, Self::mnemonic),
-            Function::Inputs => self.filter_actions(call, function, args, scope, Self::inputs),
-            Function::Outputs => self.filter_actions(call, function, args, scope, Self::outputs),
+            Evaluable::Mnemonic => self.filter_actions(call, function, args, scope, Self::mnemonic),
+            Evaluable::Inputs => self.filter_actions(call, function, args, scope, Self::inputs),
+            Evaluable::Outputs => self.filter_actions(call, function, args, scope, Self::outputs),
         }
     }
 

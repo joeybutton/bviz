@@ -8,8 +8,8 @@ use gpui::{
     Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
     px, rems,
 };
-use nucleo::pattern::{CaseMatching, Normalization};
-use nucleo::{Config, Injector, Matcher, Nucleo};
+use nucleo::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Injector, Matcher, Nucleo, Utf32Str, Utf32String};
 pub(crate) use rank::{Row, Standing};
 use std::ops::Range;
 use std::sync::Arc;
@@ -293,6 +293,29 @@ pub(crate) fn poll(
             cx.background_executor().timer(POLL).await;
         }
     });
+}
+
+/// The rows for `query` over the few `candidates`, each given by its index
+/// and its text, ranked as a [`Matching`] ranks, on the calling thread: for a
+/// list short enough that matching it costs less than handing it off.
+pub(crate) fn rank_few<'a>(
+    candidates: impl Iterator<Item = (u32, &'a str)>,
+    query: &str,
+    standing: impl Fn(u32) -> Standing,
+) -> Vec<Row> {
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let texts: Vec<(u32, Utf32String)> = candidates
+        .map(|(index, text)| (index, Utf32String::from(text)))
+        .collect();
+    let mut matcher = Matcher::new(config());
+    let mut found: Vec<(u32, u32, Utf32Str<'_>)> = Vec::with_capacity(texts.len());
+    found.extend(texts.iter().filter_map(|(index, text)| {
+        let score = pattern.score(text.slice(..), &mut matcher)?;
+        Some((score, *index, text.slice(..)))
+    }));
+    found.sort_by_key(|&(score, index, _)| (std::cmp::Reverse(score), index));
+    let found = found.into_iter().map(|(_, index, text)| (index, text));
+    rank::rank(found, query, &pattern, &mut matcher, standing)
 }
 
 /// `text` with its `path` muted and the `matched` chars picked out over it.

@@ -131,6 +131,11 @@ impl TextInput {
         self.cursor_offset()
     }
 
+    /// Moves the cursor to the byte offset `offset` into what the field holds.
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.move_to(offset.min(self.content.len()), cx);
+    }
+
     /// Replaces the byte range `range` of what the field holds with `text`,
     /// leaving the cursor just past it.
     pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {

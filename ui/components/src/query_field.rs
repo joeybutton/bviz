@@ -84,6 +84,12 @@ impl QueryField {
             .update(cx, |input, cx| input.replace(range, text, cx));
     }
 
+    /// Moves the cursor to the byte offset `offset` into the text.
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_cursor(offset, cx));
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.set_content("", cx));
     }

@@ -1,15 +1,18 @@
 //! Completion of the word typed into the query field: the graph's target
-//! labels, its packages in both wildcard forms and its repositories,
-//! matched against the word under the cursor and listed under the field.
+//! labels, its packages in both wildcard forms, its repositories, and the
+//! query functions where one can stand, matched against the word under the
+//! cursor and listed under the field.
 
-use super::GraphPanel;
+use super::{GraphPanel, command};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
-use crate::model::Prepared;
-use bviz_graph_layout::query_lang::{word_at, written_word};
+use crate::model::{Prepared, Shared};
+use bviz_graph_layout::query_lang::{ArgType, Function, Params, Place, word_at, written_word};
 use bviz_graph_layout::{Id, Kind};
-use bviz_ui_components::{ListScroll, SCROLLBAR_THICKNESS, list_scrollbar, menu_chrome};
+use bviz_ui_components::{
+    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar, menu_chrome,
+};
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, MouseButton, MouseDownEvent,
     Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*, px, uniform_list,
@@ -32,6 +35,7 @@ enum Named {
     Target(Id),
     Package,
     Repository,
+    Function(Function),
 }
 
 impl Named {
@@ -40,13 +44,65 @@ impl Named {
             Named::Target(_) => "target",
             Named::Package => "package",
             Named::Repository => "repository",
+            Named::Function(_) => "function",
         }
     }
 }
 
-/// One pattern the field offers to complete a word with.
+/// What a word standing at a place is offered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Offers {
+    functions: bool,
+    patterns: bool,
+}
+
+impl Offers {
+    fn at(place: Place) -> Offers {
+        let (functions, patterns) = match place {
+            Place::Pattern => (false, true),
+            Place::Operand => (true, true),
+            Place::Callee => (true, false),
+        };
+        Offers {
+            functions,
+            patterns,
+        }
+    }
+}
+
+/// The function `Function::ALL` holds at `index`, as a completion.
+fn function_completion(index: u32) -> Completion<'static> {
+    let function = Function::ALL[index as usize];
+    Completion {
+        text: function.name(),
+        path: 0..0,
+        named: Named::Function(function),
+        weight: 0,
+    }
+}
+
+/// The rows of the functions `word` matches, ranked as the graph's patterns
+/// are; few enough to match on the UI thread as the word changes.
+fn function_rows(word: &str) -> Vec<Row> {
+    let names = (0u32..).zip(Function::ALL.map(Function::name));
+    fuzzy::rank_few(names, word, |_| Standing {
+        path: 0..0,
+        drawn: false,
+        weight: 0,
+    })
+}
+
+/// Whether a command the graph `shared` was read from reads `function`; one
+/// none reads is bviz's own extension over that graph.
+fn read_by_graph(shared: &Shared, function: Function) -> bool {
+    let inputs = shared.inputs;
+    inputs.inputs().any(|input| command(input).reads(function))
+}
+
+/// One pattern or function the field offers to complete a word with.
 struct Completion<'a> {
-    /// The pattern unquoted, which a word is matched against.
+    /// The pattern unquoted, or the function's name, which a word is matched
+    /// against.
     text: &'a str,
     /// The chars of `text` leading up to the name of what it names.
     path: Range<u32>,
@@ -198,14 +254,53 @@ pub(super) struct Completer {
     closed_at: Option<(SharedString, Option<Range<usize>>)>,
 }
 
+/// What the field offers, listed functions first, then the graph's
+/// patterns.
 struct Offered {
     completions: Prepared<Completions>,
+    /// Matches the word against the graph's patterns.
     matching: Matching,
+    /// The functions the word matches, as indices into [`Function::ALL`].
+    functions: Vec<Row>,
     /// Where the word the rows complete stood in the field as it was matched.
     word: Option<Range<usize>>,
+    /// What the word is offered.
+    offers: Offers,
     /// The row the arrow keys moved onto, which Enter accepts; none until
     /// they move, so that Enter commits the field as typed.
     aimed: Option<usize>,
+}
+
+impl Offered {
+    /// The patterns' rows, where the word is offered patterns.
+    fn pattern_rows(&self) -> &[Row] {
+        match self.offers.patterns {
+            true => self.matching.rows(),
+            false => &[],
+        }
+    }
+
+    fn rows(&self) -> usize {
+        self.functions.len() + self.pattern_rows().len()
+    }
+
+    /// The row at `at`, with what it completes the word as. A pattern's row
+    /// is listed only once the patterns are prepared, so reading one never
+    /// waits on their preparation; a function's needs none.
+    fn row(&self, at: usize) -> Option<(Completion<'_>, &Row)> {
+        match self.functions.get(at) {
+            Some(row) => Some((function_completion(row.candidate), row)),
+            None => {
+                let row = self.pattern_rows().get(at - self.functions.len())?;
+                Some((self.completions.get().get(row.candidate), row))
+            }
+        }
+    }
+
+    /// Whether the row at `at` was ranked for the word as it stands.
+    fn current(&self, at: usize) -> bool {
+        at < self.functions.len() || self.matching.current()
+    }
 }
 
 /// The matching of what the field offers.
@@ -231,7 +326,9 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         view.chips.completer.offered = Some(Offered {
             completions: completions.clone(),
             matching: view.matchers.take(),
+            functions: Vec::new(),
             word: None,
+            offers: Offers::at(Place::Pattern),
             aimed: None,
         });
         let feed = move |feeder: &Feeder| {
@@ -247,18 +344,28 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let field = view.chips.field.read(cx);
     let text = field.text(cx);
     let typed = word_at(&text, field.cursor(cx));
-    let (word, query) = typed
-        .map(|word| (word.span, SharedString::from(word.text.to_owned())))
-        .unzip();
+    let offers = typed.as_ref().map(|word| Offers::at(word.place));
+    let functions = match &typed {
+        Some(word) if offers.is_some_and(|offers| offers.functions) => function_rows(word.text),
+        _ => Vec::new(),
+    };
+    let query = match &typed {
+        Some(word) if offers.is_some_and(|offers| offers.patterns) => word.text.to_owned(),
+        _ => String::new(),
+    };
+    let word = typed.map(|word| word.span);
     let Some(offered) = view.chips.completer.offered.as_mut() else {
         return;
     };
     offered.word = word;
+    offered.functions = functions;
+    offered.offers = offers.unwrap_or(Offers::at(Place::Pattern));
     offered.aimed = None;
     view.chips.completer.scroll.to_top();
-    if offered.matching.set_query(query.unwrap_or_default()) {
+    if offered.matching.set_query(query.into()) {
         fuzzy::poll(view, matching, take_up, cx);
     }
+    cx.notify();
 }
 
 /// Keeps the list closed while the field holds what it holds now.
@@ -284,7 +391,7 @@ fn take_up(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             weight: completion.weight,
         }
     });
-    let rows = offered.matching.rows().len();
+    let rows = offered.rows();
     offered.aimed = offered.aimed.filter(|&aimed| aimed < rows);
     cx.notify();
 }
@@ -316,9 +423,14 @@ fn shown<'a>(view: &'a GraphPanel, window: &Window, cx: &App) -> Option<&'a Offe
     if offered.word.as_ref() != Some(&word) {
         return None;
     }
-    let best = offered.matching.rows().first()?;
-    let best = written_word(offered.completions.get().get(best.candidate).text);
-    (best != text[word]).then_some(offered)
+    let (best, _) = offered.row(0)?;
+    // A pattern written out as its best match has nothing left to complete;
+    // a function's name still opens its call.
+    let complete = match best.named {
+        Named::Function(_) => false,
+        _ => written_word(best.text) == text[word],
+    };
+    (!complete).then_some(offered)
 }
 
 /// Whether the list stands open under the field.
@@ -326,15 +438,37 @@ pub(super) fn is_shown(view: &GraphPanel, window: &Window, cx: &App) -> bool {
     shown(view, window, cx).is_some()
 }
 
-/// The word of `text` the cursor at `cursor` stands in, and what replaces it
-/// to complete it as `pattern`: the pattern written to scan as one word.
-fn replacement<'a>(
-    text: &str,
+/// What completing a word writes in place of it.
+#[derive(PartialEq, Eq, Debug)]
+struct Insertion<'a> {
+    /// Where the word replaced stands.
+    span: Range<usize>,
+    text: Cow<'a, str>,
+    /// Where in `text` the cursor is left.
     cursor: usize,
-    pattern: &'a str,
-) -> Option<(Range<usize>, Cow<'a, str>)> {
+}
+
+/// What completes the word of `text` the cursor at `cursor` stands in as
+/// `completion`: a pattern written to scan as one word; a function's name
+/// alone where its `(` follows, and else the name and a pair of parentheses
+/// with the cursor between them.
+fn insertion<'a>(text: &str, cursor: usize, completion: &Completion<'a>) -> Option<Insertion<'a>> {
     let word = word_at(text, cursor)?;
-    Some((word.span, written_word(pattern)))
+    let (text, cursor) = match (completion.named, word.place) {
+        (Named::Function(_), Place::Callee) => (Cow::Borrowed(completion.text), None),
+        (Named::Function(_), _) => {
+            let call = format!("{}()", completion.text);
+            let inside = call.len() - ")".len();
+            (Cow::Owned(call), Some(inside))
+        }
+        _ => (written_word(completion.text), None),
+    };
+    let cursor = cursor.unwrap_or(text.len());
+    Some(Insertion {
+        span: word.span,
+        text,
+        cursor,
+    })
 }
 
 /// Replaces the word under the cursor with the row at `at`, or with the aimed
@@ -349,22 +483,24 @@ pub(super) fn accept(
     let Some(offered) = shown(view, window, cx) else {
         return;
     };
-    if !offered.matching.current() {
+    let at = at.or(offered.aimed).unwrap_or(0);
+    if !offered.current(at) {
         return;
     }
-    let at = at.or(offered.aimed).unwrap_or(0);
-    let Some(row) = offered.matching.rows().get(at) else {
+    let Some((completion, _)) = offered.row(at) else {
         return;
     };
-    let pattern = offered.completions.get().get(row.candidate).text.to_owned();
     let field = view.chips.field.read(cx);
     let text = field.text(cx);
-    let Some((span, written)) = replacement(&text, field.cursor(cx), &pattern) else {
+    let Some(insertion) = insertion(&text, field.cursor(cx), &completion) else {
         return;
     };
-    view.chips
-        .field
-        .update(cx, |field, cx| field.replace(span, &written, cx));
+    let Insertion { span, text, cursor } = insertion;
+    let (text, cursor) = (text.into_owned(), span.start + cursor);
+    view.chips.field.update(cx, |field, cx| {
+        field.replace(span, &text, cx);
+        field.set_cursor(cursor, cx);
+    });
     hold_closed(view, cx);
     cx.notify();
 }
@@ -380,7 +516,7 @@ pub(super) fn aim(view: &mut GraphPanel, step: isize, cx: &mut Context<GraphPane
     let Some(offered) = view.chips.completer.offered.as_mut() else {
         return;
     };
-    offered.aimed = stepped(offered.aimed, step, offered.matching.rows().len());
+    offered.aimed = stepped(offered.aimed, step, offered.rows());
     if let Some(aimed) = offered.aimed {
         bring_into_view(&view.chips.completer.scroll, aimed);
     }
@@ -417,7 +553,7 @@ pub(super) fn list(
     cx: &mut Context<GraphPanel>,
 ) -> Option<Deferred> {
     let offered = shown(view, window, cx)?;
-    let count = offered.matching.rows().len();
+    let count = offered.rows();
     let text = TextStyleRefinement {
         font_size: Some(TEXT_SIZE.into()),
         ..TextStyleRefinement::default()
@@ -432,16 +568,26 @@ pub(super) fn list(
         let Some(offered) = view.chips.completer.offered.as_ref() else {
             return Vec::new();
         };
-        let completions = offered.completions.get();
+        let shared = offered.completions.shared();
         range
             .filter_map(|index| {
-                let row = offered.matching.rows().get(index)?;
-                let completion = completions.get(row.candidate);
+                let (completion, row) = offered.row(index)?;
+                let read = match completion.named {
+                    Named::Function(function) => read_by_graph(shared, function),
+                    _ => true,
+                };
                 let accepts = match offered.aimed {
                     Some(aimed) => (aimed == index).then_some(Accepts::Aimed),
                     None => (index == 0).then_some(Accepts::First),
                 };
-                Some(listed(&completion, row, index, accepts, &listing, &entity))
+                let row = Listed {
+                    completion: &completion,
+                    row,
+                    index,
+                    read,
+                    accepts,
+                };
+                Some(listed(row, &listing, &entity))
             })
             .collect()
     })
@@ -475,21 +621,66 @@ pub(super) fn list(
     Some(menu_chrome::under_trigger(sheet))
 }
 
-/// One row: the pattern with the characters the word matched picked out, and
-/// what it names.
-fn listed(
-    completion: &Completion,
-    row: &Row,
+/// What one row of the list shows.
+struct Listed<'a> {
+    completion: &'a Completion<'a>,
+    row: &'a Row,
     index: usize,
+    /// Whether a command the graph was read from reads the row's function;
+    /// true for a pattern.
+    read: bool,
     accepts: Option<Accepts>,
-    palette: &Palette,
-    entity: &Entity<GraphPanel>,
-) -> Stateful<Div> {
+}
+
+/// One row: the pattern or the function's signature with the characters the
+/// word matched picked out, and what it names. A function no graph
+/// evaluates is dimmed, and one no command of this graph reads is marked as
+/// bviz's own; the tooltip says why.
+fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Stateful<Div> {
+    let Listed {
+        completion,
+        row,
+        index,
+        read,
+        accepts,
+    } = listed;
     let colors = &palette.colors;
     let entity = entity.clone();
-    let text = SharedString::from(completion.text.to_string());
+    let function = match completion.named {
+        Named::Function(function) => Some(function),
+        _ => None,
+    };
+    let (text, muted) = match function {
+        Some(function) => {
+            let signature = signature(function);
+            let name = chars(function.name())..chars(&signature);
+            (signature, name)
+        }
+        None => (completion.text.to_string(), completion.path.clone()),
+    };
+    let unevaluable = function.and_then(Function::unevaluable);
+    let kind = match read {
+        true => completion.named.name(),
+        false => "bviz function",
+    };
+    let why = unevaluable.clone().or_else(|| {
+        let name = function.filter(|_| !read)?.name();
+        Some(format!(
+            "no Bazel command this graph was read from has {name}(); bviz evaluates it"
+        ))
+    });
+    let ink = match unevaluable {
+        Some(_) => colors.text_disabled,
+        None => colors.text,
+    };
     let aimed = accepts == Some(Accepts::Aimed);
     menu_chrome::aimed_row(("chip-completion", index).into(), colors, aimed)
+        .when_some(why, |row, why| {
+            row.tooltip(TextTooltip::builder(
+                why.into(),
+                TooltipColors::from_colors(colors),
+            ))
+        })
         .w_full()
         .on_click(move |_: &ClickEvent, window, cx| {
             entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
@@ -501,9 +692,10 @@ fn listed(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis_start()
+                .text_color(ink)
                 .child(fuzzy::highlighted(
-                    text,
-                    &completion.path,
+                    text.into(),
+                    &muted,
                     &row.matched,
                     colors.text_muted,
                     palette.highlight.into(),
@@ -525,8 +717,29 @@ fn listed(
                 .flex_none()
                 .text_xs()
                 .text_color(colors.text_muted)
-                .child(completion.named.name()),
+                .child(kind),
         )
+}
+
+/// How a row reads `function`: its name and Bazel's signature for it, an
+/// argument left off marked `?`.
+fn signature(function: Function) -> String {
+    let signature = function.signature();
+    let reads = |argument: ArgType| match argument {
+        ArgType::Expr => "expr",
+        ArgType::Word => "word",
+        ArgType::Int => "int",
+    };
+    let arguments: Vec<String> = match signature.params {
+        Params::Fixed(arguments) => (arguments.iter().enumerate())
+            .map(|(at, &argument)| match at < signature.mandatory {
+                true => reads(argument).to_owned(),
+                false => format!("{}?", reads(argument)),
+            })
+            .collect(),
+        Params::Repeated(argument) => vec![reads(argument).to_owned(), "…".to_owned()],
+    };
+    format!("{}({})", function.name(), arguments.join(", "))
 }
 
 /// Which keys accept a row: Tab the first row while none is aimed at, and
@@ -616,6 +829,29 @@ mod tests {
         assert_eq!(stepped(None, 1, 0), None);
     }
 
+    /// The text completing the word at `cursor` of `text` as `pattern`, and
+    /// where it stands.
+    fn replacement(text: &str, cursor: usize, pattern: &str) -> Option<(Range<usize>, String)> {
+        let completion = Completion {
+            text: pattern,
+            path: 0..0,
+            named: Named::Package,
+            weight: 0,
+        };
+        let insertion = insertion(text, cursor, &completion)?;
+        assert_eq!(insertion.cursor, insertion.text.len());
+        Some((insertion.span, insertion.text.into_owned()))
+    }
+
+    fn function(function: Function) -> Completion<'static> {
+        Completion {
+            text: function.name(),
+            path: 0..0,
+            named: Named::Function(function),
+            weight: 0,
+        }
+    }
+
     #[test]
     fn a_completion_replaces_the_word_quoted_where_it_must_be() {
         let text = "deps(//ap) + x";
@@ -631,7 +867,7 @@ mod tests {
 
         let (span, _) = replacement("x + \"//a b", 10, "//a b:c").unwrap();
         assert_eq!(span, 4..10);
-        assert!(replacement("deps(x", 4, "//a").is_none());
+        assert!(replacement("a |b", 2, "//a").is_none());
     }
 
     /// A word in a quotation left open is replaced up to where an unquoted
@@ -643,5 +879,73 @@ mod tests {
         let mut completed = text.to_owned();
         completed.replace_range(span, &written);
         assert_eq!(completed, "deps(//app:lib) + x");
+    }
+
+    /// A function completed where an expression starts is written with its
+    /// parentheses and the cursor between them; one completed before its
+    /// own `(` is written as its name alone.
+    #[test]
+    fn a_function_is_written_as_a_call_unless_its_parenthesis_follows() {
+        let deps = function(Function::Deps);
+        let opened = insertion("x + de", 6, &deps).unwrap();
+        assert_eq!(
+            opened,
+            Insertion {
+                span: 4..6,
+                text: Cow::Borrowed("deps()"),
+                cursor: 5,
+            }
+        );
+        let renamed = insertion("dep(x)", 3, &deps).unwrap();
+        assert_eq!(
+            (renamed.span, &*renamed.text, renamed.cursor),
+            (0..3, "deps", 4)
+        );
+    }
+
+    /// A function is offered only where a function can stand, and only a
+    /// function before a `(`.
+    #[test]
+    fn what_a_word_is_offered_follows_where_it_stands() {
+        let offers = |place| {
+            let Offers {
+                functions,
+                patterns,
+            } = Offers::at(place);
+            (functions, patterns)
+        };
+        assert_eq!(offers(Place::Operand), (true, true));
+        assert_eq!(offers(Place::Callee), (true, false));
+        assert_eq!(offers(Place::Pattern), (false, true));
+    }
+
+    /// The functions a word matches are ranked as patterns are, a name the
+    /// word starts first.
+    #[test]
+    fn the_functions_a_word_matches_are_ranked() {
+        let names = |word: &str| -> Vec<&str> {
+            function_rows(word)
+                .iter()
+                .map(|row| Function::ALL[row.candidate as usize].name())
+                .collect()
+        };
+        assert_eq!(names("deps")[0], "deps");
+        assert_eq!(names("rdeps")[0], "rdeps");
+        assert!(names("de").contains(&"rdeps"));
+        assert_eq!(names("kin"), ["kind"]);
+        assert!(names("//ui/gr").is_empty());
+    }
+
+    /// Every function reads as its name and its arguments, an optional one
+    /// marked.
+    #[test]
+    fn a_function_reads_as_its_signature() {
+        assert_eq!(signature(Function::Deps), "deps(expr, int?)");
+        assert_eq!(signature(Function::Kind), "kind(word, expr)");
+        assert_eq!(signature(Function::Rdeps), "rdeps(expr, expr, int?)");
+        assert_eq!(signature(Function::RBuildFiles), "rbuildfiles(word, …)");
+        for function in Function::ALL {
+            assert!(signature(function).starts_with(&format!("{}(", function.name())));
+        }
     }
 }

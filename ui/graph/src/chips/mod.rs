@@ -724,6 +724,15 @@ fn put_up(
     cx.notify();
 }
 
+/// The Bazel command whose output `input` is.
+pub(super) fn command(input: Input) -> Command {
+    match input {
+        Input::Aquery => Command::Aquery,
+        Input::Cquery => Command::Cquery,
+        Input::Query => Command::Query,
+    }
+}
+
 /// Copies the stack as a Bazel query, or says on the bar why it is none.
 ///
 /// The query is written for the deepest of the commands the graph was read
@@ -737,11 +746,7 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         .loaded()
         .map(|loaded| loaded.shared.inputs);
     let deepest = inputs.and_then(|inputs| inputs.inputs().last());
-    let preferred = match deepest {
-        Some(Input::Aquery) => Command::Aquery,
-        Some(Input::Cquery) => Command::Cquery,
-        Some(Input::Query) | None => Command::Query,
-    };
+    let preferred = deepest.map_or(Command::Query, command);
     let joint = inputs.is_some_and(|inputs| inputs.inputs().count() > 1);
     view.chips.notice = Some(match view.chips.stack.bazel_text(preferred) {
         Ok(query) => {

@@ -135,6 +135,26 @@ pub enum Function {
     Visible,
 }
 
+/// A function bviz evaluates over its graph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Evaluable {
+    AllPaths,
+    AllRdeps,
+    Attr,
+    Config,
+    Deps,
+    Filter,
+    Inputs,
+    Kind,
+    Mnemonic,
+    Outputs,
+    Rdeps,
+    SamePkgDirectRdeps,
+    Siblings,
+    Some,
+    SomePath,
+}
+
 impl Function {
     /// Every function, sorted by name.
     pub const ALL: [Function; 22] = [
@@ -193,6 +213,45 @@ impl Function {
         Function::ALL
             .into_iter()
             .find(|function| function.name() == name)
+    }
+
+    /// Why no graph evaluates the function, as evaluating it fails; `None`
+    /// for a function bviz evaluates.
+    pub fn unevaluable(self) -> Option<String> {
+        self.evaluable().err()
+    }
+
+    /// The function as one bviz evaluates, or why no graph evaluates it: it
+    /// reads what bviz does not load into its graph.
+    pub(super) fn evaluable(self) -> Result<Evaluable, String> {
+        let unloaded = match self {
+            Function::AllPaths => return Ok(Evaluable::AllPaths),
+            Function::AllRdeps => return Ok(Evaluable::AllRdeps),
+            Function::Attr => return Ok(Evaluable::Attr),
+            Function::Config => return Ok(Evaluable::Config),
+            Function::Deps => return Ok(Evaluable::Deps),
+            Function::Filter => return Ok(Evaluable::Filter),
+            Function::Inputs => return Ok(Evaluable::Inputs),
+            Function::Kind => return Ok(Evaluable::Kind),
+            Function::Mnemonic => return Ok(Evaluable::Mnemonic),
+            Function::Outputs => return Ok(Evaluable::Outputs),
+            Function::Rdeps => return Ok(Evaluable::Rdeps),
+            Function::SamePkgDirectRdeps => return Ok(Evaluable::SamePkgDirectRdeps),
+            Function::Siblings => return Ok(Evaluable::Siblings),
+            Function::Some => return Ok(Evaluable::Some),
+            Function::SomePath => return Ok(Evaluable::SomePath),
+            Function::Labels => "the labels each rule's attributes name",
+            Function::Visible => "each target's visibility",
+            Function::Tests => "the tests each test suite names",
+            Function::BuildFiles | Function::LoadFiles | Function::RBuildFiles => {
+                "the BUILD and .bzl files of each package"
+            }
+            Function::Executables => "which rules are executable",
+        };
+        let name = self.name();
+        Err(format!(
+            "{name}() needs {unloaded}, which bviz does not load into its graph"
+        ))
     }
 
     /// The signature Bazel declares for the function.
