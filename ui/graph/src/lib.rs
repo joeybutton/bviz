@@ -855,6 +855,7 @@ impl Render for GraphPanel {
                 cx.listener(|view, _: &chips::Focus, window, cx| chips::focus(view, window, cx)),
             )
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -1329,6 +1330,13 @@ mod tests {
         assert!(is(dispatched("h", IN_CHIPS), ToggleNeighborhood));
         assert!(is(dispatched("ctrl-c", IN_CHIPS), chips::CopyChip));
         assert!(is(dispatched("ctrl-c", IN_CHIP_FIELD), text_input::Copy));
+        assert!(is(dispatched("ctrl-shift-c", IN_CHIPS), chips::CopyStack));
+        assert!(is(
+            dispatched("ctrl-shift-c", IN_CHIP_FIELD),
+            chips::CopyStack
+        ));
+        assert!(is(dispatched("ctrl-shift-c", IN_PANEL), chips::CopyStack));
+        assert!(dispatched("ctrl-shift-c", IN_FIELD).is_none());
     }
 
     /// A staged stack is applied from anywhere in the panel but the text

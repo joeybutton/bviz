@@ -9,7 +9,10 @@ mod pill;
 
 use crate::menu::over_window;
 use crate::{GraphPanel, Palette, checklist};
-use bviz_graph_layout::query_lang::{ChipId, Evaluation, Outcome, Prefixes, Stack, Universe};
+use bviz_graph_layout::Input;
+use bviz_graph_layout::query_lang::{
+    ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
+};
 use bviz_graph_layout::select::{Filter, Scope};
 use bviz_ui_components::{
     Button, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, load_in_background, text_input,
@@ -36,7 +39,8 @@ actions!(
         MoveForward,
         Remove,
         Edit,
-        CopyChip
+        CopyChip,
+        CopyStack
     ]
 );
 
@@ -81,6 +85,8 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", Edit, on_chips),
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
+        KeyBinding::new("secondary-shift-c", CopyStack, outside_text),
+        KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT)),
     ]
 }
 
@@ -566,6 +572,34 @@ fn open_menu(
         MenuItem::new("remove", act(remove)).keys("delete"),
         MenuItem::new("copy text", act(copy_chip)).keys(COPY_KEYS),
     ];
+    view.chips.selected = Some(id);
+    put_up(view, items, at, window, cx);
+}
+
+/// Puts up the menu of what can be done with the whole stack at `at`.
+fn open_stack_menu(
+    view: &mut GraphPanel,
+    at: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
+    let panel = cx.weak_entity();
+    let copy = MenuItem::new("copy as bazel query", move |_, cx| {
+        panel.update(cx, copy_stack).ok();
+    })
+    .keys(COPY_STACK_KEYS);
+    put_up(view, vec![copy], at, window, cx);
+}
+
+/// Puts up a menu of `items` at `at`, which gives the focus back to the bar
+/// as it closes holding it.
+fn put_up(
+    view: &mut GraphPanel,
+    items: Vec<MenuItem>,
+    at: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
     let menu = cx.new(|cx| Menu::new(items, at, window, cx));
     let dismissed = cx.subscribe_in(&menu, window, |view, _, event: &MenuEvent, window, cx| {
         let MenuEvent::Dismissed { holding_focus } = event;
@@ -575,13 +609,52 @@ fn open_menu(
         }
         cx.notify();
     });
-    view.chips.selected = Some(id);
     view.chips.menu = Some(OpenMenu {
         menu,
         _dismissed: dismissed,
     });
     cx.notify();
 }
+
+/// Copies the stack as a Bazel query, or says on the bar why it is none.
+///
+/// The query is written for the deepest of the commands the graph was read
+/// from, where that command reads every function the stack calls; and the bar
+/// says so where the graph joins several commands' output, which no one
+/// command reads alike.
+pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let inputs = view
+        .model
+        .read(cx)
+        .loaded()
+        .map(|loaded| loaded.shared.inputs);
+    let deepest = inputs.and_then(|inputs| inputs.inputs().last());
+    let preferred = match deepest {
+        Some(Input::Aquery) => Command::Aquery,
+        Some(Input::Cquery) => Command::Cquery,
+        Some(Input::Query) | None => Command::Query,
+    };
+    let joint = inputs.is_some_and(|inputs| inputs.inputs().count() > 1);
+    view.chips.notice = Some(match view.chips.stack.bazel_text(preferred) {
+        Ok(query) => {
+            let command = query.command.name();
+            cx.write_to_clipboard(ClipboardItem::new_string(query.text));
+            match joint {
+                true => format!("copied as bazel {command}; read here over a joint graph").into(),
+                false => format!("copied as bazel {command}").into(),
+            }
+        }
+        Err(unportable) => format!("not a Bazel query: {unportable}").into(),
+    });
+    cx.notify();
+}
+
+/// How a menu row names the key copying the stack.
+const COPY_STACK_KEYS: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-c"
+} else {
+    "ctrl-shift-c"
+};
 
 /// How a menu row names the key copying what the row copies.
 const COPY_KEYS: &str = if cfg!(target_os = "macos") {
@@ -590,7 +663,7 @@ const COPY_KEYS: &str = if cfg!(target_os = "macos") {
     "ctrl-c"
 };
 
-/// The menu a chip put up, standing over the whole window.
+/// The menu a chip or the stack put up, standing over the whole window.
 pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElement> {
     let open = view.chips.menu.as_ref()?;
     Some(over_window(&open.menu, window))
@@ -710,6 +783,18 @@ pub(crate) fn bar(
                 .disabled(!staged),
             ),
         )
+        .children((!chips.stack.is_empty()).then(|| {
+            div().flex_none().child(
+                Button::new(
+                    "chips-menu",
+                    cx.listener(|view, event: &ClickEvent, window, cx| {
+                        open_stack_menu(view, event.position(), window, cx)
+                    }),
+                )
+                .ghost()
+                .icon("dots-three-vertical"),
+            )
+        }))
         .into_any_element()
 }
 
