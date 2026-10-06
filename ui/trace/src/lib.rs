@@ -41,7 +41,7 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, overlay_canvas, track_drag,
+    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, overlay_canvas, text_input, track_drag,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -72,6 +72,10 @@ gpui::actions!(
         ChooseNext,
         /// Clear chosen row
         Unchoose,
+        /// Show whole timeline
+        ShowWholeTimeline,
+        /// Show whole flame graph
+        ShowWholeFlameGraph,
     ]
 );
 
@@ -88,12 +92,19 @@ pub fn register_keys(cx: &mut App) {
     );
     let timeline = Some(TIMELINE_KEY_CONTEXT.id());
     let critical_path = Some(critical_path::KEY_CONTEXT.id());
+    let unless_typing = |scope: KeyScope| format!("{scope} && !{}", text_input::KEY_CONTEXT);
+    let timeline_canvas = unless_typing(TIMELINE_KEY_CONTEXT);
+    let timeline_canvas = Some(timeline_canvas.as_str());
+    let flame_canvas = unless_typing(flame_panel::FLAME_KEY_CONTEXT);
+    let flame_canvas = Some(flame_canvas.as_str());
     cx.bind_keys([
         KeyBinding::new("secondary-a", SelectAllTracks, timeline),
         KeyBinding::new("escape", ClearTimeSelection, timeline),
         KeyBinding::new("up", ChoosePrevious, critical_path),
         KeyBinding::new("down", ChooseNext, critical_path),
         KeyBinding::new("escape", Unchoose, critical_path),
+        KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
+        KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
     ]);
 }
 

@@ -1,7 +1,9 @@
 use crate::camera::{Camera, clamp_pan};
 use crate::scroll::{ScrollDrag, scroll_drag_move};
 use crate::{GraphPanel, click_box_at};
-use bviz_ui_components::gesture::{Button, Entry, Gestures, Held, Input, Place, Pointer};
+use bviz_ui_components::gesture::{
+    Button, Clicks, Entry, Gestures, Held, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{DragEnd, track_drag};
 use gpui::{App, Context, Entity, MouseDownEvent, Pixels, Point, Window};
 
@@ -23,6 +25,7 @@ pub(crate) const DOUBLE_CLICK: usize = 2;
 /// What the canvas does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
 pub(crate) enum CanvasIntent {
+    ShowWhole,
     Pan,
     ToggleBox,
     Select,
@@ -35,6 +38,12 @@ pub(crate) enum CanvasIntent {
 const BOX: Place = Place::On("a box");
 
 pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole graph",
+        CanvasIntent::ShowWhole,
+    ),
     Entry::new(
         Input::drag(Button::Left),
         Place::Anywhere,

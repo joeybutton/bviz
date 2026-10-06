@@ -2,8 +2,8 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
 use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
-    LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    profile_status, scroll_request, thumb_offset, time_window_chip,
+    LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ShowWholeFlameGraph, ZOOM_PER_NOTCH,
+    drawn_scroll, profile_status, scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
     FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
@@ -11,7 +11,7 @@ use bviz_trace_layout::{
     flame_height, lay_out_flame,
 };
 use bviz_ui_components::gesture::{
-    self, Entry, GestureRow, Gestures, Held, Input, Place, Pointer, pinch_factor,
+    self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
@@ -35,6 +35,7 @@ pub(crate) const FLAME_KEY_CONTEXT: KeyScope = KeyScope::new("TraceFlameGraph", 
 /// What the flame graph does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
 enum FlameIntent {
+    ShowWhole,
     Zoom,
     PanAcross,
     Scroll,
@@ -43,6 +44,12 @@ enum FlameIntent {
 }
 
 const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole flame graph",
+        FlameIntent::ShowWhole,
+    ),
     Entry::new(
         Input::SCROLL.holding(Held::SECONDARY),
         Place::Anywhere,
@@ -732,6 +739,23 @@ impl FlamePanel {
         Some((at, self.box_at(at, cx)?))
     }
 
+    /// Whether `pos` lies over the graph clear of every box and scroll bar.
+    fn empty_at(&self, pos: Point<Pixels>, cx: &App) -> bool {
+        let on_bar = [self.vbar(cx), self.hbar(cx)]
+            .into_iter()
+            .flatten()
+            .any(|bar| bar.track_hit(pos));
+        self.layout(cx).is_some_and(|fl| fl.rect().contains(&pos))
+            && !on_bar
+            && self.box_at(pos, cx).is_none()
+    }
+
+    /// Fits the whole width of the graph to the panel, leaving the vertical
+    /// scroll where it is.
+    fn show_whole(&mut self) {
+        self.flame_view = FlameView::FIT;
+    }
+
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
     /// press hit one, otherwise a pan of the panel.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
@@ -833,6 +857,10 @@ impl FlamePanel {
             cx.listener(|this, e: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
                 GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                    FlameIntent::ShowWhole if this.empty_at(e.position, cx) => {
+                        this.show_whole();
+                        true
+                    }
                     FlameIntent::Pan => {
                         this.press(e.position, cx);
                         true
@@ -915,6 +943,10 @@ impl Render for FlamePanel {
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ShowWholeFlameGraph, _, cx| {
+                this.show_whole();
+                this.invalidate_canvas(cx);
+            }))
             .flex()
             .flex_col()
             .size_full()

@@ -9,10 +9,10 @@ use crate::theme::Palette;
 use crate::{
     ClearTimeSelection, DEFAULT_COUNTERS_HEIGHT, DEFAULT_GUTTER_WIDTH, EDGE_MARGIN_PX,
     GROUP_BAND_HEIGHT, GROUP_ICON, LINE_SCROLL_PX, MAX_PX_PER_US, METRICS, MIN_DRAG_PX,
-    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, TIMELINE_KEY_CONTEXT, TimelineBars, TracePanel,
-    ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter, paint_marker_band, paint_markers,
-    paint_ruler, paint_slice, ruler_ticks, scroll_request, scrollbar_geom, slice_tooltip,
-    thumb_offset,
+    MIN_SLICE_PX, SLICE_TEXT_PAD, SelectAllTracks, ShowWholeTimeline, TIMELINE_KEY_CONTEXT,
+    TimelineBars, TracePanel, ZOOM_PER_NOTCH, drawn_scroll, paint_gridlines, paint_gutter,
+    paint_marker_band, paint_markers, paint_ruler, paint_slice, ruler_ticks, scroll_request,
+    scrollbar_geom, slice_tooltip, thumb_offset,
 };
 use bviz_trace_layout::{
     Cull, LaneLayout, TimeRegion, TimeSelection, TimeView, Viewport, VisibleSlice, span_between,
@@ -20,7 +20,7 @@ use bviz_trace_layout::{
 };
 use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
 use bviz_ui_components::gesture::{
-    Button, Entry, Gestures, Held, Input, Place, Pointer, pinch_factor,
+    Button, Clicks, Entry, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
 use bviz_ui_playback::Clock;
@@ -36,6 +36,7 @@ use std::sync::Arc;
 /// What the timeline does for a gesture in [`TIMELINE_GESTURES`].
 #[derive(Clone, Copy)]
 pub(crate) enum TimelineIntent {
+    ShowWhole,
     ShowAllOfGroup,
     FoldGroup,
     PickTrack(TrackPick),
@@ -132,6 +133,12 @@ pub(crate) const TIMELINE_GESTURES: Gestures<TimelineIntent> = Gestures::new(&[
             on: TimeBand::Lanes,
             toggles: false,
         },
+    ),
+    Entry::new(
+        Input::new(Motion::Press(Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole timeline",
+        TimelineIntent::ShowWhole,
     ),
     Entry::new(
         Input::drag(Button::Left),
@@ -882,6 +889,27 @@ impl Timeline {
         regions.in_flame(pos) || regions.in_counters(pos)
     }
 
+    /// Whether `pos` lies over the time axis's content clear of every slice
+    /// and scroll bar.
+    fn empty_at(&self, pos: Point<Pixels>, cx: &App) -> bool {
+        let bars = self.scroll_bars(cx);
+        let on_bar = [bars.flame, bars.time, bars.counters]
+            .into_iter()
+            .flatten()
+            .any(|bar| bar.track_hit(pos));
+        self.in_content(pos, cx) && !on_bar && self.slice_at(pos, cx).is_none()
+    }
+
+    /// Fits the whole span of the profile to the time axis.
+    fn show_whole(&mut self, cx: &App) {
+        let Some(span) = self.model.read(cx).profile().map(|profile| profile.span()) else {
+            return;
+        };
+        let before = self.view;
+        self.view = TimeView::fit(span, self.regions(cx).time_w, EDGE_MARGIN_PX);
+        self.release_if_moved(before);
+    }
+
     /// The slice under a window-space cursor: the box the last paint drew there,
     /// found in the memoized draw list, so a hover names what is on screen, and
     /// the document it was drawn from. `None` until the first paint has culled a
@@ -1262,6 +1290,7 @@ impl Timeline {
                 }
                 return took;
             }
+            TimelineIntent::ShowWhole if self.empty_at(e.position, cx) => self.show_whole(cx),
             TimelineIntent::Pan => self.press(e, cx),
             _ => return false,
         }
@@ -1279,6 +1308,10 @@ impl Timeline {
             .track_focus(&self.content_focus)
             .on_action(cx.listener(Self::select_all_visible))
             .on_action(cx.listener(Self::clear_time_selection))
+            .on_action(cx.listener(|this, _: &ShowWholeTimeline, _, cx| {
+                this.show_whole(cx);
+                this.invalidate_canvas(cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {

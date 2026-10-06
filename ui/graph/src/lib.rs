@@ -101,6 +101,8 @@ actions!(
         JumpBack,
         /// Go forward
         JumpForward,
+        /// Show whole graph
+        ShowWholeGraph,
     ]
 );
 
@@ -141,6 +143,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("h", ToggleNeighborhood, outside_text),
         KeyBinding::new("r", ToggleReduce, outside_text),
         KeyBinding::new("escape", Dismiss, outside_text),
+        KeyBinding::new("0", ShowWholeGraph, outside_text),
         KeyBinding::new("enter", reveal::Accept, outside_text),
         KeyBinding::new("alt-left", JumpBack, outside_text),
         KeyBinding::new("alt-right", JumpForward, outside_text),
@@ -282,6 +285,11 @@ pub struct GraphPanel {
     derived: Derived,
     framing: Framing,
     drag: Drag,
+    /// Whether the last press on the canvas was the first of its run and
+    /// landed clear of every box, which a double click showing the whole graph
+    /// must begin with: a first click on a box opens or closes it, and the
+    /// boxes moving under the second may leave it on empty space.
+    pressed_clear: bool,
     emphasis: Emphasis,
     morph: Morph,
     mode: LayoutMode,
@@ -507,6 +515,7 @@ impl GraphPanel {
             derived,
             framing: Framing::new(),
             drag: Drag::None,
+            pressed_clear: false,
             emphasis: Emphasis::none(),
             morph: Morph::none(),
             mode,
@@ -705,6 +714,8 @@ impl GraphPanel {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
         jump::dismiss(self, cx);
+        let clear = self.box_id_at(e.position).is_none();
+        let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
         if let Some(axis) = scrollbar_hit(self, e.position) {
@@ -712,12 +723,22 @@ impl GraphPanel {
             return;
         }
         GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::ShowWhole if clear && pressed_clear => {
+                self.show_whole(cx);
+                true
+            }
             CanvasIntent::Pan => {
                 start_pan(self, e, cx);
                 true
             }
             _ => false,
         });
+    }
+
+    /// Eases the view onto the whole of what the panel draws.
+    fn show_whole(&mut self, cx: &mut Context<Self>) {
+        self.framing.request_frame(framing::Frame::Drawing);
+        self.invalidate_canvas(cx);
     }
 
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -754,17 +775,23 @@ impl GraphPanel {
         });
     }
 
-    fn mark_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(drawn) = self.drawn() else {
-            return;
-        };
+    /// The box drawn under the window-space `position`, if any.
+    fn box_id_at(&self, position: Point<Pixels>) -> Option<Id> {
+        let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        let hit = drawn
+        drawn
             .view(camera.zoom)
             .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, position))
-            .map(|b| b.id);
+            .map(|b| b.id)
+    }
+
+    fn mark_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.drawn().is_none() {
+            return;
+        }
+        let hit = self.box_id_at(position);
         if hit != self.hovered {
             self.hovered = hit;
             self.invalidate_canvas(cx);
@@ -931,6 +958,7 @@ impl Render for GraphPanel {
             )
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
+            .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
