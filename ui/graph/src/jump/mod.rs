@@ -3,10 +3,10 @@
 //! the filter is what does.
 
 mod index;
-mod rank;
 
 use crate::derive::Drawn;
 use crate::framing::{Frame, Held};
+use crate::fuzzy::{self, Matching, Row, Standing};
 use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
@@ -21,21 +21,14 @@ use bviz_ui_components::{
     menu_chrome, overlay_canvas,
 };
 use gpui::{
-    Bounds, ClickEvent, Context, Div, Entity, Focusable, HighlightStyle, Hsla, MouseButton,
-    MouseDownEvent, Pixels, Rems, ScrollStrategy, SharedString, Stateful, StyledText, Subscription,
-    Task, TextStyleRefinement, UnderlineStyle, Window, actions, div, prelude::*, px, relative,
-    rems, uniform_list,
+    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, MouseButton, MouseDownEvent, Pixels,
+    Rems, ScrollStrategy, SharedString, Stateful, Subscription, TextStyleRefinement, Window,
+    actions, div, prelude::*, px, relative, rems, uniform_list,
 };
 pub(crate) use index::Candidates;
 use index::{Candidate, Scope};
-use nucleo::pattern::{CaseMatching, Normalization};
-use nucleo::{Config, Matcher, Nucleo};
-use rank::Row;
+use nucleo::Nucleo;
 use rustc_hash::FxHashSet;
-use std::ops::Range;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 actions!(
     bviz_graph_jump,
@@ -75,31 +68,13 @@ const VISIBLE_ROWS: usize = 12;
 /// row's own text, enough that it is cut away before the text is cut at all.
 const CONTAINER_SHRINK: f32 = 1000.;
 
-/// How often a running match is polled for what it has found, often enough
-/// for the rows to keep pace with typing.
-const POLL: Duration = Duration::from_millis(16);
-
-/// How long one poll waits on a match pass to finish, in milliseconds: a
-/// small share of a frame, so the UI thread is not held on it.
-const POLL_WAIT_MS: u64 = 1;
-
-/// The weight of the line under a row's matched characters.
-const MATCH_UNDERLINE: Pixels = px(1.);
-
-/// The matcher's settings: every candidate's text reads as a path.
-fn config() -> Config {
-    let mut config = Config::DEFAULT;
-    config.set_match_paths();
-    config
-}
-
 /// The panel's jump palette.
 #[derive(Default)]
 pub(crate) struct Finder {
     /// The palette while it is open over the drawing.
     open: Option<Jump>,
-    /// The matcher the palette last closed with, which the next opening takes
-    /// up so that each opening does not start a pool of its own.
+    /// The worker pool the palette last closed with, which the next opening
+    /// takes up.
     closed: Option<Nucleo<u32>>,
     /// How far the open palette's rows have scrolled.
     scroll: ListScroll,
@@ -111,7 +86,7 @@ impl Finder {
         let Some(jump) = self.open.take() else {
             return false;
         };
-        self.closed = Some(jump.nucleo);
+        self.closed = Some(jump.matching.into_pool());
         true
     }
 }
@@ -121,20 +96,10 @@ struct Jump {
     field: Entity<TextInput>,
     _edits: Subscription,
     scope: Scope,
-    /// The query last handed to the matcher, which an edit extending it
-    /// narrows rather than matches afresh.
-    query: SharedString,
-    nucleo: Nucleo<u32>,
-    /// Finds the characters each row's query matched, for ranking the rows
-    /// and highlighting them.
-    matcher: Matcher,
-    /// The document's candidates, of which the matcher holds the indices
+    /// Matches the field's query against the indices of the candidates
     /// `scope` offers.
+    matching: Matching,
     candidates: Prepared<Candidates>,
-    rows: Vec<Row>,
-    /// How many candidates the query matches, of which `rows` lists the
-    /// first.
-    matched: u32,
     /// The row the keys are on, which is previewed once a key moved it.
     aimed: usize,
     /// Where the palette was last painted, the band of the canvas a preview
@@ -143,33 +108,6 @@ struct Jump {
     /// Where the view stood as the palette opened, and in which mode, so that
     /// closing it unpicked returns there.
     opened_at: Option<(LayoutMode, Held)>,
-    /// Whether the scope's candidates are still being handed to the matcher.
-    streaming: bool,
-    _injecting: Injecting,
-    _polling: Task<()>,
-}
-
-/// Candidates being handed to the matcher off the UI thread, stopped once
-/// this is dropped: a restarted matcher reads nothing handed to it through an
-/// injector taken before.
-struct Injecting {
-    stopped: Arc<AtomicBool>,
-    _task: Task<()>,
-}
-
-impl Injecting {
-    fn none() -> Self {
-        Injecting {
-            stopped: Arc::default(),
-            _task: Task::ready(()),
-        }
-    }
-}
-
-impl Drop for Injecting {
-    fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Relaxed);
-    }
 }
 
 /// Opens the palette over the drawing, or takes the focus back to it where it
@@ -181,33 +119,15 @@ pub(crate) fn open(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<
         };
         let field = cx.new(|cx| TextInput::new(cx, PLACEHOLDER, 0));
         let edits = cx.subscribe(&field, |view, _, _: &TextEdited, cx| edited(view, cx));
-        let mut nucleo = view.jump.closed.take().unwrap_or_else(|| {
-            Nucleo::new(
-                config(),
-                Arc::new(|| {}),
-                Some(bviz_parallel::worker_count()),
-                1,
-            )
-        });
-        nucleo
-            .pattern
-            .reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
         view.jump.open = Some(Jump {
             field,
             _edits: edits,
             scope: Scope::default(),
-            query: SharedString::default(),
-            nucleo,
-            matcher: Matcher::new(config()),
+            matching: Matching::new(view.jump.closed.take()),
             candidates,
-            rows: Vec::new(),
-            matched: 0,
             aimed: 0,
             painted: None,
             opened_at: view.framing.hold().map(|held| (view.mode, held)),
-            streaming: false,
-            _injecting: Injecting::none(),
-            _polling: Task::ready(()),
         });
         view.jump.scroll.to_top();
         inject(view, cx);
@@ -219,46 +139,27 @@ pub(crate) fn open(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
+/// The open palette's matching.
+fn matching(view: &mut GraphPanel) -> Option<&mut Matching> {
+    Some(&mut view.jump.open.as_mut()?.matching)
+}
+
 /// Hands the matcher the candidates the scope offers, in place of any it
 /// held, off the UI thread.
 fn inject(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let Some(jump) = view.jump.open.as_mut() else {
+    let Some(jump) = view.jump.open.as_ref() else {
         return;
     };
-    jump.nucleo.restart(true);
-    jump.rows.clear();
-    jump.matched = 0;
-    jump.streaming = true;
-    let injector = jump.nucleo.injector();
     let (candidates, scope) = (jump.candidates.clone(), jump.scope);
-    let stopped: Arc<AtomicBool> = Arc::default();
-    let stop = Arc::clone(&stopped);
-    let task = cx.spawn(async move |view, cx| {
-        cx.background_executor()
-            .spawn(async move {
-                let candidates = candidates.get();
-                for index in candidates.in_scope(scope) {
-                    if stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    injector.push(index, |&index, columns| {
-                        columns[0] = (*candidates.get(index).text).into();
-                    });
-                }
-            })
-            .await;
-        let _ = view.update(cx, |view, cx| {
-            if let Some(jump) = view.jump.open.as_mut() {
-                jump.streaming = false;
+    let feed = move |feeder: &fuzzy::Feeder| {
+        let candidates = candidates.get();
+        for index in candidates.in_scope(scope) {
+            if !feeder.push(index, &candidates.get(index).text) {
+                return;
             }
-            poll(view, cx);
-        });
-    });
-    jump._injecting = Injecting {
-        stopped,
-        _task: task,
+        }
     };
-    poll(view, cx);
+    fuzzy::inject(view, matching, take_up, feed, cx);
 }
 
 /// Hands the matcher the query the field holds.
@@ -267,89 +168,50 @@ fn edited(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     let query = jump.field.read(cx).content();
-    if query == jump.query {
+    if !jump.matching.set_query(query) {
         return;
     }
-    let narrowing = query.starts_with(jump.query.as_str());
-    jump.nucleo.pattern.reparse(
-        0,
-        &query,
-        CaseMatching::Smart,
-        Normalization::Smart,
-        narrowing,
-    );
-    jump.query = query;
     jump.aimed = 0;
     view.jump.scroll.to_top();
-    poll(view, cx);
+    fuzzy::poll(view, matching, take_up, cx);
 }
 
-/// Polls the matcher every [`POLL`] for as long as it runs or is handed
-/// candidates, taking up each result it finishes.
-fn poll(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+/// Takes up what the matcher has found since the last poll, keeping the aim
+/// on the row it was on.
+fn take_up(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let drawn = drawn_ids(view);
     let Some(jump) = view.jump.open.as_mut() else {
         return;
     };
-    jump._polling = cx.spawn(async move |view, cx| {
-        loop {
-            let running = view.update(cx, take_up);
-            if !running.unwrap_or(false) {
-                break;
-            }
-            cx.background_executor().timer(POLL).await;
-        }
-    });
-}
-
-/// Takes up what the matcher has found since the last poll, and reports
-/// whether it is still at work.
-fn take_up(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) -> bool {
-    let Some(jump) = view.jump.open.as_mut() else {
-        return false;
-    };
-    let status = jump.nucleo.tick(POLL_WAIT_MS);
-    if status.changed {
-        let drawn = drawn_ids(view);
-        let Some(jump) = view.jump.open.as_mut() else {
-            return false;
-        };
-        let was = jump.aimed;
-        let aimed = jump.rows.get(was).map(|row| row.candidate);
-        rerank(jump, &drawn);
-        jump.aimed = aimed
-            .and_then(|aimed| jump.rows.iter().position(|row| row.candidate == aimed))
-            .unwrap_or(0);
-        // The list follows the aim only when the aimed row moves, so a reader
-        // scrolling it while matches stream in keeps their place.
-        if jump.aimed != was {
-            let aimed = jump.aimed;
-            bring_into_view(&view.jump.scroll, aimed);
-        }
-        cx.notify();
+    let was = jump.aimed;
+    let aimed = jump.matching.rows().get(was).map(|row| row.candidate);
+    rerank(jump, &drawn);
+    let rows = jump.matching.rows();
+    jump.aimed = aimed
+        .and_then(|aimed| rows.iter().position(|row| row.candidate == aimed))
+        .unwrap_or(0);
+    // The list follows the aim only when the aimed row moves, so a reader
+    // scrolling it while matches stream in keeps their place.
+    if jump.aimed != was {
+        let aimed = jump.aimed;
+        bring_into_view(&view.jump.scroll, aimed);
     }
-    status.running || view.jump.open.as_ref().is_some_and(|jump| jump.streaming)
+    cx.notify();
 }
 
 /// Lists the rows the matcher's latest result ranks first.
 fn rerank(jump: &mut Jump, drawn: &FxHashSet<Id>) {
-    let snapshot = jump.nucleo.snapshot();
-    jump.matched = snapshot.matched_item_count();
-    // An item is pushed only once the candidates are prepared, so reading
-    // them here never waits on their preparation.
-    if jump.query.is_empty() || snapshot.item_count() == 0 {
-        jump.rows.clear();
-        return;
-    }
-    let found = snapshot
-        .matched_items(..)
-        .map(|item| (*item.data, item.matcher_columns[0].slice(..)));
-    jump.rows = rank::rank(
-        found,
-        snapshot.pattern().column_pattern(0),
-        &mut jump.matcher,
-        jump.candidates.get(),
-        |id| drawn.contains(&id),
-    );
+    let candidates = &jump.candidates;
+    jump.matching.rerank(|index| {
+        // An item is pushed only once the candidates are prepared, so reading
+        // them here never waits on their preparation.
+        let candidate = candidates.get().get(index);
+        Standing {
+            path: candidate.path.clone(),
+            drawn: drawn.contains(&candidate.id),
+            weight: candidate.rdeps,
+        }
+    });
 }
 
 /// The nodes the drawing holds a box for at the zoom it is drawn at.
@@ -384,10 +246,11 @@ fn aim(view: &mut GraphPanel, step: isize, cx: &mut Context<GraphPanel>) {
     let Some(jump) = view.jump.open.as_mut() else {
         return;
     };
-    if jump.rows.is_empty() {
+    let rows = jump.matching.rows().len();
+    if rows == 0 {
         return;
     }
-    jump.aimed = stepped(jump.aimed, step, jump.rows.len());
+    jump.aimed = stepped(jump.aimed, step, rows);
     let aimed = jump.aimed;
     bring_into_view(&view.jump.scroll, aimed);
     preview(view, cx);
@@ -409,7 +272,7 @@ fn bring_into_view(scroll: &ListScroll, aimed: usize) {
 
 /// The node of the aimed row.
 fn aimed(jump: &Jump) -> Option<Id> {
-    let row = jump.rows.get(jump.aimed)?;
+    let row = jump.matching.rows().get(jump.aimed)?;
     Some(jump.candidates.get().get(row.candidate).id)
 }
 
@@ -636,7 +499,7 @@ pub(crate) fn overlay(
                             ),
                     )
                     .children(
-                        (!jump.rows.is_empty())
+                        (!jump.matching.rows().is_empty())
                             .then(|| rows(jump, &view.jump.scroll, row, palette, cx)),
                     )
                     .child(footer(jump, colors.text_muted))
@@ -662,7 +525,8 @@ fn rows(
 ) -> impl IntoElement + use<> {
     let entity = cx.entity();
     let listing = *palette;
-    let listed = uniform_list("jump-rows", jump.rows.len(), move |range, _, cx| {
+    let count = jump.matching.rows().len();
+    let listed = uniform_list("jump-rows", count, move |range, _, cx| {
         let view = entity.read(cx);
         let (Some(jump), Some(loaded)) = (view.jump.open.as_ref(), view.model.read(cx).loaded())
         else {
@@ -671,7 +535,7 @@ fn rows(
         let candidates = jump.candidates.get();
         range
             .filter_map(|index| {
-                let row = jump.rows.get(index)?;
+                let row = jump.matching.rows().get(index)?;
                 let candidate = candidates.get(row.candidate);
                 Some(listed(
                     view,
@@ -685,7 +549,7 @@ fn rows(
             })
             .collect()
     })
-    .h(row * jump.rows.len().min(VISIBLE_ROWS) as f32)
+    .h(row * count.min(VISIBLE_ROWS) as f32)
     .w_full()
     .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(scroll.uniform_handle());
@@ -704,13 +568,15 @@ fn rows(
 
 /// The line under the rows: how many nodes the query matches, and the keys.
 fn footer(jump: &Jump, muted: Hsla) -> Div {
-    let tally = match (jump.query.is_empty(), jump.matched) {
+    let matching = &jump.matching;
+    let listed = matching.rows().len();
+    let tally = match (matching.query().is_empty(), matching.matched()) {
         (true, _) => "type to find a node".to_owned(),
-        (false, 0) if jump.streaming => "matching…".to_owned(),
+        (false, 0) if matching.streaming() => "matching…".to_owned(),
         (false, 0) => "no matches".to_owned(),
         (false, 1) => "1 match".to_owned(),
-        (false, matched) if (jump.rows.len() as u32) < matched => {
-            format!("{matched} matches, best {} listed", jump.rows.len())
+        (false, matched) if (listed as u32) < matched => {
+            format!("{matched} matches, best {listed} listed")
         }
         (false, matched) => format!("{matched} matches"),
     };
@@ -789,9 +655,10 @@ fn listed(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis_start()
-                .child(highlighted(
-                    candidate,
-                    row,
+                .child(fuzzy::highlighted(
+                    SharedString::from(candidate.text.to_string()),
+                    &candidate.path,
+                    &row.matched,
                     colors.text_muted,
                     palette.highlight.into(),
                 )),
@@ -839,67 +706,6 @@ fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
         .child(text.into())
 }
 
-/// The candidate's text with its path leading up to the name muted and the
-/// characters the query matched picked out.
-fn highlighted(candidate: &Candidate, row: &Row, muted: Hsla, matched: Hsla) -> StyledText {
-    let text = SharedString::from(candidate.text.to_string());
-    let styles = styled_runs(&text, &candidate.path, &row.matched);
-    let highlights = styles.into_iter().map(move |(range, style)| {
-        let highlight = match style {
-            Style::Path => HighlightStyle {
-                color: Some(muted),
-                ..HighlightStyle::default()
-            },
-            // Picked out by colour and an underline but in the row's own
-            // weight: a row is cut to fit as measured in that weight, so a
-            // wider one would run past the cut and be clipped unmarked.
-            Style::Matched => HighlightStyle {
-                color: Some(matched),
-                underline: Some(UnderlineStyle {
-                    thickness: MATCH_UNDERLINE,
-                    color: Some(matched),
-                    wavy: false,
-                }),
-                ..HighlightStyle::default()
-            },
-        };
-        (range, highlight)
-    });
-    StyledText::new(text.clone()).with_highlights(highlights.collect::<Vec<_>>())
-}
-
-/// How a run of a row's text is drawn apart from the node's name.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Style {
-    Path,
-    Matched,
-}
-
-/// The byte ranges of `text` drawn apart from the name: the chars in `path` as
-/// path and the `matched` chars as matched, a matched char in the path drawn
-/// matched.
-fn styled_runs(text: &str, path: &Range<u32>, matched: &[u32]) -> Vec<(Range<usize>, Style)> {
-    let mut runs: Vec<(Range<usize>, Style)> = Vec::with_capacity(matched.len() + 1);
-    for (index, (at, c)) in (0u32..).zip(text.char_indices()) {
-        let style = if matched.binary_search(&index).is_ok() {
-            Some(Style::Matched)
-        } else if path.contains(&index) {
-            Some(Style::Path)
-        } else {
-            None
-        };
-        let Some(style) = style else {
-            continue;
-        };
-        let end = at + c.len_utf8();
-        match runs.last_mut() {
-            Some((range, last)) if *last == style && range.end == at => range.end = end,
-            _ => runs.push((at..end, style)),
-        }
-    }
-    runs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,34 +740,5 @@ mod tests {
         assert_eq!(stepped(aimed, -2, rows), rows - 3);
         assert_eq!(stepped(1, -5, rows), 0);
         assert_eq!(stepped(0, 1, 0), 0);
-    }
-
-    #[test]
-    fn the_path_is_muted_and_the_matched_chars_picked_out_over_it() {
-        assert_eq!(
-            styled_runs("//a:lib", &(0..4), &[1, 4, 5]),
-            [
-                (0..1, Style::Path),
-                (1..2, Style::Matched),
-                (2..4, Style::Path),
-                (4..6, Style::Matched),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_path_inside_the_text_is_muted_alone() {
-        assert_eq!(
-            styled_runs("Javac out/lib.jar", &(6..10), &[0]),
-            [(0..1, Style::Matched), (6..10, Style::Path)]
-        );
-    }
-
-    #[test]
-    fn a_run_is_measured_in_bytes_where_its_chars_are_counted() {
-        assert_eq!(
-            styled_runs("é:é", &(0..2), &[2]),
-            [(0..3, Style::Path), (3..5, Style::Matched)]
-        );
     }
 }

@@ -124,13 +124,6 @@ impl Candidates {
     }
 }
 
-#[cfg(test)]
-impl From<Vec<Candidate>> for Candidates {
-    fn from(candidates: Vec<Candidate>) -> Self {
-        Candidates(candidates)
-    }
-}
-
 /// How many distinct nodes depend directly on each node of `shared`'s graph,
 /// indexed by id over the graph's whole id span. Several inputs can each state the same dependency, so the edges
 /// between one pair are counted once.

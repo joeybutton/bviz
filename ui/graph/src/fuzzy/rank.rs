@@ -1,10 +1,9 @@
-//! The order the jump palette lists the nodes a query matches in.
+//! The order a list lists the candidates a query matches in.
 
-use super::index::Candidates;
-use bviz_graph_layout::Id;
 use nucleo::pattern::Pattern;
 use nucleo::{Matcher, Utf32Str};
 use std::cmp::Reverse;
+use std::ops::Range;
 
 /// How many of the matcher's best-scored matches are ranked and listed. A
 /// match the matcher scores lower but that a hit on the node's own name lifts
@@ -18,6 +17,17 @@ const WINDOW: usize = 256;
 /// so every match sharing that score is ranked, up to this many.
 const MAX_WINDOW: usize = 4096;
 
+/// What the ranking reads of a matched candidate past the matcher's score.
+pub(crate) struct Standing {
+    /// The chars of the candidate's text that are no part of its own name.
+    pub(crate) path: Range<u32>,
+    /// Whether the drawing shows what the candidate names.
+    pub(crate) drawn: bool,
+    /// How much the candidate weighs among those otherwise tied, such as how
+    /// many nodes depend on the one it names.
+    pub(crate) weight: u32,
+}
+
 /// Where in a candidate's text a query's matched characters fall.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Hit {
@@ -27,27 +37,27 @@ enum Hit {
     Name,
 }
 
-/// One row the palette lists.
+/// One row a list lists.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Row {
-    /// The candidate's index among the document's [`Candidates`].
+    /// The index the candidate was handed to the matcher by.
     pub(crate) candidate: u32,
     /// The char indices of the candidate's text the query matched, ascending.
     pub(crate) matched: Vec<u32>,
 }
 
 /// The rows for the matches in `found`, best scored first, each candidate
-/// given by its index and the text it was matched by, in the order the
-/// palette lists them: a hit on the node's own name before one reaching
-/// into its path, then by the matcher's score, then the nodes `drawn` holds,
-/// then the most depended on. Only the first of `found` are ranked: the
-/// [`WINDOW`] and every match tying its last score, up to [`MAX_WINDOW`].
+/// given by its index and the text it was matched by, in the order a list
+/// lists them: a hit on the candidate's own name before one reaching into
+/// its path, then by the matcher's score, then those drawn, then the
+/// weightiest, as `standing` tells of each index. Only the first of `found`
+/// are ranked: the [`WINDOW`] and every match tying its last score, up to
+/// [`MAX_WINDOW`].
 pub(crate) fn rank<'a>(
     found: impl Iterator<Item = (u32, Utf32Str<'a>)>,
     pattern: &Pattern,
     matcher: &mut Matcher,
-    candidates: &Candidates,
-    drawn: impl Fn(Id) -> bool,
+    standing: impl Fn(u32) -> Standing,
 ) -> Vec<Row> {
     let mut ranked: Vec<((Hit, u32, bool, u32), Row)> = Vec::with_capacity(WINDOW);
     let mut last = None;
@@ -62,12 +72,12 @@ pub(crate) fn rank<'a>(
         last = Some(score);
         matched.sort_unstable();
         matched.dedup();
-        let candidate = candidates.get(index);
-        let hit = match matched.iter().any(|at| candidate.path.contains(at)) {
+        let standing = standing(index);
+        let hit = match matched.iter().any(|at| standing.path.contains(at)) {
             true => Hit::Path,
             false => Hit::Name,
         };
-        let key = (hit, score, drawn(candidate.id), candidate.rdeps);
+        let key = (hit, score, standing.drawn, standing.weight);
         ranked.push((
             key,
             Row {
@@ -82,49 +92,58 @@ pub(crate) fn rank<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::super::index::{Candidate, Candidates, Scope};
     use super::*;
-    use bviz_graph_layout::Kind;
     use nucleo::pattern::{CaseMatching, Normalization};
     use nucleo::{Config, Utf32String};
 
-    fn candidate(id: u32, text: &str, name_start: u32, rdeps: u32) -> Candidate {
+    /// A candidate's text, the chars of it leading up to its name, and its
+    /// weight.
+    struct Candidate {
+        text: String,
+        path: Range<u32>,
+        weight: u32,
+    }
+
+    fn candidate(text: &str, name_start: u32, weight: u32) -> Candidate {
         Candidate {
-            id: Id(id),
-            kind: Kind::Target,
             text: text.into(),
             path: 0..name_start,
-            rdeps,
+            weight,
         }
     }
 
     /// The texts `rank` lists for `query` over `candidates`, of which those
-    /// with the ids `drawn` names are drawn.
+    /// at the indices `drawn` names are drawn.
     fn ranked(candidates: Vec<Candidate>, query: &str, drawn: &[u32]) -> Vec<String> {
-        let candidates = Candidates::from(candidates);
         let texts: Vec<Utf32String> = candidates
-            .in_scope(Scope::All)
-            .map(|index| Utf32String::from(&*candidates.get(index).text))
+            .iter()
+            .map(|candidate| Utf32String::from(candidate.text.as_str()))
             .collect();
         let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
         let mut config = Config::DEFAULT;
         config.set_match_paths();
         let mut matcher = Matcher::new(config);
         let found = (0u32..).zip(texts.iter().map(|text| text.slice(..)));
-        rank(found, &pattern, &mut matcher, &candidates, |id| {
-            drawn.contains(&id.0)
-        })
-        .into_iter()
-        .map(|row| candidates.get(row.candidate).text.to_string())
-        .collect()
+        let standing = |index: u32| {
+            let candidate = &candidates[index as usize];
+            Standing {
+                path: candidate.path.clone(),
+                drawn: drawn.contains(&index),
+                weight: candidate.weight,
+            }
+        };
+        rank(found, &pattern, &mut matcher, standing)
+            .into_iter()
+            .map(|row| candidates[row.candidate as usize].text.clone())
+            .collect()
     }
 
     #[test]
     fn a_hit_in_the_name_beats_one_in_the_package_path() {
         let listed = ranked(
             vec![
-                candidate(0, "//net/http:client", 10, 0),
-                candidate(1, "//util:http", 7, 0),
+                candidate("//net/http:client", 10, 0),
+                candidate("//util:http", 7, 0),
             ],
             "http",
             &[],
@@ -133,9 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn among_equal_hits_a_drawn_node_comes_first() {
+    fn among_equal_hits_a_drawn_candidate_comes_first() {
         let listed = ranked(
-            vec![candidate(0, "//a:lib", 4, 0), candidate(1, "//b:lib", 4, 0)],
+            vec![candidate("//a:lib", 4, 0), candidate("//b:lib", 4, 0)],
             "lib",
             &[1],
         );
@@ -143,12 +162,12 @@ mod tests {
     }
 
     #[test]
-    fn among_equal_drawn_hits_the_most_depended_on_comes_first() {
+    fn among_equal_drawn_hits_the_weightiest_comes_first() {
         let listed = ranked(
             vec![
-                candidate(0, "//a:lib", 4, 2),
-                candidate(1, "//b:lib", 4, 9),
-                candidate(2, "//c:lib", 4, 9),
+                candidate("//a:lib", 4, 2),
+                candidate("//b:lib", 4, 9),
+                candidate("//c:lib", 4, 9),
             ],
             "lib",
             &[0, 1],
@@ -156,21 +175,19 @@ mod tests {
         assert_eq!(listed, ["//b:lib", "//a:lib", "//c:lib"]);
     }
 
-    /// An action's mnemonic is its name, so a hit on it beats one reaching
-    /// into another action's output directories.
+    /// A name need not end the text: a hit on an action's leading mnemonic
+    /// beats one reaching into another action's output directories.
     #[test]
-    fn a_hit_on_an_actions_mnemonic_is_a_hit_on_its_name() {
-        let action = |id: u32, text: &str, path: std::ops::Range<u32>| Candidate {
-            id: Id(id),
-            kind: Kind::Action,
+    fn a_path_inside_the_text_is_no_part_of_the_name() {
+        let action = |text: &str, path: Range<u32>| Candidate {
             text: text.into(),
             path,
-            rdeps: 0,
+            weight: 0,
         };
         let listed = ranked(
             vec![
-                action(0, "Genrule bazel-out/k8/bin/javac/out.jar", 8..31),
-                action(1, "Javac bazel-out/k8/bin/app/lib.jar", 6..27),
+                action("Genrule bazel-out/k8/bin/javac/out.jar", 8..31),
+                action("Javac bazel-out/k8/bin/app/lib.jar", 6..27),
             ],
             "javac",
             &[],
@@ -190,7 +207,7 @@ mod tests {
     fn the_matches_tying_the_last_in_the_window_are_ranked_too() {
         let tied = |count: usize| -> Vec<Candidate> {
             (0..count as u32)
-                .map(|id| candidate(id, &format!("//p{id:04}:lib"), 8, 0))
+                .map(|id| candidate(&format!("//p{id:04}:lib"), 8, 0))
                 .collect()
         };
         let past = WINDOW as u32 + 5;
@@ -206,9 +223,9 @@ mod tests {
     fn every_match_is_listed_and_a_text_the_query_misses_is_not() {
         const MATCHING: u32 = 20;
         let mut candidates: Vec<Candidate> = (0..MATCHING)
-            .map(|id| candidate(id, &format!("//p{id}:lib"), 0, 0))
+            .map(|id| candidate(&format!("//p{id}:lib"), 0, 0))
             .collect();
-        candidates.push(candidate(99, "//x:other", 4, 0));
+        candidates.push(candidate("//x:other", 4, 0));
         let listed = ranked(candidates, "lib", &[]);
         assert_eq!(listed.len(), MATCHING as usize);
         assert!(!listed.contains(&"//x:other".to_owned()));

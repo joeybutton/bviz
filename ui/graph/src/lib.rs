@@ -38,6 +38,7 @@ mod duration;
 mod emphasis;
 mod exclusive;
 mod framing;
+mod fuzzy;
 mod hints;
 mod history;
 mod hue;
