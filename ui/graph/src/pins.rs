@@ -327,7 +327,7 @@ mod tests {
 
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
             filter
-                .evaluate(&self.graph, &self.names, &self.facets)
+                .evaluate(&self.graph, &self.facets)
                 .get(self.id(name))
         }
     }

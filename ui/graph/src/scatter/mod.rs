@@ -290,7 +290,7 @@ impl ScatterPanel {
         self.plotting = Some(load_in_background(
             cx,
             move || {
-                let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
+                let verdicts = filter.evaluate(&shared.base, &shared.facets);
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
                 let colouring = Colouring::of(colour, scope.unit(), &reference, &shared.facets);
                 let hue = |point: &Metrics| colouring.hue(point, &shared.facets, &clocks);

@@ -1,11 +1,10 @@
 //! The canonical labels one graph's nodes belong to, gathered so that a
-//! [`Pattern`] is matched over each label once however many nodes carry it.
+//! pattern is matched over each label once however many nodes carry it.
 
 use crate::facets::{Facets, WrittenRepos};
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
 use crate::label::{package_node_parts, target_node_label};
-use crate::select::pattern::Pattern;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -95,15 +94,6 @@ impl LabelIndex {
             .binary_search_by(|(_, held)| held.as_str().cmp(label));
         found.ok()
     }
-
-    /// The targets `pattern` names, by label.
-    pub fn matching<'a>(&'a self, pattern: &'a Pattern) -> impl Iterator<Item = (Id, &'a str)> {
-        let pattern = pattern.resolved(&self.repos);
-        self.entries
-            .iter()
-            .filter(move |(_, label)| pattern.matches(label))
-            .map(|(id, label)| (*id, label.as_str()))
-    }
 }
 
 #[cfg(test)]
@@ -157,76 +147,26 @@ mod tests {
         fn index(&self) -> LabelIndex {
             LabelIndex::of(&self.graph, &self.names, &self.facets)
         }
-
-        fn matching(&self, pattern: &str) -> Vec<String> {
-            let pattern = Pattern::parse(pattern);
-            self.index()
-                .matching(&pattern)
-                .map(|(_, label)| label.to_string())
-                .collect()
-        }
     }
 
     /// A box reads as the leaf of its label, which several targets share; the
-    /// index holds the canonical label instead, so a pattern naming a package
-    /// path reaches the target and a pattern naming the leaf alone does not
-    /// stand in for it.
+    /// index holds the canonical label instead, ordered by it.
     #[test]
     fn a_target_is_indexed_by_its_canonical_label_and_not_the_name_its_box_reads() {
-        let fixture = Fixture::new();
-        let labels: Vec<String> = fixture.matching("//...");
-
+        let index = Fixture::new().index();
+        let labels: Vec<&str> = (index.entries().iter())
+            .map(|(_, label)| label.as_str())
+            .collect();
         assert_eq!(
             labels,
             [
                 "//app:main",
                 "//tools/rules/cpp:toolchain",
                 "//tools/rules/java:toolchain",
+                "@@rules_foo+//bar:lib",
+                "@crates//serde:lib",
             ]
         );
-        assert_eq!(
-            fixture.matching("//.../rules/cpp/..."),
-            ["//tools/rules/cpp:toolchain"]
-        );
-    }
-
-    /// An ellipsis covers the package it names and every package below it, and
-    /// nothing beside them.
-    #[test]
-    fn a_package_pattern_covers_the_packages_below_it() {
-        let fixture = Fixture::new();
-
-        assert_eq!(
-            fixture.matching("//tools/..."),
-            [
-                "//tools/rules/cpp:toolchain",
-                "//tools/rules/java:toolchain"
-            ]
-        );
-        assert_eq!(fixture.matching("//app/..."), ["//app:main"]);
-        assert!(fixture.matching("//nowhere/...").is_empty());
-    }
-
-    /// A repository is named as it is written on a command line, which is what
-    /// a reader has to hand rather than the canonical name a dump carries.
-    #[test]
-    fn a_repository_pattern_reaches_the_labels_of_that_repository() {
-        let fixture = Fixture::new();
-
-        assert_eq!(
-            fixture.matching("@rules_foo//..."),
-            ["@@rules_foo+//bar:lib"]
-        );
-    }
-
-    /// A repository no input named canonically is reached by the apparent name
-    /// its labels carry, which is both what a reader has to hand and what
-    /// identifies the repository.
-    #[test]
-    fn a_repository_pattern_reaches_a_repository_named_only_apparently() {
-        let fixture = Fixture::new();
-
-        assert_eq!(fixture.matching("@crates//..."), ["@crates//serde:lib"]);
     }
 
     /// Every node of a target answers through the one label it carries, so the

@@ -10,7 +10,6 @@
 
 mod eval;
 pub mod labels;
-pub mod pattern;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -24,7 +23,6 @@ use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
 pub use eval::{Hiding, Verdict, Verdicts};
-use pattern::{PackagePrefix, Pattern};
 
 /// What a filter says is to become of one node.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -83,11 +81,8 @@ pub struct Rule {
 ///
 /// The rules are read in order and the last one matching a node decides it, as
 /// a gitignore file's patterns do, so a rule narrows or widens the ones before
-/// it without either being rewritten. A rule constraining [`Predicate::label`]
-/// and nothing besides stands first, ahead of every rule over a node's other
-/// facets, so that a label pattern selects within what those leave rather than
-/// drawing back what they hide. The scope hides what lies outside it ahead of
-/// every rule, so no rule draws back a node the scope leaves out. `pins`
+/// it without either being rewritten. The scope hides what lies outside it
+/// ahead of every rule, so no rule draws back a node the scope leaves out. `pins`
 /// decide the nodes they name whatever the scope and the rules say, which is
 /// what lets a node shown or hidden on its own outlast a change to a rule that
 /// has nothing to do with it.
@@ -211,12 +206,6 @@ pub struct Predicate {
     /// Tags, of which the node's target must carry one.
     pub tags: Option<Values<String>>,
     pub testonly: Option<bool>,
-    /// A pattern over the canonical label of the target the node belongs to —
-    /// see [`Pattern::covers_package`] for what a node belonging to none
-    /// answers through.
-    pub label: Option<Pattern>,
-    /// A package and everything below it, read against the same label.
-    pub package: Option<PackagePrefix>,
 }
 
 /// The [`Tri`] a node must carry to answer `yes`, an unstated facet answering
@@ -295,7 +284,7 @@ mod tests {
         /// What `filter` makes of the node `name`.
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
             filter
-                .evaluate(&self.graph, &self.names, &self.facets)
+                .evaluate(&self.graph, &self.facets)
                 .get(self.id(name))
         }
 
@@ -306,7 +295,7 @@ mod tests {
                 rules: vec![rule(predicate.clone(), Visibility::Shown)],
                 ..Filter::default()
             };
-            let verdicts = showing.evaluate(&self.graph, &self.names, &self.facets);
+            let verdicts = showing.evaluate(&self.graph, &self.facets);
             self.graph
                 .nodes
                 .iter()
@@ -342,7 +331,6 @@ mod tests {
         let app = "target://foo:app";
         let action = "action0";
         let lib = "target:@@rules_foo+//bar:lib";
-        let source = "target://foo:main.c";
         let cases: Vec<(Predicate, Vec<&str>)> = vec![
             (
                 Predicate {
@@ -437,20 +425,6 @@ mod tests {
                 },
                 vec![app, action],
             ),
-            (
-                Predicate {
-                    label: Some(Pattern::parse("//foo:all")),
-                    ..Predicate::default()
-                },
-                vec![app, action, source],
-            ),
-            (
-                Predicate {
-                    package: PackagePrefix::parse("@rules_foo//bar"),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
         ];
 
         for (predicate, expected) in cases {
@@ -525,27 +499,6 @@ mod tests {
                 "{predicate:?}"
             );
         }
-    }
-
-    /// A node belonging to no target answers no term over labels, whichever
-    /// label a node beside it carries.
-    #[test]
-    fn a_node_with_no_label_matches_no_pattern() {
-        let mut fixture = Fixture::new();
-        let group = fixture.names.intern("group:target://foo:app");
-        fixture
-            .graph
-            .add_node(Node::new(group, "2 sources", Kind::Source, None));
-
-        let predicate = Predicate {
-            label: Some(Pattern::parse("//foo/...")),
-            ..Predicate::default()
-        };
-        assert!(
-            !fixture
-                .matching(&predicate)
-                .contains(&"group:target://foo:app")
-        );
     }
 
     fn rule(predicate: Predicate, visibility: Visibility) -> Rule {

@@ -391,8 +391,7 @@ mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::intern::Id;
-    use bviz_graph_layout::select::pattern::Pattern;
-    use bviz_graph_layout::select::{Predicate, Rule, Visibility};
+    use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
 
     /// A graph of one package holding one target, with a source file beside it.
     fn graph() -> Graph {
@@ -715,7 +714,7 @@ mod tests {
     fn checking_and_clearing_every_row_leaves_a_rule_no_control_wrote_standing() {
         let untouched = Rule {
             predicate: Predicate {
-                label: Some(Pattern::parse("//foo/...")),
+                tags: Values::new(["flaky".to_string()]),
                 ..Predicate::default()
             },
             visibility: Visibility::Hidden,

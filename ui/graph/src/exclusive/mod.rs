@@ -377,7 +377,7 @@ impl ExclusivePanel {
         self.fading = Some(load_in_background(
             cx,
             move || {
-                let verdicts = filter.evaluate(&shared.base, &shared.names, &shared.facets);
+                let verdicts = filter.evaluate(&shared.base, &shared.facets);
                 Fade {
                     filter,
                     verdicts: Arc::new(verdicts),

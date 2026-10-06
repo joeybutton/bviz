@@ -16,8 +16,8 @@ use crate::facets::Facets;
 use crate::graph::{Graph, Kind};
 use crate::intern::Id;
 use crate::label::encloses;
+use crate::repo::{module_name, strip_sigil};
 use crate::select::labels::LabelIndex;
-use crate::select::pattern::{Parts, repo_matches, strip_sigil};
 use crate::target_pattern::{Repo, TargetPattern};
 
 /// The targets of one graph by repository, package and name, against which a
@@ -92,7 +92,7 @@ impl TargetIndex {
         }
         let carried = entries
             .iter()
-            .filter_map(|(_, label)| Some(Parts::of(label)?.package.repo()));
+            .filter_map(|(_, label)| Some(package_of(label)?.0));
         let mut repos: Vec<String> = Vec::with_capacity(facets.repos().len());
         for repo in carried {
             if repos.last().is_none_or(|last| last != repo) {
@@ -297,9 +297,23 @@ impl TargetIndex {
         let entries = self.labels.entries();
         let within = self.labels.starting(&format!("{repo}//{directory}"));
         within.filter(move |&at| {
-            Parts::of(&entries[at].1).is_some_and(|parts| encloses(directory, parts.package.path()))
+            package_of(&entries[at].1).is_some_and(|(_, path)| encloses(directory, path))
         })
     }
+}
+
+/// The repository part, sigil and all, and the package path of the canonical
+/// label `label`; `None` for a string that is no label.
+fn package_of(label: &str) -> Option<(&str, &str)> {
+    let (repo, rest) = label.split_once("//")?;
+    let (path, _) = rest.split_once(':')?;
+    Some((repo, path))
+}
+
+/// Whether the repository part `written` of a pattern names the repository
+/// whose canonical name is `canonical`.
+fn repo_matches(written: &str, canonical: &str) -> bool {
+    written == canonical || module_name(canonical) == Some(written)
 }
 
 impl Named {
