@@ -74,7 +74,7 @@ use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
-use drag::{CanvasIntent, Drag, GESTURES, end_drag, start_pan, track_gesture};
+use drag::{CanvasIntent, Drag, GESTURES, end_drag, pan_by, start_pan, track_gesture};
 use emphasis::Emphasis;
 pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
@@ -204,6 +204,10 @@ const ZOOM_PER_NOTCH: f32 = 1.1;
 /// Scroll delta one wheel notch amounts to, for the devices that report a delta
 /// in pixels rather than in lines.
 const PIXELS_PER_NOTCH: f32 = 120.0;
+
+/// How far one line of wheel scroll pans a view, for the devices that report a
+/// delta in lines rather than in pixels.
+const LINE_SCROLL_PX: f32 = 24.0;
 
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
@@ -778,12 +782,16 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        GESTURES.dispatch(Pointer::scroll(e), |intent| match intent {
-            CanvasIntent::Zoom => {
-                self.zoom_by_wheel(e, cx);
-                true
+        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        GESTURES.dispatch(Pointer::scroll(e), |intent| {
+            match intent {
+                CanvasIntent::Zoom => self.zoom_by_wheel(e, cx),
+                CanvasIntent::PanAcross => pan_by(self, (dx + dy, 0.0), cx),
+                CanvasIntent::Scroll => pan_by(self, (dx, dy), cx),
+                _ => return false,
             }
-            _ => false,
+            true
         });
     }
 

@@ -1,7 +1,7 @@
 use crate::camera::{Camera, clamp_pan};
 use crate::scroll::{ScrollDrag, scroll_drag_move};
 use crate::{GraphPanel, click_box_at};
-use bviz_ui_components::gesture::{Button, Entry, Gestures, Input, Place, Pointer};
+use bviz_ui_components::gesture::{Button, Entry, Gestures, Held, Input, Place, Pointer};
 use bviz_ui_components::{DragEnd, track_drag};
 use gpui::{App, Context, Entity, MouseDownEvent, Pixels, Point, Window};
 
@@ -28,6 +28,8 @@ pub(crate) enum CanvasIntent {
     Select,
     Mark,
     Zoom,
+    PanAcross,
+    Scroll,
 }
 
 const BOX: Place = Place::On("a box");
@@ -58,11 +60,18 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
         CanvasIntent::Mark,
     ),
     Entry::new(
-        Input::SCROLL,
+        Input::SCROLL.holding(Held::SECONDARY),
         Place::Anywhere,
         "Zoom about pointer",
         CanvasIntent::Zoom,
     ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        CanvasIntent::PanAcross,
+    ),
+    Entry::new(Input::SCROLL, Place::Anywhere, "Pan", CanvasIntent::Scroll),
 ]);
 
 /// The pointer gesture the view is in the middle of.
@@ -116,19 +125,24 @@ pub(crate) fn drag_pan(
     if past_slop(pan.press, position) {
         pan.moved = true;
     }
+    let dx = f32::from(position.x) - f32::from(pan.last.x);
+    let dy = f32::from(position.y) - f32::from(pan.last.y);
+    pan.last = position;
+    view.drag = Drag::Pan(pan);
+    pan_by(view, (dx, dy), cx);
+}
+
+/// Slides the graph by `(dx, dy)` window px, as far as [`clamp_pan`] lets it.
+pub(crate) fn pan_by(view: &mut GraphPanel, (dx, dy): (f32, f32), cx: &mut Context<GraphPanel>) {
     let Camera {
         zoom,
         pan: (px, py),
     } = view.camera();
-    let dx = f32::from(position.x) - f32::from(pan.last.x);
-    let dy = f32::from(position.y) - f32::from(pan.last.y);
     let panned = (px + dx, py + dy);
     let panned = match view.drawn().map(|d| d.content()) {
         Some(content) => clamp_pan(panned, zoom, view.framing.viewport().size, content),
         None => panned,
     };
-    pan.last = position;
-    view.drag = Drag::Pan(pan);
     view.framing.pan_to(panned);
     view.invalidate_canvas(cx);
 }

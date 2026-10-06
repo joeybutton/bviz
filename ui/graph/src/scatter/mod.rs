@@ -21,14 +21,14 @@ use crate::point::{
 use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
-use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
+use crate::{LINE_SCROLL_PX, PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
-use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Motion, Place};
+use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS,
     TextTooltip, Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar,
@@ -39,7 +39,7 @@ use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rems,
     Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
-    Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -374,12 +374,21 @@ impl ScatterPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        GESTURES.dispatch(gesture::Pointer::scroll(e), |intent| match intent {
-            ScatterIntent::Zoom => {
-                self.zoom_by_wheel(e, cx);
-                true
+        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        GESTURES.dispatch(gesture::Pointer::scroll(e), |intent| {
+            let by = match intent {
+                ScatterIntent::Zoom => {
+                    self.zoom_by_wheel(e, cx);
+                    return true;
+                }
+                ScatterIntent::PanAcross => point(delta.x + delta.y, px(0.)),
+                ScatterIntent::Scroll => delta,
+                _ => return false,
+            };
+            if let Some(area) = self.area() {
+                self.zoom_to(area.panned(by), e.position, cx);
             }
-            _ => false,
+            true
         });
     }
 
@@ -845,6 +854,8 @@ enum ScatterIntent {
     Reveal,
     RevealListed,
     Zoom,
+    PanAcross,
+    Scroll,
     Describe,
 }
 
@@ -876,10 +887,22 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         ScatterIntent::RevealListed,
     ),
     Entry::new(
-        gesture::Input::SCROLL,
+        gesture::Input::SCROLL.holding(Held::SECONDARY),
         Place::Anywhere,
         "Zoom about pointer",
         ScatterIntent::Zoom,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        ScatterIntent::PanAcross,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL,
+        Place::Anywhere,
+        "Pan",
+        ScatterIntent::Scroll,
     ),
     Entry::new(
         gesture::Input::HOVER,
