@@ -1,5 +1,5 @@
 use crate::carry::{Carrying, Reported, Taken};
-use crate::documents_menu::DocumentsMenu;
+use crate::documents_menu::{self, DocumentsMenu};
 use crate::drop::{PaneGeometry, Preview};
 use crate::gestures::{CHROME_GESTURES, ChromeIntent, chrome_gestures};
 use crate::pane::Handover;
@@ -81,7 +81,7 @@ actions!(
 
 /// The key context the workspace's own bindings are scoped to, so they reach a
 /// window this crate frames and no other.
-const KEY_CONTEXT: KeyScope = KeyScope::new("Workspace", "Panes & windows");
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("Workspace", "Panes & windows");
 
 /// The hairline drawn between two sides of a split.
 const DIVIDER_LINE: Pixels = px(1.);
@@ -139,7 +139,14 @@ const MARK_FILL: f32 = 0.3;
 const MENU_LAYER: usize = 1;
 
 pub(crate) fn register_keys(cx: &mut App) {
-    declare_scopes(cx, [KEY_CONTEXT, PLAYBACK_KEY_CONTEXT]);
+    declare_scopes(
+        cx,
+        [
+            KEY_CONTEXT,
+            PLAYBACK_KEY_CONTEXT,
+            documents_menu::KEY_CONTEXT,
+        ],
+    );
     let workspace = Some(KEY_CONTEXT.id());
     // Typed into a text field, these keys edit the text.
     let unless_typing = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
@@ -154,6 +161,11 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("secondary-w", ClosePanel, workspace),
         KeyBinding::new("secondary-shift-n", DetachPanel, workspace),
         KeyBinding::new("secondary-shift-d", ToggleDocuments, workspace),
+        KeyBinding::new(
+            "escape",
+            documents_menu::CloseDocuments,
+            Some(documents_menu::KEY_CONTEXT.id()),
+        ),
         KeyBinding::new("secondary-k m", ToggleMaximize, workspace),
         KeyBinding::new("secondary-k =", EvenSplit, workspace),
         KeyBinding::new("secondary-k 0", ResetArrangement, workspace),

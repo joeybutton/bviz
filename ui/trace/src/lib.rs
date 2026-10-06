@@ -79,6 +79,8 @@ gpui::actions!(
         ShowWholeFlameGraph,
         /// Filter tracks
         FilterTracks,
+        /// Close tracks menu
+        CloseTracksMenu,
     ]
 );
 
@@ -88,6 +90,7 @@ pub fn register_keys(cx: &mut App) {
         [
             TRACE_KEY_CONTEXT,
             TIMELINE_KEY_CONTEXT,
+            TRACKS_MENU_KEY_CONTEXT,
             stats_panel::STATS_KEY_CONTEXT,
             flame_panel::FLAME_KEY_CONTEXT,
             critical_path::KEY_CONTEXT,
@@ -103,6 +106,11 @@ pub fn register_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-a", SelectAllTracks, timeline),
         KeyBinding::new("escape", ClearTimeSelection, timeline),
+        KeyBinding::new(
+            "escape",
+            CloseTracksMenu,
+            Some(TRACKS_MENU_KEY_CONTEXT.id()),
+        ),
         KeyBinding::new("up", ChoosePrevious, critical_path),
         KeyBinding::new("down", ChooseNext, critical_path),
         KeyBinding::new("escape", Unchoose, critical_path),
@@ -126,6 +134,14 @@ const TIMELINE_KEY_CONTEXT: KeyScope = KeyScope::within(
     Nesting::Inside,
     "TraceTimeline",
     TRACE_KEY_CONTEXT.label(),
+);
+
+/// The key context of the open tracks menu.
+const TRACKS_MENU_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &TRACE_KEY_CONTEXT,
+    Nesting::Inside,
+    "TracksMenu",
+    "Tracks menu",
 );
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane

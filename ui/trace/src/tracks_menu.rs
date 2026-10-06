@@ -4,8 +4,8 @@ use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
-    TRACKS_MENU_WIDTH, TracePanel,
+    CloseTracksMenu, GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE,
+    TRACKS_MENU_KEY_CONTEXT, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, TextInput, list_scrollbar};
@@ -137,7 +137,15 @@ impl TracksMenu {
         let rows = self.menu_rows(&profile, palette, cx);
         let menu = self.chrome(rows, palette, cx);
         let backdrop = self.backdrop(viewport, cx);
-        Some(deferred(div().child(backdrop).child(menu)))
+        Some(deferred(
+            div()
+                .key_context(TRACKS_MENU_KEY_CONTEXT)
+                .on_action(
+                    cx.listener(|this, _: &CloseTracksMenu, window, cx| this.close(window, cx)),
+                )
+                .child(backdrop)
+                .child(menu),
+        ))
     }
 
     /// Tracks under their lane-class group headers, each group's tracks in the
@@ -507,8 +515,7 @@ impl Render for TracksMenu {
                 if this.open {
                     this.close(window, cx);
                 } else {
-                    this.open = true;
-                    cx.notify();
+                    this.open_filtering(window, cx);
                 }
             }))
             .child(

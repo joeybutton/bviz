@@ -79,10 +79,12 @@ pub fn register_keys(cx: &mut App) {
         [
             text_input::KEY_CONTEXT,
             multi_select::KEY_CONTEXT,
+            dropdown::KEY_CONTEXT,
             keys_help::KEY_CONTEXT,
         ],
     );
     keys_help::bind_keys(cx);
     text_input::bind_keys(cx);
     multi_select::bind_keys(cx);
+    dropdown::bind_keys(cx);
 }

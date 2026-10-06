@@ -1,12 +1,27 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens from it.
 
-use crate::menu_chrome;
+use crate::{KeyScope, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, Pixels, Render,
-    SharedString, Subscription, Window, div, prelude::*,
+    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, KeyBinding,
+    Pixels, Render, SharedString, Subscription, Window, div, prelude::*,
 };
+
+gpui::actions!(
+    bviz_dropdown,
+    [
+        /// Close list
+        Dismiss,
+    ]
+);
+
+/// The key context the dropdown carries, which [`Dismiss`] is scoped to.
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("Dropdown", "Dropdown");
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT.id()))]);
+}
 
 /// Emitted when the user picks a different option. Programmatic
 /// [`set_selected`](Dropdown::set_selected) does NOT emit — only a user choice —
@@ -125,6 +140,15 @@ impl Dropdown {
         cx.notify();
     }
 
+    fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+        if self.open {
+            self.open = false;
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn trigger(
         &self,
         colors: &ThemeColors,
@@ -191,7 +215,9 @@ impl Render for Dropdown {
 
         div()
             .relative()
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::dismiss))
             .child(self.trigger(&colors, option_width, cx))
             .children(self.open.then(|| self.menu(&colors, cx)))
     }

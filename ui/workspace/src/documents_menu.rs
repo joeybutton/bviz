@@ -1,11 +1,27 @@
 use crate::workspace::{ResetArrangement, ToggleDocuments};
 use crate::{DocumentId, Documents, OpenDocument, ViewId, ViewState, Workspace};
-use bviz_ui_components::{Button, action_label, key_text_in, menu_chrome};
+use bviz_ui_components::{Button, KeyScope, Nesting, action_label, key_text_in, menu_chrome};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
     Action, AnyElement, Context, ElementId, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
     SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px, relative,
 };
+
+gpui::actions!(
+    bviz_workspace,
+    [
+        /// Close Documents menu
+        CloseDocuments,
+    ]
+);
+
+/// The key context the menu carries, which [`CloseDocuments`] is scoped to.
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
+    &crate::workspace::KEY_CONTEXT,
+    Nesting::Inside,
+    "DocumentsMenu",
+    "Documents menu",
+);
 
 /// Side of the mark at the head of a view's row.
 const ROW_MARK: Pixels = px(13.);
@@ -379,7 +395,15 @@ impl Render for DocumentsMenu {
         div()
             .relative()
             .flex_none()
+            .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &CloseDocuments, window, cx| {
+                if this.open {
+                    this.toggle(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .child(self.trigger(cx))
             .children(self.open.then(|| self.popover(&colors, window, cx)))
     }
