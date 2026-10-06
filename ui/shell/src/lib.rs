@@ -78,7 +78,7 @@ fn bindings() -> Vec<KeyBinding> {
     let window = Some(KEY_CONTEXT);
     vec![
         KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-w", CloseWindow, None),
+        KeyBinding::new("secondary-shift-w", CloseWindow, None),
         KeyBinding::new("tab", Tab, window),
         KeyBinding::new("shift-tab", TabPrev, window),
     ]

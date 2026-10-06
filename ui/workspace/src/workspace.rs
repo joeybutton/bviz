@@ -151,7 +151,7 @@ pub(crate) fn register_keys(cx: &mut App) {
         KeyBinding::new("f1", ShowKeysAndGestures, workspace),
         KeyBinding::new("ctrl-tab", NextTab, workspace),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, workspace),
-        KeyBinding::new("secondary-shift-w", ClosePanel, workspace),
+        KeyBinding::new("secondary-w", ClosePanel, workspace),
         KeyBinding::new("secondary-shift-n", DetachPanel, workspace),
         KeyBinding::new("secondary-shift-d", ToggleDocuments, workspace),
         KeyBinding::new("secondary-k m", ToggleMaximize, workspace),
