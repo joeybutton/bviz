@@ -134,6 +134,9 @@ pub enum Clicks {
     Single,
     Double,
     Triple,
+    /// The second press of a run and every press after it, each acted on
+    /// alike.
+    Repeated,
 }
 
 impl Clicks {
@@ -144,6 +147,7 @@ impl Clicks {
             Clicks::Single => count == 1,
             Clicks::Double => count == 2,
             Clicks::Triple => count == 3,
+            Clicks::Repeated => count >= 2,
         }
     }
 
@@ -151,7 +155,7 @@ impl Clicks {
     fn first(self) -> usize {
         match self {
             Clicks::Every | Clicks::Single => 1,
-            Clicks::Double => 2,
+            Clicks::Double | Clicks::Repeated => 2,
             Clicks::Triple => 3,
         }
     }
@@ -159,7 +163,7 @@ impl Clicks {
     fn prefix(self) -> &'static str {
         match self {
             Clicks::Every | Clicks::Single => "",
-            Clicks::Double => "double-",
+            Clicks::Double | Clicks::Repeated => "double-",
             Clicks::Triple => "triple-",
         }
     }
@@ -493,6 +497,15 @@ mod tests {
         assert!(press(Clicks::Every).answers(double));
         assert!(!press(Clicks::Single).answers(double));
         assert!(!press(Clicks::Triple).answers(double));
+    }
+
+    #[test]
+    fn a_repeated_click_is_made_by_every_press_after_the_first() {
+        let press = |count| Pointer::press(&down(MouseButton::Left, count, Modifiers::none()));
+        let repeated = Input::new(Motion::Press(Button::Left, Clicks::Repeated));
+        assert!(!repeated.answers(press(1)));
+        assert!(repeated.answers(press(2)));
+        assert!(repeated.answers(press(3)));
     }
 
     #[test]

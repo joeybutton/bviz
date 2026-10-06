@@ -9,6 +9,7 @@ mod documents;
 mod documents_menu;
 mod drag_icon;
 mod drop;
+mod gestures;
 mod group;
 mod layout;
 mod pane;
@@ -23,6 +24,7 @@ pub use documents::ViewSpec;
 pub(crate) use documents::{
     DocumentId, Documents, OpenDocument, ViewId, ViewState, WindowsChanged,
 };
+pub use gestures::chrome_gestures;
 pub use group::{PanelGroup, Weight};
 pub use layout::{AtEdge, DividerId, Layout, Panes, Removal, Side, Split, SplitSide};
 pub(crate) use pane::Framing;

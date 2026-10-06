@@ -1,6 +1,7 @@
 use crate::carry::{Carrying, Reported, Taken};
 use crate::documents_menu::DocumentsMenu;
 use crate::drop::{PaneGeometry, Preview};
+use crate::gestures::{CHROME_GESTURES, ChromeIntent};
 use crate::pane::Handover;
 use crate::panel::keys_focus;
 use crate::panel_menu::{Deed, Standing};
@@ -9,6 +10,7 @@ use crate::{
     PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, documents, drag_icon,
     drop, panel_menu,
 };
+use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{
     Divider, DragEnd, Menu, MenuEvent, overlay_canvas, text_input, track_drag,
 };
@@ -1884,8 +1886,7 @@ fn span(bounds: Bounds<Pixels>, axis: Axis) -> (f32, f32) {
 }
 
 /// The grab band at one boundary between a split's sides, [`DIVIDER_GRIP`]
-/// across. A press takes hold of the boundary to drag it; a double click evens
-/// the split it parts instead, taking hold of nothing.
+/// across.
 fn divider(
     id: DividerId,
     axis: Axis,
@@ -1902,12 +1903,18 @@ fn divider(
         ElementId::NamedInteger("split-divider".into(), id.as_u64()),
         axis,
         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
-            if event.click_count > 1 {
-                workspace.even_split(id, cx);
-                return;
-            }
-            workspace.divider_drag = Some(id);
-            cx.notify();
+            CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+                ChromeIntent::EvenSplit => {
+                    workspace.even_split(id, cx);
+                    true
+                }
+                ChromeIntent::ResizeSplit => {
+                    workspace.divider_drag = Some(id);
+                    cx.notify();
+                    true
+                }
+                _ => false,
+            });
         }),
     )
     .band(DIVIDER_GRIP)

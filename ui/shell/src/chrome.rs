@@ -1,5 +1,8 @@
 use crate::{CloseWindow, KEY_CONTEXT, Quit, Tab, TabPrev};
 use bviz_ui_components::Button;
+use bviz_ui_components::gesture::{
+    self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
@@ -232,6 +235,24 @@ impl MoveLatch {
     }
 }
 
+/// What the title bar does for a gesture in [`TITLE_BAR_GESTURES`].
+#[derive(Clone, Copy)]
+enum TitleBarIntent {
+    Zoom,
+}
+
+const TITLE_BAR_GESTURES: Gestures<TitleBarIntent> = Gestures::new(&[Entry::new(
+    Input::new(Motion::Click(gesture::Button::Left, Clicks::Double)),
+    Place::On("the title bar"),
+    "Maximize or restore window",
+    TitleBarIntent::Zoom,
+)]);
+
+/// The gestures a window's title bar answers to.
+pub fn title_bar_gestures() -> impl Iterator<Item = GestureRow> {
+    TITLE_BAR_GESTURES.rows()
+}
+
 /// A title bar: draggable to move the window, with minimize/maximize/close controls.
 fn title_bar(
     colors: &ThemeColors,
@@ -273,13 +294,13 @@ fn title_bar(
                 window.start_window_move();
             }
         })
-        // Double-clicking the title bar maximizes/restores the window (like the
-        // maximize control) — it fills the work area without covering the panel,
-        // unlike true fullscreen.
         .on_click(|e, window, _| {
-            if e.click_count() == 2 {
-                window.zoom_window();
-            }
+            TITLE_BAR_GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                TitleBarIntent::Zoom => {
+                    window.zoom_window();
+                    true
+                }
+            });
         })
         .child(div().px_1().child(title))
         .child(
@@ -445,6 +466,11 @@ mod tests {
     use super::*;
     use bviz_ui_theme::{MIN_EDGED_STEP, MIN_VISIBLE_STEP, ThemeRegistry, level_step};
     use gpui::size;
+
+    #[test]
+    fn every_title_bar_gesture_is_reachable() {
+        assert_eq!(TITLE_BAR_GESTURES.unreachable(), []);
+    }
 
     /// Dimming the bands is what says the window is no longer the active one, and
     /// once a compositor tiles the window — taking the rounded corners and the

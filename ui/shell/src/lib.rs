@@ -2,7 +2,7 @@
 //! and the global interactivity (quit/close/tab) shared by every app window.
 
 mod chrome;
-pub use chrome::Chrome;
+pub use chrome::{Chrome, title_bar_gestures};
 
 use gpui::{
     App, Application, Bounds, Entity, KeyBinding, Pixels, Render, Result, Size, TitlebarOptions,

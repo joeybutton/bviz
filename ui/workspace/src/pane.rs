@@ -1,7 +1,9 @@
 use crate::drop::Band;
+use crate::gestures::{CHROME_GESTURES, ChromeIntent};
 use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ToggleMaximize};
 use crate::{AnyPanel, PanelEvent};
+use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{Button, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -496,19 +498,30 @@ impl Pane {
         )
     }
 
-    /// Asks for the whole of the window's body where `event` is the second
-    /// click of a double click on one of the pane's own tabs or on its handle,
-    /// which is the gesture that asks for it. A click on the control that gives
-    /// that body back is neither of the two: it leaves the pane restored, and
-    /// the click the platform counts after it would otherwise ask for the body
+    /// Acts on a click on the tab at `tab`, or on the pane's handle where that
+    /// is `None`, as [`CHROME_GESTURES`] has it. A click on the control that
+    /// gives the window's body back is neither: it leaves the pane restored,
+    /// and the click the platform counts after it must not ask for the body
     /// straight back.
-    fn maximize_on_second_click(&mut self, event: &ClickEvent, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.restore_clicked) {
-            return;
-        }
-        if event.click_count() == 2 {
-            cx.emit(PaneEvent::Maximize);
-        }
+    fn clicked(
+        &mut self,
+        tab: Option<usize>,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restoring = std::mem::take(&mut self.restore_clicked);
+        CHROME_GESTURES.dispatch(Pointer::click(event), |intent| match (intent, tab) {
+            (ChromeIntent::Maximize, _) if !restoring => {
+                cx.emit(PaneEvent::Maximize);
+                true
+            }
+            (ChromeIntent::Activate, Some(index)) => {
+                self.activate(index, window, cx);
+                true
+            }
+            _ => false,
+        });
     }
 
     /// The grip over a pane holding one panel, naming that panel as a tab strip
@@ -539,8 +552,8 @@ impl Pane {
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
             .on_mouse_down(MouseButton::Right, menu_asked(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
-            .on_click(cx.listener(|pane, event: &ClickEvent, _, cx| {
-                pane.maximize_on_second_click(event, cx);
+            .on_click(cx.listener(|pane, event: &ClickEvent, window, cx| {
+                pane.clicked(None, event, window, cx);
             }))
             .when_some(description_tooltip(&panel, colors), |handle, tooltip| {
                 handle.tooltip(tooltip)
@@ -599,8 +612,7 @@ impl Pane {
             .on_mouse_down(MouseButton::Right, menu_asked(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
             .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
-                pane.activate(index, window, cx);
-                pane.maximize_on_second_click(event, cx);
+                pane.clicked(Some(index), event, window, cx);
             }))
             .when_some(description_tooltip(&panel, colors), |tab, tooltip| {
                 tab.tooltip(tooltip)
@@ -653,9 +665,15 @@ fn pressed(
     cx: &mut Context<Pane>,
 ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
     cx.listener(move |_, event: &MouseDownEvent, _, cx| {
-        cx.emit(PaneEvent::Pressed {
-            panel,
-            at: event.position,
+        CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+            ChromeIntent::Move => {
+                cx.emit(PaneEvent::Pressed {
+                    panel,
+                    at: event.position,
+                });
+                true
+            }
+            _ => false,
         });
     })
 }
@@ -676,9 +694,15 @@ fn menu_asked(
 ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
     cx.listener(move |_, event: &MouseDownEvent, _, cx| {
         cx.stop_propagation();
-        cx.emit(PaneEvent::Menu {
-            panel,
-            at: event.position,
+        CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+            ChromeIntent::OpenMenu => {
+                cx.emit(PaneEvent::Menu {
+                    panel,
+                    at: event.position,
+                });
+                true
+            }
+            _ => false,
         });
     })
 }
