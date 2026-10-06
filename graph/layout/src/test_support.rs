@@ -1,4 +1,7 @@
-use bazel_query_proto::analysis::{Configuration, ConfiguredTarget};
+use bazel_query_proto::analysis::{
+    Action, ActionGraphContainer, Artifact, Configuration, ConfiguredTarget, DepSetOfFiles,
+    PathFragment,
+};
 use bazel_query_proto::blaze_query::{
     Attribute, GeneratedFile, Rule, SourceFile, Target, attribute::Discriminator as AttributeType,
     target::Discriminator,
@@ -107,4 +110,85 @@ pub(crate) fn configuration(
         is_tool,
         ..Default::default()
     }
+}
+
+/// One action of [`action_graph`]: the label of the target registering it,
+/// its mnemonic, and the exec paths of the files it reads and writes, the
+/// first written being its primary output.
+pub(crate) struct ActionSpec<'a> {
+    pub label: &'a str,
+    pub mnemonic: &'a str,
+    pub inputs: &'a [&'a str],
+    pub outputs: &'a [&'a str],
+}
+
+/// An aquery of `actions`, all built in one configuration.
+pub(crate) fn action_graph(actions: &[ActionSpec]) -> ActionGraphContainer {
+    let mut graph = ActionGraphContainer {
+        configuration: vec![configuration(1, "c0ffee", "k8-fastbuild", false)],
+        ..Default::default()
+    };
+    for spec in actions {
+        let target_id = match graph
+            .targets
+            .iter()
+            .find(|target| target.label == spec.label)
+        {
+            Some(target) => target.id,
+            None => {
+                let id = graph.targets.len() as u32 + 1;
+                graph.targets.push(bazel_query_proto::analysis::Target {
+                    id,
+                    label: spec.label.to_string(),
+                    ..Default::default()
+                });
+                id
+            }
+        };
+        let inputs: Vec<u32> = (spec.inputs.iter())
+            .map(|path| artifact(&mut graph, path))
+            .collect();
+        let outputs: Vec<u32> = (spec.outputs.iter())
+            .map(|path| artifact(&mut graph, path))
+            .collect();
+        let dep_set = graph.dep_set_of_files.len() as u32 + 1;
+        graph.dep_set_of_files.push(DepSetOfFiles {
+            id: dep_set,
+            direct_artifact_ids: inputs,
+            transitive_dep_set_ids: Vec::new(),
+        });
+        graph.actions.push(Action {
+            target_id,
+            mnemonic: spec.mnemonic.to_string(),
+            configuration_id: 1,
+            input_dep_set_ids: vec![dep_set],
+            primary_output_id: outputs[0],
+            output_ids: outputs,
+            ..Default::default()
+        });
+    }
+    graph
+}
+
+/// The id of the artifact at exec path `path` in `graph`, adding it if absent.
+fn artifact(graph: &mut ActionGraphContainer, path: &str) -> u32 {
+    let held = graph
+        .path_fragments
+        .iter()
+        .find(|fragment| fragment.label == path);
+    if let Some(fragment) = held {
+        return fragment.id;
+    }
+    let id = graph.artifacts.len() as u32 + 1;
+    graph.path_fragments.push(PathFragment {
+        id,
+        label: path.to_string(),
+        parent_id: 0,
+    });
+    graph.artifacts.push(Artifact {
+        id,
+        path_fragment_id: id,
+        is_tree_artifact: false,
+    });
+    id
 }

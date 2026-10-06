@@ -10,6 +10,7 @@ use std::fmt;
 use std::ops::Range;
 
 use fixedbitset::FixedBitSet;
+use regex_automata::meta::Regex;
 
 use super::ast::{Arg, BinaryOp, Expr, ExprKind, Function, Word};
 use super::universe::Universe;
@@ -190,11 +191,37 @@ impl Universe {
                 let config = self.config(&values[0], words(args)[0], &written);
                 config.map_err(fail)
             }
-            Function::Inputs | Function::Mnemonic | Function::Outputs => Err(fail(format!(
-                "bviz does not evaluate {}()",
-                function.name()
-            ))),
+            Function::Mnemonic => self.filter_actions(call, function, args, scope, Self::mnemonic),
+            Function::Inputs => self.filter_actions(call, function, args, scope, Self::inputs),
+            Function::Outputs => self.filter_actions(call, function, args, scope, Self::outputs),
         }
+    }
+
+    /// Evaluates a call of the aquery filter `function`, which keeps the
+    /// actions `keep` keeps by the pattern of its first argument.
+    fn filter_actions<'a>(
+        &self,
+        call: &'a Expr,
+        function: Function,
+        args: &'a [Arg],
+        scope: &mut Scope<'a>,
+        keep: fn(&Self, &Regex, &FixedBitSet) -> FixedBitSet,
+    ) -> Result<FixedBitSet, EvalError> {
+        let fail = |message: String| EvalError {
+            message,
+            span: call.span.clone(),
+        };
+        let regex = self.whole_regex(function, words(args)[0]).map_err(fail)?;
+        self.filters_actions(function).map_err(fail)?;
+        let (values, _) = self.arguments(args, scope)?;
+        let Some(value) = values.first() else {
+            return Err(fail(
+                "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 \
+                 arguments,except when --skyframe_state is used."
+                    .to_string(),
+            ));
+        };
+        Ok(keep(self, &regex, value))
     }
 
     /// The values of the expressions among `args`, in order, and the integer

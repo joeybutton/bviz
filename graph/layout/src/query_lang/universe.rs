@@ -28,12 +28,16 @@ pub struct Universe {
     owner: Vec<u32>,
     /// The nodes a value may hold: every node but the frames.
     members: FixedBitSet,
+    pub(super) facets: Arc<Facets>,
     pub(super) declared: Declared,
     pub(super) configurations: Configurations,
     /// How far the inputs state each rule's tags.
     pub(super) tags: Support,
     /// How far the inputs state whether each rule is `testonly`.
     pub(super) testonly: Support,
+    /// How far the inputs state the files each action reads and writes.
+    pub(super) artifacts: Support,
+    pub(super) holds_actions: bool,
     pub(super) patterns: Patterns,
 }
 
@@ -41,7 +45,12 @@ pub struct Universe {
 const NO_LABEL: u32 = u32::MAX;
 
 impl Universe {
-    pub fn new(graph: &Graph, names: &Names, facets: &Facets, capabilities: &Capabilities) -> Self {
+    pub fn new(
+        graph: &Graph,
+        names: &Names,
+        facets: &Arc<Facets>,
+        capabilities: &Capabilities,
+    ) -> Self {
         let labels = Arc::new(LabelIndex::of(graph, names, facets));
         let targets = TargetIndex::of(labels.clone(), graph, facets, capabilities);
         let ids = id_span(graph);
@@ -50,7 +59,9 @@ impl Universe {
         at.extend((labels.entries().iter().enumerate()).map(|(at, (id, _))| (*id, at as u32)));
         let mut owner: Vec<u32> = vec![NO_LABEL; ids];
         let mut members = FixedBitSet::with_capacity(ids);
+        let mut holds_actions = false;
         for node in &graph.nodes {
+            holds_actions |= node.kind == Kind::Action;
             if let Some(&at) = facets.label(node.id).and_then(|label| at.get(&label)) {
                 owner[node.id.0 as usize] = at;
             }
@@ -60,6 +71,7 @@ impl Universe {
         Universe {
             declared: Declared::new(labels.entries(), &index, facets),
             configurations: Configurations::new(graph, facets),
+            facets: Arc::clone(facets),
             index,
             labels,
             targets,
@@ -67,6 +79,8 @@ impl Universe {
             members,
             tags: capabilities.support(Axis::Tags),
             testonly: capabilities.support(Axis::Testonly),
+            artifacts: capabilities.support(Axis::Artifacts),
+            holds_actions,
             patterns: Patterns::default(),
         }
     }

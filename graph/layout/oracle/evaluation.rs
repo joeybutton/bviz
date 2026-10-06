@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bazel_query_proto::blaze_query::{
     Attribute, GeneratedFile, PackageGroup, Rule, SourceFile, Target,
@@ -110,7 +111,7 @@ fn evaluates_as_bazel_does() {
         let universe = Universe::new(
             &joint.graph,
             &joint.names,
-            &joint.facets,
+            &Arc::new(joint.facets),
             &joint.capabilities,
         );
         let ours = Ours {

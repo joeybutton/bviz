@@ -217,6 +217,12 @@ impl Index {
         edges.map(|&edge| Id(self.ends[edge as usize][1]))
     }
 
+    /// The nodes `id` depends on by an edge of its own.
+    pub(crate) fn dependencies(&self, id: Id) -> impl Iterator<Item = Id> + '_ {
+        let edges = self.incoming.of(id.0 as usize).iter();
+        edges.map(|&edge| Id(self.ends[edge as usize][0]))
+    }
+
     /// The dependency and the dependent the edge at `edge` of the graph's edge
     /// list joins.
     pub(crate) fn ends(&self, edge: u32) -> [Id; 2] {

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bazel_query_proto::blaze_query::Target;
 use fixedbitset::FixedBitSet;
 
@@ -34,7 +36,7 @@ impl Fixture {
         let universe = Universe::new(
             &joint.graph,
             &joint.names,
-            &joint.facets,
+            &Arc::new(joint.facets),
             &joint.capabilities,
         );
         Fixture {
@@ -193,10 +195,6 @@ fn a_function_reading_what_the_graph_lacks_says_what_it_needs() {
         fixture.error("visible(//a:lib, //b:app)"),
         "visible() needs each target's visibility, which bviz does not load into its graph"
     );
-    assert_eq!(
-        fixture.error("mnemonic(Javac, //a:lib)"),
-        "bviz does not evaluate mnemonic()"
-    );
 }
 
 #[test]
@@ -258,7 +256,7 @@ fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
     let universe = Universe::new(
         &joint.graph,
         &joint.names,
-        &joint.facets,
+        &Arc::new(joint.facets),
         &joint.capabilities,
     );
     let error = universe
@@ -296,7 +294,7 @@ fn configured(tools: bool) -> (Universe, Names) {
     let universe = Universe::new(
         &joint.graph,
         &joint.names,
-        &joint.facets,
+        &Arc::new(joint.facets),
         &joint.capabilities,
     );
     (universe, joint.names)
@@ -360,7 +358,7 @@ fn config_target_leaves_out_a_configuration_only_a_dependency_is_built_in() {
     let universe = Universe::new(
         &joint.graph,
         &joint.names,
-        &joint.facets,
+        &Arc::new(joint.facets),
         &joint.capabilities,
     );
     assert_eq!(
@@ -381,6 +379,151 @@ fn config_anyexec_takes_the_first_tool_configuration_by_checksum() {
     assert!(
         error.starts_with("Unable to identify 'exec' configuration for //c:lib\n"),
         "{error}"
+    );
+}
+
+/// An aquery of `//p:gen`, whose Genrule reads `p/in.txt` and writes
+/// `p/out.h` and `p/out.c`, and of `//p:lib`, whose CppCompile reads
+/// `p/out.c` and a header of another repository, which the graph leaves out.
+fn actions() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let out = |name: &str| format!("bazel-out/k8-fastbuild/bin/p/{name}");
+    let (header, source) = (out("out.h"), out("out.c"));
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:gen",
+            mnemonic: "Genrule",
+            inputs: &["p/in.txt"],
+            outputs: &[&header, &source],
+        },
+        ActionSpec {
+            label: "//p:lib",
+            mnemonic: "CppCompile",
+            inputs: &[&source, "external/repo+/include/x.h"],
+            outputs: &[&out("lib.o")],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn an_aquery_filter_keeps_the_actions_matching_in_full() {
+    let (universe, names) = actions();
+    let query = |expr| configured_query(&universe, &names, expr);
+    let genrule = "action:bazel-out/k8-fastbuild/bin/p/out.h";
+    let compile = "action:bazel-out/k8-fastbuild/bin/p/lib.o";
+    assert_eq!(query("mnemonic(Genrule, //p:all)").unwrap(), [genrule]);
+    assert!(query("mnemonic(Gen, //p:all)").unwrap().is_empty());
+    assert_eq!(query("mnemonic('Gen|Cpp.*', //p:all)").unwrap(), [compile]);
+    assert_eq!(query("inputs('.*\\.c', //p:all)").unwrap(), [compile]);
+    assert_eq!(query("outputs('.*/out\\.c', //p:all)").unwrap(), [genrule]);
+    assert_eq!(query("inputs('p/in.txt', //p:all)").unwrap(), [genrule]);
+}
+
+#[test]
+fn an_aquery_filter_may_stand_inside_another_function() {
+    let (universe, names) = actions();
+    let found = configured_query(&universe, &names, "deps(mnemonic(CppCompile, //p:lib))");
+    assert_eq!(
+        found.unwrap(),
+        [
+            "//p:in.txt",
+            "action:bazel-out/k8-fastbuild/bin/p/lib.o",
+            "action:bazel-out/k8-fastbuild/bin/p/out.h",
+            "artifact3",
+        ]
+    );
+}
+
+#[test]
+fn an_aquery_filter_fails_as_bazel_does() {
+    let (universe, names) = actions();
+    let query = |expr| configured_query(&universe, &names, expr);
+    assert_eq!(
+        query("mnemonic(Genrule)").unwrap_err(),
+        "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 \
+         arguments,except when --skyframe_state is used."
+    );
+    assert_eq!(
+        query("inputs('a)(b', //p:all)").unwrap_err(),
+        "Illegal 'inputs' pattern regexp 'a)(b': unopened group",
+        "a pattern closing a group early is no whole-string pattern"
+    );
+}
+
+#[test]
+fn inputs_matches_a_file_the_graph_left_out() {
+    let (universe, names) = actions();
+    assert_eq!(
+        configured_query(&universe, &names, "inputs('external/.*/x\\.h', //p:all)").unwrap(),
+        ["action:bazel-out/k8-fastbuild/bin/p/lib.o"]
+    );
+}
+
+#[test]
+fn a_verbose_pattern_matches_whole_strings_with_its_comment_left_out() {
+    let (universe, names) = actions();
+    assert_eq!(
+        configured_query(
+            &universe,
+            &names,
+            "mnemonic('(?x)Cpp # a comment', //p:all)"
+        )
+        .unwrap(),
+        Vec::<String>::new(),
+        "the whole mnemonic must match"
+    );
+    assert_eq!(
+        configured_query(
+            &universe,
+            &names,
+            "mnemonic('(?x)Cpp Compile # spaced', //p:all)"
+        )
+        .unwrap(),
+        ["action:bazel-out/k8-fastbuild/bin/p/lib.o"]
+    );
+}
+
+#[test]
+fn an_aquery_filter_names_the_data_a_graph_lacks() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.error("mnemonic(Genrule, //a:lib)"),
+        "mnemonic() needs the actions of an aquery, which the graph's inputs do not include"
+    );
+    let aquery = [bazel_query_proto::analysis::ActionGraphContainer {
+        targets: vec![bazel_query_proto::analysis::Target {
+            id: 1,
+            label: "//p:gen".to_string(),
+            ..Default::default()
+        }],
+        actions: vec![bazel_query_proto::analysis::Action {
+            target_id: 1,
+            mnemonic: "Genrule".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr);
+    assert_eq!(query("mnemonic(Genrule, //p:all)").unwrap().len(), 1);
+    assert_eq!(
+        query("outputs('.*', //p:all)").unwrap_err(),
+        "outputs() needs the files each action reads and writes, which the graph's inputs \
+         state only under --include_artifacts"
     );
 }
 
@@ -418,7 +561,10 @@ fn levels() -> (Universe, Names) {
         graph.add_edge(ids[0][level], ids[1][level], kind);
     }
     let (facets, capabilities) = builder.seal();
-    (Universe::new(&graph, &names, &facets, &capabilities), names)
+    (
+        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        names,
+    )
 }
 
 fn value(universe: &Universe, names: &Names, members: &[&str]) -> FixedBitSet {
@@ -659,7 +805,10 @@ fn joint(rng: &mut fastrand::Rng) -> (Universe, Names) {
         }
     }
     let (facets, capabilities) = builder.seal();
-    (Universe::new(&graph, &names, &facets, &capabilities), names)
+    (
+        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        names,
+    )
 }
 
 /// The graph seeds the mirror property is checked over.
@@ -746,7 +895,7 @@ fn deps_reach_the_target_whose_action_writes_a_file_read() {
         builder.describe_label(target, Some(package), label);
     }
     let (facets, capabilities) = builder.seal();
-    let universe = Universe::new(&graph, &names, &facets, &capabilities);
+    let universe = Universe::new(&graph, &names, &Arc::new(facets), &capabilities);
 
     let deps = universe.evaluate(&parse("deps(//a:app)").unwrap()).unwrap();
     assert!(deps.contains(r.0 as usize) && deps.contains(r_ct.0 as usize));

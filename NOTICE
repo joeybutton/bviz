@@ -70,12 +70,12 @@ take their expressions and expected text verbatim from Bazel's tests of its
 query language (https://github.com/bazelbuild/bazel, tag 9.2.0):
 src/test/java/com/google/devtools/build/lib/query2/engine/LexerTest.java and
 QueryParserTest.java,
-src/test/java/com/google/devtools/build/lib/query2/testutil/AbstractQueryTest.java
-and
-src/test/java/com/google/devtools/build/lib/query2/cquery/ConfiguredTargetQuerySemanticsTest.java.
-The graphs the cases are evaluated over are bviz's own, built to stand for the
-BUILD files those tests write. They are compiled into bviz's tests only. Bazel
-carries no NOTICE file of its own.
+src/test/java/com/google/devtools/build/lib/query2/testutil/AbstractQueryTest.java,
+src/test/java/com/google/devtools/build/lib/query2/cquery/ConfiguredTargetQuerySemanticsTest.java
+and src/test/shell/integration/aquery_test.sh. The graphs the cases are
+evaluated over are bviz's own, built to stand for the BUILD files those tests
+write. They are compiled into bviz's tests only. Bazel carries no NOTICE file
+of its own.
 
 Apache License 2.0: //LICENSES:bazel
 

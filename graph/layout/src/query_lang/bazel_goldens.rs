@@ -2,6 +2,7 @@
 //! inputs and expected text taken verbatim; NOTICE names the source.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use bazel_query_proto::analysis::CqueryResult;
 use bazel_query_proto::blaze_query::ConfiguredRuleInput;
@@ -319,7 +320,7 @@ fn abstract_query_test_packages() -> Universe {
     Universe::new(
         &joint.graph,
         &joint.names,
-        &joint.facets,
+        &Arc::new(joint.facets),
         &joint.capabilities,
     )
 }
@@ -467,7 +468,7 @@ fn configured_target_query_semantics_test_build() -> (Universe, Names) {
     let universe = Universe::new(
         &joint.graph,
         &joint.names,
-        &joint.facets,
+        &Arc::new(joint.facets),
         &joint.capabilities,
     );
     (universe, joint.names)
@@ -549,4 +550,171 @@ fn config_names_configured_targets_as_cquery_does() {
 
     // testConfigFunctionRefinesMultipleMatches
     assert_eq!(configured("config(//test:simple, target)").len(), 1);
+}
+
+/// The actions of a target of aquery_test.sh's BUILD files: its label, and
+/// one `(mnemonic, inputs, outputs)` for each action it registers, each file
+/// named relative to the package.
+type Registered = (
+    &'static str,
+    &'static [(&'static str, &'static str, &'static str)],
+);
+
+const FOO: Registered = (
+    "foo",
+    &[("Genrule", "foo_matching_in.java", "foo_matching_out")],
+);
+const WRONG_INPUT: Registered = (
+    "wrong_input",
+    &[("Genrule", "wrong_input.java", "wi_matching_out")],
+);
+const WRONG_OUTPUT: Registered = (
+    "wrong_output",
+    &[("Genrule", "wo_matching_in.java", "wrong_out")],
+);
+/// `java_library(name = "wrong_mnemonic", srcs = ["wm_matching_in.java"])`.
+const WRONG_MNEMONIC: Registered = (
+    "wrong_mnemonic",
+    &[("Javac", "wm_matching_in.java", "libwrong_mnemonic.jar")],
+);
+
+/// Each of aquery_test.sh's filtering tests: its package, named after the
+/// test, the targets its BUILD file declares, its query, and the mnemonic of
+/// the one action of `foo` the query names.
+const AQUERY_FILTERS: &[(&str, &[Registered], &str, &str)] = &[
+    (
+        "test_aquery_all_filters_only_match_foo",
+        &[FOO, WRONG_INPUT, WRONG_OUTPUT, WRONG_MNEMONIC],
+        "inputs(
+    '.*matching_in.java', outputs('.*matching_out', mnemonic('Genrule', //$pkg:all)))",
+        "Genrule",
+    ),
+    (
+        "test_aquery_inputs_filter_only_mach_foo",
+        &[FOO, WRONG_INPUT],
+        "inputs('.*matching_in.java', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_outputs_filter_only_mach_foo",
+        &[FOO, WRONG_OUTPUT],
+        "outputs('.*matching_out', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_mnemonic_filter_only_mach_foo",
+        &[FOO, WRONG_MNEMONIC],
+        "mnemonic('.*rule', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_inputs_filter_exact_filename_only_mach_foo",
+        &[FOO, WRONG_INPUT],
+        "inputs('$pkg/foo_matching_in.java', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_outputs_filter_exact_filename_only_mach_foo",
+        &[FOO, WRONG_OUTPUT],
+        "outputs('.*/$pkg/foo_matching_out', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_mnemonic_filter_exact_mnemonic_only_mach_foo",
+        &[FOO, WRONG_MNEMONIC],
+        "mnemonic('Genrule', //$pkg:all)",
+        "Genrule",
+    ),
+    (
+        "test_aquery_filters_chain_inputs_only_match_one",
+        &[
+            FOO,
+            ("bar", &[("Javac", "in_bar.java", "libbar.jar")]),
+            (
+                "foo2",
+                &[("Genrule", "foo_matching_in.java_not", "foo_matching_out2")],
+            ),
+        ],
+        "inputs('.*java', inputs('.*foo.*', //$pkg:all))",
+        "Genrule",
+    ),
+    (
+        "test_aquery_filters_chain_outputs_only_match_one",
+        &[
+            FOO,
+            (
+                "foo2",
+                &[("Genrule", "foo_matching_in.java", "foo_matching_out_not")],
+            ),
+            (
+                "foo3",
+                &[("Genrule", "foo_matching_in.java", "not_matching_out")],
+            ),
+        ],
+        "outputs('.*out', outputs('.*foo.*', //$pkg:all))",
+        "Genrule",
+    ),
+    (
+        "test_aquery_filters_chain_mnemonic_only_match_one",
+        // java_library(name='foo', srcs=['Foo.java']), whose actions'
+        // mnemonics the test lists.
+        &[(
+            "foo",
+            &[
+                ("Javac", "Foo.java", "libfoo.jar"),
+                ("JavaSourceJar", "Foo.java", "libfoo-src.jar"),
+                ("Turbine", "Foo.java", "libfoo-hjar.jar"),
+            ],
+        )],
+        "mnemonic('Java.*', mnemonic('.*e.*', //$pkg:all))",
+        "JavaSourceJar",
+    ),
+];
+
+#[test]
+fn filters_actions_as_aquery_does() {
+    for &(pkg, targets, query, mnemonic) in AQUERY_FILTERS {
+        let mut actions: Vec<(String, &str, Vec<String>, Vec<String>)> = Vec::new();
+        for &(name, registered) in targets {
+            for &(mnemonic, input, output) in registered {
+                actions.push((
+                    format!("//{pkg}:{name}"),
+                    mnemonic,
+                    vec![format!("{pkg}/{input}")],
+                    vec![format!("bazel-out/k8-fastbuild/bin/{pkg}/{output}")],
+                ));
+            }
+        }
+        let inputs: Vec<Vec<&str>> = (actions.iter())
+            .map(|(_, _, inputs, _)| inputs.iter().map(String::as_str).collect())
+            .collect();
+        let outputs: Vec<Vec<&str>> = (actions.iter())
+            .map(|(_, _, _, outputs)| outputs.iter().map(String::as_str).collect())
+            .collect();
+        let specs: Vec<test_support::ActionSpec> = (actions.iter().enumerate())
+            .map(|(at, (label, mnemonic, _, _))| test_support::ActionSpec {
+                label,
+                mnemonic,
+                inputs: &inputs[at],
+                outputs: &outputs[at],
+            })
+            .collect();
+        let aquery = [test_support::action_graph(&specs)];
+        let joint = build_joint(Some(&aquery), None, None, false);
+        let facets = Arc::new(joint.facets);
+        let universe = Universe::new(&joint.graph, &joint.names, &facets, &joint.capabilities);
+
+        let query = query.replace("$pkg", pkg);
+        let value = universe.evaluate(&parse(&query).unwrap()).unwrap();
+        let named: Vec<(&str, &str)> = value
+            .ones()
+            .map(|id| {
+                let id = Id(id as u32);
+                let mnemonic = facets.mnemonic(id).map(|sym| facets.strings().resolve(sym));
+                (universe.label(id).unwrap(), mnemonic.unwrap())
+            })
+            .collect();
+        let foo = format!("//{pkg}:foo");
+        assert_eq!(named, [(foo.as_str(), mnemonic)], "{query}");
+    }
 }
