@@ -163,6 +163,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("right", exclusive::SelectNext, outside_roots),
         KeyBinding::new("up", exclusive::SelectParent, outside_roots),
         KeyBinding::new("down", exclusive::SelectChild, outside_roots),
+        KeyBinding::new("escape", exclusive::Deselect, outside_roots),
         KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
         KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
         KeyBinding::new("alt-left", exclusive::FocusBack, outside_roots),

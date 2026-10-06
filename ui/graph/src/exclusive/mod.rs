@@ -136,6 +136,8 @@ gpui::actions!(
         SelectParent,
         /// Select heaviest child cell
         SelectChild,
+        /// Clear selection
+        Deselect,
         /// Focus cell
         FocusSelected,
         /// Show cell in graph
@@ -1732,6 +1734,7 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectNext, _, cx| view.step(Step::Next, cx)))
             .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
+            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.deselect(cx)))
             .on_action(cx.listener(|view, _: &FocusSelected, _, cx| view.focus_selected(cx)))
             .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
             .on_action(cx.listener(|view, _: &FocusBack, _, cx| view.go_back(cx)))
