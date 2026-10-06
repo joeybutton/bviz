@@ -389,6 +389,15 @@ fn syntax_error(text: &str) -> Option<String> {
     chip.parsed().err().map(|error| error.message.clone())
 }
 
+/// Adds a chip reading `text` on top of the stack and applies it.
+pub(crate) fn push(view: &mut GraphPanel, text: &str, cx: &mut Context<GraphPanel>) {
+    view.chips.stack.push(text);
+    view.chips.scroll_to_last();
+    changed(view, cx);
+    let stack = view.chips.stack.clone();
+    apply(view, stack, cx);
+}
+
 /// Takes the focus into the field.
 pub(crate) fn focus(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
     view.chips.selected = None;

@@ -11,8 +11,9 @@ use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
 use crate::reveal::{self, hidden_by};
-use crate::{GraphPanel, Palette, pins, why};
+use crate::{GraphPanel, Palette, chips, pins, why};
 use bviz_graph_layout::select::Visibility;
+use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::text_input::TextEdited;
 use bviz_ui_components::{
@@ -45,6 +46,7 @@ actions!(
         Go,
         AskWhy,
         AlwaysShow,
+        AddChip,
         Close,
         NextScope,
         PreviousScope
@@ -485,6 +487,29 @@ fn always_show(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<Grap
     pins::set(view, id, Visibility::Shown, cx);
     reveal::reveal(view, id, cx);
 }
+/// Adds the aimed row's node to the query bar as a chip, closing the palette.
+fn add_chip(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
+    let Some(id) = view.jump.open.as_ref().and_then(aimed) else {
+        return;
+    };
+    let loaded = view.model.read(cx).loaded();
+    let Some(literal) = loaded.and_then(|loaded| literal(&loaded.shared, id)) else {
+        return;
+    };
+    put_away(view, window, cx);
+    chips::push(view, &literal, cx);
+}
+
+/// A quoted target pattern naming `id`: the label of the target it belongs
+/// to, or every target of the package a package box stands for.
+fn literal(shared: &Shared, id: Id) -> Option<String> {
+    let pattern = match carried_label(&shared.names, &shared.facets, id) {
+        Some(label) => shared.labels.written(label).into_owned(),
+        None => format!("{}:*", package_label(&shared.names, id)?),
+    };
+    let quote = if pattern.contains('"') { '\'' } else { '"' };
+    Some(format!("{quote}{pattern}{quote}"))
+}
 
 /// Closes the palette unpicked, returning the view to where it stood as the
 /// palette opened.
@@ -565,6 +590,9 @@ pub(crate) fn overlay(
                         cx.listener(|view, _: &AlwaysShow, window, cx| {
                             always_show(view, window, cx)
                         }),
+                    )
+                    .on_action(
+                        cx.listener(|view, _: &AddChip, window, cx| add_chip(view, window, cx)),
                     )
                     .on_action(cx.listener(|view, _: &Close, window, cx| close(view, window, cx)))
                     .on_action(
@@ -723,6 +751,7 @@ const KEY_HINTS: &[&str] = &[
     "enter jump",
     "shift-enter always show",
     "ctrl-enter why",
+    "alt-enter add chip",
     "tab scope",
     "esc back",
 ];
@@ -874,6 +903,23 @@ fn styled_runs(text: &str, path: &Range<u32>, matched: &[u32]) -> Vec<(Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node is added as the target it belongs to, and a package box as
+    /// every target of its package.
+    #[test]
+    fn a_node_is_added_as_a_quoted_pattern_naming_its_target() {
+        let shared = index::tests::shared();
+        let literal = |name: &str| literal(&shared, shared.names.get(name).unwrap());
+        assert_eq!(
+            literal("target://app:lib").as_deref(),
+            Some("\"//app:lib\"")
+        );
+        assert_eq!(
+            literal("action:bazel-out/app/liblib.a").as_deref(),
+            Some("\"//app:lib\"")
+        );
+        assert_eq!(literal("pkg:app").as_deref(), Some("\"//app:*\""));
+    }
 
     /// The aim reaches every listed row, past those in view, and stops at
     /// either end of the list.
