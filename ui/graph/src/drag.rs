@@ -1,8 +1,9 @@
 use crate::camera::{Camera, clamp_pan};
 use crate::scroll::{ScrollDrag, scroll_drag_move};
 use crate::{GraphPanel, click_box_at};
+use bviz_ui_components::gesture::{Button, Entry, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{DragEnd, track_drag};
-use gpui::{App, Context, Entity, Pixels, Point, Window};
+use gpui::{App, Context, Entity, MouseDownEvent, Pixels, Point, Window};
 
 /// A cursor must travel at least this far from the press before the gesture
 /// counts as a drag rather than a click.
@@ -18,6 +19,51 @@ pub(crate) fn past_slop(from: Point<Pixels>, at: Point<Pixels>) -> bool {
 
 /// The `click_count` of the press completing a double click.
 pub(crate) const DOUBLE_CLICK: usize = 2;
+
+/// What the canvas does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+pub(crate) enum CanvasIntent {
+    Pan,
+    ToggleBox,
+    Select,
+    Mark,
+    Zoom,
+}
+
+const BOX: Place = Place::On("a box");
+
+pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
+    Entry::new(
+        Input::drag(Button::Left),
+        Place::Anywhere,
+        "Pan",
+        CanvasIntent::Pan,
+    ),
+    Entry::new(
+        Input::click(Button::Left),
+        BOX,
+        "Open or close box",
+        CanvasIntent::ToggleBox,
+    ),
+    Entry::new(
+        Input::press(Button::Right),
+        BOX,
+        "Select or deselect box",
+        CanvasIntent::Select,
+    ),
+    Entry::new(
+        Input::HOVER,
+        BOX,
+        "Highlight box's neighbors",
+        CanvasIntent::Mark,
+    ),
+    Entry::new(
+        Input::SCROLL,
+        Place::Anywhere,
+        "Zoom about pointer",
+        CanvasIntent::Zoom,
+    ),
+]);
 
 /// The pointer gesture the view is in the middle of.
 #[derive(Clone, Copy, Default)]
@@ -36,19 +82,22 @@ pub(crate) struct Pan {
     last: Point<Pixels>,
     /// Latched once the cursor travels past `CLICK_SLOP`.
     moved: bool,
+    /// The click a release short of `CLICK_SLOP` makes of the press.
+    click: Pointer,
 }
 
-/// Begin panning from a press at `position`, repainting so the frame installs
-/// the window-global handlers that carry the gesture past the window edge.
+/// Begin panning from `press`, repainting so the frame installs the
+/// window-global handlers that carry the gesture past the window edge.
 pub(crate) fn start_pan(
     view: &mut GraphPanel,
-    position: Point<Pixels>,
+    press: &MouseDownEvent,
     cx: &mut Context<GraphPanel>,
 ) {
     view.drag = Drag::Pan(Pan {
-        press: position,
-        last: position,
+        press: press.position,
+        last: press.position,
         moved: false,
+        click: Pointer::completing(press),
     });
     cx.notify();
 }
@@ -98,9 +147,15 @@ pub(crate) fn end_drag(
 ) {
     match std::mem::take(&mut view.drag) {
         Drag::None => {}
-        Drag::Pan(Pan { moved, .. }) => {
+        Drag::Pan(Pan { moved, click, .. }) => {
             if !moved && matches!(end, DragEnd::Released) {
-                click_box_at(view, position, cx);
+                GESTURES.dispatch(click, |intent| match intent {
+                    CanvasIntent::ToggleBox => {
+                        click_box_at(view, position, cx);
+                        true
+                    }
+                    _ => false,
+                });
             }
         }
         Drag::Scrollbar(_) => cx.notify(),
@@ -114,5 +169,15 @@ pub(crate) fn track_gesture(entity: &Entity<GraphPanel>, window: &mut Window, cx
         Drag::None => {}
         Drag::Pan(_) => track_drag(window, entity, drag_pan, end_drag),
         Drag::Scrollbar(_) => track_drag(window, entity, scroll_drag_move, end_drag),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
     }
 }

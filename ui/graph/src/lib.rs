@@ -4,6 +4,7 @@
 
 use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
+use bviz_ui_components::gesture::{GestureRow, Pointer};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
     cached_layer, overlay_canvas, text_input,
@@ -73,7 +74,7 @@ use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
-use drag::{Drag, end_drag, start_pan, track_gesture};
+use drag::{CanvasIntent, Drag, GESTURES, end_drag, start_pan, track_gesture};
 use emphasis::Emphasis;
 pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
@@ -695,14 +696,24 @@ impl GraphPanel {
             start_scroll_drag(self, axis, e.position, cx);
             return;
         }
-        start_pan(self, e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::Pan => {
+                start_pan(self, e, cx);
+                true
+            }
+            _ => false,
+        });
     }
 
-    /// Picks the box under the cursor out for as long as it stays selected, or
-    /// drops the selection where the press lands on no box.
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         jump::dismiss(self, cx);
-        select_box_at(self, e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::Select => {
+                select_box_at(self, e.position, cx);
+                true
+            }
+            _ => false,
+        });
     }
 
     /// Ends the drag on the release the element receives directly, which the
@@ -719,6 +730,16 @@ impl GraphPanel {
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
+        GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+            CanvasIntent::Mark => {
+                self.mark_box_at(e.position, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn mark_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(drawn) = self.drawn() else {
             return;
         };
@@ -727,7 +748,7 @@ impl GraphPanel {
         let morph = self.morph_frame();
         let hit = drawn
             .view(camera.zoom)
-            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, e.position))
+            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, position))
             .map(|b| b.id);
         if hit != self.hovered {
             self.hovered = hit;
@@ -747,6 +768,16 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::scroll(e), |intent| match intent {
+            CanvasIntent::Zoom => {
+                self.zoom_by_wheel(e, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn zoom_by_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let Some(content) = self.drawn().map(|d| d.content()) else {
             return;
         };
@@ -817,6 +848,10 @@ impl Panel for GraphPanel {
             label: "Graph",
             key_context: KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {

@@ -28,6 +28,7 @@ use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
+use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Motion, Place};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
     Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
@@ -371,8 +372,18 @@ impl ScatterPanel {
         }
     }
 
-    /// Zooms about the pointer by as many notches as the wheel turned.
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(gesture::Pointer::scroll(e), |intent| match intent {
+            ScatterIntent::Zoom => {
+                self.zoom_by_wheel(e, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms about the pointer by as many notches as the wheel turned.
+    fn zoom_by_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let notches = match e.delta {
             ScrollDelta::Lines(lines) => lines.y,
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
@@ -383,30 +394,38 @@ impl ScatterPanel {
         }
     }
 
-    /// Starts a press, or shows the whole of each axis again on a double
-    /// click clear of every mark: a first click on a mark shows it in the
-    /// graph, which the second click then lands on. A press beside an open
-    /// list of points closes it and goes on as a press on the plot. The second
-    /// press of a double click whose first put the list up or revealed one of
-    /// its rows goes no further.
+    /// Acts on a press as [`GESTURES`] has it. A double click shows the whole
+    /// of each axis only clear of every mark: a first click on a mark shows it
+    /// in the graph, which the second click then lands on. A press beside an
+    /// open list of points closes it and goes on as a press on the plot. The
+    /// second press of a double click whose first put the list up or revealed
+    /// one of its rows goes no further.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let row_revealed = std::mem::take(&mut self.row_revealed);
         if e.click_count >= DOUBLE_CLICK && (row_revealed || self.picking()) {
             return;
         }
         self.close_pick(cx);
-        if e.click_count == DOUBLE_CLICK && self.pick(e.position).is_none() {
-            self.press = None;
-            self.zoom_to(Zoom::WHOLE, e.position, cx);
-            return;
-        }
-        self.press = Some(Press {
-            from: e.position,
-            last: e.position,
-            dragged: false,
+        GESTURES.dispatch(gesture::Pointer::press(e), |intent| match intent {
+            ScatterIntent::ShowWholePlot if self.pick(e.position).is_none() => {
+                self.press = None;
+                self.zoom_to(Zoom::WHOLE, e.position, cx);
+                true
+            }
+            ScatterIntent::Pan => {
+                self.press = Some(Press {
+                    from: e.position,
+                    last: e.position,
+                    dragged: false,
+                    click: gesture::Pointer::completing(e),
+                });
+                // The frame this asks for installs the handlers carrying the
+                // drag.
+                cx.notify();
+                true
+            }
+            _ => false,
         });
-        // The frame this asks for installs the handlers carrying the drag.
-        cx.notify();
     }
 
     /// Follows the pointer to the mark it picks, repainting only where that
@@ -461,10 +480,8 @@ impl ScatterPanel {
         }
     }
 
-    /// Ends the press, which where it was a click shows the graph's drawing of
-    /// the point under the pointer, or lists the points there where it lands
-    /// on several. Taking the press makes a second call for the same release a
-    /// no-op.
+    /// Ends the press, which where it was a click acts as [`GESTURES`] has
+    /// it. Taking the press makes a second call for the same release a no-op.
     fn end_press(&mut self, at: Point<Pixels>, end: DragEnd, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else {
             return;
@@ -474,6 +491,18 @@ impl ScatterPanel {
         if press.dragged || !matches!(end, DragEnd::Released) {
             return;
         }
+        GESTURES.dispatch(press.click, |intent| match intent {
+            ScatterIntent::Reveal => {
+                self.reveal_at(at, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Shows the graph's drawing of the point under `at`, or lists the points
+    /// there where it lands on several.
+    fn reveal_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let (Some(picked), Some(area)) = (self.pick(at), self.area()) else {
             return;
         };
@@ -807,6 +836,58 @@ struct Plot {
     timed: Revision,
 }
 
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum ScatterIntent {
+    ShowWholePlot,
+    Pan,
+    Reveal,
+    RevealListed,
+    Zoom,
+    Describe,
+}
+
+const POINT: Place = Place::On("a point");
+
+const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
+    Entry::new(
+        gesture::Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole plot",
+        ScatterIntent::ShowWholePlot,
+    ),
+    Entry::new(
+        gesture::Input::drag(gesture::Button::Left),
+        Place::Anywhere,
+        "Pan",
+        ScatterIntent::Pan,
+    ),
+    Entry::new(
+        gesture::Input::click(gesture::Button::Left),
+        POINT,
+        "Show in graph or list points",
+        ScatterIntent::Reveal,
+    ),
+    Entry::new(
+        gesture::Input::click(gesture::Button::Left),
+        Place::On("a listed point"),
+        "Show point in graph",
+        ScatterIntent::RevealListed,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL,
+        Place::Anywhere,
+        "Zoom about pointer",
+        ScatterIntent::Zoom,
+    ),
+    Entry::new(
+        gesture::Input::HOVER,
+        POINT,
+        "Describe point",
+        ScatterIntent::Describe,
+    ),
+]);
+
 /// A press over the plot, which is a click until it is dragged past
 /// [`CLICK_SLOP`](crate::drag::CLICK_SLOP) and pans the plot from then on.
 struct Press {
@@ -814,6 +895,8 @@ struct Press {
     /// Where the pointer was at the last step of the pan.
     last: Point<Pixels>,
     dragged: bool,
+    /// The click a release short of [`CLICK_SLOP`] makes of the press.
+    click: gesture::Pointer,
 }
 
 /// What among a plot's marks the pointer is on.
@@ -940,6 +1023,10 @@ impl Panel for ScatterPanel {
             label: "Scatter",
             key_context: KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -1071,7 +1158,13 @@ impl Render for ScatterPanel {
                 .children(list)
                 .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
                     if view.press.is_none() {
-                        view.hover_at(e.position, cx);
+                        GESTURES.dispatch(gesture::Pointer::HOVER, |intent| match intent {
+                            ScatterIntent::Describe => {
+                                view.hover_at(e.position, cx);
+                                true
+                            }
+                            _ => false,
+                        });
                     }
                 }))
                 .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
@@ -1408,7 +1501,17 @@ fn pick_row(
         .gap(PICK_GAP)
         .when(!style.reveals, |row| row.cursor_default())
         .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
-        .on_click(move |_, _, cx| reveal.update(cx, |view, cx| view.reveal_row(index, cx)))
+        .on_click(move |e, _, cx| {
+            reveal.update(cx, |view, cx| {
+                GESTURES.dispatch(gesture::Pointer::click(e), |intent| match intent {
+                    ScatterIntent::RevealListed => {
+                        view.reveal_row(index, cx);
+                        true
+                    }
+                    _ => false,
+                });
+            });
+        })
         .child(
             div()
                 .flex_none()
@@ -1658,5 +1761,15 @@ impl Render for ScatterCanvas {
             },
         )
         .size_full()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
     }
 }
