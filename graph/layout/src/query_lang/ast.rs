@@ -283,6 +283,12 @@ fn write_literal(f: &mut fmt::Formatter<'_>, pattern: &str) -> fmt::Result {
     if !needs_quoting {
         return f.write_str(pattern);
     }
-    let quote = if pattern.contains('"') { '\'' } else { '"' };
-    write!(f, "{quote}{pattern}{quote}")
+    f.write_str(&quoted(pattern))
+}
+
+/// `word` in the quotes that keep it whole: double quotes, or single ones
+/// around a word holding a double quote.
+pub(super) fn quoted(word: &str) -> String {
+    let quote = if word.contains('"') { '\'' } else { '"' };
+    format!("{quote}{word}{quote}")
 }

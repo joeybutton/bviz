@@ -5,6 +5,7 @@
 
 mod ast;
 mod config;
+mod cursor;
 mod declared;
 mod eval;
 mod functions;
@@ -22,6 +23,7 @@ use std::ops::Range;
 
 pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Word};
 pub use config::ANY_EXEC;
+pub use cursor::{TypedWord, word_at, written_word};
 pub use eval::EvalError;
 pub use parse::parse;
 pub use stack::{

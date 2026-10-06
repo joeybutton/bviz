@@ -96,16 +96,10 @@ pub(super) fn scan(input: &str) -> Result<Vec<Token<'_>>, SyntaxError> {
         let start = pos;
         let byte = bytes[pos];
         pos += 1;
-        let kind = match byte {
-            b'(' => TokenKind::LParen,
-            b')' => TokenKind::RParen,
-            b',' => TokenKind::Comma,
-            b'+' => TokenKind::Plus,
-            b'-' => TokenKind::Minus,
-            b'=' => TokenKind::Equals,
-            b'^' => TokenKind::Caret,
-            b'\n' | b' ' | b'\t' | b'\r' => continue,
-            b'\'' | b'"' => {
+        let kind = match (lone(byte), byte) {
+            (Some(Lone::Space), _) => continue,
+            (Some(Lone::Token(kind)), _) => kind,
+            (None, b'\'' | b'"') => {
                 let Some(close) = bytes[pos..].iter().position(|&b| b == byte) else {
                     return Err(SyntaxError {
                         message: "unclosed quotation".into(),
@@ -120,7 +114,7 @@ pub(super) fn scan(input: &str) -> Result<Vec<Token<'_>>, SyntaxError> {
                 });
                 continue;
             }
-            _ => {
+            (None, _) => {
                 pos = word_end(bytes, start);
                 let word = &input[start..pos];
                 match TokenKind::keyword(word) {
@@ -150,9 +144,31 @@ pub(super) fn scan(input: &str) -> Result<Vec<Token<'_>>, SyntaxError> {
     Ok(tokens)
 }
 
+/// What a byte scans as where it stands alone, ending any word before it.
+pub(super) enum Lone {
+    Space,
+    Token(TokenKind),
+}
+
+/// What `byte` scans as alone; `None` for a byte that starts a word or a
+/// quotation.
+pub(super) fn lone(byte: u8) -> Option<Lone> {
+    Some(Lone::Token(match byte {
+        b'(' => TokenKind::LParen,
+        b')' => TokenKind::RParen,
+        b',' => TokenKind::Comma,
+        b'+' => TokenKind::Plus,
+        b'-' => TokenKind::Minus,
+        b'=' => TokenKind::Equals,
+        b'^' => TokenKind::Caret,
+        b'\n' | b' ' | b'\t' | b'\r' => return Some(Lone::Space),
+        _ => return None,
+    }))
+}
+
 /// The end of the unquoted word whose first byte is at `start`, which belongs
 /// to the word whatever it is.
-fn word_end(bytes: &[u8], start: usize) -> usize {
+pub(super) fn word_end(bytes: &[u8], start: usize) -> usize {
     // `+` continues only a canonical label, so `@@a++b//:c` is one word while
     // `@a+@b` is two operands.
     let canonical = bytes[start..].starts_with(b"@@");

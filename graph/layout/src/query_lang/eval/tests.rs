@@ -993,3 +993,37 @@ fn deps_of_no_depth_name_the_argument_alone() {
         .unwrap();
     assert_eq!(labels(&names, &named), ["//a:t", "ct:t"]);
 }
+
+/// A canonical repository name holding `+` names the repository's targets
+/// written bare or quoted alike, and only that repository's, not those of
+/// a name it starts.
+#[test]
+fn a_canonical_name_with_plus_names_its_repository_bare_or_quoted() {
+    let repo = "@@rules_rs++crate+crates__elk-rs_1";
+    let targets = [
+        rule(&format!("{repo}//plugins/core:core"), &[], &[]),
+        rule(
+            &format!("{repo}//:root"),
+            &[&format!("{repo}//plugins/core:core")],
+            &[],
+        ),
+        rule("@@rules_rs++crate+crates__elk//:other", &[], &[]),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let fixture = Fixture {
+        universe,
+        names: joint.names,
+    };
+    let named = [
+        format!("{repo}//:root"),
+        format!("{repo}//plugins/core:core"),
+    ];
+    assert_eq!(fixture.ok(&format!("{repo}//...")), named);
+    assert_eq!(fixture.ok(&format!("\"{repo}//...\"")), named);
+}
