@@ -26,18 +26,19 @@ pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
 use groups::{ChartLanes, GroupChrome, group_label, lanes_headed_by_pool};
 use model::{SourceReplaced, TraceModel};
-use regions::{
-    CountersStrip, DividerGrab, DividerPress, LaneBand, LaneHeights, Regions, clamp_gutter_width,
-};
+use regions::{CountersStrip, DividerGrab, LaneBand, LaneHeights, Regions, clamp_gutter_width};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::{HoveredSlice, Timeline};
+use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
 use bviz_invocation::{InvocationId, Session};
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
     Scrollbar, overlay_canvas, track_drag,
@@ -305,7 +306,7 @@ impl TracePanel {
             model,
             timeline,
             drag: Drag::None,
-            counters: CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
+            counters: CountersStrip::DEFAULT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             tracks_menu,
             _source_replaced: source_replaced,
@@ -402,26 +403,49 @@ impl TracePanel {
     }
 }
 
-/// A thin overlay strip at the gutter's right edge that begins a width drag; a
-/// double-click resets the gutter to its default width.
+/// What the panel does for a gesture in [`DIVIDER_GESTURES`].
+#[derive(Clone, Copy)]
+enum DividerIntent {
+    Reset,
+    Resize,
+}
+
+/// The gestures of the gutter handle and the counters divider.
+const DIVIDER_GESTURES: Gestures<DividerIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(PointerButton::Left, Clicks::Double)),
+        Place::On("a divider"),
+        "Reset to default size",
+        DividerIntent::Reset,
+    ),
+    Entry::new(
+        Input::drag(PointerButton::Left),
+        Place::On("a divider"),
+        "Resize gutter or counters",
+        DividerIntent::Resize,
+    ),
+]);
+
+/// A thin overlay strip at the gutter's right edge.
 fn gutter_handle(panel: &Entity<TracePanel>, window: &Window) -> Divider {
     Divider::new(
         "trace-gutter-handle",
         gpui::Axis::Horizontal,
         window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
-            if e.click_count == 2 {
-                this.gutter_width = DEFAULT_GUTTER_WIDTH;
-            } else {
-                this.drag = Drag::Gutter;
-            }
+            DIVIDER_GESTURES.dispatch(Pointer::press(e), |intent| {
+                match intent {
+                    DividerIntent::Reset => this.gutter_width = DEFAULT_GUTTER_WIDTH,
+                    DividerIntent::Resize => this.drag = Drag::Gutter,
+                }
+                true
+            });
             cx.stop_propagation();
             this.invalidate_timeline(cx);
         }),
     )
 }
 
-/// The band between the flame chart and the counters strip. A press on it begins
-/// a strip-resize drag; a double-click resets the strip to its default height.
+/// The band between the flame chart and the counters strip.
 fn counters_divider(
     regions: &Regions,
     palette: Palette,
@@ -433,16 +457,19 @@ fn counters_divider(
         gpui::Axis::Vertical,
         window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
             let counters_top = this.regions(cx).counters_top;
-            match this
-                .counters
-                .press(e.click_count, f32::from(e.position.y), counters_top)
-            {
-                DividerPress::Reset(strip) => {
-                    this.counters = strip;
-                    this.drag = Drag::None;
+            DIVIDER_GESTURES.dispatch(Pointer::press(e), |intent| {
+                match intent {
+                    DividerIntent::Reset => {
+                        this.counters = CountersStrip::DEFAULT;
+                        this.drag = Drag::None;
+                    }
+                    DividerIntent::Resize => {
+                        let grab = this.counters.grab(f32::from(e.position.y), counters_top);
+                        this.drag = Drag::Divider(grab);
+                    }
                 }
-                DividerPress::Grab(grab) => this.drag = Drag::Divider(grab),
-            }
+                true
+            });
             cx.stop_propagation();
             this.invalidate_timeline(cx);
         }),
@@ -552,6 +579,13 @@ impl Panel for TracePanel {
             label: "Timeline",
             key_context: TRACE_KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        TIMELINE_GESTURES
+            .rows()
+            .chain(DIVIDER_GESTURES.rows())
+            .collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -1729,6 +1763,11 @@ pub fn run() {
 mod tests {
     use super::*;
     use bviz_invocation::Configurations;
+
+    #[test]
+    fn every_divider_gesture_is_reachable() {
+        assert_eq!(DIVIDER_GESTURES.unreachable(), []);
+    }
 
     /// A session told of a configuration per `(checksum, mnemonic)`.
     pub(crate) fn session_knowing(described: &[(&str, &str)]) -> Session {

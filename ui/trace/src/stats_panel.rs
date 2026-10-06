@@ -7,9 +7,10 @@ use crate::{
     profile_status, set_list_thumb, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
+use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip, Toolbar,
-    centered_spinner, load_in_background, overlay_canvas, sort_header, track_drag,
+    centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -17,12 +18,29 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, SharedString, Subscription,
     UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
 };
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// The key context scoping the stats table's own bindings, so a key pressed here
 /// reaches this panel and no other.
 const STATS_KEY_CONTEXT: &str = "TraceStats";
-use std::rc::Rc;
-use std::sync::Arc;
+
+/// What the table does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum StatsIntent {
+    Sort,
+    Pick,
+}
+
+const GESTURES: Gestures<StatsIntent> = Gestures::new(&[
+    sort_gesture(StatsIntent::Sort),
+    Entry::new(
+        Input::click(Button::Left),
+        Place::On("a row"),
+        "Choose row",
+        StatsIntent::Pick,
+    ),
+]);
 
 /// A sortable column of the graph-mode stats table.
 #[derive(Clone, Copy, PartialEq)]
@@ -328,9 +346,15 @@ impl StatsPanel {
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sort_by(column);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, e, _, cx| {
+                        GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                            StatsIntent::Sort => {
+                                this.sort_by(column);
+                                cx.notify();
+                                true
+                            }
+                            _ => false,
+                        });
                     }))
             }));
 
@@ -413,13 +437,22 @@ impl StatsPanel {
                                 .items_center()
                                 .size_full()
                                 .cursor_pointer()
-                                .on_click(move |_, _, cx: &mut App| {
+                                .on_click(move |e, _, cx: &mut App| {
                                     entity.update(cx, |panel, cx| {
-                                        panel.picked = Some(StatsPick {
-                                            aggregate_version: version,
-                                            index,
-                                        });
-                                        cx.notify();
+                                        GESTURES.dispatch(
+                                            Pointer::click(e),
+                                            |intent| match intent {
+                                                StatsIntent::Pick => {
+                                                    panel.picked = Some(StatsPick {
+                                                        aggregate_version: version,
+                                                        index,
+                                                    });
+                                                    cx.notify();
+                                                    true
+                                                }
+                                                _ => false,
+                                            },
+                                        );
                                     });
                                 })
                                 .children(cells),
@@ -576,6 +609,10 @@ impl Panel for StatsPanel {
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
         Self::kind().label.into()
     }
@@ -671,4 +708,14 @@ fn stats_end_drag(
 ) {
     panel.drag = StatsDrag::None;
     cx.notify();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
 }

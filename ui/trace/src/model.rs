@@ -414,6 +414,20 @@ impl LoadedProfile {
     }
 }
 
+/// How a click on a track's label changes which tracks are selected.
+#[derive(Clone, Copy)]
+pub(crate) enum TrackPick {
+    /// The track alone.
+    Only,
+    /// The track toggled in the selection.
+    Flip,
+    /// The visible lanes from anchor to track.
+    Run,
+    /// That run set to the anchor's own state, extending a just-added run or
+    /// clearing a just-removed one.
+    SetRun,
+}
+
 /// The shared trace document and the selection and visibility state derived from
 /// it, plus the layouts and aggregates cached from those. Shared as an entity by
 /// every view of one profile, so each reads one source of truth; a view's own
@@ -1026,21 +1040,11 @@ impl TraceModel {
         self.invalidate_visible_lanes();
     }
 
-    /// Selects `track` for the flame graph and stats, with file-manager gesture
-    /// semantics. A plain click selects it alone; a `ctrl` (or cmd) click flips it
-    /// in the current set; a `shift` click replaces the selection with the run of
-    /// visible lanes from the anchor to `track`; a `shift`+`ctrl` click sets that
-    /// run to the anchor's own state, extending a just-added run or clearing a
-    /// just-removed one. A plain or ctrl click moves the anchor to `track`; a
-    /// shift click leaves it, so the run can be re-adjusted. Keys a rebuild only
-    /// when the set actually changes, so a repeat click is free.
-    pub(crate) fn select_track(
-        &mut self,
-        track: usize,
-        shift: bool,
-        ctrl: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Selects `track` for the flame graph and stats as `pick` asks. Picking
+    /// the one track moves the anchor to it; picking a run leaves the anchor,
+    /// so the run can be re-adjusted. Keys a rebuild only when the set
+    /// actually changes, so a repeat click is free.
+    pub(crate) fn select_track(&mut self, track: usize, pick: TrackPick, cx: &mut Context<Self>) {
         let n = self.selected_tracks.len();
         if track >= n {
             return;
@@ -1051,32 +1055,27 @@ impl TraceModel {
         let anchor_state = self
             .select_anchor
             .and_then(|a| self.selected_tracks.get(a).copied());
-        let sel = match (shift, ctrl, run) {
-            // Plain click: select the one track and anchor there.
-            (false, false, _) => {
+        let sel = match (pick, run) {
+            (TrackPick::Only, _) => {
                 let mut sel = vec![false; n];
                 sel[track] = true;
                 self.select_anchor = Some(track);
                 sel
             }
-            // Ctrl-click: flip the one track, keeping the rest, and re-anchor.
-            (false, true, _) => {
+            (TrackPick::Flip, _) => {
                 let mut sel = self.selected_tracks.clone();
                 sel[track] = !sel[track];
                 self.select_anchor = Some(track);
                 sel
             }
-            // Shift-click: replace the selection with the anchor run.
-            (true, false, Some(run)) => {
+            (TrackPick::Run, Some(run)) => {
                 let mut sel = vec![false; n];
                 for t in run {
                     sel[t] = true;
                 }
                 sel
             }
-            // Shift-Ctrl-click: set the anchor run to the anchor's state,
-            // extending a just-added run or clearing a just-removed one.
-            (true, true, Some(run)) => {
+            (TrackPick::SetRun, Some(run)) => {
                 let state = anchor_state.unwrap_or(true);
                 let mut sel = self.selected_tracks.clone();
                 for t in run {
@@ -1084,9 +1083,9 @@ impl TraceModel {
                 }
                 sel
             }
-            // A shift click with no anchor (or an anchor no longer visible) falls
-            // back to selecting the one track.
-            (true, _, None) => {
+            // A run with no anchor (or an anchor no longer visible) falls back
+            // to selecting the one track.
+            (TrackPick::Run | TrackPick::SetRun, None) => {
                 let mut sel = vec![false; n];
                 sel[track] = true;
                 self.select_anchor = Some(track);

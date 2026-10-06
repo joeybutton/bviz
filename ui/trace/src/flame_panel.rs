@@ -10,6 +10,7 @@ use bviz_trace_layout::{
     FlamePlacement, FlameRemainder, FlameView, FlameWeight, RemainderSiblings, ScopeAggregate,
     flame_height, lay_out_flame,
 };
+use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Held, Input, Place, Pointer};
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
     cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
@@ -28,6 +29,49 @@ use std::sync::Arc;
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
 const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
+
+/// What the flame graph does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum FlameIntent {
+    Zoom,
+    PanAcross,
+    Scroll,
+    Pan,
+    Describe,
+}
+
+const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
+    Entry::new(
+        Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        FlameIntent::Zoom,
+    ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        FlameIntent::PanAcross,
+    ),
+    Entry::new(
+        Input::SCROLL,
+        Place::Anywhere,
+        "Scroll up and down",
+        FlameIntent::Scroll,
+    ),
+    Entry::new(
+        Input::drag(gesture::Button::Left),
+        Place::Anywhere,
+        "Pan",
+        FlameIntent::Pan,
+    ),
+    Entry::new(
+        Input::HOVER,
+        Place::On("a box"),
+        "Describe box",
+        FlameIntent::Describe,
+    ),
+]);
 
 /// Narrowest the toolbar's legend is squeezed beside the controls; with less
 /// than this left on their row it starts the next one.
@@ -726,8 +770,6 @@ impl FlamePanel {
         self.flame_view = fv;
     }
 
-    /// Ctrl/Cmd+wheel zooms about the cursor, Shift+wheel pans horizontally, plain
-    /// wheel scrolls vertically.
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let Some(fl) = self.layout(cx) else {
             return;
@@ -735,32 +777,44 @@ impl FlamePanel {
         let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         let (mut fv, left, width) = (fl.view, fl.left, fl.width);
-        if e.modifiers.control || e.modifiers.platform {
-            let dy_lines = dy / LINE_SCROLL_PX;
-            fv.zoom_at(
-                f32::from(e.position.x) - left,
-                width,
-                ZOOM_PER_NOTCH.powf(dy_lines as f64),
-            );
-            self.flame_view = fv;
-        } else if e.modifiers.shift {
-            fv.pan_px(dx + dy, width);
-            self.flame_view = fv;
-        } else {
-            self.scroll_by(dy, cx);
-        }
+        GESTURES.dispatch(Pointer::scroll(e), |intent| {
+            match intent {
+                FlameIntent::Zoom => {
+                    let dy_lines = dy / LINE_SCROLL_PX;
+                    fv.zoom_at(
+                        f32::from(e.position.x) - left,
+                        width,
+                        ZOOM_PER_NOTCH.powf(dy_lines as f64),
+                    );
+                    self.flame_view = fv;
+                }
+                FlameIntent::PanAcross => {
+                    fv.pan_px(dx + dy, width);
+                    self.flame_view = fv;
+                }
+                FlameIntent::Scroll => self.scroll_by(dy, cx),
+                _ => return false,
+            }
+            true
+        });
         self.invalidate_canvas(cx);
     }
 
-    /// The panel's mouse/scroll/hover wiring: a press drives a scroll bar or pans,
-    /// the wheel zooms/pans/scrolls, and a move updates the box hover. Presses and
-    /// the wheel stop propagation so they don't also reach the flame chart's
-    /// handlers underneath.
+    /// The panel's pointer wiring, acting as [`GESTURES`] has it, a press on a
+    /// scroll bar driving the bar instead of panning. Presses and the wheel
+    /// stop propagation so they don't also reach the flame chart's handlers
+    /// underneath.
     fn panel_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                this.press(e.position, cx);
+                GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                    FlameIntent::Pan => {
+                        this.press(e.position, cx);
+                        true
+                    }
+                    _ => false,
+                });
                 cx.stop_propagation();
                 this.invalidate_canvas(cx);
             }),
@@ -771,7 +825,13 @@ impl FlamePanel {
         }))
         .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
             if matches!(this.drag, FlameDrag::None) {
-                this.update_hover(e.position, cx);
+                GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+                    FlameIntent::Describe => {
+                        this.update_hover(e.position, cx);
+                        true
+                    }
+                    _ => false,
+                });
             }
         }))
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -797,6 +857,10 @@ impl Panel for FlamePanel {
             label: "Flame Graph",
             key_context: FLAME_KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -1065,6 +1129,11 @@ mod tests {
         FlameDirection, FlameGraph, FlameLabels, FlameMode, FlameWeight, TimeSelection,
     };
     use bviz_trace_profile::Profile;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
 
     /// Width of the content column the fixture layouts are placed for, wide
     /// enough that every fixture frame clears [`MIN_SLICE_PX`].

@@ -3,7 +3,7 @@ use crate::counters::{StripCounters, counter_readouts, paint_crosshair, track_co
 use crate::groups::{
     ChartLanes, GroupChrome, GroupHit, RowAnchor, anchor_at, anchor_offset, chart_rows,
 };
-use crate::model::{ChoiceChanged, TraceModel, WorkingLanesDerived};
+use crate::model::{ChoiceChanged, TraceModel, TrackPick, WorkingLanesDerived};
 use crate::regions::{CountersStrip, LaneBand, Regions};
 use crate::theme::Palette;
 use crate::{
@@ -19,6 +19,7 @@ use bviz_trace_layout::{
     visible_slices,
 };
 use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
+use bviz_ui_components::gesture::{Button, Entry, Gestures, Held, Input, Place, Pointer};
 use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
 use bviz_ui_playback::Clock;
 use gpui::{
@@ -28,6 +29,144 @@ use gpui::{
 };
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// What the timeline does for a gesture in [`TIMELINE_GESTURES`].
+#[derive(Clone, Copy)]
+pub(crate) enum TimelineIntent {
+    ShowAllOfGroup,
+    FoldGroup,
+    PickTrack(TrackPick),
+    SelectTime { on: TimeBand, toggles: bool },
+    Pan,
+    Unchoose,
+    Zoom,
+    PanTime,
+    Scroll,
+    Read,
+}
+
+/// Where a press takes hold of the time selection.
+#[derive(Clone, Copy)]
+pub(crate) enum TimeBand {
+    Ruler,
+    Lanes,
+}
+
+const GROUP_HEADER: Place = Place::On("a group header");
+const TRACK_LABEL: Place = Place::On("a track label");
+const RULER: Place = Place::On("the ruler");
+const LANES: Place = Place::On("the lanes");
+
+pub(crate) const TIMELINE_GESTURES: Gestures<TimelineIntent> = Gestures::new(&[
+    Entry::new(
+        Input::press(Button::Left),
+        Place::On("a show-all icon"),
+        "Show all lanes or cap them",
+        TimelineIntent::ShowAllOfGroup,
+    ),
+    Entry::new(
+        Input::press(Button::Left),
+        GROUP_HEADER,
+        "Fold or unfold group",
+        TimelineIntent::FoldGroup,
+    ),
+    Entry::new(
+        Input::press(Button::Left).holding(Held::SHIFT.and(Held::SECONDARY)),
+        TRACK_LABEL,
+        "Set tracks to here like anchor",
+        TimelineIntent::PickTrack(TrackPick::SetRun),
+    ),
+    Entry::new(
+        Input::press(Button::Left).holding(Held::SHIFT),
+        TRACK_LABEL,
+        "Select from anchor to here",
+        TimelineIntent::PickTrack(TrackPick::Run),
+    ),
+    Entry::new(
+        Input::press(Button::Left).holding(Held::SECONDARY),
+        TRACK_LABEL,
+        "Add or remove track",
+        TimelineIntent::PickTrack(TrackPick::Flip),
+    ),
+    Entry::new(
+        Input::press(Button::Left),
+        TRACK_LABEL,
+        "Select track alone",
+        TimelineIntent::PickTrack(TrackPick::Only),
+    ),
+    Entry::new(
+        Input::drag(Button::Left).holding(Held::SECONDARY),
+        RULER,
+        "Add or remove time region",
+        TimelineIntent::SelectTime {
+            on: TimeBand::Ruler,
+            toggles: true,
+        },
+    ),
+    Entry::new(
+        Input::drag(Button::Left),
+        RULER,
+        "Select or adjust time region",
+        TimelineIntent::SelectTime {
+            on: TimeBand::Ruler,
+            toggles: false,
+        },
+    ),
+    Entry::new(
+        Input::drag(Button::Left).holding(Held::SHIFT.and(Held::SECONDARY)),
+        LANES,
+        "Add or remove time region",
+        TimelineIntent::SelectTime {
+            on: TimeBand::Lanes,
+            toggles: true,
+        },
+    ),
+    Entry::new(
+        Input::drag(Button::Left).holding(Held::SHIFT),
+        LANES,
+        "Select time region",
+        TimelineIntent::SelectTime {
+            on: TimeBand::Lanes,
+            toggles: false,
+        },
+    ),
+    Entry::new(
+        Input::drag(Button::Left),
+        Place::Anywhere,
+        "Pan",
+        TimelineIntent::Pan,
+    ),
+    Entry::new(
+        Input::click(Button::Left),
+        Place::Anywhere,
+        "Clear chosen row",
+        TimelineIntent::Unchoose,
+    ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        TimelineIntent::Zoom,
+    ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        TimelineIntent::PanTime,
+    ),
+    Entry::new(
+        Input::SCROLL,
+        Place::Anywhere,
+        "Pan lanes or counters",
+        TimelineIntent::Scroll,
+    ),
+    Entry::new(
+        Input::HOVER,
+        Place::Anywhere,
+        "Read time and slice",
+        TimelineIntent::Read,
+    ),
+]);
 
 /// The timeline's culled draw list together with the inputs that determine it,
 /// so a repaint reuses it unless one changed. The list turns only on the profile
@@ -203,7 +342,7 @@ pub(crate) enum RegionEdit {
 impl RegionEdit {
     /// Whether a press that never passed the click threshold drops the whole
     /// selection. Only a plain press on empty time does, naming no region and
-    /// asking for no set operation, so it reads as "select nothing". A ctrl
+    /// asking for no set operation, so it reads as "select nothing". A secondary
     /// press asks to toggle one region's membership and leaves the rest of the
     /// set standing, even where it found no region to toggle — the gap it
     /// misses by is a few pixels, and the selection it would drop is
@@ -336,13 +475,16 @@ struct PanDrag {
     /// Whether the cursor has passed [`MIN_DRAG_PX`] from the press, latched
     /// so a pan that returns to the press point stays a pan.
     moved: bool,
+    /// The click a release short of [`MIN_DRAG_PX`] makes of the press.
+    click: Pointer,
 }
 
 impl PanDrag {
-    fn at(press: Point<Pixels>) -> PanDrag {
+    fn at(press: &MouseDownEvent) -> PanDrag {
         PanDrag {
-            press,
+            press: press.position,
             moved: false,
+            click: Pointer::completing(press),
         }
     }
 
@@ -830,14 +972,23 @@ impl Timeline {
         Some(time_at_x(self.view, profile.span(), x_px))
     }
 
-    /// Begins a time-region drag if the press asks for one — anywhere in the
-    /// ruler band, or a shift-press over the flame lanes — reporting whether it
-    /// took the press. [`region_press`] resolves what it edits.
-    fn press_time_region(&mut self, e: &MouseDownEvent, cx: &App) -> bool {
+    /// Begins a time-region drag from a press at `pos` where it lands on the
+    /// band `on`, reporting whether it did. [`region_press`] resolves what it
+    /// edits, a press that `toggles` membership or not.
+    fn press_time_region(
+        &mut self,
+        pos: Point<Pixels>,
+        on: TimeBand,
+        toggles: bool,
+        cx: &App,
+    ) -> bool {
         let regions = self.regions(cx);
-        let x = f32::from(e.position.x);
-        let in_ruler = regions.in_ruler(e.position);
-        if !(in_ruler || (e.modifiers.shift && regions.in_flame(e.position))) {
+        let x = f32::from(pos.x);
+        let on_band = match on {
+            TimeBand::Ruler => regions.in_ruler(pos),
+            TimeBand::Lanes => regions.in_flame(pos),
+        };
+        if !on_band {
             return false;
         }
         let Some(profile) = self.model.read(cx).profile() else {
@@ -847,13 +998,11 @@ impl Timeline {
         let at = time_at_x(self.view, bounds, x - regions.content_left);
         let (edit, anchor_us) = {
             let sel = self.model.read(cx).time_selection();
-            let grab = if in_ruler {
-                Grab::Ruler(region_grab(sel, self.view, regions, bounds, at, x))
-            } else {
-                Grab::Lanes
+            let grab = match on {
+                TimeBand::Ruler => Grab::Ruler(region_grab(sel, self.view, regions, bounds, at, x)),
+                TimeBand::Lanes => Grab::Lanes,
             };
-            let ctrl = e.modifiers.control || e.modifiers.platform;
-            region_press(sel, at, ctrl, grab)
+            region_press(sel, at, toggles, grab)
         };
         self.crosshair = None;
         self.drag = TimelineDrag::TimeRegion(RegionDrag {
@@ -879,9 +1028,10 @@ impl Timeline {
             .update(cx, |m, cx| m.set_time_selection(selection, cx));
     }
 
-    /// Begins a timeline drag at `pos`: the lane vertical or time horizontal
-    /// scroll thumb/track if the press hit one, otherwise a pan.
-    fn press(&mut self, pos: Point<Pixels>, cx: &App) {
+    /// Begins a timeline drag from `press`: the lane vertical or time
+    /// horizontal scroll thumb/track if the press hit one, otherwise a pan.
+    fn press(&mut self, press: &MouseDownEvent, cx: &App) {
+        let pos = press.position;
         self.crosshair = None;
         let bars = self.scroll_bars(cx);
         if let Some(bar) = bars.flame
@@ -908,7 +1058,7 @@ impl Timeline {
             self.counters_thumb_to(pos, grab, cx);
             return;
         }
-        self.drag = TimelineDrag::Pan(PanDrag::at(pos));
+        self.drag = TimelineDrag::Pan(PanDrag::at(press));
         self.last_mouse = pos;
     }
 
@@ -960,31 +1110,34 @@ impl Timeline {
         let before = self.view;
         let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
-        if e.modifiers.control || e.modifiers.platform {
-            let rel_x = f32::from(e.position.x) - content_left;
-            let dy_lines = dy / LINE_SCROLL_PX;
-            self.view
-                .zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
-            self.view.px_per_us = self
-                .view
-                .px_per_us
-                .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
-            self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
-        } else {
-            let (pan_dx, scroll_dy) = if e.modifiers.shift {
-                (dx + dy, 0.0)
-            } else {
-                (dx, dy)
-            };
-            // Both sections share the time axis, so a wheel pans either; the
-            // vertical half goes to whichever the cursor is over.
-            match regions.in_counters(e.position) {
-                true => self.scroll_counters_by(scroll_dy, cx),
-                false => self.scroll_by(scroll_dy, cx),
+        TIMELINE_GESTURES.dispatch(Pointer::scroll(e), |intent| {
+            match intent {
+                TimelineIntent::Zoom => {
+                    let rel_x = f32::from(e.position.x) - content_left;
+                    let dy_lines = dy / LINE_SCROLL_PX;
+                    self.view
+                        .zoom_at(rel_x, ZOOM_PER_NOTCH.powf(dy_lines as f64));
+                    self.view.px_per_us = self
+                        .view
+                        .px_per_us
+                        .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
+                }
+                TimelineIntent::PanTime => self.view.pan_px(dx + dy),
+                TimelineIntent::Scroll => {
+                    // Both sections share the time axis, so a wheel pans
+                    // either; the vertical half goes to whichever the cursor
+                    // is over.
+                    match regions.in_counters(e.position) {
+                        true => self.scroll_counters_by(dy, cx),
+                        false => self.scroll_by(dy, cx),
+                    }
+                    self.view.pan_px(dx);
+                }
+                _ => return false,
             }
-            self.view.pan_px(pan_dx);
             self.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
-        }
+            true
+        });
         self.release_if_moved(before);
         self.invalidate_canvas(cx);
     }
@@ -1005,24 +1158,72 @@ impl Timeline {
         if !matches!(self.drag, TimelineDrag::None) {
             return;
         }
-        let in_content = self.in_content(e.position, cx);
+        TIMELINE_GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+            TimelineIntent::Read => {
+                self.read_at(e.position, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn read_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let in_content = self.in_content(position, cx);
         let was_crosshair = self.crosshair.is_some();
-        self.crosshair = in_content.then_some(e.position);
-        self.update_hover(e.position, cx);
+        self.crosshair = in_content.then_some(position);
+        self.update_hover(position, cx);
         if in_content || was_crosshair {
             cx.notify();
         }
     }
 
-    /// The timeline's mouse/scroll/hover wiring: a press on a group header folds
-    /// or shows-all it, on a track label selects that track, on a scroll
-    /// thumb/track drives that bar, on the ruler (or with shift on the lanes)
-    /// selects time regions, anywhere else pans, a click there letting go of
-    /// what is chosen of the critical path; the wheel zooms/pans/scrolls,
-    /// and a move updates the crosshair and hover. Holds the content focus and
-    /// the chart's actions, so after a press here [`SelectAllTracks`] selects all
-    /// tracks and [`ClearTimeSelection`] widens the aggregate to the whole
-    /// timeline.
+    /// Acts on `intent` for the press `e`, declining where the press is not on
+    /// the intent's place.
+    fn press_for(
+        &mut self,
+        intent: TimelineIntent,
+        e: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match intent {
+            TimelineIntent::ShowAllOfGroup => match self.group_row_at(e.position, cx) {
+                Some(GroupHit::ShowAll(group)) => {
+                    self.model.update(cx, |m, _| m.toggle_group_show_all(group));
+                }
+                _ => return false,
+            },
+            TimelineIntent::FoldGroup => match self.group_row_at(e.position, cx) {
+                Some(GroupHit::Collapse(group)) => {
+                    self.model
+                        .update(cx, |m, _| m.toggle_group_collapsed(group));
+                }
+                _ => return false,
+            },
+            TimelineIntent::PickTrack(pick) => match self.track_label_at(e.position, cx) {
+                Some(track) => self
+                    .model
+                    .update(cx, |m, cx| m.select_track(track, pick, cx)),
+                None => return false,
+            },
+            TimelineIntent::SelectTime { on, toggles } => {
+                let took = self.press_time_region(e.position, on, toggles, cx);
+                if took {
+                    cx.notify();
+                }
+                return took;
+            }
+            TimelineIntent::Pan => self.press(e, cx),
+            _ => return false,
+        }
+        self.invalidate_canvas(cx);
+        true
+    }
+
+    /// The timeline's pointer wiring, acting as [`TIMELINE_GESTURES`] has it,
+    /// a press on a scroll thumb or track driving that bar instead of panning.
+    /// Holds the content focus and the chart's actions, so after a press here
+    /// [`SelectAllTracks`] selects all tracks and [`ClearTimeSelection`]
+    /// widens the aggregate to the whole timeline.
     fn content_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.key_context(TIMELINE_KEY_CONTEXT)
             .track_focus(&self.content_focus)
@@ -1034,28 +1235,8 @@ impl Timeline {
                     // Take content focus so `SelectAllTracks` dispatches here after
                     // a chart interaction (a click may have moved focus to the filter).
                     this.content_focus.focus(window, cx);
-                    if let Some(hit) = this.group_row_at(e.position, cx) {
-                        this.model.update(cx, |m, _| match hit {
-                            GroupHit::Collapse(g) => m.toggle_group_collapsed(g),
-                            GroupHit::ShowAll(g) => m.toggle_group_show_all(g),
-                        });
-                        this.invalidate_canvas(cx);
-                        return;
-                    }
-                    if let Some(track) = this.track_label_at(e.position, cx) {
-                        let ctrl = e.modifiers.control || e.modifiers.platform;
-                        this.model.update(cx, |m, cx| {
-                            m.select_track(track, e.modifiers.shift, ctrl, cx)
-                        });
-                        this.invalidate_canvas(cx);
-                        return;
-                    }
-                    if this.press_time_region(e, cx) {
-                        cx.notify();
-                        return;
-                    }
-                    this.press(e.position, cx);
-                    this.invalidate_canvas(cx);
+                    TIMELINE_GESTURES
+                        .dispatch(Pointer::press(e), |intent| this.press_for(intent, e, cx));
                 }),
             )
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
@@ -1169,7 +1350,13 @@ fn timeline_end_drag(
             cx.notify();
         }
         TimelineDrag::Pan(pan) if pan.clicked(end) => {
-            timeline.model.update(cx, |model, cx| model.unchoose(cx));
+            TIMELINE_GESTURES.dispatch(pan.click, |intent| match intent {
+                TimelineIntent::Unchoose => {
+                    timeline.model.update(cx, |model, cx| model.unchoose(cx));
+                    true
+                }
+                _ => false,
+            });
             timeline.invalidate_canvas(cx);
         }
         _ => timeline.invalidate_canvas(cx),
@@ -1655,12 +1842,12 @@ enum Grab {
 }
 
 /// The edit a press on the instant `at` resolves to, with the instant to anchor
-/// its drag at. Ctrl toggles the pressed region's membership: it takes away
-/// whichever region the press took hold of, and where it held none it unions the
-/// drag in. Without ctrl the press keeps what it took hold of, and failing that
-/// replaces the selection.
-fn region_press(sel: &TimeSelection, at: i64, ctrl: bool, grab: Grab) -> (RegionEdit, i64) {
-    if ctrl {
+/// its drag at. Holding secondary toggles the pressed region's membership: it
+/// takes away whichever region the press took hold of, and where it held none
+/// it unions the drag in. Without secondary the press keeps what it took hold
+/// of, and failing that replaces the selection.
+fn region_press(sel: &TimeSelection, at: i64, toggles: bool, grab: Grab) -> (RegionEdit, i64) {
+    if toggles {
         let held = match grab {
             Grab::Ruler(held) => held.and_then(|(edit, _)| edit.region()),
             Grab::Lanes => sel.region_at(at),
@@ -2001,6 +2188,11 @@ fn overlay_paint(
 mod tests {
     use super::*;
     use bviz_trace_layout::Lane;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(TIMELINE_GESTURES.unreachable(), []);
+    }
 
     /// A profile's whole time, long enough for every framing below to zoom in.
     const WHOLE: TimeSpan = TimeSpan {
@@ -2611,7 +2803,10 @@ mod tests {
     #[test]
     fn a_pan_let_go_of_within_the_click_threshold_is_a_click() {
         let press = point(px(100.), px(100.));
-        let mut pan = PanDrag::at(press);
+        let mut pan = PanDrag::at(&MouseDownEvent {
+            position: press,
+            ..Default::default()
+        });
         pan.follow(point(px(100. + MIN_DRAG_PX), px(100. - MIN_DRAG_PX)));
         assert!(pan.clicked(DragEnd::Released));
         assert!(!pan.clicked(DragEnd::Abandoned), "no release, no click");
@@ -2624,7 +2819,8 @@ mod tests {
     #[test]
     fn cancelling_with_no_drag_under_way_reports_nothing_to_abandon() {
         assert!(!TimelineDrag::None.cancel_region());
-        assert!(!TimelineDrag::Pan(PanDrag::at(Point::default())).cancel_region());
+        let press = MouseDownEvent::default();
+        assert!(!TimelineDrag::Pan(PanDrag::at(&press)).cancel_region());
     }
 
     /// A viewport split with a gutter of [`TEST_GUTTER`] and no counter lanes,
@@ -2790,7 +2986,7 @@ mod tests {
 
     /// A press at window `x` over the ruler band, resolved as the ruler's own
     /// handler resolves it.
-    fn ruler_press(sel: &TimeSelection, x: f32, ctrl: bool) -> (RegionEdit, i64) {
+    fn ruler_press(sel: &TimeSelection, x: f32, toggles: bool) -> (RegionEdit, i64) {
         let axis = test_axis();
         let at = press_at(x, axis);
         let grab = Grab::Ruler(region_grab(
@@ -2801,7 +2997,7 @@ mod tests {
             at,
             x,
         ));
-        region_press(sel, at, ctrl, grab)
+        region_press(sel, at, toggles, grab)
     }
 
     /// A press released without ever passing the click threshold.
@@ -2819,7 +3015,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_click_inside_a_region_takes_that_region_away() {
+    fn a_secondary_click_inside_a_region_takes_that_region_away() {
         let base = three_regions();
         let (edit, at) = ruler_press(&base, ruler_x(8500), true);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }));
@@ -2830,14 +3026,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_removes_exactly_the_region_a_plain_press_would_take_hold_of() {
+    fn secondary_removes_exactly_the_region_a_plain_press_would_take_hold_of() {
         let base = three_regions();
         let axis = test_axis();
         let mut x = axis.content_left;
         while x <= axis.time_right {
             let plain = ruler_press(&base, x, false).0;
-            let ctrl = ruler_press(&base, x, true).0;
-            assert_eq!(plain.region(), ctrl.region(), "at x={x}");
+            let toggled = ruler_press(&base, x, true).0;
+            assert_eq!(plain.region(), toggled.region(), "at x={x}");
             x += 1.0;
         }
     }
@@ -2846,9 +3042,10 @@ mod tests {
     /// edges carry the grips the removal gestures below aim at.
     const REGION_1_EDGES_PX: (f32, f32) = (500.0, 600.0);
 
-    /// Asserts a ctrl press at window `x` takes region 1 away and leaves the
-    /// other two, and that a plain press there resizes the same region — the
-    /// grip is grabbable at `x`, and ctrl agrees on which region it belongs to.
+    /// Asserts a secondary press at window `x` takes region 1 away and leaves
+    /// the other two, and that a plain press there resizes the same region —
+    /// the grip is grabbable at `x`, and a secondary press agrees on which
+    /// region it belongs to.
     fn assert_grip_removes_region_1(x: f32) {
         let base = three_regions();
         assert!(
@@ -2867,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_press_in_a_grips_outer_half_removes_its_region() {
+    fn a_secondary_press_in_a_grips_outer_half_removes_its_region() {
         assert_eq!(
             (ruler_x(8000), ruler_x(9000)),
             REGION_1_EDGES_PX,
@@ -2880,21 +3077,21 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_press_on_a_drawn_end_edge_removes_its_region() {
+    fn a_secondary_press_on_a_drawn_end_edge_removes_its_region() {
         // A region ends on the instant past its last, so its end edge stands on
         // time the region itself does not cover.
         assert_grip_removes_region_1(REGION_1_EDGES_PX.1);
     }
 
     #[test]
-    fn a_ctrl_press_in_a_grips_inner_half_removes_its_region() {
+    fn a_secondary_press_in_a_grips_inner_half_removes_its_region() {
         let (left, right) = REGION_1_EDGES_PX;
         assert_grip_removes_region_1(left);
         assert_grip_removes_region_1(right - 2.0);
     }
 
     #[test]
-    fn a_ctrl_press_beyond_a_grips_reach_leaves_the_selection_untouched() {
+    fn a_secondary_press_beyond_a_grips_reach_leaves_the_selection_untouched() {
         let base = three_regions();
         let (left, right) = REGION_1_EDGES_PX;
         assert_eq!(
@@ -2935,7 +3132,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_click_outside_every_region_leaves_the_selection_untouched() {
+    fn a_secondary_click_outside_every_region_leaves_the_selection_untouched() {
         let base = three_regions();
         let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
         assert!(
@@ -2946,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_ctrl_click_over_the_lanes_holding_no_region_keeps_the_selection() {
+    fn a_shift_secondary_click_over_the_lanes_holding_no_region_keeps_the_selection() {
         let base = three_regions();
         let (edit, at) = region_press(&base, IN_THE_GAP_US, true, Grab::Lanes);
         assert!(matches!(edit, RegionEdit::Union));
@@ -2954,7 +3151,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ctrl_press_outside_every_region_unions_a_new_one() {
+    fn a_secondary_press_outside_every_region_unions_a_new_one() {
         let base = three_regions();
         let (edit, at) = ruler_press(&base, ruler_x(IN_THE_GAP_US), true);
         assert!(matches!(edit, RegionEdit::Union));
@@ -2982,7 +3179,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_ctrl_press_over_the_lanes_removes_the_region_it_lands_in() {
+    fn a_shift_secondary_press_over_the_lanes_removes_the_region_it_lands_in() {
         let base = three_regions();
         let (edit, at) = region_press(&base, 8500, true, Grab::Lanes);
         assert!(matches!(edit, RegionEdit::Remove { index: 1 }));

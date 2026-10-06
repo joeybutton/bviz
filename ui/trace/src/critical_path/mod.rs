@@ -18,9 +18,10 @@ use bviz_critical_path::{
     Coverage, CriticalPath, Modeled, NearlyCritical, Part, Phase, Spawned, Step,
 };
 use bviz_invocation::Chosen;
+use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice, centered_spinner,
-    list_scrollbar, sort_header,
+    list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use by_height::ByHeight;
@@ -35,6 +36,23 @@ use std::time::Duration;
 use whole::whole_or_none;
 
 pub(crate) const KEY_CONTEXT: &str = "TraceCriticalPath";
+
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum CriticalPathIntent {
+    Sort,
+    Choose,
+}
+
+const GESTURES: Gestures<CriticalPathIntent> = Gestures::new(&[
+    sort_gesture(CriticalPathIntent::Sort),
+    Entry::new(
+        Input::click(gesture::Button::Left),
+        Place::On("a row"),
+        "Choose or clear row",
+        CriticalPathIntent::Choose,
+    ),
+]);
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
@@ -597,10 +615,16 @@ fn choosable(
         row.bg(palette.selection)
             .hover(move |row| row.bg(picked_hover))
     })
-    .on_click(move |_, window, cx| {
+    .on_click(move |e, window, cx| {
         entity.update(cx, |panel, cx| {
-            panel.focus.focus(window, cx);
-            panel.toggle(stands_for, cx)
+            GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                CriticalPathIntent::Choose => {
+                    panel.focus.focus(window, cx);
+                    panel.toggle(stands_for, cx);
+                    true
+                }
+                _ => false,
+            });
         })
     })
 }
@@ -874,9 +898,15 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
             .id(column.title)
             .cursor_pointer()
             .hover(|cell| cell.bg(palette.hover))
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                sort_by(panel, by, descending, cx);
-                cx.notify();
+            .on_click(cx.listener(move |panel, e, _, cx| {
+                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                    CriticalPathIntent::Sort => {
+                        sort_by(panel, by, descending, cx);
+                        cx.notify();
+                        true
+                    }
+                    _ => false,
+                });
             }))
             .into_any_element(),
         }
@@ -1222,6 +1252,10 @@ impl Panel for CriticalPathPanel {
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
         Self::kind().label.into()
     }
@@ -1272,5 +1306,15 @@ impl Render for CriticalPathPanel {
                 path: Some(path), ..
             }) => panel.child(self.body(path, &palette, &fills, cx)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
     }
 }
