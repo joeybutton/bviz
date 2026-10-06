@@ -25,6 +25,12 @@ alias(
     visibility = ["//visibility:public"],
 )
 
+alias(
+    name = "zstd",
+    actual = "@zstd//:zstd",
+    visibility = ["//visibility:public"],
+)
+
 package_metadata(
     name = "xkbcommon_package_metadata",
     attributes = [":xkbcommon_license"],
@@ -57,6 +63,25 @@ license(
     name = "wayland_license",
     kind = "@package_metadata//licenses/spdx:MIT",
     text = "@wayland//:COPYING",
+)
+
+package_metadata(
+    name = "zstd_package_metadata",
+    attributes = [":zstd_license"],
+    purl = "pkg:bazel/zstd",
+    visibility = ["//bviz:__pkg__"],
+)
+
+license(
+    name = "zstd_license",
+    kind = ":zstd_license_kind",
+    text = "@zstd//:LICENSE",
+)
+
+license_kind(
+    name = "zstd_license_kind",
+    full_name = "BSD 3-Clause License or GNU General Public License v2.0 only",
+    identifier = "BSD-3-Clause OR GPL-2.0-only",
 )
 
 package_metadata(

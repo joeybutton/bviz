@@ -41,5 +41,6 @@ rust_library(
 
 rust_test(
     name = "assets_test",
+    size = "small",
     crate = ":assets",
 )

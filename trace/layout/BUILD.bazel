@@ -19,6 +19,7 @@ rust_library(
 
 rust_test(
     name = "layout_test",
+    size = "small",
     crate = ":layout",
     deps = ["@crates//:fastrand"],
 )

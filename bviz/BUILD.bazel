@@ -27,6 +27,7 @@ rust_binary(
 
 rust_test(
     name = "bviz_test",
+    size = "small",
     crate = ":bviz",
 )
 
@@ -47,6 +48,7 @@ third_party_notices(
         "//third_party:wayland_package_metadata",
         "//third_party:xkbcommon_package_metadata",
         "//third_party:zed_package_metadata",
+        "//third_party:zstd_package_metadata",
     ],
     toolchain_package_metadata = ["//third_party:rust_std_package_metadata"],
     visibility = ["//dist:__pkg__"],

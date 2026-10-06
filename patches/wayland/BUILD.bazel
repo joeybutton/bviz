@@ -1,3 +1,1 @@
-# The patch adds two lines to the module's BUILD file and carries the seven
-# around them, too little of the file to attribute.
 exports_files(["wayland-export-copying.patch"])

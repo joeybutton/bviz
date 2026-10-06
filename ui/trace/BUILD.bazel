@@ -40,5 +40,6 @@ rust_binary(
 
 rust_test(
     name = "trace_test",
+    size = "small",
     crate = ":trace_lib",
 )

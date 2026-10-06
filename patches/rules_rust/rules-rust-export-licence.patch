@@ -3,6 +3,9 @@ Export the licence text
 The archive ships its licence as LICENSE.txt, which the BUILD file leaves out
 of its exported files, so no licence declaration can point at it.
 
+The patch adds one line to the ruleset's BUILD file and carries the six
+around it, too little of the file to attribute.
+
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -2,6 +2,7 @@
