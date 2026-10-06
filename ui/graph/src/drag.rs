@@ -51,7 +51,7 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
         CanvasIntent::Pan,
     ),
     Entry::new(
-        Input::click(Button::Left),
+        Input::new(Motion::Click(Button::Left, Clicks::Single)),
         BOX,
         "Open or close box",
         CanvasIntent::ToggleBox,
@@ -208,5 +208,24 @@ mod tests {
     #[test]
     fn every_gesture_is_reachable() {
         assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    /// Whether letting go of the `click_count`th press of a run on a box opens
+    /// or closes it.
+    fn toggles(click_count: usize) -> bool {
+        let press = MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            click_count,
+            ..Default::default()
+        };
+        GESTURES.dispatch(Pointer::completing(&press), |intent| {
+            matches!(intent, CanvasIntent::ToggleBox)
+        })
+    }
+
+    #[test]
+    fn a_double_click_on_a_box_toggles_it_once() {
+        assert!(toggles(1));
+        assert!(!toggles(DOUBLE_CLICK));
     }
 }
