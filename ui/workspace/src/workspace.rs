@@ -16,13 +16,14 @@ use bviz_ui_components::{
     track_drag,
 };
 use bviz_ui_playback::{
-    Clock, PlayPause, PlaybackBar, SeekEnd, SeekStart, SpeedDown, SpeedUp, StepBack, StepForward,
+    Clock, KEY_CONTEXT as PLAYBACK_KEY_CONTEXT, PlayPause, PlaybackBar, SeekEnd, SeekStart,
+    SpeedDown, SpeedUp, StepBack, StepForward,
 };
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, Axis, Bounds, Canvas, Div, ElementId, Entity,
-    EntityId, FocusHandle, IconScale, IntoElement, KeyBinding, MouseDownEvent, Pixels,
+    EntityId, FocusHandle, IconScale, IntoElement, KeyBinding, KeyContext, MouseDownEvent, Pixels,
     PlatformDragEvent, Point, Rems, Render, SharedString, Size, Stateful, Subscription, WeakEntity,
     Window, actions, deferred, div, point, prelude::*, px,
 };
@@ -136,10 +137,10 @@ const MARK_FILL: f32 = 0.3;
 const MENU_LAYER: usize = 1;
 
 pub(crate) fn register_keys(cx: &mut App) {
-    declare_scopes(cx, [KEY_CONTEXT]);
+    declare_scopes(cx, [KEY_CONTEXT, PLAYBACK_KEY_CONTEXT]);
     let workspace = Some(KEY_CONTEXT.id());
     // Typed into a text field, the playback keys edit the text.
-    let playback = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let playback = format!("{PLAYBACK_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let playback = Some(playback.as_str());
     cx.bind_keys([
         KeyBinding::new("ctrl-tab", NextTab, workspace),
@@ -2004,6 +2005,10 @@ impl Render for Workspace {
             .child(self.body_element(&colors, cx))
             .child(measure_body(cx));
         let playback = self.playback_bar(&panel, cx);
+        let mut key_context = KeyContext::from(KEY_CONTEXT);
+        if playback.is_some() {
+            key_context.add(PLAYBACK_KEY_CONTEXT.id());
+        }
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
             .menu(self.documents_menu.clone())
@@ -2013,7 +2018,7 @@ impl Render for Workspace {
             None => chrome,
         };
         let body = div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
             .size_full()
             .on_action(cx.listener(|workspace, _: &NextTab, window, cx| {
                 workspace

@@ -9,6 +9,7 @@ pub use bar::PlaybackBar;
 pub use clock::{Clock, DocumentClock, OnClock, Source, SourceId, Span, Speed, Timeline};
 pub use note::unaligned_note;
 
+use bviz_ui_components::KeyScope;
 use gpui::{Pixels, actions, px};
 
 actions!(
@@ -30,6 +31,10 @@ actions!(
         SpeedDown,
     ]
 );
+
+/// The key context a window carries while the document it shows plays back,
+/// so the playback keys reach a clock that is there to drive.
+pub const KEY_CONTEXT: KeyScope = KeyScope::new("Playback", "Playback");
 
 /// Size of the text the playback controls and notes are set in.
 const TEXT_SIZE: Pixels = px(12.);
