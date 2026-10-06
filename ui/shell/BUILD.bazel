@@ -30,5 +30,6 @@ rust_library(
 
 rust_test(
     name = "shell_test",
+    size = "small",
     crate = ":shell",
 )

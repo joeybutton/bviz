@@ -36,5 +36,6 @@ rust_library(
 
 rust_test(
     name = "components_test",
+    size = "small",
     crate = ":components",
 )

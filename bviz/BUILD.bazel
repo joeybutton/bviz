@@ -27,6 +27,7 @@ rust_binary(
 
 rust_test(
     name = "bviz_test",
+    size = "small",
     crate = ":bviz",
 )
 

@@ -34,5 +34,6 @@ rust_binary(
 
 rust_test(
     name = "graph_test",
+    size = "small",
     crate = ":graph_lib",
 )

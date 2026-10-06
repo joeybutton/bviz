@@ -17,5 +17,6 @@ rust_library(
 
 rust_test(
     name = "cli_test",
+    size = "small",
     crate = ":cli",
 )

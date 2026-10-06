@@ -26,5 +26,6 @@ rust_library(
 
 rust_test(
     name = "theme_test",
+    size = "small",
     crate = ":theme",
 )

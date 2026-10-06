@@ -19,6 +19,7 @@ rust_binary(
 
 rust_test(
     name = "notices_test",
+    size = "small",
     crate = ":notices",
     data = ["@spdx_license_list//:texts"],
     env = {"SPDX_TEXTS": "$(rlocationpaths @spdx_license_list//:texts)"},

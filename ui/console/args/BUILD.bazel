@@ -16,5 +16,6 @@ rust_library(
 
 rust_test(
     name = "args_test",
+    size = "small",
     crate = ":args",
 )

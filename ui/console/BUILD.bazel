@@ -33,6 +33,7 @@ rust_binary(
 
 rust_test(
     name = "console_test",
+    size = "small",
     crate = ":console_lib",
     deps = ["@crates//:prost"],
 )
