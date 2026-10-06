@@ -136,8 +136,7 @@ pub fn register_keys(cx: &mut App) {
         // Paging and the commands work regardless of which region has focus.
         KeyBinding::new("pageup", ScrollPageUp, console),
         KeyBinding::new("pagedown", ScrollPageDown, console),
-        KeyBinding::new("cmd-c", Copy, console),
-        KeyBinding::new("ctrl-c", Copy, console),
+        KeyBinding::new("secondary-c", Copy, console),
         KeyBinding::new("cmd-f", Find, console),
         KeyBinding::new("ctrl-f", Find, console),
         KeyBinding::new("/", Find, outside_text),
