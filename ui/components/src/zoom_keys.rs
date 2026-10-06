@@ -22,7 +22,7 @@ pub const ZOOM_KEY_STEP: f32 = 1.25;
 /// The zoom keys of a canvas carrying `scope`, which stand down while a text
 /// field in it holds the focus.
 pub fn zoom_key_bindings(scope: KeyScope) -> [KeyBinding; 3] {
-    let predicate = format!("{scope} && !{}", text_input::KEY_CONTEXT);
+    let predicate = text_input::unless_typing(scope);
     let predicate = Some(predicate.as_str());
     [
         KeyBinding::new("=", ZoomIn, predicate),

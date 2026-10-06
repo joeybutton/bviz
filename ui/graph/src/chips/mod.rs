@@ -96,8 +96,8 @@ const NOTICE_WIDTH: Pixels = px(480.);
 
 const PLACEHOLDER: &str = "query: //foo/... or deps()";
 
-/// The bar's keys; `outside_text` scopes those reaching it from the panel.
-pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
+/// The bar's keys; `unless_typing` scopes those reaching it from the panel.
+pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
     let field = Some(FIELD_KEY_CONTEXT);
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
@@ -109,8 +109,8 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("tab", AcceptCompletion, completing),
         KeyBinding::new("enter", AcceptCompletion, aimed),
         KeyBinding::new("escape", CloseCompletion, completing),
-        KeyBinding::new("q", Focus, outside_text),
-        KeyBinding::new("secondary-enter", Apply, outside_text),
+        KeyBinding::new("q", Focus, unless_typing),
+        KeyBinding::new("secondary-enter", Apply, unless_typing),
         KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),
@@ -125,7 +125,7 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", Edit, on_chips),
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
-        KeyBinding::new("secondary-shift-c", CopyStack, outside_text),
+        KeyBinding::new("secondary-shift-c", CopyStack, unless_typing),
         KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-shift-backspace", ClearQuery, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT)),

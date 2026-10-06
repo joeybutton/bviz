@@ -100,10 +100,9 @@ pub fn register_keys(cx: &mut App) {
     let timeline = Some(TIMELINE_KEY_CONTEXT.id());
     let critical_path = Some(critical_path::KEY_CONTEXT.id());
     let stats = Some(stats_panel::STATS_KEY_CONTEXT.id());
-    let unless_typing = |scope: KeyScope| format!("{scope} && !{}", text_input::KEY_CONTEXT);
-    let timeline_canvas = unless_typing(TIMELINE_KEY_CONTEXT);
+    let timeline_canvas = text_input::unless_typing(TIMELINE_KEY_CONTEXT);
     let timeline_canvas = Some(timeline_canvas.as_str());
-    let flame_canvas = unless_typing(flame_panel::FLAME_KEY_CONTEXT);
+    let flame_canvas = text_input::unless_typing(flame_panel::FLAME_KEY_CONTEXT);
     let flame_canvas = Some(flame_canvas.as_str());
     cx.bind_keys([
         KeyBinding::new("secondary-a", SelectAllTracks, timeline),

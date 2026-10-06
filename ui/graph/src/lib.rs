@@ -128,10 +128,8 @@ pub fn register_keys(cx: &mut App) {
 }
 
 fn bindings() -> Vec<KeyBinding> {
-    // A bare character typed into a text field is text, so the panel's own
-    // bindings stand down inside one.
-    let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
-    let outside_text = Some(outside_text.as_str());
+    let unless_typing = text_input::unless_typing(KEY_CONTEXT);
+    let unless_typing = Some(unless_typing.as_str());
     let jumping = Some(jump::KEY_CONTEXT);
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
@@ -142,13 +140,13 @@ fn bindings() -> Vec<KeyBinding> {
     );
     let outside_roots = Some(exclusive.as_str());
     let mut bindings = vec![
-        KeyBinding::new("h", ToggleNeighborhood, outside_text),
-        KeyBinding::new("r", ToggleReduce, outside_text),
-        KeyBinding::new("escape", Dismiss, outside_text),
-        KeyBinding::new("0", ShowWholeGraph, outside_text),
-        KeyBinding::new("enter", reveal::Accept, outside_text),
-        KeyBinding::new("alt-left", JumpBack, outside_text),
-        KeyBinding::new("alt-right", JumpForward, outside_text),
+        KeyBinding::new("h", ToggleNeighborhood, unless_typing),
+        KeyBinding::new("r", ToggleReduce, unless_typing),
+        KeyBinding::new("escape", Dismiss, unless_typing),
+        KeyBinding::new("0", ShowWholeGraph, unless_typing),
+        KeyBinding::new("enter", reveal::Accept, unless_typing),
+        KeyBinding::new("alt-left", JumpBack, unless_typing),
+        KeyBinding::new("alt-right", JumpForward, unless_typing),
         KeyBinding::new("up", jump::Previous, jumping),
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
@@ -180,7 +178,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", scatter::RevealAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
-    bindings.extend(chips::bindings(outside_text));
+    bindings.extend(chips::bindings(unless_typing));
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));

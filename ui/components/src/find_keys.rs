@@ -10,7 +10,7 @@ use gpui::{Action, KeyBinding};
 /// `find` only while its field is drawn: focus given to a field no element
 /// carries leaves the window answering no key.
 pub fn find_key_bindings<A: Action + Clone>(scope: KeyScope, find: A) -> [KeyBinding; 2] {
-    let unless_typing = format!("{scope} && !{}", text_input::KEY_CONTEXT);
+    let unless_typing = text_input::unless_typing(scope);
     [
         KeyBinding::new("secondary-f", find.clone(), Some(scope.id())),
         KeyBinding::new("/", find, Some(unless_typing.as_str())),

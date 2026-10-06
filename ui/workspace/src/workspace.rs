@@ -148,10 +148,9 @@ pub(crate) fn register_keys(cx: &mut App) {
         ],
     );
     let workspace = Some(KEY_CONTEXT.id());
-    // Typed into a text field, these keys edit the text.
-    let unless_typing = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let unless_typing = text_input::unless_typing(KEY_CONTEXT);
     let unless_typing = Some(unless_typing.as_str());
-    let playback = format!("{PLAYBACK_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let playback = text_input::unless_typing(PLAYBACK_KEY_CONTEXT);
     let playback = Some(playback.as_str());
     cx.bind_keys([
         KeyBinding::new("?", ShowKeysAndGestures, unless_typing),

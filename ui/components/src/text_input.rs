@@ -52,6 +52,12 @@ gpui::actions!(
 /// while it has focus edits the text rather than reaching an enclosing panel.
 pub const KEY_CONTEXT: KeyScope = KeyScope::new("TextInput", "Text field");
 
+/// The predicate of a binding in `scope` that stands down while a text field
+/// within it holds the focus, where the keystroke edits the text instead.
+pub fn unless_typing(scope: KeyScope) -> String {
+    format!("{scope} && !{KEY_CONTEXT}")
+}
+
 /// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
