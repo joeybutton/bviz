@@ -13,6 +13,7 @@ use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
 use crate::history::History;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
+use crate::menu::over_window;
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
@@ -34,7 +35,7 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
-    WeakEntity, Window, anchored, canvas, deferred, div, point, prelude::*, px, relative,
+    WeakEntity, Window, canvas, div, point, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -1757,22 +1758,6 @@ impl Render for ExclusivePanel {
             )
     }
 }
-
-/// `menu` standing over the whole window, drawn above whatever else the
-/// window draws.
-fn over_window(menu: &Entity<Menu>, window: &Window) -> impl IntoElement {
-    let viewport = window.viewport_size();
-    let whole = div()
-        .w(viewport.width)
-        .h(viewport.height)
-        .child(menu.clone());
-    let origin = point(px(0.), px(0.));
-    deferred(anchored().position(origin).child(whole)).with_priority(MENU_PRIORITY)
-}
-
-/// The priority a menu is deferred at, above that of any other deferred
-/// element the panel draws.
-const MENU_PRIORITY: usize = 1;
 
 /// The strip choosing the unit drawn and the roots `field`, followed by
 /// `crumbs`, which reads `computing` while the roots of a new choice are

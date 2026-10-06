@@ -44,6 +44,7 @@ mod history;
 mod hue;
 mod jump;
 mod legend;
+mod menu;
 mod missing;
 mod mode;
 mod model;
