@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::model::ConsoleModel;
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
 use bviz_ui_components::gesture::{
-    self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+    self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
     Button, KeyScope, Nesting, Scrollbar, TextInput, declare_scopes, find_key_bindings,
@@ -86,7 +86,7 @@ const GESTURES: Gestures<ConsoleIntent> = Gestures::new(&[
         ConsoleIntent::SelectText,
     ),
     Entry::new(
-        Input::click(gesture::Button::Left),
+        Input::click(gesture::Button::Left).holding(Held::SECONDARY),
         Place::On("a link"),
         "Open link",
         ConsoleIntent::OpenLink,
