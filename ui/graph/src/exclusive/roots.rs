@@ -14,8 +14,7 @@ use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip, TooltipColo
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 use std::sync::Arc;
 
-/// The key context the roots field carries, by which the panel's own
-/// single-key bindings stand down while a target set is typed into it.
+/// The key context the roots field carries, which [`LeaveRoots`] is scoped to.
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
     &super::KEY_CONTEXT,
     Nesting::Inside,

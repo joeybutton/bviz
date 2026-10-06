@@ -131,14 +131,12 @@ fn bindings() -> Vec<KeyBinding> {
     let unless_typing = text_input::unless_typing(KEY_CONTEXT);
     let unless_typing = Some(unless_typing.as_str());
     let jumping = Some(jump::KEY_CONTEXT);
+    let scatter_canvas = text_input::unless_typing(scatter::KEY_CONTEXT);
+    let scatter_canvas = Some(scatter_canvas.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
-    let exclusive = format!(
-        "{} && !{}",
-        exclusive::KEY_CONTEXT,
-        exclusive::ROOTS_KEY_CONTEXT
-    );
-    let outside_roots = Some(exclusive.as_str());
+    let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
+    let exclusive_canvas = Some(exclusive_canvas.as_str());
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
@@ -156,18 +154,18 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", jump::Close, jumping),
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
-        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT.id())),
-        KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
-        KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
-        KeyBinding::new("left", exclusive::SelectPrevious, outside_roots),
-        KeyBinding::new("right", exclusive::SelectNext, outside_roots),
-        KeyBinding::new("up", exclusive::SelectParent, outside_roots),
-        KeyBinding::new("down", exclusive::SelectChild, outside_roots),
-        KeyBinding::new("escape", exclusive::Deselect, outside_roots),
-        KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
-        KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
-        KeyBinding::new("alt-left", exclusive::FocusBack, outside_roots),
-        KeyBinding::new("alt-right", exclusive::FocusForward, outside_roots),
+        KeyBinding::new("0", scatter::ShowWholePlot, scatter_canvas),
+        KeyBinding::new("0", exclusive::ShowWholeBuild, exclusive_canvas),
+        KeyBinding::new("backspace", exclusive::FocusUp, exclusive_canvas),
+        KeyBinding::new("left", exclusive::SelectPrevious, exclusive_canvas),
+        KeyBinding::new("right", exclusive::SelectNext, exclusive_canvas),
+        KeyBinding::new("up", exclusive::SelectParent, exclusive_canvas),
+        KeyBinding::new("down", exclusive::SelectChild, exclusive_canvas),
+        KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
+        KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
+        KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
+        KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
+        KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
