@@ -1,3 +1,1 @@
-# The patch adds one line to the ruleset's BUILD file and carries the six
-# around it, too little of the file to attribute.
 exports_files(["rules-rust-export-licence.patch"])

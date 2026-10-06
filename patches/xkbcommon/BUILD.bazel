@@ -1,5 +1,3 @@
-# The patch removes a module declaration and a cfg attribute, too little of the
-# crate to attribute.
 exports_files(
     ["xkbcommon-drop-x11.patch"],
     visibility = ["//visibility:public"],

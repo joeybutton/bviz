@@ -3,6 +3,9 @@ Export the licence text
 The module's BUILD file keeps its COPYING private, so no licence declaration
 can point at it.
 
+The patch adds two lines to the module's BUILD file and carries the
+seven around them, too little of the file to attribute.
+
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -1,7 +1,9 @@
