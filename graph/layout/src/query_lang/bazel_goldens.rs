@@ -1,8 +1,13 @@
-//! Cases ported from Bazel's own tests of its query lexer and parser, with
-//! their inputs and expected text taken verbatim; NOTICE names the source.
+//! Cases ported from Bazel's own tests of its query language, with their
+//! inputs and expected text taken verbatim; NOTICE names the source.
+
+use std::collections::BTreeSet;
 
 use super::lex::{TokenKind, scan};
-use super::{Function, parse};
+use super::{Function, Universe, parse};
+use crate::intern::Id;
+use crate::joint::build_joint;
+use crate::test_support;
 
 /// Each input, and its tokens as LexerTest prints them.
 const SCANS: &[(&str, &str)] = &[
@@ -240,4 +245,156 @@ fn an_unknown_function_lists_the_known_ones() {
             known.join(", ")
         )
     );
+}
+
+/// AbstractQueryTest's package `c`, as `bazel query --output=proto` writes
+/// its BUILD file:
+///
+/// ```text
+/// genrule(name='c', srcs=['p', 'q'], outs=['r', 's'], cmd=':')
+/// cc_binary(name='d', srcs=['e.cc'], data=['r'])
+/// cc_test(name='f', srcs=['g.cc'])
+/// ```
+///
+/// with the `.dwp` and `.stripped` outputs each C++ rule implies; and its
+/// package `t`:
+///
+/// ```text
+/// cc_library(name='t', srcs=['t.cc'], data=['r'], testonly=0)
+/// cc_library(name='t_test', srcs=['t.cc'], data=['r'], testonly=1)
+/// ```
+fn abstract_query_test_packages() -> Universe {
+    let mut targets = Vec::new();
+    for source in [
+        "//c:BUILD",
+        "//c:e.cc",
+        "//c:g.cc",
+        "//c:p",
+        "//c:q",
+        "//t:BUILD",
+        "//t:t.cc",
+        "//t:r",
+    ] {
+        targets.push(test_support::source(source));
+    }
+    let c_rules = [
+        (
+            "//c:c",
+            "genrule",
+            &["//c:p", "//c:q"][..],
+            &["//c:r", "//c:s"],
+        ),
+        (
+            "//c:d",
+            "cc_binary",
+            &["//c:e.cc", "//c:r"],
+            &["//c:d.dwp", "//c:d.stripped"],
+        ),
+        (
+            "//c:f",
+            "cc_test",
+            &["//c:g.cc"],
+            &["//c:f.dwp", "//c:f.stripped"],
+        ),
+    ];
+    for (name, class, inputs, outputs) in c_rules {
+        targets.push(test_support::rule(name, class, inputs, Vec::new()));
+        targets.extend(
+            outputs
+                .iter()
+                .map(|output| test_support::generated(output, name)),
+        );
+    }
+    for (name, testonly) in [("//t:t", false), ("//t:t_test", true)] {
+        let attributes = vec![test_support::boolean("testonly", testonly)];
+        let inputs = ["//t:t.cc", "//t:r"];
+        targets.push(test_support::rule(name, "cc_library", &inputs, attributes));
+    }
+    let joint = build_joint(None, None, Some(&targets), false);
+    Universe::new(
+        &joint.graph,
+        &joint.names,
+        &joint.facets,
+        &joint.capabilities,
+    )
+}
+
+/// Each expression AbstractQueryTest evaluates over [`abstract_query_test_packages`],
+/// and the labels it names, as `evalToString` prints them.
+const EVALUATIONS: &[(&str, &str)] = &[
+    (
+        "c:*",
+        "//c:BUILD //c:c //c:d //c:d.dwp //c:d.stripped //c:e.cc //c:f //c:f.dwp //c:f.stripped //c:g.cc //c:p //c:q //c:r //c:s",
+    ),
+    // testKindOperator
+    ("kind(rule, c:*)", "//c:c //c:d //c:f"),
+    ("kind(genrule, c:*)", "//c:c"),
+    ("kind(cc.*, c:*)", "//c:d //c:f"),
+    (
+        "kind(file, c:*)",
+        "//c:BUILD //c:d.dwp //c:d.stripped //c:e.cc //c:f.dwp //c:f.stripped //c:g.cc //c:p //c:q //c:r //c:s",
+    ),
+    (
+        "kind(gener.*, c:*)",
+        "//c:d.dwp //c:d.stripped //c:f.dwp //c:f.stripped //c:r //c:s",
+    ),
+    (
+        "kind(gen.*, c:*)",
+        "//c:c //c:d.dwp //c:d.stripped //c:f.dwp //c:f.stripped //c:r //c:s",
+    ),
+    (
+        "kind(source, c:*)",
+        "//c:BUILD //c:e.cc //c:g.cc //c:p //c:q",
+    ),
+    (
+        "kind('source file', c:*)",
+        "//c:BUILD //c:e.cc //c:g.cc //c:p //c:q",
+    ),
+    // testFilterOperator
+    ("filter(BUILD, c:*)", "//c:BUILD"),
+    ("filter('\\.cc$', c:*)", "//c:e.cc //c:g.cc"),
+    ("filter(//c.*cc$, c:*)", "//c:e.cc //c:g.cc"),
+    (
+        "filter(:.$, c:*)",
+        "//c:c //c:d //c:f //c:p //c:q //c:r //c:s",
+    ),
+    // testAttrOperatorOnName
+    ("attr(name, '.*', '//c:*')", "//c:c //c:d //c:f"),
+    ("attr(name, '.+', '//c:*')", "//c:c //c:d //c:f"),
+    ("attr(name, '.*d.*', '//c:*')", "//c:d"),
+    ("attr(name, '.*e.*', '//c:*')", ""),
+    // testAttrOperatorOnBooleans
+    ("attr(testonly, 0, t:*)", "//t:t"),
+    ("attr(testonly, 1, t:*)", "//t:t_test"),
+];
+
+/// Expressions of AbstractQueryTest's `testAttrOperator`, reading attributes
+/// bviz does not load into its graph.
+const UNLOADED_ATTRIBUTES: &[&str] = &[
+    "attr(cmd,':', c:*)",
+    "attr(linkshared, 0, c:*)",
+    "attr('data', 'r', c:*)",
+    "attr('deps', '\\[\\]', c:*)",
+];
+
+#[test]
+fn narrows_as_bazel_does() {
+    let universe = abstract_query_test_packages();
+    for &(input, expected) in EVALUATIONS {
+        let value = universe.evaluate(&parse(input).unwrap()).unwrap();
+        let named: BTreeSet<&str> = value
+            .ones()
+            .map(|id| universe.label(Id(id as u32)).unwrap())
+            .collect();
+        let named: Vec<&str> = named.into_iter().collect();
+        assert_eq!(named.join(" "), expected, "{input}");
+    }
+    for &input in UNLOADED_ATTRIBUTES {
+        let error = universe.evaluate(&parse(input).unwrap()).unwrap_err();
+        assert!(
+            error.message.starts_with("attr() needs each rule's '"),
+            "{input}: {}",
+            error.message
+        );
+    }
 }

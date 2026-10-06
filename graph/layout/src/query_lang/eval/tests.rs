@@ -1,7 +1,4 @@
-use bazel_query_proto::blaze_query::{
-    Attribute, GeneratedFile, Rule, SourceFile, Target, attribute::Discriminator as AttributeType,
-    target::Discriminator,
-};
+use bazel_query_proto::blaze_query::Target;
 use fixedbitset::FixedBitSet;
 
 use super::super::parse;
@@ -10,48 +7,10 @@ use crate::facets::FacetsBuilder;
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
+use crate::test_support::{generated, source, string_list};
 
 fn rule(name: &str, inputs: &[&str], tags: &[&str]) -> Target {
-    let tags = Attribute {
-        name: "tags".to_string(),
-        r#type: AttributeType::StringList as i32,
-        string_list_value: tags.iter().map(|tag| tag.to_string()).collect(),
-        ..Default::default()
-    };
-    Target {
-        r#type: Discriminator::Rule as i32,
-        rule: Some(Rule {
-            name: name.to_string(),
-            rule_class: "genrule".to_string(),
-            rule_input: inputs.iter().map(|input| input.to_string()).collect(),
-            attribute: vec![tags],
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-fn source(name: &str) -> Target {
-    Target {
-        r#type: Discriminator::SourceFile as i32,
-        source_file: Some(SourceFile {
-            name: name.to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-fn generated(name: &str, rule: &str) -> Target {
-    Target {
-        r#type: Discriminator::GeneratedFile as i32,
-        generated_file: Some(GeneratedFile {
-            name: name.to_string(),
-            generating_rule: rule.to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
+    crate::test_support::rule(name, "genrule", inputs, vec![string_list("tags", tags)])
 }
 
 /// A query graph: `//a:lib` compiles `//a:lib.cc`, `//a:gen` turns it into
@@ -235,8 +194,80 @@ fn a_function_reading_what_the_graph_lacks_says_what_it_needs() {
         "visible() needs each target's visibility, which bviz does not load into its graph"
     );
     assert_eq!(
-        fixture.error("kind(rule, //a:lib)"),
-        "bviz does not evaluate kind()"
+        fixture.error("config(//a:lib, target)"),
+        "bviz does not evaluate config()"
+    );
+}
+
+#[test]
+fn attr_reads_tags_as_bazel_prints_a_list() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.ok("attr(tags, '^\\[manual\\]$', //...)"),
+        ["//b:app"]
+    );
+    assert_eq!(
+        fixture.ok("attr(tags, '^\\[\\]$', //...)"),
+        ["//a:gen", "//a:lib", "//b:test"]
+    );
+    assert_eq!(
+        fixture.ok("attr(name, '^lib$', //...:*)"),
+        ["//a:lib"],
+        "a file target carries no attributes"
+    );
+}
+
+#[test]
+fn a_pattern_the_regex_crate_rejects_fails_naming_the_construct() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.error("filter('a(?=b)', //nowhere:x)"),
+        "illegal 'filter' pattern regexp 'a(?=b)': look-around, including look-ahead and \
+         look-behind, is not supported",
+        "the pattern fails before the expression is evaluated"
+    );
+    assert_eq!(
+        fixture.error("kind('(a)\\1', //a:lib)"),
+        "illegal 'kind' pattern regexp '(a)\\1': backreferences are not supported"
+    );
+}
+
+#[test]
+fn a_pattern_matches_ascii_word_characters_alone() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.ok("filter('^//a:\\w+$', //a:*)"),
+        ["//a:gen", "//a:lib"]
+    );
+}
+
+#[test]
+fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.error("attr(srcs, x, //a:lib)"),
+        "attr() needs each rule's 'srcs' attribute, which bviz does not load into its graph"
+    );
+    let bare = [crate::test_support::rule(
+        "//a:lib",
+        "genrule",
+        &[],
+        Vec::new(),
+    )];
+    let joint = build_joint(None, None, Some(&bare), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &joint.facets,
+        &joint.capabilities,
+    );
+    let error = universe
+        .evaluate(&parse("attr(tags, manual, //a:lib)").unwrap())
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "attr() needs each rule's tags, which the graph's inputs state only under \
+         --proto:output_rule_attrs"
     );
 }
 
@@ -323,6 +354,23 @@ fn a_walk_from_a_deeper_level_climbs_no_higher() {
         ["act:t", "act:u", "ct:t", "ct:u"],
         "each level walks apart"
     );
+}
+
+#[test]
+fn a_configured_target_and_an_action_match_as_their_target_does() {
+    let (universe, names) = levels();
+    let all = value(
+        &universe,
+        &names,
+        &["target://a:t", "ct:t", "act:t", "ct:u"],
+    );
+    let regex = universe.regex(Function::Filter, ":t$").unwrap();
+    assert_eq!(
+        labels(&names, &universe.filter(&regex, &all)),
+        ["//a:t", "act:t", "ct:t"]
+    );
+    let regex = universe.regex(Function::Kind, "^rule$").unwrap();
+    assert_eq!(labels(&names, &universe.kind(&regex, &all)).len(), 4);
 }
 
 #[test]

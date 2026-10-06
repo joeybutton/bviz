@@ -8,6 +8,10 @@
 //! no edges, so the graphs drawn state neither, and the two engines walk the
 //! same edges.
 //!
+//! `attr` is drawn for the attributes bviz loads, which the graphs drawn state
+//! as `--proto:output_rule_attrs` writes them: every rule its tags, some rules
+//! `testonly`.
+//!
 //! `somepath` and `some` may each answer any of several sets. Drawn only at
 //! the top of an expression, where nothing reads their answer further, each is
 //! checked for being one Bazel's engine could give: a path of fewest edges
@@ -422,6 +426,47 @@ struct Drawer<'a> {
     graph: &'a Graph,
 }
 
+/// The patterns `kind`, `filter` and `attr` are drawn with: constructs Java's
+/// and the `regex` crate's engines read alike over ASCII text, which leaves out
+/// look-around, backreferences, possessive quantifiers, atomic groups and
+/// `\Q…\E` quoting.
+const KIND_PATTERNS: &[&str] = &[
+    "rule",
+    "file",
+    "source",
+    "gen.*",
+    "^genrule rule$",
+    "_test",
+    "package",
+    "java|sh",
+    "e r",
+    "d f",
+    "^s",
+    "",
+];
+const LABEL_PATTERNS: &[&str] = &[
+    "lib",
+    "\\.txt$",
+    "^@@ext",
+    "//a/b",
+    ":a",
+    "out\\d",
+    "a.*b",
+    "^//a:",
+    "x/y",
+    "[.]json",
+    "(?i)APP",
+    "\\w+\\.o$",
+];
+const ATTRIBUTE_PATTERNS: [(&str, &[&str]); 3] = [
+    (
+        "tags",
+        &["manual", "^\\[\\]$", "local", "\\[manual\\]", "", ", "],
+    ),
+    ("testonly", &["1", "0", "", "^1$"]),
+    ("name", &["^a", "lib|app", "t$", "", "^[a-c]$"]),
+];
+
 /// The variables a drawn `let` binds; a reference to one may fall outside it.
 const VARIABLES: &[&str] = &["v", "w"];
 
@@ -473,12 +518,17 @@ impl Drawer<'_> {
         }
     }
 
+    /// One of `patterns`, quoted.
+    fn pick(&mut self, patterns: &[&str]) -> String {
+        format!("'{}'", patterns[self.rng.usize(..patterns.len())])
+    }
+
     fn call(&mut self, depth: u32) -> String {
         let mut arg = || self.expr(depth - 1);
         let (one, two) = (arg(), arg());
         let bounded = self.rng.bool();
         let depth = self.depth();
-        match self.rng.u8(..6) {
+        match self.rng.u8(..9) {
             0 if bounded => format!("deps({one}, {depth})"),
             0 => format!("deps({one})"),
             1 if bounded => format!("allrdeps({one}, {depth})"),
@@ -487,7 +537,13 @@ impl Drawer<'_> {
             2 => format!("rdeps({one}, {two})"),
             3 => format!("allpaths({one}, {two})"),
             4 => format!("siblings({one})"),
-            _ => format!("same_pkg_direct_rdeps({one})"),
+            5 => format!("same_pkg_direct_rdeps({one})"),
+            6 => format!("kind({}, {one})", self.pick(KIND_PATTERNS)),
+            7 => format!("filter({}, {one})", self.pick(LABEL_PATTERNS)),
+            _ => {
+                let (attribute, patterns) = ATTRIBUTE_PATTERNS[self.rng.usize(..3)];
+                format!("attr({attribute}, {}, {one})", self.pick(patterns))
+            }
         }
     }
 }

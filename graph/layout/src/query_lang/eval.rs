@@ -165,16 +165,28 @@ impl Universe {
                 needs("the BUILD and .bzl files of each package")
             }
             Function::Executables => needs("which rules are executable"),
-            Function::Attr
-            | Function::Config
-            | Function::Filter
-            | Function::Inputs
-            | Function::Kind
-            | Function::Mnemonic
-            | Function::Outputs => Err(fail(format!(
-                "bviz does not evaluate {}()",
-                function.name()
-            ))),
+            // Bazel compiles the pattern before it evaluates the expression
+            // filtered, so a pattern it cannot compile fails first.
+            Function::Kind => {
+                let regex = self.regex(function, words(args)[0]).map_err(fail)?;
+                let (values, _) = arguments()?;
+                Ok(self.kind(&regex, &values[0]))
+            }
+            Function::Filter => {
+                let regex = self.regex(function, words(args)[0]).map_err(fail)?;
+                let (values, _) = arguments()?;
+                Ok(self.filter(&regex, &values[0]))
+            }
+            Function::Attr => {
+                let words = words(args);
+                let regex = self.regex(function, words[1]).map_err(fail)?;
+                let attribute = self.attribute(words[0]).map_err(fail)?;
+                let (values, _) = arguments()?;
+                Ok(self.attr(attribute, &regex, &values[0]))
+            }
+            Function::Config | Function::Inputs | Function::Mnemonic | Function::Outputs => Err(
+                fail(format!("bviz does not evaluate {}()", function.name())),
+            ),
         }
     }
 
@@ -196,6 +208,15 @@ impl Universe {
         }
         Ok((values, int))
     }
+}
+
+/// The words among `args`, in order.
+fn words(args: &[Arg]) -> Vec<&str> {
+    let words = args.iter().filter_map(|arg| match arg {
+        Arg::Word(word) => Some(word.text.as_str()),
+        Arg::Expr(_) | Arg::Int(_) => None,
+    });
+    words.collect()
 }
 
 /// Whether `name` is a variable name `let` binds (`LetExpression.NAME_PATTERN`).

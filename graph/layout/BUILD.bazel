@@ -32,6 +32,8 @@ rust_library(
         "@crates//:org-eclipse-elk-graph",
         "@crates//:prost",
         "@crates//:rayon",
+        "@crates//:regex-automata",
+        "@crates//:regex-syntax",
         "@crates//:rustc-hash",
     ],
 )

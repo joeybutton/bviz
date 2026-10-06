@@ -468,9 +468,26 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
         throw new UnsupportedOperationException();
       }
 
+      /**
+       * The values {@code TargetUtils.getAttrAsString} prints for an attribute the proto states:
+       * a list as {@code List.toString} prints it, a boolean as {@code 1} or {@code 0}.
+       */
       @Override
       public Iterable<String> getAttrAsString(Node node, String attrName) {
-        throw new UnsupportedOperationException();
+        if (attrName.equals("name")) {
+          return List.of(node.label.getName());
+        }
+        for (Build.Attribute attribute : node.target.getRule().getAttributeList()) {
+          if (!attribute.getName().equals(attrName)) {
+            continue;
+          }
+          return switch (attribute.getType()) {
+            case STRING_LIST -> List.of(new ArrayList<>(attribute.getStringListValueList()).toString());
+            case BOOLEAN -> List.of(attribute.getBooleanValue() ? "1" : "0");
+            default -> throw new UnsupportedOperationException(attribute.toString());
+          };
+        }
+        return List.of();
       }
 
       @Override

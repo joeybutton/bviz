@@ -4,9 +4,11 @@
 //! can be pointed at where it was written.
 
 mod ast;
+mod declared;
 mod eval;
 mod functions;
 mod lex;
+mod narrow;
 mod parse;
 mod universe;
 

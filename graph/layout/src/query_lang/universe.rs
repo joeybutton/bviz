@@ -6,7 +6,9 @@ use std::sync::Arc;
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
 
-use crate::capability::Capabilities;
+use super::declared::Declared;
+use super::narrow::Patterns;
+use crate::capability::{Axis, Capabilities, Support};
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
@@ -25,6 +27,12 @@ pub struct Universe {
     owner: Vec<u32>,
     /// The nodes a value may hold: every node but the frames.
     members: FixedBitSet,
+    pub(super) declared: Declared,
+    /// How far the inputs state each rule's tags.
+    pub(super) tags: Support,
+    /// How far the inputs state whether each rule is `testonly`.
+    pub(super) testonly: Support,
+    pub(super) patterns: Patterns,
 }
 
 /// Stands in [`Universe::owner`] for a node belonging to no target.
@@ -46,12 +54,17 @@ impl Universe {
             }
             members.set(node.id.0 as usize, !node.kind.is_frame());
         }
+        let index = Index::new(graph, &[]);
         Universe {
-            index: Index::new(graph, &[]),
+            declared: Declared::new(labels.entries(), &index, facets),
+            index,
             labels,
             targets,
             owner,
             members,
+            tags: capabilities.support(Axis::Tags),
+            testonly: capabilities.support(Axis::Testonly),
+            patterns: Patterns::default(),
         }
     }
 
