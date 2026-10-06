@@ -1,10 +1,12 @@
 use crate::chart::format_duration;
 use crate::model::{SourceReplaced, TraceModel};
 use crate::rebuild::Rebuild;
+use crate::row_step;
 use crate::theme::Palette;
 use crate::{
-    STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE,
-    profile_status, set_list_thumb, thumb_offset, time_window_chip,
+    ChooseNext, ChoosePrevious, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH,
+    STATS_ROW_HEIGHT, STATS_TEXT_SIZE, Unchoose, profile_status, set_list_thumb, thumb_offset,
+    time_window_chip,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
@@ -16,8 +18,8 @@ use bviz_ui_components::{
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, SharedString, Subscription,
-    UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -547,6 +549,27 @@ impl StatsPanel {
         (picked.aggregate_version == order.aggregate_version).then_some(picked.index)
     }
 
+    /// Picks the row `by` rows from the picked one in the order the table
+    /// shows, or its first where none is picked, and scrolls it into view.
+    fn pick_by(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some(order) = self.stats_order.clone() else {
+            return;
+        };
+        let shown = order.order();
+        let Some(index) = row_step::moved(shown, self.picked_row(&order), by) else {
+            return;
+        };
+        self.picked = Some(StatsPick {
+            aggregate_version: order.aggregate_version,
+            index,
+        });
+        if let Some(row) = row_step::position(shown, index) {
+            self.stats_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
     /// Sorts by `column`, the other way where the table is sorted by it
     /// already, and descending otherwise.
     fn sort_by(&mut self, column: StatsColumn) {
@@ -639,6 +662,12 @@ impl Render for StatsPanel {
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|panel, _: &ChoosePrevious, _, cx| panel.pick_by(-1, cx)))
+            .on_action(cx.listener(|panel, _: &ChooseNext, _, cx| panel.pick_by(1, cx)))
+            .on_action(cx.listener(|panel, _: &Unchoose, _, cx| {
+                panel.picked = None;
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()

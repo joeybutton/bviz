@@ -99,6 +99,7 @@ pub fn register_keys(cx: &mut App) {
     );
     let timeline = Some(TIMELINE_KEY_CONTEXT.id());
     let critical_path = Some(critical_path::KEY_CONTEXT.id());
+    let stats = Some(stats_panel::STATS_KEY_CONTEXT.id());
     let unless_typing = |scope: KeyScope| format!("{scope} && !{}", text_input::KEY_CONTEXT);
     let timeline_canvas = unless_typing(TIMELINE_KEY_CONTEXT);
     let timeline_canvas = Some(timeline_canvas.as_str());
@@ -115,6 +116,9 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("up", ChoosePrevious, critical_path),
         KeyBinding::new("down", ChooseNext, critical_path),
         KeyBinding::new("escape", Unchoose, critical_path),
+        KeyBinding::new("up", ChoosePrevious, stats),
+        KeyBinding::new("down", ChooseNext, stats),
+        KeyBinding::new("escape", Unchoose, stats),
         KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
         KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
     ]);
