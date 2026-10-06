@@ -1,3 +1,4 @@
+use bazel_query_proto::analysis::{Configuration, ConfiguredTarget};
 use bazel_query_proto::blaze_query::{
     Attribute, GeneratedFile, Rule, SourceFile, Target, attribute::Discriminator as AttributeType,
     target::Discriminator,
@@ -79,6 +80,31 @@ pub(crate) fn boolean(name: &str, value: bool) -> Attribute {
         name: name.to_string(),
         r#type: AttributeType::Boolean as i32,
         boolean_value: Some(value),
+        ..Default::default()
+    }
+}
+
+/// `target` built in the configuration cquery numbers `configuration_id`, `0`
+/// standing for none.
+pub(crate) fn configured(target: Target, configuration_id: u32) -> ConfiguredTarget {
+    ConfiguredTarget {
+        target: Some(target),
+        configuration_id,
+        ..Default::default()
+    }
+}
+
+pub(crate) fn configuration(
+    id: u32,
+    checksum: &str,
+    mnemonic: &str,
+    is_tool: bool,
+) -> Configuration {
+    Configuration {
+        id,
+        checksum: checksum.to_string(),
+        mnemonic: mnemonic.to_string(),
+        is_tool,
         ..Default::default()
     }
 }

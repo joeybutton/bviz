@@ -3,9 +3,14 @@
 
 use std::collections::BTreeSet;
 
+use bazel_query_proto::analysis::CqueryResult;
+use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+use fixedbitset::FixedBitSet;
+
 use super::lex::{TokenKind, scan};
 use super::{Function, Universe, parse};
-use crate::intern::Id;
+use crate::graph::Kind;
+use crate::intern::{Id, Names};
 use crate::joint::build_joint;
 use crate::test_support;
 
@@ -397,4 +402,151 @@ fn narrows_as_bazel_does() {
             error.message
         );
     }
+}
+
+/// The configured targets of ConfiguredTargetQuerySemanticsTest's `config()`
+/// cases, as a cquery under `--transitions` writes them: the top-level
+/// configuration (1), an exec configuration (2), and one a Starlark
+/// transition reached (3), whose checksums share a prefix.
+fn configured_target_query_semantics_test_build() -> (Universe, Names) {
+    use test_support::{configuration, configured, rule, source};
+    let configurations = vec![
+        configuration(1, "0a1b2c3d4e5f", "k8-fastbuild", false),
+        configuration(2, "9f8e7d6c5b4a", "k8-opt-exec-ST-d57f47055a04", true),
+        configuration(3, "0a1bff000011", "k8-fastbuild-ST-4c3a9e1b2d7f", false),
+    ];
+    // Each configured target: its label, rule class and configuration, and
+    // those it depends on in their configurations.
+    type Built<'a> = (&'a str, &'a str, u32, &'a [(&'a str, u32)]);
+    let built: [Built; 12] = [
+        ("//test:target_dep", "simple_rule", 1, &[("//test:dep", 1)]),
+        ("//test:exec_dep", "simple_rule", 2, &[("//test:dep", 2)]),
+        ("//test:dep", "simple_rule", 1, &[]),
+        ("//test:dep", "simple_rule", 2, &[]),
+        ("//test:my_java", "java_library", 1, &[]),
+        ("//test:my_flag", "string_flag", 1, &[]),
+        (
+            "//test:buildme",
+            "rule_with_deps_transition",
+            1,
+            &[("//test:mydep", 3)],
+        ),
+        ("//test:mydep", "simple_rule", 3, &[]),
+        (
+            "//test:transitioner",
+            "rule_with_deps_transition",
+            1,
+            &[("//test:simple", 3)],
+        ),
+        ("//test:simple", "simple_rule", 1, &[]),
+        ("//test:simple", "simple_rule", 3, &[]),
+        ("//mytest:mytarget", "simple_rule", 1, &[]),
+    ];
+    let mut results: Vec<_> = built
+        .into_iter()
+        .map(|(name, class, config, deps)| {
+            let labels: Vec<&str> = deps.iter().map(|&(label, _)| label).collect();
+            let mut target = rule(name, class, &labels, Vec::new());
+            let rule = target.rule.as_mut().expect("a rule");
+            rule.configured_rule_input = (deps.iter())
+                .map(|&(label, config)| ConfiguredRuleInput {
+                    label: Some(label.to_string()),
+                    configuration_id: Some(config),
+                    ..Default::default()
+                })
+                .collect();
+            configured(target, config)
+        })
+        .collect();
+    results.push(configured(source("//test:foo.java"), 0));
+    let cquery = [CqueryResult {
+        results,
+        configurations,
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &joint.facets,
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+/// The configured targets among `value`, by their names in the graph.
+fn configured_targets(universe: &Universe, names: &Names, value: &FixedBitSet) -> Vec<String> {
+    let configured = value
+        .ones()
+        .map(|id| Id(id as u32))
+        .filter(|&id| universe.index.kind(id) == Some(Kind::ConfiguredTarget));
+    configured.map(|id| names.resolve(id).to_string()).collect()
+}
+
+#[test]
+fn config_names_configured_targets_as_cquery_does() {
+    let (universe, names) = configured_target_query_semantics_test_build();
+    let eval = |expr: &str| universe.evaluate(&parse(expr).unwrap());
+    let configured = |expr: &str| configured_targets(&universe, &names, &eval(expr).unwrap());
+
+    // testConfig_target
+    assert_eq!(eval("config(//test:target_dep, target)").unwrap(), {
+        let mut literal = eval("//test:target_dep").unwrap();
+        literal.set(
+            names.get("target://test:target_dep").unwrap().0 as usize,
+            false,
+        );
+        literal
+    });
+    assert_eq!(
+        eval("config(//test:exec_dep, target)").unwrap_err().message,
+        "No target (in) //test:exec_dep could be found in the 'target' configuration"
+    );
+    assert_eq!(
+        configured("config(//test:dep, target)"),
+        ["ct://test:dep#0a1b2c3d4e5f"]
+    );
+
+    // testConfig_nullConfig
+    let null = eval("config(//test:foo.java,null)").unwrap();
+    assert_eq!(null.count_ones(..), 1);
+    assert!(configured_targets(&universe, &names, &null).is_empty());
+
+    // testConfig_configHash
+    assert_eq!(configured("config(//test:mydep, 0a1bff000011)").len(), 1);
+    assert!(
+        eval("config(//test:mydep, 0a1b2c3d4e5f)")
+            .unwrap_err()
+            .message
+            .contains(
+                "No target (in) //test:mydep could be found in the configuration with checksum"
+            )
+    );
+
+    // testConfig_configHashPrefix
+    assert_eq!(
+        configured("config(//mytest:mytarget,0a1b2c)"),
+        configured("//mytest:mytarget")
+    );
+
+    // testConfig_configHashUnknownPrefix
+    assert!(
+        eval("config(//mytest:mytarget,0a1b2d)")
+            .unwrap_err()
+            .message
+            .contains("config()'s second argument must identify a unique configuration")
+    );
+
+    // testConfig_exprArgumentFailure
+    assert!(
+        eval("config(filter(\"??not-a-valid-regex\", //test:foo.java), null)")
+            .unwrap_err()
+            .message
+            .starts_with("illegal 'filter' pattern regexp '??not-a-valid-regex'")
+    );
+
+    // testLabelExpressionsMatchesAllConfiguredTargetsWithLabel
+    assert_eq!(configured("//test:simple").len(), 2);
+
+    // testConfigFunctionRefinesMultipleMatches
+    assert_eq!(configured("config(//test:simple, target)").len(), 1);
 }

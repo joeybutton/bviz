@@ -6,6 +6,7 @@ use std::sync::Arc;
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
 
+use super::config::Configurations;
 use super::declared::Declared;
 use super::narrow::Patterns;
 use crate::capability::{Axis, Capabilities, Support};
@@ -28,6 +29,7 @@ pub struct Universe {
     /// The nodes a value may hold: every node but the frames.
     members: FixedBitSet,
     pub(super) declared: Declared,
+    pub(super) configurations: Configurations,
     /// How far the inputs state each rule's tags.
     pub(super) tags: Support,
     /// How far the inputs state whether each rule is `testonly`.
@@ -57,6 +59,7 @@ impl Universe {
         let index = Index::new(graph, &[]);
         Universe {
             declared: Declared::new(labels.entries(), &index, facets),
+            configurations: Configurations::new(graph, facets),
             index,
             labels,
             targets,

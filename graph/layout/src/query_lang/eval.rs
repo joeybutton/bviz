@@ -184,9 +184,16 @@ impl Universe {
                 let (values, _) = arguments()?;
                 Ok(self.attr(attribute, &regex, &values[0]))
             }
-            Function::Config | Function::Inputs | Function::Mnemonic | Function::Outputs => Err(
-                fail(format!("bviz does not evaluate {}()", function.name())),
-            ),
+            Function::Config => {
+                let (values, _) = arguments()?;
+                let written = expressions(args)[0].to_string();
+                let config = self.config(&values[0], words(args)[0], &written);
+                config.map_err(fail)
+            }
+            Function::Inputs | Function::Mnemonic | Function::Outputs => Err(fail(format!(
+                "bviz does not evaluate {}()",
+                function.name()
+            ))),
         }
     }
 
@@ -208,6 +215,15 @@ impl Universe {
         }
         Ok((values, int))
     }
+}
+
+/// The expressions among `args`, in order.
+fn expressions(args: &[Arg]) -> Vec<&Expr> {
+    let expressions = args.iter().filter_map(|arg| match arg {
+        Arg::Expr(expr) => Some(expr),
+        Arg::Word(_) | Arg::Int(_) => None,
+    });
+    expressions.collect()
 }
 
 /// The words among `args`, in order.

@@ -194,8 +194,8 @@ fn a_function_reading_what_the_graph_lacks_says_what_it_needs() {
         "visible() needs each target's visibility, which bviz does not load into its graph"
     );
     assert_eq!(
-        fixture.error("config(//a:lib, target)"),
-        "bviz does not evaluate config()"
+        fixture.error("mnemonic(Javac, //a:lib)"),
+        "bviz does not evaluate mnemonic()"
     );
 }
 
@@ -268,6 +268,119 @@ fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
         error.message,
         "attr() needs each rule's tags, which the graph's inputs state only under \
          --proto:output_rule_attrs"
+    );
+}
+
+/// A cquery of `//c:lib`, built in the top-level configuration and in two
+/// exec configurations whose checksums share a prefix, and of `//c:in.txt`,
+/// built in none; or, without `tools`, of `//c:lib` built in the top-level
+/// configuration alone.
+fn configured(tools: bool) -> (Universe, Names) {
+    use crate::test_support::{configuration, configured, rule};
+    let mut configurations = vec![configuration(1, "aa11", "k8-fastbuild", false)];
+    let mut results = vec![
+        configured(rule("//c:lib", "genrule", &[], Vec::new()), 1),
+        configured(source("//c:in.txt"), 0),
+    ];
+    if tools {
+        configurations.push(configuration(2, "bb22", "k8-opt-exec-ST-1", true));
+        configurations.push(configuration(3, "bb33", "k8-opt-exec-ST-2", true));
+        results.push(configured(rule("//c:lib", "genrule", &[], Vec::new()), 3));
+        results.push(configured(rule("//c:lib", "genrule", &[], Vec::new()), 2));
+    }
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results,
+        configurations,
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &joint.facets,
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+fn configured_query(universe: &Universe, names: &Names, expr: &str) -> Result<Vec<String>, String> {
+    let value = universe
+        .evaluate(&parse(expr).unwrap())
+        .map_err(|e| e.message)?;
+    Ok(labels(names, &value))
+}
+
+#[test]
+fn config_names_a_configuration_by_a_unique_checksum_prefix() {
+    let (universe, names) = configured(true);
+    let query = |expr| configured_query(&universe, &names, expr);
+    assert_eq!(query("config(//c:lib, bb3)").unwrap(), ["ct://c:lib#bb33"]);
+    assert_eq!(
+        query("config(//c:lib, bb)").unwrap_err(),
+        "Configuration ID 'bb' is ambiguous.\n\
+         'bb' is a prefix of multiple configurations:\n bb22\n bb33\n\
+         \n\
+         Use a longer prefix to uniquely identify one configuration."
+    );
+    assert_eq!(
+        query("config(//c:lib, host)").unwrap_err(),
+        "'host' configuration no longer exists. Use a specific configuration hash instead"
+    );
+    assert_eq!(
+        query("config(//c:lib - //c:lib, host)").unwrap_err(),
+        "No target (in) (//c:lib - //c:lib) could be found in the 'host' configuration",
+        "an empty value names nothing before the configuration is read"
+    );
+    assert_eq!(query("config(//c:*, null)").unwrap(), ["//c:in.txt"]);
+}
+
+#[test]
+fn config_target_leaves_out_a_configuration_only_a_dependency_is_built_in() {
+    use crate::test_support::{configuration, configured, rule};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    // //c:app, built for the host platform, depends on //c:lib built for
+    // another platform, whose configuration's mnemonic carries no `ST-`.
+    let mut app = rule("//c:app", "genrule", &["//c:lib"], Vec::new());
+    app.rule.as_mut().unwrap().configured_rule_input = vec![ConfiguredRuleInput {
+        label: Some("//c:lib".to_string()),
+        configuration_id: Some(2),
+        ..Default::default()
+    }];
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(app, 1),
+            configured(rule("//c:lib", "genrule", &[], Vec::new()), 1),
+            configured(rule("//c:lib", "genrule", &[], Vec::new()), 2),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "aarch64-fastbuild", false),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &joint.facets,
+        &joint.capabilities,
+    );
+    assert_eq!(
+        configured_query(&universe, &joint.names, "config(//c:lib, target)").unwrap(),
+        ["ct://c:lib#aa11"]
+    );
+}
+
+#[test]
+fn config_anyexec_takes_the_first_tool_configuration_by_checksum() {
+    let (universe, names) = configured(true);
+    assert_eq!(
+        configured_query(&universe, &names, "config(//c:lib, anyexec)").unwrap(),
+        ["ct://c:lib#bb22"]
+    );
+    let (universe, names) = configured(false);
+    let error = configured_query(&universe, &names, "config(//c:lib, anyexec)").unwrap_err();
+    assert!(
+        error.starts_with("Unable to identify 'exec' configuration for //c:lib\n"),
+        "{error}"
     );
 }
 

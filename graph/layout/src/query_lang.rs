@@ -4,6 +4,7 @@
 //! can be pointed at where it was written.
 
 mod ast;
+mod config;
 mod declared;
 mod eval;
 mod functions;
@@ -19,6 +20,7 @@ use std::fmt;
 use std::ops::Range;
 
 pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Word};
+pub use config::ANY_EXEC;
 pub use eval::EvalError;
 pub use parse::parse;
 pub use universe::Universe;
