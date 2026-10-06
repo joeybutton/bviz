@@ -45,6 +45,8 @@ actions!(
         Edit,
         CopyChip,
         CopyStack,
+        ClearQuery,
+        RevertQuery,
         CompletePrevious,
         CompleteNext,
         AcceptCompletion,
@@ -105,6 +107,8 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", CopyChip, on_chips),
         KeyBinding::new("secondary-shift-c", CopyStack, outside_text),
         KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-backspace", ClearQuery, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT)),
     ]
 }
 
@@ -632,12 +636,68 @@ fn open_stack_menu(
     cx: &mut Context<GraphPanel>,
 ) {
     let panel = cx.weak_entity();
+    let copying = panel.clone();
     let copy = MenuItem::new("copy as bazel query", move |_, cx| {
-        panel.update(cx, copy_stack).ok();
+        copying.update(cx, copy_stack).ok();
     })
     .keys(COPY_STACK_KEYS);
-    put_up(view, vec![copy], at, window, cx);
+    let clearing = panel.clone();
+    let clear = MenuItem::new("clear query", move |_, cx| {
+        clearing.update(cx, clear_query).ok();
+    })
+    .keys(CLEAR_QUERY_KEYS);
+    let mut items = vec![copy, clear];
+    if view.chips.staged {
+        let revert = MenuItem::new("revert to applied", move |_, cx| {
+            panel.update(cx, revert_query).ok();
+        })
+        .keys(REVERT_QUERY_KEYS);
+        items.push(revert);
+    }
+    put_up(view, items, at, window, cx);
 }
+
+/// Puts the stack applied last back in the bar, emptying the field, which
+/// takes back every edit made since; with none applied, the bar is emptied.
+fn revert_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if !view.chips.staged {
+        return;
+    }
+    let applied = view.chips.applied.as_ref().map(|(stack, _)| stack.clone());
+    view.chips.stack = applied.unwrap_or_default();
+    view.chips.selected = None;
+    view.chips.editing = None;
+    view.chips.field.update(cx, |field, cx| field.clear(cx));
+    changed(view, cx);
+}
+
+/// How a menu row names the key reverting the query.
+const REVERT_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
+    "cmd-z"
+} else {
+    "ctrl-z"
+};
+
+/// Takes every chip off the stack and empties the field. Like every other
+/// edit to the stack it is staged, the scope applied standing until the
+/// stack is applied or the applied stack is reverted to.
+fn clear_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let ids: Vec<ChipId> = view.chips.stack.chips().map(|chip| chip.id()).collect();
+    for id in ids {
+        view.chips.stack.remove(id);
+    }
+    view.chips.selected = None;
+    view.chips.editing = None;
+    view.chips.field.update(cx, |field, cx| field.clear(cx));
+    changed(view, cx);
+}
+
+/// How a menu row names the key clearing the query.
+const CLEAR_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-backspace"
+} else {
+    "ctrl-shift-backspace"
+};
 
 /// Puts up a menu of `items` at `at`, which gives the focus back to the bar
 /// as it closes holding it.
@@ -807,6 +867,8 @@ pub(crate) fn bar(
                 edit(view, id, window, cx);
             }
         }))
+        .on_action(cx.listener(|view, _: &ClearQuery, _, cx| clear_query(view, cx)))
+        .on_action(cx.listener(|view, _: &RevertQuery, _, cx| revert_query(view, cx)))
         .on_action(cx.listener(|view, _: &CopyChip, window, cx| {
             if let Some(id) = view.chips.selected {
                 copy_chip(view, id, window, cx);
@@ -891,7 +953,7 @@ pub(crate) fn bar(
                 .disabled(!staged),
             ),
         )
-        .children((!chips.stack.is_empty()).then(|| {
+        .children((!chips.stack.is_empty() || staged).then(|| {
             div().flex_none().child(
                 Button::new(
                     "chips-menu",

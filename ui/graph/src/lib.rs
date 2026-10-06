@@ -1391,6 +1391,18 @@ mod tests {
             chips::CopyStack
         ));
         assert!(is(dispatched("ctrl-shift-c", IN_PANEL), chips::CopyStack));
+        assert!(is(
+            dispatched("ctrl-shift-backspace", IN_CHIPS),
+            chips::ClearQuery
+        ));
+        assert!(is(
+            dispatched("ctrl-shift-backspace", IN_CHIP_FIELD),
+            chips::ClearQuery
+        ));
+        assert!(dispatched("ctrl-shift-backspace", IN_PANEL).is_none());
+        assert!(is(dispatched("ctrl-z", IN_CHIPS), chips::RevertQuery));
+        assert!(is(dispatched("ctrl-z", IN_CHIP_FIELD), chips::RevertQuery));
+        assert!(dispatched("ctrl-z", IN_PANEL).is_none());
         assert!(dispatched("ctrl-shift-c", IN_FIELD).is_none());
     }
 
