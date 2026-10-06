@@ -11,6 +11,7 @@ bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf"
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_rs", version = "0.0.112")
 bazel_dep(name = "tar.bzl", version = "0.10.4")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
 
 # System libraries for gpui's Wayland backend, provided via the BCR.
 bazel_dep(name = "libffi", version = "3.4.7.bcr.5")
@@ -24,6 +25,12 @@ single_version_override(
     module_name = "wayland",
     patch_strip = 1,
     patches = ["//patches/wayland:wayland-export-copying.patch"],
+)
+
+single_version_override(
+    module_name = "zstd",
+    patch_strip = 1,
+    patches = ["//patches/zstd:zstd-export-license.patch"],
 )
 
 single_version_override(
@@ -275,6 +282,11 @@ crate.annotation(
         "//third_party:wayland_client",
         "//third_party:wayland_cursor",
     ],
+)
+crate.annotation(
+    crate = "zstd-sys",
+    gen_build_script = "off",  # otherwise it compiles the zstd it bundles
+    deps = ["//third_party:zstd"],
 )
 
 # rav1e records its build environment through the built crate, whose RUSTC entry

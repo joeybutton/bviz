@@ -10,7 +10,7 @@
     },
     "zstd-sys": {
       "licence": "BSD-3-Clause OR GPL-2.0-only",
-      "reason": "The crate compiles in the zstd library it bundles, whose every source file offers its terms under either licence, at the user's option (zstd/LICENSE, zstd/COPYING); the Cargo manifest names only BSD-3-Clause."
+      "reason": "The published crate carries a copy of the zstd sources, whose every file offers its terms under either licence, at the user's option, and ships both texts (zstd/LICENSE, zstd/COPYING); the Cargo manifest names only BSD-3-Clause. The copy is not compiled: zstd-sys links the BCR zstd module."
     }
   },
   "copyright_holders": {
