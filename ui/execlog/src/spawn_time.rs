@@ -4,9 +4,10 @@ use crate::model::Source;
 use crate::palette::Palette;
 use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, PhaseTiming};
+use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, list_scrollbar,
-    sort_header,
+    sort_gesture, sort_header,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -33,6 +34,14 @@ const CARET: Pixels = px(12.);
 const NAME_WIDTH: Pixels = px(220.);
 const NUMBER_WIDTH: Pixels = px(110.);
 const NOTE_WIDTH: Pixels = px(110.);
+
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum SpawnTimeIntent {
+    Sort,
+}
+
+const GESTURES: Gestures<SpawnTimeIntent> = Gestures::new(&[sort_gesture(SpawnTimeIntent::Sort)]);
 
 /// What a table of groups is ordered by.
 #[derive(Clone, Copy, PartialEq)]
@@ -427,7 +436,14 @@ fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnT
             .id(title)
             .cursor_pointer()
             .hover(|style| style.bg(palette.colors.element_hover))
-            .on_click(cx.listener(move |panel, _, _, cx| panel.sort_mnemonics(by, cx)))
+            .on_click(cx.listener(move |panel, e, _, cx| {
+                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                    SpawnTimeIntent::Sort => {
+                        panel.sort_mnemonics(by, cx);
+                        true
+                    }
+                });
+            }))
             .into_any_element()
     };
     header_row(
@@ -617,6 +633,10 @@ impl Panel for SpawnTimePanel {
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
         Self::kind().label.into()
     }
@@ -662,6 +682,11 @@ impl Render for SpawnTimePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
 
     fn rows(named: &[(&str, usize)]) -> Vec<GroupRow> {
         named
