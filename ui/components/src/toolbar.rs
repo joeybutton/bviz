@@ -1,5 +1,7 @@
 use crate::CONTROL_HEIGHT;
-use gpui::{AnyElement, App, Div, IntoElement, Pixels, RenderOnce, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Div, ElementId, IntoElement, Pixels, RenderOnce, Window, div, prelude::*, px,
+};
 
 /// Space the strip leaves above and below its controls.
 const PADDING: Pixels = px(4.);
@@ -9,6 +11,9 @@ const PADDING: Pixels = px(4.);
 pub struct Toolbar {
     leading: Vec<AnyElement>,
     trailing: Vec<AnyElement>,
+    /// Holds the leading group to one row, scrolling it sideways past the
+    /// strip's width, where set; the id keeps the scroll.
+    one_row: Option<ElementId>,
 }
 
 impl Toolbar {
@@ -18,9 +23,18 @@ impl Toolbar {
 
     /// Add to the group held against the left edge. The group wraps onto as many
     /// rows as it takes to hold what it is given, so a control is never cut off
-    /// at the window edge however narrow the window.
+    /// at the window edge however narrow the window, unless the strip is held
+    /// to [`one_row`](Self::one_row).
     pub fn child(mut self, child: impl IntoElement) -> Self {
         self.leading.push(child.into_any_element());
+        self
+    }
+
+    /// Holds the strip to one row of one height, the leading group scrolling
+    /// sideways where it outgrows the strip, so that what the strip holds
+    /// never moves the content below it. `id` keeps the group's scroll.
+    pub fn one_row(mut self, id: impl Into<ElementId>) -> Self {
+        self.one_row = Some(id.into());
         self
     }
 
@@ -48,7 +62,20 @@ impl RenderOnce for Toolbar {
             .bg(colors.surface)
             .border_b_1()
             .border_color(colors.border)
-            .child(group(self.leading).flex_wrap().flex_1().min_w_0())
+            .child(match self.one_row {
+                Some(id) => group(self.leading)
+                    .id(id)
+                    .h(CONTROL_HEIGHT)
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .into_any_element(),
+                None => group(self.leading)
+                    .flex_wrap()
+                    .flex_1()
+                    .min_w_0()
+                    .into_any_element(),
+            })
             .child(group(self.trailing).flex_none())
     }
 }

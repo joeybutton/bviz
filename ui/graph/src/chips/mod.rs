@@ -68,11 +68,6 @@ pub(crate) const AIMED_KEY_CONTEXT: &str = "GraphChipCompletionAimed";
 /// Width the field is drawn at, wide enough for a call over a package.
 const FIELD_WIDTH: Pixels = px(200.);
 
-/// The widest the row of chips stands, past which it scrolls: the bar is as
-/// wide as what it holds up to this, so however many chips the stack holds
-/// it stays one line and widens the toolbar's row no further.
-const CHIP_ROW_MAX_WIDTH: Pixels = px(280.);
-
 /// The widest the bar's notice stands before it wraps.
 const NOTICE_WIDTH: Pixels = px(480.);
 
@@ -809,7 +804,6 @@ pub(crate) fn bar(
                     .id("graph-chip-row")
                     .flex()
                     .min_w_0()
-                    .max_w(CHIP_ROW_MAX_WIDTH)
                     .items_center()
                     .gap_1()
                     .overflow_x_scroll()

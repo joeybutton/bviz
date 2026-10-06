@@ -2,34 +2,27 @@ use crate::{Controls, GraphPanel, Palette};
 use bviz_ui_components::{Button, Toolbar, spinner};
 use gpui::{ClickEvent, Context, Div, IntoElement, Pixels, div, prelude::*, px};
 
-pub(crate) fn toolbar(
-    controls: Controls,
-    palette: &Palette,
-    cx: &mut Context<GraphPanel>,
-) -> Toolbar {
-    // The query leads the strip: on a graph too large to read, naming what to
-    // look at is where a reader starts.
-    let mut bar = Toolbar::new().child(controls.chips).child(controls.picker);
-    // The facet checklists sit beside the layout picker: both say what the panel
-    // draws, where the toggles past them say how it is drawn.
-    for checklist in [controls.class_filter, controls.origin_filter]
-        .into_iter()
-        .flatten()
-    {
-        bar = bar.child(checklist);
-    }
-    bar = bar.child(controls.preset_filter).child(
-        Button::new(
-            "neighborhood-toggle",
-            cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
-        )
-        .label("neighbors")
-        .selected(controls.neighborhood_enabled),
-    );
+/// The panel's controls in three strips, each one row tall, so that neither
+/// a selection coming and going nor chips being added moves the drawing:
+/// how the graph is drawn, then the checklists over its facets, then the
+/// query bar.
+pub(crate) fn toolbar(controls: Controls, palette: &Palette, cx: &mut Context<GraphPanel>) -> Div {
+    let mut view = Toolbar::new()
+        .one_row("graph-view-controls")
+        .child(controls.picker)
+        .child(controls.colour_picker)
+        .child(
+            Button::new(
+                "neighborhood-toggle",
+                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
+            )
+            .label("neighbors")
+            .selected(controls.neighborhood_enabled),
+        );
     // The strip only ever offers a control the mode's layout can answer, so
     // everything on it acts on what is drawn.
     if let Some(reduced) = controls.reduced.filter(|_| controls.mode.honors_reduce()) {
-        bar = bar.child(
+        view = view.child(
             Button::new(
                 "reduce-toggle",
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
@@ -38,9 +31,8 @@ pub(crate) fn toolbar(
             .selected(reduced),
         );
     }
-    bar = bar.child(controls.colour_picker);
     if let Some(enabled) = controls.critical_path {
-        bar = bar.child(
+        view = view.child(
             Button::new(
                 "critical-path-toggle",
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_critical_path(cx)),
@@ -53,23 +45,42 @@ pub(crate) fn toolbar(
         .into_iter()
         .flatten()
     {
-        bar = bar.child(card);
+        view = view.child(card);
     }
     // Last, past the controls that are always up, so the strip's standing shape
     // holds still as a selection comes and goes.
     if let Some(picker) = controls.relation_picker {
-        bar = bar.child(picker);
+        view = view.child(picker);
     }
     if let Some(pin) = controls.pin_control {
-        bar = bar.child(pin);
+        view = view.child(pin);
     }
     if let Some(why) = controls.why_controls {
-        bar = bar.child(why);
+        view = view.child(why);
     }
-    bar.when(controls.relaying, |bar| {
+    let view = view.when(controls.relaying, |view| {
         // The prior layout stays interactive while a relayout runs.
-        bar.trailing(busy("relaying-spinner", "laying out…", palette))
-    })
+        view.trailing(busy("relaying-spinner", "laying out…", palette))
+    });
+    let mut facets = Toolbar::new().one_row("graph-facet-controls");
+    for checklist in [controls.class_filter, controls.origin_filter]
+        .into_iter()
+        .flatten()
+    {
+        facets = facets.child(checklist);
+    }
+    let facets = facets.child(controls.preset_filter);
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .child(view)
+        .child(facets)
+        .child(
+            Toolbar::new()
+                .one_row("graph-query-bar")
+                .child(controls.chips),
+        )
 }
 
 /// A strip's controls grouped under the word `name`.
