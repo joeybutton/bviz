@@ -23,7 +23,7 @@ use crate::target_pattern::TargetIndex;
 pub struct Universe {
     pub(super) index: Index,
     pub(super) labels: Arc<LabelIndex>,
-    pub(super) targets: TargetIndex,
+    pub(super) targets: Arc<TargetIndex>,
     /// Where the target each node belongs to lies among the labels, by node
     /// id; [`NO_LABEL`] for a node belonging to none.
     owner: Vec<u32>,
@@ -63,7 +63,18 @@ impl Universe {
         capabilities: &Capabilities,
     ) -> Self {
         let labels = Arc::new(LabelIndex::of(graph, names, facets));
-        let targets = TargetIndex::of(labels.clone(), graph, facets, capabilities);
+        let targets = Arc::new(TargetIndex::of(labels, graph, facets, capabilities));
+        Universe::with_targets(graph, targets, facets, capabilities)
+    }
+
+    /// The universe of `graph`, whose targets `targets` indexes.
+    pub fn with_targets(
+        graph: &Graph,
+        targets: Arc<TargetIndex>,
+        facets: &Arc<Facets>,
+        capabilities: &Capabilities,
+    ) -> Self {
+        let labels = Arc::clone(targets.labels());
         let ids = id_span(graph);
         let mut at: FxHashMap<Id, u32> =
             FxHashMap::with_capacity_and_hasher(labels.len(), Default::default());

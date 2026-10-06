@@ -40,6 +40,13 @@ const MAX_CACHED_PREFIXES: usize = 64;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ChipId(u64);
 
+impl ChipId {
+    /// The chip's number, unique within its stack.
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
+
 /// One chip of a [`Stack`].
 #[derive(Clone, Debug)]
 pub struct Chip {

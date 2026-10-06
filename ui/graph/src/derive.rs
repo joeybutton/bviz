@@ -755,6 +755,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     };
     view.derived.opened_on(loaded);
     publish_filter(view, cx);
+    crate::chips::reset(view, cx);
     crate::search::reset(view, cx);
     crate::why::reset(view);
     crate::reveal::reset(view);

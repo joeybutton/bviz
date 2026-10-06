@@ -110,6 +110,11 @@ impl TargetIndex {
     /// How far the graph states the tags of its rules, which is how far a
     /// wildcard can leave out the rules tagged `manual`: a rule stating no
     /// tags is taken for one carrying none.
+    /// The canonical labels the index orders its targets by.
+    pub fn labels(&self) -> &Arc<LabelIndex> {
+        &self.labels
+    }
+
     pub fn tags(&self) -> Support {
         self.tags
     }

@@ -12,6 +12,7 @@ use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
 use bviz_ui_components::{QueryField, TextTooltip, TooltipColors};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
+use std::sync::Arc;
 
 /// The key context the roots field carries, by which the panel's own
 /// single-key bindings stand down while a target set is typed into it.
@@ -106,7 +107,7 @@ pub(super) struct Found {
 /// those copies starts from.
 pub(super) fn find(
     text: &str,
-    targets: &Prepared<TargetIndex>,
+    targets: &Prepared<Arc<TargetIndex>>,
     within: &Within,
 ) -> Result<Found, PatternError> {
     let set = TargetSet::parse(text)?;

@@ -14,6 +14,7 @@ use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
+use bviz_graph_layout::query_lang::Universe;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
@@ -134,9 +135,11 @@ pub(crate) struct Loaded {
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
-    targets: Prepared<TargetIndex>,
+    targets: Prepared<Arc<TargetIndex>>,
     /// The graph's nodes as the jump palette offers them.
     candidates: Prepared<Candidates>,
+    /// The graph as a query reads it.
+    universe: Prepared<Universe>,
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
@@ -147,12 +150,19 @@ impl Loaded {
     pub(crate) fn new(shared: Shared, opening: Opening) -> Self {
         let targets = Prepared::new(&shared, |shared| {
             let labels = Arc::clone(&shared.labels);
-            TargetIndex::of(labels, &shared.base, &shared.facets, &shared.capabilities)
+            let index = TargetIndex::of(labels, &shared.base, &shared.facets, &shared.capabilities);
+            Arc::new(index)
         });
         let candidates = Prepared::new(&shared, Candidates::of);
+        let indexed = targets.clone();
+        let universe = Prepared::new(&shared, move |shared| {
+            let targets = Arc::clone(indexed.get());
+            Universe::with_targets(&shared.base, targets, &shared.facets, &shared.capabilities)
+        });
         Self {
             targets,
             candidates,
+            universe,
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -875,12 +885,18 @@ impl GraphModel {
 
     /// The targets of the loaded graph, indexed for resolving a target set;
     /// absent while the graph is still being read.
-    pub(crate) fn targets(&self) -> Option<Prepared<TargetIndex>> {
+    pub(crate) fn targets(&self) -> Option<Prepared<Arc<TargetIndex>>> {
         Some(self.loaded()?.targets.clone())
     }
 
     pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
         Some(self.loaded()?.candidates.clone())
+    }
+
+    /// The loaded graph as a query reads it; absent while the graph is still
+    /// being read.
+    pub(crate) fn universe(&self) -> Option<Prepared<Universe>> {
+        Some(self.loaded()?.universe.clone())
     }
 
     /// Runs the work `pass` makes of the loaded graph off the UI thread for
