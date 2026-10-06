@@ -34,6 +34,7 @@ use bviz_ui_components::{
     centered_spinner, list_scrollbar, load_in_background, menu_chrome, paint_tooltip,
     paint_tooltip_box, tooltip_extent, track_drag,
 };
+use bviz_ui_components::{KeyStyle, key_text_in};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
@@ -875,25 +876,29 @@ enum ScatterIntent {
 
 const POINT: Place = Place::On("a point");
 
+const SHOW_WHOLE: Entry<ScatterIntent> = Entry::new(
+    gesture::Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+    Place::Empty,
+    "Show whole plot",
+    ScatterIntent::ShowWholePlot,
+);
+
+const REVEAL: Entry<ScatterIntent> = Entry::new(
+    gesture::Input::click(gesture::Button::Left),
+    POINT,
+    "Show in graph or list points",
+    ScatterIntent::Reveal,
+);
+
 const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
-    Entry::new(
-        gesture::Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
-        Place::Empty,
-        "Show whole plot",
-        ScatterIntent::ShowWholePlot,
-    ),
+    SHOW_WHOLE,
     Entry::new(
         gesture::Input::drag(gesture::Button::Left),
         Place::Anywhere,
         "Pan",
         ScatterIntent::Pan,
     ),
-    Entry::new(
-        gesture::Input::click(gesture::Button::Left),
-        POINT,
-        "Show in graph or list points",
-        ScatterIntent::Reveal,
-    ),
+    REVEAL,
     Entry::new(
         gesture::Input::click(gesture::Button::Left),
         Place::On("a listed point"),
@@ -1011,7 +1016,8 @@ fn describe(
         lines.push(format!("{} {actions}", point.actions));
     }
     if others > 0 {
-        lines.push(format!("+{others} more here · click to list"));
+        let click = REVEAL.gesture().input.text(KeyStyle::NATIVE);
+        lines.push(format!("+{others} more here · {click} to list"));
     }
     lines
 }
@@ -1195,7 +1201,9 @@ impl Render for ScatterPanel {
             _ => None,
         };
         let hovering = matches!(plot.pointer, Pointer::Hover(_));
-        root.child(legend(plot, self.zoom, &palette)).child(
+        let show_whole = key_text_in(&ShowWholePlot, &self.focus, window);
+        let legend = legend(plot, self.zoom, show_whole.as_deref(), &palette);
+        root.child(legend).child(
             div()
                 .id("scatter-plot")
                 .relative()
@@ -1597,9 +1605,6 @@ const SWATCH_ALPHA: f32 = 0.7;
 /// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
-/// What the legend reads while the plot shows part of an axis.
-const ZOOMED: &str = "double-click empty space or press 0 to show all";
-
 /// The strip choosing what the plot measures, now `scope`, which reads
 /// `measuring` while a new choice is measured over the plot drawn for the last.
 fn strip(
@@ -1773,13 +1778,20 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom.
-fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
+/// mark's size stands for, and how to leave a zoom, which the keys
+/// `show_whole` also do.
+fn legend(plot: &Plot, zoom: Zoom, show_whole: Option<&str>, palette: &Palette) -> Div {
     let swatch = Swatch {
         alpha: SWATCH_ALPHA,
         diameter: px(SWATCH_DIAMETER),
     };
-    let zoomed = (zoom != Zoom::WHOLE).then_some(ZOOMED);
+    let zoomed = (zoom != Zoom::WHOLE).then(|| {
+        let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
+        match show_whole {
+            Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
+            None => format!("{gesture} to show the whole plot"),
+        }
+    });
     let hints = zoomed
         .into_iter()
         .map(SharedString::from)

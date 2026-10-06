@@ -28,9 +28,9 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    KeyScope, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar, TooltipColors,
-    beside_anchor, cached_layer, centered_notice, centered_spinner, load_in_background,
-    paint_tooltip,
+    KeyScope, KeyStyle, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar,
+    TooltipColors, beside_anchor, cached_layer, centered_notice, centered_spinner, key_text_in,
+    load_in_background, paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -72,6 +72,20 @@ enum ExclusiveIntent {
 
 const CELL: Place = Place::On("a cell");
 
+const FOCUS_CELL: Entry<ExclusiveIntent> = Entry::new(
+    Input::new(Motion::Press(Button::Left, Clicks::Single)),
+    CELL,
+    "Focus cell or go up one level",
+    ExclusiveIntent::FocusCell,
+);
+
+const OPEN_MENU: Entry<ExclusiveIntent> = Entry::new(
+    Input::press(Button::Right),
+    CELL,
+    "Open cell menu",
+    ExclusiveIntent::OpenMenu,
+);
+
 const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
     Entry::new(
         Input::new(Motion::Press(Button::Left, Clicks::Double)),
@@ -79,18 +93,8 @@ const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
         "Show whole build",
         ExclusiveIntent::ShowWholeBuild,
     ),
-    Entry::new(
-        Input::new(Motion::Press(Button::Left, Clicks::Single)),
-        CELL,
-        "Focus cell or go up one level",
-        ExclusiveIntent::FocusCell,
-    ),
-    Entry::new(
-        Input::press(Button::Right),
-        CELL,
-        "Open cell menu",
-        ExclusiveIntent::OpenMenu,
-    ),
+    FOCUS_CELL,
+    OPEN_MENU,
     Entry::new(
         Input::press(Button::Back),
         Place::Anywhere,
@@ -1618,33 +1622,32 @@ fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> St
 /// The most roots a tooltip names as reaching a top.
 const NAMED_ROOTS: usize = 3;
 
-/// What a click on the cell holding `holds` under `top` does, and where its
+/// What a click on the cell holding `holds` under `top` does, along with the
+/// keys `up` that go up a level as a click on the top cell does, and where its
 /// menu offers `more` than the click that it does; absent where a click does
 /// nothing.
-fn gesture(holds: Holds, top: Holds, more: bool) -> Option<String> {
-    let click = match holds {
+fn gesture(holds: Holds, top: Holds, up: Option<&str>, more: bool) -> Option<String> {
+    let click = FOCUS_CELL.gesture().input.text(KeyStyle::NATIVE);
+    let does = match holds {
         Holds::Build => return None,
-        _ if holds == top => FOCUS_UP,
-        Holds::Node(_) => FOCUS,
-        Holds::Shared | Holds::Rest(_) => OPEN,
+        _ if holds == top => match up {
+            Some(keys) => format!("{click} or {keys} to go up a level"),
+            None => format!("{click} to go up a level"),
+        },
+        Holds::Node(_) => format!("{click} to focus"),
+        Holds::Shared | Holds::Rest(_) => format!("{click} to open"),
     };
     Some(match more {
-        true => format!("{click} · {MORE}"),
-        false => click.to_owned(),
+        true => {
+            let menu = OPEN_MENU.gesture().input.text(KeyStyle::NATIVE);
+            format!("{does} · {menu} for more")
+        }
+        false => does,
     })
 }
 
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
-
-/// What a click on a cell does: on a point, on a cell gathering several, and
-/// on the cell on top.
-const FOCUS: &str = "click to focus";
-const OPEN: &str = "click to open";
-const FOCUS_UP: &str = "click or Backspace to go up a level";
-
-/// Says that a cell's menu offers more than a click does.
-const MORE: &str = "right-click for more";
 
 /// What share of `whole` `part` is, as a percentage.
 fn share(part: u32, whole: u32) -> String {
@@ -2071,7 +2074,8 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
             return;
         };
         let more = panel.offers(cell.holds, cx).len() > 1;
-        let gesture = gesture(cell.holds, drawn.top(), more);
+        let up = key_text_in(&FocusUp, &panel.focus_handle, window);
+        let gesture = gesture(cell.holds, drawn.top(), up.as_deref(), more);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, by, pointer) = (*cell, *by, drawn.pointer);
         paint::paint_ring(&cell, &palette, window);

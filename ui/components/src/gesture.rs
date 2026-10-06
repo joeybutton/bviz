@@ -244,7 +244,8 @@ impl Input {
         moved && pointer.held.covers(self.held)
     }
 
-    fn text(self, style: KeyStyle) -> String {
+    /// The input as `style` spells its modifiers: `Ctrl+Scroll`, `Double-click`.
+    pub fn text(self, style: KeyStyle) -> String {
         let motion = match self.motion {
             Motion::Scroll => "scroll".to_owned(),
             Motion::Pinch => "pinch".to_owned(),
@@ -338,6 +339,10 @@ impl<I> Entry<I> {
             },
             intent,
         }
+    }
+
+    pub const fn gesture(&self) -> Gesture {
+        self.row.gesture
     }
 }
 
