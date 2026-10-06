@@ -42,6 +42,16 @@ impl Universe {
         self.eval(expr, &mut Scope::new())
     }
 
+    /// The nodes `expr` names with the variable `name` bound to `bound`.
+    pub(super) fn evaluate_with<'a>(
+        &self,
+        expr: &'a Expr,
+        name: &'a str,
+        bound: &FixedBitSet,
+    ) -> Result<FixedBitSet, EvalError> {
+        self.eval(expr, &mut vec![(name, bound.clone())])
+    }
+
     fn eval<'a>(&self, expr: &'a Expr, scope: &mut Scope<'a>) -> Result<FixedBitSet, EvalError> {
         let fail = |message: String| EvalError {
             message,

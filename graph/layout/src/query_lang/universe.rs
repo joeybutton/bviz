@@ -41,6 +41,16 @@ pub struct Universe {
     pub(super) patterns: Patterns,
 }
 
+/// How many nodes a query's value holds, and how many of them are of the kinds
+/// a reader tells a build's size by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Counts {
+    pub nodes: usize,
+    pub targets: usize,
+    pub configured_targets: usize,
+    pub actions: usize,
+}
+
 /// Stands in [`Universe::owner`] for a node belonging to no target.
 const NO_LABEL: u32 = u32::MAX;
 
@@ -93,6 +103,20 @@ impl Universe {
     /// An empty value.
     pub fn empty(&self) -> FixedBitSet {
         FixedBitSet::with_capacity(self.ids())
+    }
+
+    pub fn counts(&self, value: &FixedBitSet) -> Counts {
+        let mut counts = Counts::default();
+        for id in value.ones() {
+            counts.nodes += 1;
+            match self.index.kind(Id(id as u32)) {
+                Some(Kind::Target) => counts.targets += 1,
+                Some(Kind::ConfiguredTarget) => counts.configured_targets += 1,
+                Some(Kind::Action) => counts.actions += 1,
+                _ => {}
+            }
+        }
+        counts
     }
 
     pub(super) fn members(&self) -> &FixedBitSet {

@@ -11,6 +11,7 @@ mod functions;
 mod lex;
 mod narrow;
 mod parse;
+mod stack;
 mod universe;
 
 #[cfg(test)]
@@ -23,7 +24,11 @@ pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signatur
 pub use config::ANY_EXEC;
 pub use eval::EvalError;
 pub use parse::parse;
-pub use universe::Universe;
+pub use stack::{
+    BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,
+    Prefixes, Stack, Unportable,
+};
+pub use universe::{Counts, Universe};
 
 /// Where an expression fails to scan or parse, with the message Bazel gives for
 /// it word for word, but for two cases. A long expression Bazel quotes cut
