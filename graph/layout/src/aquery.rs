@@ -32,6 +32,7 @@ use bazel_query_proto::analysis::{
 };
 
 use crate::capability::Axis;
+use crate::exec_path::{LeftOutInputs, LeftOutInputsBuilder};
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
@@ -106,6 +107,7 @@ pub(crate) fn build_with_packages(
     facets: &mut FacetsBuilder,
 ) -> Graph {
     let index = Index::build(containers, names);
+    facets.reserve_exec_paths(index.tables.paths.artifact_by_id.len());
 
     let mut graph = Graph::new();
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
@@ -246,6 +248,8 @@ fn wire_action_inputs(
         };
         wiring.wire(&node.action.input_dep_set_ids, walk, graph, names);
     }
+    let left_out = wiring.left_out_inputs(&actions);
+    wiring.facets.set_left_out_inputs(left_out);
 }
 
 /// The by-id artifact and path-fragment lookups, paired so an artifact's
@@ -592,10 +596,10 @@ impl Boxes<'_> {
         producing_ct: Id,
         config_id: ConfigId,
     ) -> Id {
-        let path = producer.output_path(out, &self.tables.paths, self.names);
+        let path = (producer.output_path(out, &self.tables.paths, self.names)).into_owned();
         let label = generated_label(self.hierarchy, &path)
             .filter(|label| self.labeled_outputs.contains(label));
-        match label {
+        let id = match label {
             Some(out_label) => {
                 let out_ct = self.target_ct(
                     &TargetBox {
@@ -629,7 +633,9 @@ impl Boxes<'_> {
                 self.facets.facets().inherit(id, producing_ct);
                 id
             }
-        }
+        };
+        self.facets.set_exec_path(id, &path);
+        id
     }
 
     /// The configured-target box `ct:{label}#{checksum}` for `target` in one
@@ -832,7 +838,84 @@ impl Wiring<'_, '_> {
                 names,
             ),
         };
+        self.facets.set_exec_path(node_id, &path);
         Some(node_id)
+    }
+
+    /// The files `actions` read that the wiring left out, in the nested sets
+    /// holding them.
+    fn left_out_inputs(&self, actions: &[ActionNode]) -> LeftOutInputs {
+        const UNSEEN: u8 = 0;
+        const OPEN: u8 = 1;
+        const HOLDS_NONE: u8 = 2;
+        const HOLDS: u8 = 3;
+        let depsets = &self.depsets;
+        let left_out = |member: usize| {
+            let artifact = depsets.members[member] as usize;
+            matches!(self.resolved[artifact], Resolution::Dropped)
+        };
+        // Each set, nested sets first, by whether it holds a left-out file.
+        let mut state: Vec<u8> = vec![UNSEEN; depsets.len()];
+        let mut holding: Vec<u32> = Vec::new();
+        let mut stack: Vec<(u32, bool)> = Vec::new();
+        for root in 0..depsets.len() as u32 {
+            stack.push((root, false));
+            while let Some((set, closing)) = stack.pop() {
+                let at = set as usize;
+                if closing {
+                    let holds = depsets.members(set).any(left_out)
+                        || (depsets.nested(set).iter()).any(|&n| state[n as usize] == HOLDS);
+                    state[at] = if holds { HOLDS } else { HOLDS_NONE };
+                    if holds {
+                        holding.push(set);
+                    }
+                    continue;
+                }
+                if state[at] != UNSEEN {
+                    continue;
+                }
+                state[at] = OPEN;
+                stack.push((set, true));
+                let unseen = depsets
+                    .nested(set)
+                    .iter()
+                    .filter(|&&n| state[n as usize] == UNSEEN);
+                stack.extend(unseen.map(|&n| (n, false)));
+            }
+        }
+        let direct: usize = (holding.iter())
+            .map(|&set| depsets.members(set).filter(|&m| left_out(m)).count())
+            .sum();
+        let nested: usize = holding.iter().map(|&set| depsets.nested(set).len()).sum();
+        let mut table = LeftOutInputsBuilder::with_capacity(holding.len(), direct, nested, direct);
+        let mut handle_of_set: Vec<Option<u32>> = vec![None; depsets.len()];
+        let mut handle_of_path: FxHashMap<u32, u32> =
+            FxHashMap::with_capacity_and_hasher(direct, Default::default());
+        let mut paths: Vec<u32> = Vec::new();
+        for &set in &holding {
+            paths.clear();
+            for member in depsets.members(set).filter(|&m| left_out(m)) {
+                let artifact = depsets.members[member];
+                let path = *handle_of_path.entry(artifact).or_insert_with(|| {
+                    table.push_path(&self.paths.full_path(depsets.artifacts[artifact as usize]))
+                });
+                paths.push(path);
+            }
+            let nested = depsets.nested(set).iter();
+            let nested = nested.filter_map(|&n| handle_of_set[n as usize]);
+            handle_of_set[set as usize] = Some(table.push_set(paths.iter().copied(), nested));
+        }
+        for node in actions {
+            let roots = node.action.input_dep_set_ids.iter();
+            let roots = roots.filter_map(|id| depsets.index_of.get(id));
+            let mut roots = roots
+                .filter_map(|&set| handle_of_set[set as usize])
+                .peekable();
+            if roots.peek().is_some() {
+                table.push_action(node.id, roots);
+            }
+        }
+        table.seal()
     }
 
     fn add_edge(&mut self, from: Id, walk: Walk, graph: &mut Graph) {
@@ -1719,6 +1802,94 @@ mod tests {
         let action = names.get("action:bazel-out/k8-fastbuild/bin/pkg/gen.c");
         let primary = facets.primary_output(action.unwrap());
         assert_eq!(primary.map(|id| names.resolve(id)), Some("artifact2"));
+    }
+
+    #[test]
+    fn each_file_an_action_reads_or_writes_carries_its_exec_path() {
+        let (source, source_fragment) = source_artifact(1, "in.c");
+        let (first, mut frags) = generated_artifact(2, 100, "pkg/gen.h");
+        let (second, more) = generated_artifact(3, 200, "pkg/gen.c");
+        frags.extend(more);
+        frags.push(source_fragment);
+        let container = ActionGraphContainer {
+            artifacts: vec![source, first, second],
+            path_fragments: frags,
+            targets: vec![target(9, "//pkg:gen")],
+            dep_set_of_files: vec![dep_set(10, &[1], &[])],
+            actions: vec![Action {
+                output_ids: vec![2, 3],
+                primary_output_id: 3,
+                ..action(9, "Genrule", &[10])
+            }],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let path = |name: &str| {
+            let path = facets.exec_path(names.get(name).unwrap());
+            path.map(|path| path.to_string())
+        };
+        assert_eq!(path("source1").as_deref(), Some("in.c"));
+        assert_eq!(
+            path("artifact2").as_deref(),
+            Some("bazel-out/k8-fastbuild/bin/pkg/gen.h")
+        );
+        assert_eq!(
+            path("artifact3").as_deref(),
+            Some("bazel-out/k8-fastbuild/bin/pkg/gen.c")
+        );
+        assert_eq!(path("action:bazel-out/k8-fastbuild/bin/pkg/gen.c"), None);
+    }
+
+    #[test]
+    fn the_inputs_left_out_are_kept_in_the_sets_holding_them() {
+        let (kept, kept_fragment) = source_artifact(1, "pkg/in.c");
+        let (external, external_fragment) = source_artifact(2, "external/repo+/lib.h");
+        let (orphan, mut frags) = generated_artifact(3, 100, "other/gen.h");
+        frags.extend([kept_fragment, external_fragment]);
+        let container = ActionGraphContainer {
+            artifacts: vec![kept, external, orphan],
+            path_fragments: frags,
+            targets: vec![target(9, "//pkg:a"), target(8, "//pkg:b")],
+            // Set 10 nests set 11, which holds the external header; set 12
+            // holds only a file the graph keeps.
+            dep_set_of_files: vec![
+                dep_set(10, &[3], &[11]),
+                dep_set(11, &[2], &[]),
+                dep_set(12, &[1], &[]),
+            ],
+            actions: vec![action(9, "Compile", &[10, 12]), action(8, "Link", &[12])],
+            ..Default::default()
+        };
+
+        let (_, names, facets) = build(&[container], false);
+
+        let left_out = facets.left_out_inputs();
+        let reads = |action: &str| {
+            let mut paths: Vec<String> = Vec::new();
+            let mut open: Vec<u32> = left_out.read_by(names.get(action).unwrap()).to_vec();
+            while let Some(set) = open.pop() {
+                let direct = left_out.direct(set).iter();
+                paths.extend(direct.map(|&path| left_out.path(path).to_string()));
+                open.extend_from_slice(left_out.nested(set));
+            }
+            paths.sort();
+            paths
+        };
+        assert_eq!(
+            reads("action0"),
+            [
+                "bazel-out/k8-fastbuild/bin/other/gen.h",
+                "external/repo+/lib.h"
+            ]
+        );
+        assert!(reads("action1").is_empty());
+        assert_eq!(
+            left_out.sets(),
+            2,
+            "a set holding nothing left out is not kept"
+        );
     }
 
     /// An action of `target_id` whose one output, and so its primary one, is

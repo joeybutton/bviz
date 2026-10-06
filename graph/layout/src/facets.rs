@@ -14,6 +14,7 @@ use std::num::NonZeroU32;
 use bazel_query_proto::analysis::Configuration;
 
 use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
+use crate::exec_path::{ExecPath, ExecPaths, ExecPathsBuilder, LeftOutInputs};
 use crate::intern::Id;
 use crate::label;
 use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
@@ -448,6 +449,8 @@ pub struct Facets {
     primary_output: Vec<Option<NodeRef>>,
     tags: SparseFacet,
     aspects: SparseFacet,
+    exec_paths: ExecPaths,
+    left_out_inputs: LeftOutInputs,
     repos: Vec<RepoEntry>,
     /// The repository each name identifies, which is how a repository already
     /// named is found again.
@@ -570,6 +573,17 @@ impl Facets {
 
     pub fn set_aspects(&mut self, aspects: SparseFacet) {
         self.aspects = aspects;
+    }
+
+    /// The path below the execution root of the file the node stands for,
+    /// where an aquery states one.
+    pub fn exec_path(&self, id: Id) -> Option<ExecPath<'_>> {
+        self.exec_paths.get(id)
+    }
+
+    /// The files the actions read that the graph holds no node for.
+    pub fn left_out_inputs(&self) -> &LeftOutInputs {
+        &self.left_out_inputs
     }
 
     /// The strings every handle these facets carry resolves through.
@@ -785,6 +799,8 @@ impl Facets {
         self.primary_output = permuted_nodes(&self.primary_output, remap);
         self.tags.renumber(remap);
         self.aspects.renumber(remap);
+        self.exec_paths.renumber(remap);
+        self.left_out_inputs.renumber(remap);
     }
 
     fn origin(&mut self, canonical: &str) -> Origin {
@@ -905,6 +921,7 @@ pub struct FacetsBuilder {
     facets: Facets,
     tags: SparseFill,
     aspects: SparseFill,
+    exec_paths: ExecPathsBuilder,
     capabilities: CapabilitiesBuilder,
 }
 
@@ -951,6 +968,19 @@ impl FacetsBuilder {
         self.aspects.fill(&mut self.facets.strings, id, aspects);
     }
 
+    pub fn set_exec_path(&mut self, id: Id, path: &str) {
+        self.exec_paths.push(id, path);
+    }
+
+    /// Makes room for the exec paths of `files` more files.
+    pub fn reserve_exec_paths(&mut self, files: usize) {
+        self.exec_paths.reserve(files);
+    }
+
+    pub fn set_left_out_inputs(&mut self, inputs: LeftOutInputs) {
+        self.facets.left_out_inputs = inputs;
+    }
+
     pub fn observe(&mut self, axis: Axis, carried: bool) {
         self.capabilities.observe(axis, carried);
     }
@@ -958,6 +988,7 @@ impl FacetsBuilder {
     pub fn seal(mut self) -> (Facets, Capabilities) {
         self.facets.set_tags(self.tags.values.seal());
         self.facets.set_aspects(self.aspects.values.seal());
+        self.facets.exec_paths = self.exec_paths.seal();
         (self.facets, self.capabilities.seal())
     }
 }
@@ -1593,6 +1624,23 @@ mod tests {
             .map(|(id, values)| (id, values.to_vec()))
             .collect();
         assert_eq!(read, [(Id(1), vec![local, flaky]), (Id(2), vec![manual])]);
+    }
+
+    #[test]
+    fn an_exec_path_moves_with_its_node_and_the_first_stated_stays() {
+        let mut builder = FacetsBuilder::default();
+        builder.set_exec_path(Id(2), "b/two");
+        builder.set_exec_path(Id(1), "a/one");
+        builder.set_exec_path(Id(2), "b/again");
+        let (mut facets, _) = builder.seal();
+        let path = |facets: &Facets, id| facets.exec_path(Id(id)).map(|path| path.to_string());
+        assert_eq!(path(&facets, 1).as_deref(), Some("a/one"));
+        assert_eq!(path(&facets, 2).as_deref(), Some("b/two"));
+        assert_eq!(path(&facets, 0), None);
+        facets.renumber(&rotated());
+        assert_eq!(path(&facets, 0).as_deref(), Some("a/one"));
+        assert_eq!(path(&facets, 1).as_deref(), Some("b/two"));
+        assert_eq!(path(&facets, 2), None);
     }
 
     #[test]
