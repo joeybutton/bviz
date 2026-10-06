@@ -2,6 +2,7 @@ use crate::carry::{Carrying, Reported, Taken};
 use crate::documents_menu::DocumentsMenu;
 use crate::drop::{PaneGeometry, Preview};
 use crate::pane::Handover;
+use crate::panel::keys_focus;
 use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
@@ -683,6 +684,8 @@ impl Workspace {
             return;
         };
         let windows = self.other_windows(cx);
+        let active = self.active_panel(cx);
+        let keys_in = keys_focus(panel, Some(&active), cx);
         let items = panel_menu::items(
             panel,
             &cx.weak_entity(),
@@ -692,6 +695,9 @@ impl Workspace {
                 alone: pane.read(cx).tab_count() == 1,
             },
             &windows,
+            keys_in.as_ref(),
+            window,
+            cx,
         );
         let menu = cx.new(|cx| Menu::new(items, at, window, cx));
         let dismissed = cx.subscribe_in(

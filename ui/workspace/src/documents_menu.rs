@@ -1,8 +1,9 @@
+use crate::workspace::ResetArrangement;
 use crate::{DocumentId, Documents, OpenDocument, ViewId, ViewState, Workspace};
-use bviz_ui_components::Button;
+use bviz_ui_components::{Button, action_label, key_text_in, menu_chrome};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
-    AnyElement, Context, ElementId, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
+    Action, AnyElement, Context, ElementId, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
     SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px, relative,
 };
 
@@ -227,7 +228,12 @@ impl DocumentsMenu {
     /// The open menu, laid out above the trigger: the status bar it opens from
     /// sits at the window's bottom edge, so there is nothing below it to open
     /// into.
-    fn popover(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn popover(
+        &self,
+        colors: &ThemeColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let rows = self.rows(colors, cx);
         deferred(
             div()
@@ -251,7 +257,7 @@ impl DocumentsMenu {
                         .shadow_lg()
                         .text_color(colors.text)
                         .children(rows)
-                        .child(self.reset_row(colors, cx)),
+                        .child(self.reset_row(colors, window, cx)),
                 ),
         )
     }
@@ -280,7 +286,12 @@ impl DocumentsMenu {
     /// The row that lays the window out as its files described themselves.
     /// It acts on the window rather than on any one view, so it carries no mark
     /// and is ruled off from the rows naming views.
-    fn reset_row(&self, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn reset_row(
+        &self,
+        colors: &ThemeColors,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let hovered = hovered(surface(colors), colors);
         div()
             .id("documents-menu-reset")
@@ -296,10 +307,16 @@ impl DocumentsMenu {
             .cursor_pointer()
             .hover(move |s| s.bg(hovered))
             .on_click(cx.listener(|this, _, window, cx| this.reset_arrangement(window, cx)))
+            .justify_between()
+            .gap(menu_chrome::LABEL_GAP)
             .child(
                 div()
                     .whitespace_nowrap()
-                    .child("Reset to Opening Arrangement"),
+                    .child(action_label(&ResetArrangement, cx).unwrap_or(ResetArrangement.name())),
+            )
+            .children(
+                key_text_in(&ResetArrangement, &self.focus_handle, window)
+                    .map(|keys| menu_chrome::row_keys(keys, colors)),
             )
     }
 
@@ -363,7 +380,7 @@ impl Render for DocumentsMenu {
             .flex_none()
             .track_focus(&self.focus_handle)
             .child(self.trigger(cx))
-            .children(self.open.then(|| self.popover(&colors, cx)))
+            .children(self.open.then(|| self.popover(&colors, window, cx)))
     }
 }
 

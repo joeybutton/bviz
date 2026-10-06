@@ -189,6 +189,20 @@ impl AnyPanel {
     }
 }
 
+/// The focus a control acting on `panel` looks up the keys it names in,
+/// `active` being the panel the window's keys act on, if any: that panel's
+/// focus, wherever focus stands in the window, where it is `panel`; `None`
+/// otherwise, as those keys would act on a panel other than `panel`.
+pub(crate) fn keys_focus(
+    panel: EntityId,
+    active: Option<&AnyPanel>,
+    cx: &App,
+) -> Option<FocusHandle> {
+    active
+        .filter(|active| active.entity_id() == panel)
+        .map(|active| active.focus_handle(cx))
+}
+
 /// The views one file brings to a window, arranged and weighed as its viewer
 /// asks. Its label tells it apart from the other files the window opens with,
 /// whichever documents hold them: every panel of a file whose label another

@@ -32,7 +32,7 @@ use bviz_ui_components::{
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use cell_menu::{Offer, PointFacts};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
+    Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
     WeakEntity, Window, canvas, div, point, prelude::*, px, relative,
@@ -750,7 +750,7 @@ impl ExclusivePanel {
             return;
         };
         self.select(cell, Picked::Menu, cx);
-        let items = self.menu_items(cell.holds, cx);
+        let items = self.menu_items(cell.holds, window, cx);
         if items.is_empty() {
             return;
         }
@@ -790,7 +790,7 @@ impl ExclusivePanel {
     }
 
     /// The rows of the menu of the cell holding `holds`.
-    fn menu_items(&self, holds: Holds, cx: &Context<Self>) -> Vec<MenuItem> {
+    fn menu_items(&self, holds: Holds, window: &Window, cx: &Context<Self>) -> Vec<MenuItem> {
         let Some(drawn) = &self.drawn else {
             return Vec::new();
         };
@@ -805,33 +805,32 @@ impl ExclusivePanel {
                 done.ok();
             }
         };
-        let items = offers.into_iter().map(|offer| {
-            let name = offer.label();
-            let item = match offer {
-                Offer::Focus | Offer::Open | Offer::Up => {
-                    MenuItem::new(name, deed(Deed::Click(holds)))
+        // A row an action also does reads that action's label, the action
+        // working on the selected cell, which the cell under the menu becomes.
+        let keys_in = Some(&self.focus_handle);
+        let action =
+            |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
+        let items = offers.into_iter().map(|offer| match offer {
+            Offer::Focus => action(&FocusSelected, deed(Deed::Click(holds))),
+            Offer::Up => action(&FocusUp, deed(Deed::Click(holds))),
+            Offer::Show { node, can } => {
+                let item = action(&ShowSelected, deed(Deed::Reveal(node)));
+                if can { item } else { item.disabled() }
+            }
+            Offer::Root { node, caveat } => {
+                let label = label(node);
+                let explained = caveat.map(|caveat| caveat.explain(&label));
+                let item = MenuItem::new("Use as Root", deed(Deed::Root(label.into())));
+                match explained {
+                    Some(explained) => item.tooltip(explained),
+                    None => item,
                 }
-                Offer::Show { can: false, .. } => MenuItem::disabled(name),
-                Offer::Show { node, can: true } => MenuItem::new(name, deed(Deed::Reveal(node))),
-                Offer::Root { node, caveat } => {
-                    let label = label(node);
-                    let explained = caveat.map(|caveat| caveat.explain(&label));
-                    let item = MenuItem::new(name, deed(Deed::Root(label.into())));
-                    match explained {
-                        Some(explained) => item.tooltip(explained),
-                        None => item,
-                    }
-                }
-                Offer::CopyLabel { node } => {
-                    let label = label(node);
-                    MenuItem::new(name, move |_, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
-                    })
-                }
-            };
-            match offer.keys() {
-                Some(keys) => item.keys(keys),
-                None => item,
+            }
+            Offer::CopyLabel { node } => {
+                let label = label(node);
+                MenuItem::new("Copy Label", move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
+                })
             }
         });
         items.collect()

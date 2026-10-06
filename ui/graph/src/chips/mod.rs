@@ -22,7 +22,7 @@ use bviz_ui_components::{
     Button, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, load_in_background, text_input,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     KeyBinding, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window, actions,
     div, prelude::*, px,
 };
@@ -604,9 +604,9 @@ fn open_menu(
     window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(chip) = view.chips.stack.chip(id) else {
+    if view.chips.stack.chip(id).is_none() {
         return;
-    };
+    }
     let panel = cx.weak_entity();
     let act = |act: fn(&mut GraphPanel, ChipId, &mut Window, &mut Context<GraphPanel>)| {
         let panel = panel.clone();
@@ -614,35 +614,27 @@ fn open_menu(
             panel.update(cx, |view, cx| act(view, id, window, cx)).ok();
         }
     };
-    let negate = match chip.negated() {
-        true => "stop negating",
-        false => "negate",
-    };
-    let enable = match chip.enabled() {
-        true => "disable",
-        false => "enable",
-    };
+    let keys_in = Some(&view.chips.focus_handle);
+    let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
     let items = vec![
-        MenuItem::new(
-            negate,
+        item(
+            &Negate,
             act(|view, id, _, cx| {
                 view.chips.stack.toggle_negated(id);
                 view.chips.scroll_to(id);
                 changed(view, cx);
             }),
-        )
-        .keys("!"),
-        MenuItem::new(
-            enable,
+        ),
+        item(
+            &Toggle,
             act(|view, id, _, cx| {
                 view.chips.stack.toggle_enabled(id);
                 changed(view, cx);
             }),
-        )
-        .keys("space"),
-        MenuItem::new("edit", act(edit)).keys("enter"),
-        MenuItem::new("remove", act(remove)).keys("delete"),
-        MenuItem::new("copy text", act(copy_chip)).keys(COPY_KEYS),
+        ),
+        item(&Edit, act(edit)),
+        item(&Remove, act(remove)),
+        item(&CopyChip, act(copy_chip)),
     ];
     view.chips.selected = Some(id);
     put_up(view, items, at, window, cx);
@@ -656,23 +648,20 @@ fn open_stack_menu(
     cx: &mut Context<GraphPanel>,
 ) {
     let panel = cx.weak_entity();
-    let copying = panel.clone();
-    let copy = MenuItem::new("copy as bazel query", move |_, cx| {
-        copying.update(cx, copy_stack).ok();
-    })
-    .keys(COPY_STACK_KEYS);
-    let clearing = panel.clone();
-    let clear = MenuItem::new("clear query", move |_, cx| {
-        clearing.update(cx, clear_query).ok();
-    })
-    .keys(CLEAR_QUERY_KEYS);
-    let mut items = vec![copy, clear];
+    let act = |act: fn(&mut GraphPanel, &mut Context<GraphPanel>)| {
+        let panel = panel.clone();
+        move |_: &mut Window, cx: &mut App| {
+            panel.update(cx, act).ok();
+        }
+    };
+    let keys_in = Some(&view.chips.focus_handle);
+    let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
+    let mut items = vec![
+        item(&CopyStack, act(copy_stack)),
+        item(&ClearQuery, act(clear_query)),
+    ];
     if view.chips.staged {
-        let revert = MenuItem::new("revert to applied", move |_, cx| {
-            panel.update(cx, revert_query).ok();
-        })
-        .keys(REVERT_QUERY_KEYS);
-        items.push(revert);
+        items.push(item(&RevertQuery, act(revert_query)));
     }
     put_up(view, items, at, window, cx);
 }
@@ -691,13 +680,6 @@ fn revert_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     changed(view, cx);
 }
 
-/// How a menu row names the key reverting the query.
-const REVERT_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-z"
-} else {
-    "ctrl-z"
-};
-
 /// Takes every chip off the stack and empties the field. Like every other
 /// edit to the stack it is staged, the scope applied standing until the
 /// stack is applied or the applied stack is reverted to.
@@ -711,13 +693,6 @@ fn clear_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.chips.field.update(cx, |field, cx| field.clear(cx));
     changed(view, cx);
 }
-
-/// How a menu row names the key clearing the query.
-const CLEAR_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-backspace"
-} else {
-    "ctrl-shift-backspace"
-};
 
 /// Puts up a menu of `items` at `at`, which gives the focus back to the bar
 /// as it closes holding it.
@@ -781,20 +756,6 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     });
     cx.notify();
 }
-
-/// How a menu row names the key copying the stack.
-const COPY_STACK_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-c"
-} else {
-    "ctrl-shift-c"
-};
-
-/// How a menu row names the key copying what the row copies.
-const COPY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-c"
-} else {
-    "ctrl-c"
-};
 
 /// The menu a chip or the stack put up, standing over the whole window.
 pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElement> {

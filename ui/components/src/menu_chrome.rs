@@ -24,6 +24,9 @@ const MENU_FOLD: Pixels = px(18.);
 /// Room a row leaves above and below its label.
 const ROW_PADDING: Pixels = px(4.);
 
+/// Room between what a row reads and the keys or the mark at the end of it.
+pub const LABEL_GAP: Pixels = px(16.);
+
 /// Room a row leaves at either end of what it holds, set in pixels like the rest
 /// of a row's spacing so it holds whatever the root font size.
 pub const ROW_INSET: Pixels = px(8.);
@@ -94,6 +97,14 @@ pub(crate) fn trigger(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
         // (e.g. a toolbar); that would blur the menu and, via the controls'
         // dismiss-on-blur, close it just before this click reopens it.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// The keys running what a row does, set at the end of the row.
+pub fn row_keys(keys: SharedString, colors: &ThemeColors) -> Div {
+    div()
+        .whitespace_nowrap()
+        .text_color(colors.text_muted)
+        .child(keys)
 }
 
 /// The mark on a trigger saying it opens a menu.
