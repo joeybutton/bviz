@@ -125,6 +125,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("h", ToggleNeighborhood, outside_text),
         KeyBinding::new("r", ToggleReduce, outside_text),
         KeyBinding::new("escape", Dismiss, outside_text),
+        KeyBinding::new("enter", reveal::Accept, outside_text),
         KeyBinding::new("alt-left", JumpBack, outside_text),
         KeyBinding::new("alt-right", JumpForward, outside_text),
         KeyBinding::new("cmd-f", jump::Open, graph),
@@ -847,6 +848,7 @@ impl Render for GraphPanel {
             )
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| {
                 jump::dismiss(view, cx);
                 reveal::back(view, cx);
@@ -1258,6 +1260,9 @@ mod tests {
         assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
         assert!(is(dispatched("escape", IN_PALETTE), jump::Close));
         assert!(is(dispatched("escape", IN_PANEL), Dismiss));
+        assert!(is(dispatched("enter", IN_PANEL), reveal::Accept));
+        assert!(is(dispatched("enter", IN_CHIP_FIELD), chips::Commit));
+        assert!(is(dispatched("enter", IN_CHIPS), chips::Edit));
         assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
         assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
         assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));

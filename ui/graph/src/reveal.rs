@@ -11,7 +11,9 @@ use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
 use bviz_ui_components::Button;
 use bviz_ui_workspace::PanelEvent;
-use gpui::{ClickEvent, Context, Div, div, prelude::*};
+use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
+
+actions!(bviz_graph_reveal, [Accept]);
 
 /// What keeps a node out of the drawing, as a reader names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -262,6 +264,15 @@ pub(crate) fn landed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 
 /// Puts away the offer to reveal a hidden node, and a reveal still waiting on
 /// a restriction; reports whether either was pending.
+/// Takes the card's own action on the node it offers to show, for the key
+/// answering it; a key no card stands for is left to what else binds it.
+pub(crate) fn accept(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    match view.reveal {
+        Reveal::Offered(node, by) if by.revealable() => reveal_anyway(view, node, cx),
+        _ => cx.propagate(),
+    }
+}
+
 pub(crate) fn dismiss(view: &mut GraphPanel) -> bool {
     let pending = view.reveal != Reveal::Idle;
     view.reveal = Reveal::Idle;
@@ -314,8 +325,8 @@ pub(crate) fn card(
                             }),
                         )
                         .label(match by {
-                            HiddenBy::Pin => "unpin",
-                            _ => "reveal anyway",
+                            HiddenBy::Pin => "unpin · enter",
+                            _ => "reveal anyway · enter",
                         })
                         .compact()
                     }))
@@ -327,7 +338,7 @@ pub(crate) fn card(
                                 cx.notify();
                             }),
                         )
-                        .label("close")
+                        .label("close · esc")
                         .compact(),
                     ),
             ),
