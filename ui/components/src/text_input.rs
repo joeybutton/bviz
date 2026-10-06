@@ -712,8 +712,11 @@ impl Element for TextElement {
             cx,
         );
         let line = prepaint.line.take().unwrap();
+        // The selection and the cursor mark where typing lands, which only a
+        // focused field takes.
+        let focused = focus_handle.is_focused(window);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if let Some(selection) = prepaint.selection.take() {
+            if focused && let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection);
             }
             line.paint(
@@ -725,9 +728,7 @@ impl Element for TextElement {
                 cx,
             )
             .unwrap();
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
+            if focused && let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
         });
