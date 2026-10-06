@@ -7,12 +7,9 @@ pub(crate) fn toolbar(
     palette: &Palette,
     cx: &mut Context<GraphPanel>,
 ) -> Toolbar {
-    // The search leads the strip: on a graph too large to read, naming what to
+    // The query leads the strip: on a graph too large to read, naming what to
     // look at is where a reader starts.
-    let mut bar = Toolbar::new()
-        .child(controls.chips)
-        .child(controls.search)
-        .child(controls.picker);
+    let mut bar = Toolbar::new().child(controls.chips).child(controls.picker);
     // The facet checklists sit beside the layout picker: both say what the panel
     // draws, where the toggles past them say how it is drawn.
     for checklist in [controls.class_filter, controls.origin_filter]

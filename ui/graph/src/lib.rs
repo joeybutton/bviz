@@ -2,7 +2,6 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
 use bviz_ui_components::{
@@ -23,7 +22,6 @@ use gpui::{
     Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
     canvas, div, prelude::*, px, size,
 };
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod actions;
@@ -62,7 +60,6 @@ mod reveal;
 mod rules;
 mod scatter;
 mod scroll;
-mod search;
 mod selection;
 mod status;
 mod timecard;
@@ -87,7 +84,6 @@ use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
-use search::Search;
 use selection::Selection;
 
 actions!(
@@ -137,12 +133,10 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
         KeyBinding::new("ctrl-enter", jump::AskWhy, jumping),
+        KeyBinding::new("shift-enter", jump::AlwaysShow, jumping),
         KeyBinding::new("escape", jump::Close, jumping),
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
-        // Escape acts on the innermost thing holding focus: in the field that
-        // is the card the typed pattern put up over the drawing.
-        KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
         KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
         KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
         KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
@@ -295,11 +289,7 @@ pub struct GraphPanel {
     _preset_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
-    /// The label search, whose pattern shows or hides the nodes it names.
-    search: Search,
     jump: jump::Finder,
-    /// Carries what is typed into the search field into the search.
-    _search_typing: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Repaints the drawing, and only it, as a gesture moves the document's
@@ -369,15 +359,6 @@ impl GraphPanel {
             }
             _ => Some(self.camera().zoom),
         }
-    }
-
-    /// The canonical labels the loaded graph's nodes belong to, which a search
-    /// pattern is matched over; `None` until the read lands.
-    fn labels(&self, cx: &App) -> Option<Arc<LabelIndex>> {
-        self.model
-            .read(cx)
-            .loaded()
-            .map(|loaded| Arc::clone(&loaded.shared.labels))
     }
 
     /// The boxes the selected mode's layout lets the user open or close.
@@ -462,8 +443,6 @@ impl GraphPanel {
                 checklist::choose_presets(view, event, cx);
             });
         let chips = chips::Chips::new(cx);
-        let search = Search::new(cx);
-        let search_typing = cx.subscribe(search.field(), search::typed);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas { parent });
         let changed = cx.observe(&model, |view, _, cx| {
@@ -520,9 +499,7 @@ impl GraphPanel {
             preset_filter,
             _preset_choices: preset_choices,
             chips,
-            search,
             jump: jump::Finder::default(),
-            _search_typing: search_typing,
             _changed: changed,
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
@@ -641,7 +618,6 @@ impl GraphPanel {
                     .folding(timecard::card(self, &palette, cx))
                     .foot(why::card(self, &palette, cx)),
             )
-            .children(search::card(self, &palette, cx))
             .children(jump::overlay(self, &palette, window, cx))
             .children(chips::menu(self, window))
             .children(chips::notice(self, &palette))
@@ -698,9 +674,8 @@ impl GraphPanel {
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // The card and the palette occlude the canvas, so a press reaching here
-        // landed outside them.
-        search::dismiss(self, cx);
+        // The palette occludes the canvas, so a press reaching here landed
+        // outside it.
         jump::dismiss(self, cx);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
@@ -714,7 +689,6 @@ impl GraphPanel {
     /// Picks the box under the cursor out for as long as it stays selected, or
     /// drops the selection where the press lands on no box.
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        search::dismiss(self, cx);
         jump::dismiss(self, cx);
         select_box_at(self, e.position, cx);
     }
@@ -859,7 +833,6 @@ impl Panel for GraphPanel {
 
 impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        search::watch_field(self, window, cx);
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let chrome = div()
             .key_context(Self::kind().key_context)
@@ -898,7 +871,6 @@ impl Render for GraphPanel {
                 let controls = Controls {
                     mode: self.mode,
                     chips: chips::bar(self, &palette, window, cx),
-                    search: search::field(&self.search, cx).into_any_element(),
                     picker: self.mode_picker.clone(),
                     class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
                     origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
@@ -980,8 +952,6 @@ struct Controls {
     mode: LayoutMode,
     /// The query bar.
     chips: AnyElement,
-    /// The field a label pattern is typed into, with the button that empties it.
-    search: AnyElement,
     picker: Entity<Dropdown>,
     /// The checklists over the facets the loaded graph carries, each offered
     /// only where that graph carries a value on its axis.
@@ -1249,7 +1219,6 @@ mod tests {
     const IN_PANEL: &[&str] = &[KEY_CONTEXT];
     const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
     const IN_PALETTE: &[&str] = &[KEY_CONTEXT, jump::KEY_CONTEXT, text_input::KEY_CONTEXT];
-    const IN_SEARCH: &[&str] = &[KEY_CONTEXT, search::KEY_CONTEXT, text_input::KEY_CONTEXT];
 
     /// A letter typed into any text field is text, not one of the panel's
     /// keys.
@@ -1257,7 +1226,7 @@ mod tests {
     fn the_panels_letters_stand_down_in_any_text_field() {
         assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
         assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
-        for field in [IN_SEARCH, IN_FIELD] {
+        for field in [IN_CHIP_FIELD, IN_FIELD] {
             assert!(dispatched("h", field).is_none());
             assert!(dispatched("r", field).is_none());
         }
@@ -1266,11 +1235,11 @@ mod tests {
     #[test]
     fn slash_opens_the_palette_only_where_it_types_nothing() {
         assert!(is(dispatched("/", IN_PANEL), jump::Open));
-        assert!(dispatched("/", IN_SEARCH).is_none());
+        assert!(dispatched("/", IN_CHIP_FIELD).is_none());
         assert!(dispatched("/", IN_PALETTE).is_none());
         for find in ["ctrl-f", "cmd-f"] {
             assert!(is(dispatched(find, IN_PANEL), jump::Open), "{find}");
-            assert!(is(dispatched(find, IN_SEARCH), jump::Open), "{find}");
+            assert!(is(dispatched(find, IN_CHIP_FIELD), jump::Open), "{find}");
         }
     }
 
@@ -1285,6 +1254,7 @@ mod tests {
         assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
         assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
         assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
+        assert!(is(dispatched("shift-enter", IN_PALETTE), jump::AlwaysShow));
         assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
         assert!(is(dispatched("shift-tab", IN_PALETTE), jump::PreviousScope));
     }
@@ -1296,7 +1266,7 @@ mod tests {
         assert!(is(dispatched("alt-left", IN_PANEL), JumpBack));
         assert!(is(dispatched("alt-right", IN_PANEL), JumpForward));
         for keys in ["alt-left", "alt-right"] {
-            for field in [IN_PALETTE, IN_SEARCH] {
+            for field in [IN_PALETTE, IN_CHIP_FIELD] {
                 assert!(!is(dispatched(keys, field), JumpBack), "{keys}");
                 assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
             }

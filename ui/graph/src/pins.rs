@@ -25,10 +25,6 @@ const PANEL_WIDTH: Pixels = px(320.);
 /// the canvas's foot and every row it lists can be reached.
 const MAX_HEIGHT_SHARE: f32 = 0.6;
 
-/// Side of the mark a pinned row carries, and of the space a row without one
-/// leaves so the labels line up.
-const MARK: Pixels = px(12.);
-
 /// How a reader is offered the override `pin`, and how it is listed.
 fn label(pin: Pin) -> &'static str {
     match pin {
@@ -76,11 +72,6 @@ fn unpinned(filter: &Filter, node: Id) -> Filter {
         pins,
         ..filter.clone()
     }
-}
-
-/// The override `filter` holds for `node`.
-pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Pin> {
-    filter.pins.get(&node).copied()
 }
 
 /// The name `node` is listed under: the canonical label of the target it
@@ -156,20 +147,9 @@ fn clear_all(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     checklist::set_filter(view, filter, cx);
 }
 
-/// The mark a row carries while it is pinned, and the space it leaves where it
-/// is not, so the labels of a list line up either way.
-pub(crate) fn mark(pinned: bool, palette: &Palette) -> Div {
-    div().size(MARK).flex_none().children(pinned.then(|| {
-        bviz_ui_assets::icon("check")
-            .size(MARK)
-            .text_color(palette.label)
-    }))
-}
-
 /// The override offered on the box a secondary click has selected: dropping it
 /// from the drawing, which is what a reader reaches for on a box in front of
-/// them. Its opposite is offered where it can be aimed at a box the drawing does
-/// not hold, on a search result. `None` while no box is selected.
+/// them. `None` while no box is selected.
 pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option<Button> {
     let node = view.selection.node()?;
     Some(
@@ -302,6 +282,11 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The override `filter` holds for `node`.
+    fn pinned(filter: &Filter, node: Id) -> Option<Pin> {
+        filter.pins.get(&node).copied()
+    }
     use bviz_graph_layout::Kind;
     use bviz_graph_layout::facets::FacetsBuilder;
     use bviz_graph_layout::graph::{Graph, Node};

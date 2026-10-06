@@ -11,7 +11,8 @@ use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
 use crate::reveal::{self, hidden_by};
-use crate::{GraphPanel, Palette, why};
+use crate::{GraphPanel, Palette, pins, why};
+use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::text_input::TextEdited;
 use bviz_ui_components::{
@@ -43,6 +44,7 @@ actions!(
         Next,
         Go,
         AskWhy,
+        AlwaysShow,
         Close,
         NextScope,
         PreviousScope
@@ -473,6 +475,17 @@ fn ask_why(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPan
     why::ask_why(view, id, cx);
 }
 
+/// Pins the aimed row's node to be shown whatever the filter says, or drops
+/// that pin where the node carries it, and jumps to it, closing the palette.
+fn always_show(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
+    let Some(id) = view.jump.open.as_ref().and_then(aimed) else {
+        return;
+    };
+    put_away(view, window, cx);
+    pins::set(view, id, Visibility::Shown, cx);
+    reveal::reveal(view, id, cx);
+}
+
 /// Closes the palette unpicked, returning the view to where it stood as the
 /// palette opened.
 fn close(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
@@ -547,6 +560,11 @@ pub(crate) fn overlay(
                     .on_action(cx.listener(|view, _: &Go, window, cx| go(view, window, cx)))
                     .on_action(
                         cx.listener(|view, _: &AskWhy, window, cx| ask_why(view, window, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|view, _: &AlwaysShow, window, cx| {
+                            always_show(view, window, cx)
+                        }),
                     )
                     .on_action(cx.listener(|view, _: &Close, window, cx| close(view, window, cx)))
                     .on_action(
@@ -668,6 +686,14 @@ fn footer(jump: &Jump, muted: Hsla) -> Div {
         }
         (false, matched) => format!("{matched} matches"),
     };
+    let last = KEY_HINTS.len() - 1;
+    let hints = KEY_HINTS
+        .iter()
+        .enumerate()
+        .map(move |(at, hint)| match at == last {
+            true => SharedString::from(*hint),
+            false => format!("{hint} ·").into(),
+        });
     div()
         .flex()
         .justify_between()
@@ -676,9 +702,30 @@ fn footer(jump: &Jump, muted: Hsla) -> Div {
         .pt_1()
         .text_xs()
         .text_color(muted)
-        .child(tally)
-        .child("↑↓ preview · enter jump · ctrl-enter why · tab scope · esc back")
+        .child(div().flex_none().child(tally))
+        .child(
+            // The hints wrap between one another, so none runs past the
+            // palette's edge.
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .gap_x_1()
+                .children(hints),
+        )
 }
+
+/// The keys the palette answers to, as its footer lists them.
+const KEY_HINTS: &[&str] = &[
+    "↑↓ preview",
+    "enter jump",
+    "shift-enter always show",
+    "ctrl-enter why",
+    "tab scope",
+    "esc back",
+];
 
 /// One row: the node's text with the characters the query matched picked
 /// out, what holds it where the text leaves that out, and its badges.

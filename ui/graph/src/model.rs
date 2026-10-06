@@ -49,8 +49,8 @@ pub(crate) struct Shared {
     /// The facets of the base graph's nodes, keyed by the same ids, which a
     /// panel's filter selects on.
     pub(crate) facets: Arc<Facets>,
-    /// The canonical labels those nodes belong to, gathered as the graph is read
-    /// so that a search matches a pattern over them without walking the graph.
+    /// The canonical labels those nodes belong to, gathered once for every
+    /// index over them.
     pub(crate) labels: Arc<LabelIndex>,
     /// The multi-child containers of the base graph, which a layered view offers
     /// to open.
