@@ -5,7 +5,8 @@ mod rank;
 
 use crate::GraphPanel;
 use gpui::{
-    Context, HighlightStyle, Hsla, Pixels, SharedString, StyledText, Task, UnderlineStyle, px,
+    Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
+    px, rems,
 };
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Matcher, Nucleo};
@@ -25,6 +26,9 @@ const POLL_WAIT_MS: u64 = 1;
 
 /// The weight of the line under a row's matched characters.
 const MATCH_UNDERLINE: Pixels = px(1.);
+
+/// The size a list of matches is set in, which its rows are measured at.
+pub(crate) const TEXT_SIZE: Rems = rems(0.875);
 
 /// The matcher's settings: every candidate's text reads as a path.
 fn config() -> Config {
@@ -49,6 +53,9 @@ pub(crate) struct Matching {
     /// The query last handed to the matcher, which an edit extending it
     /// narrows rather than matches afresh.
     query: SharedString,
+    /// The query `rows` were ranked for, which trails `query` until the
+    /// matcher is next polled.
+    ranked: SharedString,
     rows: Vec<Row>,
     /// How many candidates the query matches, of which `rows` lists the
     /// first.
@@ -61,10 +68,26 @@ pub(crate) struct Matching {
     _polling: Task<()>,
 }
 
+/// The matcher worker pool a panel keeps while no list of its holds it, so
+/// that a list opened takes it up rather than starting a pool of its own.
+#[derive(Default)]
+pub(crate) struct Pool(Option<Nucleo<u32>>);
+
+impl Pool {
+    /// A matching with no query, on the parked pool where one is parked.
+    pub(crate) fn take(&mut self) -> Matching {
+        Matching::new(self.0.take())
+    }
+
+    /// Parks the pool of `matching`, which stops matching; a pool parked
+    /// already stays, and the other is dropped.
+    pub(crate) fn park(&mut self, matching: Matching) {
+        self.0.get_or_insert(matching.nucleo);
+    }
+}
+
 impl Matching {
-    /// A matching with no query, on the worker pool of `pool` where a closed
-    /// matching gave one up, so that each list opened does not start one.
-    pub(crate) fn new(pool: Option<Nucleo<u32>>) -> Self {
+    fn new(pool: Option<Nucleo<u32>>) -> Self {
         let mut nucleo = pool.unwrap_or_else(|| {
             let workers = Some(bviz_parallel::worker_count());
             Nucleo::new(config(), Arc::new(|| {}), workers, 1)
@@ -76,6 +99,7 @@ impl Matching {
             nucleo,
             matcher: Matcher::new(config()),
             query: SharedString::default(),
+            ranked: SharedString::default(),
             rows: Vec::new(),
             matched: 0,
             running: false,
@@ -83,11 +107,6 @@ impl Matching {
             _injecting: Injecting::none(),
             _polling: Task::ready(()),
         }
-    }
-
-    /// Gives up the matcher's worker pool, for a matching opened later.
-    pub(crate) fn into_pool(self) -> Nucleo<u32> {
-        self.nucleo
     }
 
     pub(crate) fn query(&self) -> &SharedString {
@@ -104,6 +123,11 @@ impl Matching {
 
     pub(crate) fn streaming(&self) -> bool {
         self.streaming
+    }
+
+    /// Whether `rows` were ranked for the query last handed to the matcher.
+    pub(crate) fn current(&self) -> bool {
+        self.ranked == self.query
     }
 
     /// Hands the matcher `query`; reports whether it differs from the last.
@@ -140,6 +164,7 @@ impl Matching {
     /// tells of each candidate's index; it is asked only of an index handed
     /// to the matcher.
     pub(crate) fn rerank(&mut self, standing: impl Fn(u32) -> Standing) {
+        self.ranked = self.query.clone();
         let snapshot = self.nucleo.snapshot();
         self.matched = snapshot.matched_item_count();
         if self.query.is_empty() || snapshot.item_count() == 0 {
@@ -256,7 +281,7 @@ pub(crate) fn poll(
                 let Some(matching) = locate(view) else {
                     return false;
                 };
-                if matching.tick() {
+                if matching.tick() || !matching.current() {
                     take_up(view, cx);
                 }
                 locate(view).is_some_and(|matching| matching.at_work())

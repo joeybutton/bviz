@@ -6,7 +6,7 @@ mod index;
 
 use crate::derive::Drawn;
 use crate::framing::{Frame, Held};
-use crate::fuzzy::{self, Matching, Row, Standing};
+use crate::fuzzy::{self, Matching, Row, Standing, TEXT_SIZE};
 use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
@@ -25,9 +25,8 @@ use gpui::{
     Rems, ScrollStrategy, SharedString, Stateful, Subscription, TextStyleRefinement, Window,
     actions, div, prelude::*, px, relative, rems, uniform_list,
 };
-pub(crate) use index::Candidates;
 use index::{Candidate, Scope};
-use nucleo::Nucleo;
+pub(crate) use index::{Candidates, labelled, package_of};
 use rustc_hash::FxHashSet;
 
 actions!(
@@ -54,9 +53,6 @@ const WIDTH: Pixels = px(560.);
 
 const PLACEHOLDER: &str = "jump to…";
 
-/// The size the palette's text is set in, which its rows are measured at.
-const TEXT_SIZE: Rems = rems(0.875);
-
 /// The size the scope's name is set in, which its slot is measured at.
 const SCOPE_TEXT_SIZE: Rems = rems(0.75);
 
@@ -73,22 +69,8 @@ const CONTAINER_SHRINK: f32 = 1000.;
 pub(crate) struct Finder {
     /// The palette while it is open over the drawing.
     open: Option<Jump>,
-    /// The worker pool the palette last closed with, which the next opening
-    /// takes up.
-    closed: Option<Nucleo<u32>>,
     /// How far the open palette's rows have scrolled.
     scroll: ListScroll,
-}
-
-impl Finder {
-    /// Closes the palette; reports whether it was open.
-    fn close(&mut self) -> bool {
-        let Some(jump) = self.open.take() else {
-            return false;
-        };
-        self.closed = Some(jump.matching.into_pool());
-        true
-    }
 }
 
 /// The palette while it is open over the drawing.
@@ -123,7 +105,7 @@ pub(crate) fn open(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<
             field,
             _edits: edits,
             scope: Scope::default(),
-            matching: Matching::new(view.jump.closed.take()),
+            matching: view.matchers.take(),
             candidates,
             aimed: 0,
             painted: None,
@@ -215,7 +197,7 @@ fn rerank(jump: &mut Jump, drawn: &FxHashSet<Id>) {
 }
 
 /// The nodes the drawing holds a box for at the zoom it is drawn at.
-fn drawn_ids(view: &GraphPanel) -> FxHashSet<Id> {
+pub(crate) fn drawn_ids(view: &GraphPanel) -> FxHashSet<Id> {
     let drawn = view.drawn();
     let laid_out = drawn
         .as_ref()
@@ -257,14 +239,14 @@ fn aim(view: &mut GraphPanel, step: isize, cx: &mut Context<GraphPanel>) {
 }
 
 /// The row `step` rows on from `aimed` among `rows` rows, held to the list.
-fn stepped(aimed: usize, step: isize, rows: usize) -> usize {
+pub(crate) fn stepped(aimed: usize, step: isize, rows: usize) -> usize {
     aimed
         .saturating_add_signed(step)
         .min(rows.saturating_sub(1))
 }
 
 /// Scrolls the list just far enough to show the row `aimed`.
-fn bring_into_view(scroll: &ListScroll, aimed: usize) {
+pub(crate) fn bring_into_view(scroll: &ListScroll, aimed: usize) {
     scroll
         .uniform_handle()
         .scroll_to_item(aimed, ScrollStrategy::Nearest);
@@ -394,7 +376,7 @@ fn put_away(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPa
 
 /// Closes the palette, leaving the view where it stands.
 pub(crate) fn dismiss(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if view.jump.close() {
+    if close_palette(view) {
         view.hovered = None;
         view.invalidate_canvas(cx);
     }
@@ -403,9 +385,19 @@ pub(crate) fn dismiss(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// Closes the palette, which offered the nodes of a graph that has been
 /// replaced, with the preview its rows put up.
 pub(crate) fn reset(view: &mut GraphPanel) {
-    if view.jump.close() {
+    if close_palette(view) {
         view.hovered = None;
     }
+}
+
+/// Closes the palette, parking its matcher's pool; reports whether it was
+/// open.
+fn close_palette(view: &mut GraphPanel) -> bool {
+    let Some(jump) = view.jump.open.take() else {
+        return false;
+    };
+    view.matchers.park(jump.matching);
+    true
 }
 
 /// The palette over the drawing, for the caller to place there; `None` while

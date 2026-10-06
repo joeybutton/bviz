@@ -72,6 +72,12 @@ pub struct TextEdited;
 
 impl EventEmitter<TextEdited> for TextInput {}
 
+/// The cursor of a [`TextInput`] moved, or the selection changed, over the
+/// text it holds.
+pub struct CursorMoved;
+
+impl EventEmitter<CursorMoved> for TextInput {}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -115,6 +121,22 @@ impl TextInput {
         self.hold(content.into(), cx);
         let end = self.content.len();
         self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Where the cursor stands, as a byte offset into what the field holds.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// Replaces the byte range `range` of what the field holds with `text`,
+    /// leaving the cursor just past it.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.splice(&range, text, cx);
+        let cursor = range.start + text.len();
+        self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
@@ -233,6 +255,7 @@ impl TextInput {
         self.is_selecting = false;
         self.selection_reversed = false;
         self.selected_range = range;
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -260,6 +283,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -281,6 +305,7 @@ impl TextInput {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -425,11 +450,7 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.replacement_range(range_utf16);
-        self.splice(&range, new_text, cx);
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.marked_range = None;
-        cx.notify();
+        self.replace(range, new_text, cx);
     }
 
     fn replace_and_mark_text_in_range(

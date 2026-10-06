@@ -111,6 +111,10 @@ impl Candidates {
         Candidates(candidates)
     }
 
+    pub(crate) fn len(&self) -> u32 {
+        self.0.len() as u32
+    }
+
     pub(crate) fn get(&self, index: u32) -> &Candidate {
         &self.0[index as usize]
     }
@@ -178,7 +182,7 @@ fn text(shared: &Shared, id: Id, kind: Kind) -> String {
 
 /// Whether the node `id` is a target in its own right, whose label is its
 /// own rather than its owner's.
-fn labelled(shared: &Shared, id: Id) -> bool {
+pub(crate) fn labelled(shared: &Shared, id: Id) -> bool {
     shared.facets.label(id) == Some(id)
 }
 
@@ -193,7 +197,7 @@ fn node_label(shared: &Shared, id: Id) -> &str {
 }
 
 /// The package part of `label`, up to its `:`.
-fn package_of(label: &str) -> &str {
+pub(crate) fn package_of(label: &str) -> &str {
     label.split_once(':').map_or(label, |(package, _)| package)
 }
 

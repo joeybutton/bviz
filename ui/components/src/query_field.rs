@@ -1,11 +1,13 @@
 //! A text field with a button that empties it, which says what it holds once
 //! typing settles.
 
-use crate::{Button, TextInput, text_input::TextEdited};
+use crate::text_input::{CursorMoved, TextEdited};
+use crate::{Button, TextInput};
 use gpui::{
     App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     Pixels, Render, SharedString, Subscription, Task, Window, div, prelude::*,
 };
+use std::ops::Range;
 use std::time::Duration;
 
 /// How long what a [`QueryField`] holds must stand before the field settles,
@@ -19,6 +21,8 @@ pub enum QueryFieldEvent {
     Edited,
     /// The text has stood for [`SETTLE`], or is empty, which settles at once.
     Settled,
+    /// The cursor moved over text unchanged.
+    CursorMoved,
 }
 
 /// A one-line text field with a button that empties it, shown while it holds
@@ -31,6 +35,7 @@ pub struct QueryField {
     /// wait for the text it changed.
     settling: Task<()>,
     _edited: Subscription,
+    _moved: Subscription,
 }
 
 impl QueryField {
@@ -44,12 +49,16 @@ impl QueryField {
     ) -> Self {
         let input = cx.new(|cx| TextInput::new(cx, placeholder, 0));
         let edited = cx.subscribe(&input, |field, _, _: &TextEdited, cx| field.edited(cx));
+        let moved = cx.subscribe(&input, |_, _, _: &CursorMoved, cx| {
+            cx.emit(QueryFieldEvent::CursorMoved)
+        });
         Self {
             input,
             width,
             clear_id: ElementId::Name(format!("{id}-clear").into()),
             settling: Task::ready(()),
             _edited: edited,
+            _moved: moved,
         }
     }
 
@@ -61,6 +70,18 @@ impl QueryField {
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.input
             .update(cx, |input, cx| input.set_content(text, cx));
+    }
+
+    /// Where the cursor stands, as a byte offset into the text.
+    pub fn cursor(&self, cx: &App) -> usize {
+        self.input.read(cx).cursor()
+    }
+
+    /// Replaces the byte range `range` of the text with `text`, which settles
+    /// as an edit typed does.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.replace(range, text, cx));
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {

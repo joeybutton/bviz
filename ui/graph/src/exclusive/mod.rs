@@ -157,7 +157,7 @@ impl ExclusivePanel {
             )
         });
         let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
-            QueryFieldEvent::Edited => {}
+            QueryFieldEvent::Edited | QueryFieldEvent::CursorMoved => {}
             QueryFieldEvent::Settled => view.reroot(cx),
         });
         let parent = cx.entity().downgrade();

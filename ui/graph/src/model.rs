@@ -1,6 +1,7 @@
 use crate::GraphPanel;
 use crate::actions::action_graph;
 use crate::build::{build_graph, loaded_inputs};
+use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
 use crate::jump::Candidates;
@@ -138,6 +139,8 @@ pub(crate) struct Loaded {
     targets: Prepared<Arc<TargetIndex>>,
     /// The graph's nodes as the jump palette offers them.
     candidates: Prepared<Candidates>,
+    /// What the query field offers to complete a word with.
+    completions: Prepared<Completions>,
     /// The graph as a query reads it.
     universe: Prepared<Universe>,
     /// Where the execution attempts the invocation's profile recorded stood
@@ -154,6 +157,8 @@ impl Loaded {
             Arc::new(index)
         });
         let candidates = Prepared::new(&shared, Candidates::of);
+        let offered = candidates.clone();
+        let completions = Prepared::new(&shared, move |_| Completions::of(offered));
         let indexed = targets.clone();
         let universe = Prepared::new(&shared, move |shared| {
             let targets = Arc::clone(indexed.get());
@@ -162,6 +167,7 @@ impl Loaded {
         Self {
             targets,
             candidates,
+            completions,
             universe,
             shared,
             opening,
@@ -891,6 +897,10 @@ impl GraphModel {
 
     pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
         Some(self.loaded()?.candidates.clone())
+    }
+
+    pub(crate) fn completions(&self) -> Option<Prepared<Completions>> {
+        Some(self.loaded()?.completions.clone())
     }
 
     /// The loaded graph as a query reads it; absent while the graph is still

@@ -141,7 +141,7 @@ pub fn widest(window: &mut Window, labels: impl Iterator<Item = SharedString>) -
 /// The sheet a menu's rows sit on, for [`under_trigger`] to place.
 ///
 /// No explicit width: the sheet shrinks to fit its rows, so a row never wraps.
-pub(crate) fn sheet(colors: &ThemeColors) -> Div {
+pub fn sheet(colors: &ThemeColors) -> Div {
     surface(div().occlude().absolute().flex().flex_col(), colors)
 }
 
@@ -149,7 +149,7 @@ pub(crate) fn sheet(colors: &ThemeColors) -> Div {
 /// above it where the window has no room below, and held inside the window
 /// where it fits neither way. The holder is the trigger's `relative` parent,
 /// laid out to the trigger's bounds.
-pub(crate) fn under_trigger(sheet: impl IntoElement) -> Deferred {
+pub fn under_trigger(sheet: impl IntoElement) -> Deferred {
     deferred(UnderTrigger {
         sheet: sheet.into_any_element(),
     })

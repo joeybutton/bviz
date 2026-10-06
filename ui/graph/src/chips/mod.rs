@@ -5,7 +5,10 @@
 //! as they change; the filter takes the stack up only once it is applied,
 //! since restricting the drawing to a scope costs a whole relayout.
 
+mod complete;
 mod pill;
+
+pub(crate) use complete::Completions;
 
 use crate::menu::over_window;
 use crate::{GraphPanel, Palette, checklist};
@@ -40,7 +43,11 @@ actions!(
         Remove,
         Edit,
         CopyChip,
-        CopyStack
+        CopyStack,
+        CompletePrevious,
+        CompleteNext,
+        AcceptCompletion,
+        CloseCompletion
     ]
 );
 
@@ -49,6 +56,14 @@ pub(crate) const KEY_CONTEXT: &str = "GraphChips";
 
 /// The key context the bar's field carries, inside the bar's.
 pub(crate) const FIELD_KEY_CONTEXT: &str = "GraphChipField";
+
+/// The key context the field carries inside its own while the list
+/// completing its word stands open, scoping the keys acting on the list.
+pub(crate) const COMPLETION_KEY_CONTEXT: &str = "GraphChipCompletion";
+
+/// The key context the field carries inside the completion's while the
+/// arrow keys have moved onto a row, which Enter then accepts.
+pub(crate) const AIMED_KEY_CONTEXT: &str = "GraphChipCompletionAimed";
 
 /// Width the field is drawn at, wide enough for a call over a package.
 const FIELD_WIDTH: Pixels = px(200.);
@@ -68,7 +83,14 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
     let field = Some(FIELD_KEY_CONTEXT);
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
+    let completing = Some(COMPLETION_KEY_CONTEXT);
+    let aimed = Some(AIMED_KEY_CONTEXT);
     vec![
+        KeyBinding::new("up", CompletePrevious, completing),
+        KeyBinding::new("down", CompleteNext, completing),
+        KeyBinding::new("tab", AcceptCompletion, completing),
+        KeyBinding::new("enter", AcceptCompletion, aimed),
+        KeyBinding::new("escape", CloseCompletion, completing),
         KeyBinding::new("q", Focus, outside_text),
         KeyBinding::new("secondary-enter", Apply, outside_text),
         KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT)),
@@ -119,6 +141,7 @@ pub(crate) struct Chips {
     prefixes: Arc<Prefixes>,
     /// Scrolls the row of chips.
     scroll: ScrollHandle,
+    completer: complete::Completer,
     menu: Option<OpenMenu>,
     _evaluating: Task<()>,
     /// Applies the stack committed last; replacing it gives up an apply still
@@ -145,7 +168,12 @@ impl Chips {
     pub(crate) fn new(cx: &mut Context<GraphPanel>) -> Self {
         let field = cx.new(|cx| QueryField::new("chips", PLACEHOLDER, FIELD_WIDTH, cx));
         let typed = cx.subscribe(&field, |view, _, event: &QueryFieldEvent, cx| match event {
+            QueryFieldEvent::CursorMoved => {
+                complete::follow(view, cx);
+                cx.notify();
+            }
             QueryFieldEvent::Edited => {
+                complete::follow(view, cx);
                 view.chips.restage(cx);
                 cx.notify();
             }
@@ -164,6 +192,7 @@ impl Chips {
             notice: None,
             prefixes: Arc::default(),
             scroll: ScrollHandle::new(),
+            completer: complete::Completer::default(),
             menu: None,
             _evaluating: Task::ready(()),
             _applying: Task::ready(()),
@@ -220,6 +249,7 @@ impl Chips {
 /// named was named of the graph replaced, so they are evaluated afresh, and
 /// the stack that was applied is applied again.
 pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    complete::release(view);
     let chips = &mut view.chips;
     chips.prefixes = Arc::default();
     chips.landed = None;
@@ -415,6 +445,7 @@ pub(crate) fn focus(view: &mut GraphPanel, window: &mut Window, cx: &mut Context
 /// Gives the focus back to the panel, dropping an edit under way.
 fn leave(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
     view.chips.selected = None;
+    complete::release(view);
     if view.chips.editing.take().is_some() {
         view.chips.field.update(cx, |field, cx| field.clear(cx));
     }
@@ -500,6 +531,7 @@ fn edit(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Context
     view.chips
         .field
         .update(cx, |field, cx| field.set_text(text, cx));
+    complete::hold_closed(view, cx);
     focus(view, window, cx);
 }
 
@@ -679,7 +711,7 @@ pub(crate) fn apply_staged(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) 
 pub(crate) fn bar(
     view: &GraphPanel,
     palette: &Palette,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) -> AnyElement {
     let chips = &view.chips;
@@ -700,6 +732,9 @@ pub(crate) fn bar(
         .and_then(|landed| Some((landed.draft?, landed)))
         .and_then(|(draft, landed)| landed.evaluation.outcome(draft).cloned());
     let staged = chips.staged;
+    let completing = complete::is_shown(view, window, cx);
+    let aimed = completing && complete::is_aimed(view);
+    let completions = complete::list(view, palette, window, cx);
     div()
         .id("graph-chips")
         .key_context(KEY_CONTEXT)
@@ -751,6 +786,7 @@ pub(crate) fn bar(
         .child(
             div()
                 .flex_none()
+                .relative()
                 .key_context(FIELD_KEY_CONTEXT)
                 .on_action(cx.listener(|view, _: &Commit, _, cx| commit(view, cx)))
                 .capture_action(cx.listener(|view, _: &text_input::Backspace, window, cx| {
@@ -758,7 +794,32 @@ pub(crate) fn bar(
                         cx.stop_propagation();
                     }
                 }))
-                .child(chips.field.clone()),
+                .child(
+                    div()
+                        .when(completing, |field| {
+                            field.key_context(COMPLETION_KEY_CONTEXT)
+                        })
+                        .on_action(cx.listener(|view, _: &CompletePrevious, _, cx| {
+                            complete::aim(view, -1, cx)
+                        }))
+                        .on_action(
+                            cx.listener(|view, _: &CompleteNext, _, cx| complete::aim(view, 1, cx)),
+                        )
+                        .on_action(cx.listener(|view, _: &AcceptCompletion, window, cx| {
+                            complete::accept(view, None, window, cx)
+                        }))
+                        .on_action(
+                            cx.listener(|view, _: &CloseCompletion, _, cx| {
+                                complete::close(view, cx)
+                            }),
+                        )
+                        .child(
+                            div()
+                                .when(aimed, |field| field.key_context(AIMED_KEY_CONTEXT))
+                                .child(chips.field.clone()),
+                        ),
+                )
+                .children(completions),
         )
         .children(
             draft

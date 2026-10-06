@@ -292,6 +292,9 @@ pub struct GraphPanel {
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
     jump: jump::Finder,
+    /// The matcher pool the palette and the query field's completion take
+    /// up in turn.
+    matchers: fuzzy::Pool,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Repaints the drawing, and only it, as a gesture moves the document's
@@ -502,6 +505,7 @@ impl GraphPanel {
             _preset_choices: preset_choices,
             chips,
             jump: jump::Finder::default(),
+            matchers: fuzzy::Pool::default(),
             _changed: changed,
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
@@ -1290,6 +1294,56 @@ mod tests {
         chips::FIELD_KEY_CONTEXT,
         text_input::KEY_CONTEXT,
     ];
+
+    const IN_CHIP_COMPLETION: &[&str] = &[
+        KEY_CONTEXT,
+        chips::KEY_CONTEXT,
+        chips::FIELD_KEY_CONTEXT,
+        chips::COMPLETION_KEY_CONTEXT,
+        text_input::KEY_CONTEXT,
+    ];
+    const IN_AIMED_COMPLETION: &[&str] = &[
+        KEY_CONTEXT,
+        chips::KEY_CONTEXT,
+        chips::FIELD_KEY_CONTEXT,
+        chips::COMPLETION_KEY_CONTEXT,
+        chips::AIMED_KEY_CONTEXT,
+        text_input::KEY_CONTEXT,
+    ];
+
+    /// While the list completing the field's word stands open, its keys
+    /// move through it, accept a row and close it ahead of the field's own;
+    /// the field's text keys and the panel's apply still reach through.
+    #[test]
+    fn an_open_completion_takes_the_keys_ahead_of_the_field() {
+        for completion in [IN_CHIP_COMPLETION, IN_AIMED_COMPLETION] {
+            assert!(is(dispatched("up", completion), chips::CompletePrevious));
+            assert!(is(dispatched("down", completion), chips::CompleteNext));
+            assert!(is(dispatched("tab", completion), chips::AcceptCompletion));
+            assert!(is(dispatched("escape", completion), chips::CloseCompletion));
+            assert!(is(dispatched("ctrl-enter", completion), chips::Apply));
+            assert!(is(dispatched("left", completion), text_input::Left));
+            assert!(dispatched("q", completion).is_none());
+        }
+        for closed in ["up", "down", "tab"] {
+            assert!(
+                !dispatched(closed, IN_CHIP_FIELD)
+                    .is_some_and(|action| action.name().contains("Completion")),
+                "{closed}"
+            );
+        }
+    }
+
+    /// Enter commits the field as typed until the arrow keys move onto a
+    /// row, and accepts that row once they have.
+    #[test]
+    fn enter_accepts_a_completion_only_once_a_row_is_aimed_at() {
+        assert!(is(dispatched("enter", IN_CHIP_COMPLETION), chips::Commit));
+        assert!(is(
+            dispatched("enter", IN_AIMED_COMPLETION),
+            chips::AcceptCompletion
+        ));
+    }
 
     /// `q` reaches the query bar from the panel and is text in a field; the
     /// field commits and leaves by its own keys and edits by the text field's.
