@@ -4,8 +4,8 @@
 //! [`Menu`]: bviz_ui_components::Menu
 
 use crate::workspace::{
-    ClosePanel, Destination, DetachPanel, EvenSplit, SplitDown, SplitLeft, SplitRight, SplitUp,
-    ToggleMaximize, Workspace, re_homes,
+    ClosePanel, Destination, DetachPanel, EvenSplit, ShowKeysAndGestures, SplitDown, SplitLeft,
+    SplitRight, SplitUp, ToggleMaximize, Workspace, re_homes,
 };
 use crate::{Arrangement, Pane, Side};
 use bviz_ui_components::{MenuItem, SubmenuItem};
@@ -26,6 +26,7 @@ pub(crate) enum Offer {
     /// every pane back where one is drawn in place of them already.
     Maximize,
     EvenSplit,
+    KeysHelp,
     Close,
 }
 
@@ -78,6 +79,8 @@ pub(crate) enum Deed<P = Entity<Pane>, W = WeakEntity<Workspace>> {
     Maximize,
     /// Evens the split laying the pane holding the panel out.
     EvenSplit,
+    /// Puts the panel's keys help up, or takes it down.
+    KeysHelp,
     Close,
 }
 
@@ -138,6 +141,7 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
     if layout.innermost_divider(pane).is_some() {
         rows.push(Row::Offer(Offer::EvenSplit));
     }
+    rows.push(Row::Offer(Offer::KeysHelp));
     rows.push(Row::Offer(Offer::Close));
     rows
 }
@@ -209,6 +213,7 @@ fn offer_deed<P: Clone, W>(offer: Offer, pane: &P) -> Deed<P, W> {
         Offer::NewWindow => Deed::Move(Destination::NewWindow),
         Offer::Maximize => Deed::Maximize,
         Offer::EvenSplit => Deed::EvenSplit,
+        Offer::KeysHelp => Deed::KeysHelp,
         Offer::Close => Deed::Close,
     }
 }
@@ -233,6 +238,7 @@ impl Offer {
             Offer::NewWindow => &DetachPanel,
             Offer::Maximize => &ToggleMaximize,
             Offer::EvenSplit => &EvenSplit,
+            Offer::KeysHelp => &ShowKeysAndGestures,
             Offer::Close => &ClosePanel,
         }
     }
@@ -336,7 +342,7 @@ mod tests {
         let arrangement = Arrangement::new(Layout::Pane('a'));
         assert_eq!(
             labels(&offers(&arrangement, 'a', true)),
-            ["NewWindow", "Close"]
+            ["NewWindow", "KeysHelp", "Close"]
         );
     }
 
@@ -358,6 +364,7 @@ mod tests {
                 "  Top",
                 "  Bottom",
                 "NewWindow",
+                "KeysHelp",
                 "Close",
             ]
         );
@@ -378,6 +385,7 @@ mod tests {
                 "NewWindow",
                 "Maximize",
                 "EvenSplit",
+                "KeysHelp",
                 "Close",
             ]
         );
@@ -403,6 +411,7 @@ mod tests {
                 "NewWindow",
                 "Maximize",
                 "EvenSplit",
+                "KeysHelp",
                 "Close",
             ]
         );
@@ -476,11 +485,17 @@ mod tests {
         let standing = standing(&arrangement, &'a', true);
         assert_eq!(
             labels(&offered(&standing, &windows(["1. b.profile.gz"]))),
-            ["NewWindow", "Move to Window", "  1. b.profile.gz", "Close",]
+            [
+                "NewWindow",
+                "Move to Window",
+                "  1. b.profile.gz",
+                "KeysHelp",
+                "Close",
+            ]
         );
         assert_eq!(
             labels(&offered::<char, Window>(&standing, &[])),
-            ["NewWindow", "Close"]
+            ["NewWindow", "KeysHelp", "Close"]
         );
     }
 

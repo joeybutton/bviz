@@ -33,7 +33,9 @@ pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{KeyStyle, action_label, binding_text, key_text, key_text_in, keystroke_text};
-pub use keys_help::{KeyGroup, KeyRow, keys_in_effect};
+pub use keys_help::{
+    GestureGroup, KEYS_HELP_NAME, KeyGroup, KeyRow, KeysHelp, KeysHelpEvent, keys_in_effect,
+};
 pub use layer::{cached_layer, overlay_canvas};
 pub use list_scroll::{ListScroll, list_scrollbar};
 pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
@@ -68,7 +70,15 @@ pub(crate) fn laid_out_width(measured: Pixels) -> Pixels {
 
 /// Register the key bindings the components rely on.
 pub fn register_keys(cx: &mut App) {
-    declare_scopes(cx, [text_input::KEY_CONTEXT, multi_select::KEY_CONTEXT]);
+    declare_scopes(
+        cx,
+        [
+            text_input::KEY_CONTEXT,
+            multi_select::KEY_CONTEXT,
+            keys_help::KEY_CONTEXT,
+        ],
+    );
+    keys_help::bind_keys(cx);
     text_input::bind_keys(cx);
     multi_select::bind_keys(cx);
 }

@@ -1,7 +1,7 @@
 use crate::carry::{Carrying, Reported, Taken};
 use crate::documents_menu::DocumentsMenu;
 use crate::drop::{PaneGeometry, Preview};
-use crate::gestures::{CHROME_GESTURES, ChromeIntent};
+use crate::gestures::{CHROME_GESTURES, ChromeIntent, chrome_gestures};
 use crate::pane::Handover;
 use crate::panel::keys_focus;
 use crate::panel_menu::{Deed, Standing};
@@ -12,8 +12,8 @@ use crate::{
 };
 use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{
-    Divider, DragEnd, KeyScope, Menu, MenuEvent, declare_scopes, overlay_canvas, text_input,
-    track_drag,
+    Divider, DragEnd, GestureGroup, KeyScope, KeyStyle, KeysHelp, Menu, MenuEvent, action_label,
+    declare_scopes, declared_scopes, keys_in_effect, overlay_canvas, text_input, track_drag,
 };
 use bviz_ui_playback::{
     Clock, KEY_CONTEXT as PLAYBACK_KEY_CONTEXT, PlayPause, PlaybackBar, SeekEnd, SeekStart,
@@ -74,6 +74,8 @@ actions!(
         EvenSplit,
         /// Reset to opening arrangement
         ResetArrangement,
+        /// Show keys and gestures
+        ShowKeysAndGestures,
     ]
 );
 
@@ -139,10 +141,14 @@ const MENU_LAYER: usize = 1;
 pub(crate) fn register_keys(cx: &mut App) {
     declare_scopes(cx, [KEY_CONTEXT, PLAYBACK_KEY_CONTEXT]);
     let workspace = Some(KEY_CONTEXT.id());
-    // Typed into a text field, the playback keys edit the text.
+    // Typed into a text field, these keys edit the text.
+    let unless_typing = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let unless_typing = Some(unless_typing.as_str());
     let playback = format!("{PLAYBACK_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let playback = Some(playback.as_str());
     cx.bind_keys([
+        KeyBinding::new("?", ShowKeysAndGestures, unless_typing),
+        KeyBinding::new("f1", ShowKeysAndGestures, workspace),
         KeyBinding::new("ctrl-tab", NextTab, workspace),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, workspace),
         KeyBinding::new("secondary-shift-w", ClosePanel, workspace),
@@ -707,6 +713,82 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Closes the keys help the pane holding `panel` has up, or else puts the
+    /// keys help of `panel` up over it, bringing it forward first where it is
+    /// not the active panel.
+    fn toggle_keys_help(&mut self, panel: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((pane, _)) = self.holder(panel, cx) else {
+            return;
+        };
+        if pane.read(cx).shows_keys_help() {
+            pane.update(cx, |pane, cx| pane.close_keys_help(window, cx));
+            return;
+        }
+        if self.active_panel(cx).entity_id() != panel {
+            self.reveal(panel, window, cx);
+        }
+        let room = pane.read(cx).keys_help_room(window);
+        let help = self.keys_help(&self.active_panel(cx), room, window, cx);
+        pane.update(cx, |pane, cx| pane.show_keys_help(help, window, cx));
+    }
+
+    /// The keys help of `panel`, which holds focus, standing at most
+    /// `max_height` tall. Its keys are those in effect in the context stack the
+    /// last frame drew from the window's root to `panel`, read along the path
+    /// to the focused element; where that path does not pass through `panel`,
+    /// the window's own context stands in for what lies around it.
+    fn keys_help(
+        &self,
+        panel: &AnyPanel,
+        max_height: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<KeysHelp> {
+        let scope = panel.key_scope();
+        let mut stack = window.context_stack();
+        match stack
+            .iter()
+            .rposition(|context| context.contains(scope.id()))
+        {
+            Some(at) => stack.truncate(at + 1),
+            None => stack = vec![self.key_context(cx), scope.into()],
+        }
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keys_in_effect(
+                &keymap,
+                declared_scopes(cx),
+                &stack,
+                scope,
+                |action| action_label(action, cx).unwrap_or(action.name()).into(),
+                KeyStyle::NATIVE,
+            )
+        };
+        let gestures = vec![
+            GestureGroup {
+                scope: scope.label(),
+                rows: panel.gestures(),
+            },
+            GestureGroup {
+                scope: KEY_CONTEXT.label(),
+                rows: chrome_gestures(),
+            },
+        ];
+        cx.new(|cx| KeysHelp::new(keys, gestures, max_height, window, cx))
+    }
+
+    /// The key context the window's root carries: the workspace's own, and the
+    /// playback scope while the active panel's document plays back.
+    fn key_context(&self, cx: &mut App) -> KeyContext {
+        let mut key_context = KeyContext::from(KEY_CONTEXT);
+        let document = self.active_panel(cx).document();
+        if Documents::global(cx).read(cx).playback(document).is_some() {
+            key_context.add(PLAYBACK_KEY_CONTEXT.id());
+        }
+        key_context
+    }
+
     /// Hands focus to the panel the active pane shows. Which panel that is is
     /// read here and not before: a menu names rows that close a panel and that
     /// move one to another window, so the panel a gesture was opened over may
@@ -760,6 +842,7 @@ impl Workspace {
                     self.even_pane_split(&pane, cx);
                 }
             }
+            Deed::KeysHelp => self.toggle_keys_help(panel, window, cx),
             Deed::Close => {
                 if let Some((pane, at)) = self.holder(panel, cx) {
                     pane.update(cx, |pane, cx| pane.close(at, window, cx));
@@ -1201,6 +1284,7 @@ impl Workspace {
                 PaneEvent::Menu { panel, at } => {
                     workspace.open_panel_menu(*panel, *at, window, cx);
                 }
+                PaneEvent::KeysHelp(panel) => workspace.toggle_keys_help(*panel, window, cx),
                 PaneEvent::Reveal(panel) => {
                     // The gesture asking for it may have come from another
                     // window.
@@ -2005,10 +2089,7 @@ impl Render for Workspace {
             .child(self.body_element(&colors, cx))
             .child(measure_body(cx));
         let playback = self.playback_bar(&panel, cx);
-        let mut key_context = KeyContext::from(KEY_CONTEXT);
-        if playback.is_some() {
-            key_context.add(PLAYBACK_KEY_CONTEXT.id());
-        }
+        let key_context = self.key_context(cx);
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
             .menu(self.documents_menu.clone())
@@ -2046,6 +2127,12 @@ impl Render for Workspace {
                 let pane = workspace.active.clone();
                 workspace.even_pane_split(&pane, cx);
             }))
+            .on_action(
+                cx.listener(|workspace, _: &ShowKeysAndGestures, window, cx| {
+                    let panel = workspace.active_panel(cx).entity_id();
+                    workspace.toggle_keys_help(panel, window, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &ResetArrangement, window, cx| {
                 workspace.reset_arrangement(window, cx);
             }))

@@ -1,15 +1,15 @@
 use crate::drop::Band;
 use crate::gestures::{CHROME_GESTURES, ChromeIntent};
 use crate::panel::keys_focus;
-use crate::workspace::{ClosePanel, ToggleMaximize};
+use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, PanelEvent};
 use bviz_ui_components::gesture::Pointer;
-use bviz_ui_components::{Button, TextTooltip, TooltipColors};
+use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, EntityId, EventEmitter,
-    FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render,
-    Subscription, Window, div, prelude::*, px,
+    Anchor, AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, Entity, EntityId,
+    EventEmitter, FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    Point, Render, Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
 use std::cmp::Ordering;
 
@@ -33,6 +33,16 @@ const HANDLE_ICON_SIZE: Pixels = px(12.);
 const RESTORE_ICON: &str = "arrows-in";
 
 const MENU_ICON: &str = "dots-three-vertical";
+
+const KEYS_HELP_ICON: &str = "question";
+
+/// How far the keys help stands in from the pane's corner and from the
+/// window's edges.
+const KEYS_HELP_MARGIN: Pixels = px(8.);
+
+/// The shortest the keys help stands over a pane too short to hold it, room
+/// for its filter and a few lines below it.
+const KEYS_HELP_MIN_HEIGHT: Pixels = px(200.);
 
 /// How a window frames a pane, as its workspace last laid the arrangement out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,6 +131,17 @@ pub struct Pane {
     /// drawing. The band takes them as it is laid out itself, so that a band
     /// carries the tabs of its own frame and no other.
     laid_out_tabs: Vec<Bounds<Pixels>>,
+    /// The height the last frame laid the shown panel out at, which the keys
+    /// help over it is kept within. `None` until a frame has drawn the pane.
+    body_height: Option<Pixels>,
+    keys_help: Option<OpenHelp>,
+}
+
+/// The keys help a pane puts up over the panel it shows, and the subscription
+/// letting it go once it closes.
+struct OpenHelp {
+    help: Entity<KeysHelp>,
+    _dismissed: Subscription,
 }
 
 /// What handing a panel over left of the pane that held it. The panel is
@@ -162,6 +183,9 @@ pub enum PaneEvent {
     /// That panel asked to be shown, which takes making this the active pane,
     /// and only the workspace can.
     Reveal(EntityId),
+    /// The keys help of that panel was asked to open or close, which takes
+    /// showing the panel and focusing it, and only the workspace can.
+    KeysHelp(EntityId),
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -181,6 +205,8 @@ impl Pane {
             joined_by_drag: false,
             band: None,
             laid_out_tabs: Vec::new(),
+            body_height: None,
+            keys_help: None,
         };
         pane.show_active(window, cx);
         pane
@@ -405,6 +431,62 @@ impl Pane {
         cx.notify();
     }
 
+    pub(crate) fn shows_keys_help(&self) -> bool {
+        self.keys_help.is_some()
+    }
+
+    /// Puts `help` up over the panel on show, in place of any it put up
+    /// before. Once it closes holding focus, focus goes back to that panel.
+    pub(crate) fn show_keys_help(
+        &mut self,
+        help: Entity<KeysHelp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dismissed = cx.subscribe_in(&help, window, |pane, _, event, window, cx| {
+            let KeysHelpEvent::Dismissed { holding_focus } = *event;
+            pane.keys_help = None;
+            if holding_focus {
+                window.focus(&pane.active_panel().focus_handle(cx), cx);
+            }
+            cx.notify();
+        });
+        self.keys_help = Some(OpenHelp {
+            help,
+            _dismissed: dismissed,
+        });
+        cx.notify();
+    }
+
+    /// The tallest the keys help may stand over the shown panel.
+    pub(crate) fn keys_help_room(&self, window: &Window) -> Pixels {
+        keys_help_room(self.body_height.unwrap_or(window.viewport_size().height))
+    }
+
+    pub(crate) fn close_keys_help(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = &self.keys_help {
+            open.help.update(cx, |help, cx| help.close(window, cx));
+        }
+    }
+
+    /// The keys help, standing in from the top right corner of the panel below
+    /// and kept inside the window.
+    fn keys_help_overlay(&self) -> Option<impl IntoElement + use<>> {
+        let help = self.keys_help.as_ref()?.help.clone();
+        Some(
+            div()
+                .absolute()
+                .top(KEYS_HELP_MARGIN)
+                .right(KEYS_HELP_MARGIN)
+                .child(deferred(
+                    anchored()
+                        .anchor(Anchor::TopRight)
+                        .snap_to_window_with_margin(KEYS_HELP_MARGIN)
+                        .child(help),
+                )),
+        )
+    }
+
     fn tab_strip(
         &self,
         naming: Naming,
@@ -443,6 +525,7 @@ impl Pane {
                     .on_children_prepainted(tabs_laid_out(cx)),
             )
             .children(self.restore_control(cx))
+            .child(self.keys_help_control(cx))
             .child(self.menu_control(cx))
     }
 
@@ -475,6 +558,22 @@ impl Pane {
                     .as_ref(),
             ),
         ))
+    }
+
+    /// The control that puts up the keys help of the panel on show.
+    fn keys_help_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pane = cx.entity();
+        let id = self.active_panel().entity_id();
+        control(
+            Button::new(
+                ElementId::NamedInteger("pane-keys-help".into(), id.as_u64()),
+                move |_, _, cx| pane.update(cx, |_, cx| cx.emit(PaneEvent::KeysHelp(id))),
+            )
+            .ghost()
+            .icon(KEYS_HELP_ICON)
+            .compact()
+            .keys_in(&ShowKeysAndGestures, self.keys_focus(id, cx).as_ref()),
+        )
     }
 
     /// The control that puts up the menu of rearrangements the panel on show
@@ -572,6 +671,7 @@ impl Pane {
                     .flex_1()
                     .justify_end()
                     .children(self.restore_control(cx))
+                    .child(self.keys_help_control(cx))
                     .child(self.menu_control(cx)),
             )
     }
@@ -716,6 +816,38 @@ fn tabs_laid_out(
     move |tabs, _, cx| pane.update(cx, |pane, _| pane.laid_out_tabs = tabs)
 }
 
+/// The tallest the keys help may stand over a panel `height` tall: inside it
+/// where the panel has room, and otherwise as tall as reads.
+fn keys_help_room(height: Pixels) -> Pixels {
+    (height - KEYS_HELP_MARGIN * 2.).max(KEYS_HELP_MIN_HEIGHT)
+}
+
+/// Takes up the height the shown panel was laid out at, refitting the keys
+/// help over it to a height that changed.
+fn body_laid_out(
+    cx: &Context<Pane>,
+) -> impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static {
+    let pane = cx.entity();
+    move |body, window, cx| {
+        let Some(&bounds) = body.first() else {
+            return;
+        };
+        let height = bounds.size.height;
+        let refit = pane.update(cx, |pane, _| {
+            let changed = pane.body_height.replace(height) != Some(height);
+            let help = pane.keys_help.as_ref().map(|open| open.help.clone());
+            help.filter(|_| changed)
+        });
+        if let Some(help) = refit {
+            window.on_next_frame(move |_, cx| {
+                help.update(cx, |help, cx| {
+                    help.set_max_height(keys_help_room(height), cx)
+                });
+            });
+        }
+    }
+}
+
 /// Records where a frame laid the `naming` band out, for a drag over the pane
 /// to read. A band drawn in place of another draws boundaries no frame has
 /// read yet, so drawing one asks for a frame that aims the drag at them.
@@ -810,10 +942,19 @@ fn showing_after(showing: usize, removed: usize, remaining: usize) -> usize {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.active_panel().view();
+        let help = self.keys_help_overlay();
         let Some(naming) = self.naming() else {
             self.band = None;
             self.laid_out_tabs.clear();
-            return body.into_any_element();
+            return div()
+                .relative()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(body)
+                .children(help)
+                .on_children_prepainted(body_laid_out(cx))
+                .into_any_element();
         };
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let named = match naming {
@@ -833,7 +974,17 @@ impl Render for Pane {
             .flex_col()
             .size_full()
             .child(above)
-            .child(div().flex().flex_col().flex_1().min_h(px(0.)).child(body))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(body)
+                    .children(help)
+                    .on_children_prepainted(body_laid_out(cx)),
+            )
             .into_any_element()
     }
 }

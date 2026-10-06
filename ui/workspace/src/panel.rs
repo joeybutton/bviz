@@ -167,6 +167,10 @@ impl AnyPanel {
         self.panel.gestures()
     }
 
+    pub fn key_scope(&self) -> KeyScope {
+        self.panel.key_scope()
+    }
+
     pub fn status(&self, cx: &App) -> Option<SharedString> {
         self.panel.status(cx)
     }
@@ -442,6 +446,7 @@ trait PanelOps {
     fn title(&self, cx: &App) -> SharedString;
     fn description(&self) -> Option<&'static str>;
     fn gestures(&self) -> Vec<GestureRow>;
+    fn key_scope(&self) -> KeyScope;
     fn status(&self, cx: &App) -> Option<SharedString>;
     fn icon(&self, cx: &App) -> Option<&'static str>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
@@ -467,6 +472,10 @@ impl<T: Panel> PanelOps for Entity<T> {
 
     fn gestures(&self) -> Vec<GestureRow> {
         T::gestures()
+    }
+
+    fn key_scope(&self) -> KeyScope {
+        T::kind().key_context
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

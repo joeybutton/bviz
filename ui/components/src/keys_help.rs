@@ -1,12 +1,53 @@
 //! The keys help: the bindings in effect for a panel, grouped under the key
-//! scopes their predicates name.
+//! scopes their predicates name, and the pointer gestures beside them, put up
+//! over the panel as a sheet a filter narrows.
 
+use crate::gesture::GestureRow;
 use crate::key_scope::{KeyScope, Nesting, UNSCOPED_LABEL};
 use crate::keys::{KeyStyle, binding_text};
+use crate::list_scroll::{ListScroll, list_scrollbar};
+use crate::menu_chrome::{self, ROW_INSET};
+use crate::scrollbar::{SCROLLBAR_THICKNESS, ScrollbarColors};
+use crate::{QueryField, QueryFieldEvent};
+use bviz_ui_theme::ThemeColors;
 use gpui::{
-    Action, KeyBinding, KeyBindingContextPredicate, KeyContext, Keymap, SharedString, is_no_action,
-    is_unbind,
+    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyBinding,
+    KeyBindingContextPredicate, KeyContext, Keymap, MouseButton, MouseDownEvent, Pixels, Render,
+    SharedString, Subscription, Window, actions, div, is_no_action, is_unbind, prelude::*, px,
 };
+
+actions!(
+    bviz_keys_help,
+    [
+        /// Close help
+        Close,
+    ]
+);
+
+/// The name the keys help goes by wherever it is offered.
+pub const KEYS_HELP_NAME: &str = "Keys & Gestures";
+
+/// The key context the keys help carries, which [`Close`] is scoped to.
+pub const KEY_CONTEXT: KeyScope = KeyScope::new("KeysHelp", KEYS_HELP_NAME);
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("escape", Close, Some(KEY_CONTEXT.id()))]);
+}
+
+/// How wide the sheet is drawn, room for a label and the keys beside it.
+const SHEET_WIDTH: Pixels = px(520.);
+
+/// Room the filter field leaves beside it for the button emptying it.
+const CLEAR_ROOM: Pixels = px(36.);
+
+/// Room between a label and the keys beside it.
+const COLUMN_GAP: Pixels = px(16.);
+
+/// What heads a group of gestures, ahead of the scope they belong to.
+const POINTER_HEADING: &str = "Pointer";
+
+/// The headline the sheet reads while the filter matches nothing.
+const NO_MATCH: &str = "Nothing matches";
 
 /// The bindings in effect under one scope, each action listed once.
 #[derive(Clone, PartialEq, Debug)]
@@ -208,6 +249,276 @@ fn dispatched_first(keymap: &Keymap, binding: &KeyBinding, stack: &[KeyContext])
     matched.first().is_some_and(|first| {
         first.action().partial_eq(binding.action()) && first.predicate() == binding.predicate()
     })
+}
+
+/// Gestures a scope answers to, headed by that scope's label.
+pub struct GestureGroup {
+    pub scope: &'static str,
+    pub rows: Vec<GestureRow>,
+}
+
+/// One line of the sheet: what something does, and what does it.
+struct Line {
+    label: SharedString,
+    keys: SharedString,
+}
+
+impl Line {
+    fn matches(&self, filter: &str) -> bool {
+        self.label.to_lowercase().contains(filter) || self.keys.to_lowercase().contains(filter)
+    }
+}
+
+struct Section {
+    heading: SharedString,
+    lines: Vec<Line>,
+}
+
+/// What [`KeysHelp`] tells its holder.
+pub enum KeysHelpEvent {
+    /// The help has closed and is to be let go. `holding_focus` says whether
+    /// focus was still within it, which the holder is then to place.
+    Dismissed { holding_focus: bool },
+}
+
+/// The keys and gestures of a panel as a sheet, narrowed by a filter field at
+/// its top, closing once focus leaves it.
+pub struct KeysHelp {
+    sections: Vec<Section>,
+    filter: Entity<QueryField>,
+    focus_handle: FocusHandle,
+    scroll: ListScroll,
+    /// The tallest the sheet stands, past which its lines scroll.
+    max_height: Pixels,
+    /// Whether it has told its holder it closed, after which it answers
+    /// nothing in the frame before the holder lets it go.
+    closed: bool,
+    _while_up: [Subscription; 2],
+}
+
+impl EventEmitter<KeysHelpEvent> for KeysHelp {}
+
+impl KeysHelp {
+    /// The help listing `keys`, then `gestures`, standing at most
+    /// `max_height` tall and taking focus into its filter.
+    pub fn new(
+        keys: Vec<KeyGroup>,
+        gestures: Vec<GestureGroup>,
+        max_height: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut sections = Vec::with_capacity(keys.len() + gestures.len());
+        sections.extend(keys.into_iter().map(|group| {
+            Section {
+                heading: group.label.into(),
+                lines: group
+                    .rows
+                    .into_iter()
+                    .map(|row| Line {
+                        label: row.label,
+                        keys: row.keys.join(", ").into(),
+                    })
+                    .collect(),
+            }
+        }));
+        sections.extend(
+            gestures
+                .into_iter()
+                .filter(|group| !group.rows.is_empty())
+                .map(|group| Section {
+                    heading: format!("{POINTER_HEADING}: {}", group.scope).into(),
+                    lines: group
+                        .rows
+                        .into_iter()
+                        .map(|row| Line {
+                            label: row.does.into(),
+                            keys: row.gesture.text(KeyStyle::NATIVE).into(),
+                        })
+                        .collect(),
+                }),
+        );
+        let filter_width = SHEET_WIDTH - ROW_INSET * 2. - CLEAR_ROOM;
+        let filter = cx.new(|cx| {
+            QueryField::new(
+                "keys-help-filter",
+                "Filter keys and gestures",
+                filter_width,
+                cx,
+            )
+        });
+        let edited = cx.subscribe(&filter, |help, _, event: &QueryFieldEvent, cx| {
+            if *event == QueryFieldEvent::Edited {
+                help.scroll.to_top();
+                cx.notify();
+            }
+        });
+        let focus_handle = cx.focus_handle();
+        let left = cx.on_focus_out(&focus_handle, window, |help, _, window, cx| {
+            help.close(window, cx);
+        });
+        filter.read(cx).focus_handle(cx).focus(window, cx);
+        Self {
+            sections,
+            filter,
+            focus_handle,
+            scroll: ListScroll::new(),
+            max_height,
+            closed: false,
+            _while_up: [edited, left],
+        }
+    }
+
+    pub fn set_max_height(&mut self, max_height: Pixels, cx: &mut Context<Self>) {
+        if self.max_height != max_height {
+            self.max_height = max_height;
+            cx.notify();
+        }
+    }
+
+    /// Closes the help, telling its holder whether focus was within it.
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        let holding_focus = self.focus_handle.contains_focused(window, cx);
+        cx.emit(KeysHelpEvent::Dismissed { holding_focus });
+    }
+
+    fn list(&self, filter: &str, colors: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let listed = self.sections.iter().map(|section| section.lines.len() + 1);
+        let mut children = Vec::with_capacity(listed.sum());
+        for section in &self.sections {
+            let mut lines = section
+                .lines
+                .iter()
+                .filter(|line| line.matches(filter))
+                .peekable();
+            if lines.peek().is_none() {
+                continue;
+            }
+            children.push(heading(section.heading.clone(), colors).into_any_element());
+            children.extend(lines.map(|line| row(line, colors).into_any_element()));
+        }
+        if children.is_empty() {
+            children.push(
+                div()
+                    .px(ROW_INSET)
+                    .py_2()
+                    .text_color(colors.text_muted)
+                    .child(NO_MATCH)
+                    .into_any_element(),
+            );
+        }
+        let list = div()
+            .id("keys-help-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .pr(px(SCROLLBAR_THICKNESS))
+            .overflow_y_scroll()
+            .track_scroll(self.scroll.handle())
+            .children(children);
+        let bar = list_scrollbar(
+            cx.entity(),
+            |help: &Self| &help.scroll,
+            |help: &mut Self| &mut help.scroll,
+            ScrollbarColors::from_colors(colors),
+        );
+        div()
+            .relative()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .child(list)
+            .child(bar)
+    }
+}
+
+/// The line heading a section.
+fn heading(text: SharedString, colors: &ThemeColors) -> impl IntoElement {
+    div()
+        .px(ROW_INSET)
+        .pt_2()
+        .pb_1()
+        .text_xs()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(colors.text_accent)
+        .child(text)
+}
+
+/// One line of a section: what it does on the left, what does it on the right
+/// in the ink a menu names keys in. What does it keeps to one line, so a line
+/// too long for the sheet wraps its label and not the keys or gesture.
+fn row(line: &Line, colors: &ThemeColors) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(COLUMN_GAP)
+        .px(ROW_INSET)
+        .py_0p5()
+        .text_sm()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(colors.text)
+                .child(line.label.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_right()
+                .text_color(colors.text_muted)
+                .child(line.keys.clone()),
+        )
+}
+
+impl Focusable for KeysHelp {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for KeysHelp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        let filter = self.filter.read(cx).text(cx).to_lowercase();
+        menu_chrome::surface(div(), &colors)
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|help, _: &Close, window, cx| help.close(window, cx)))
+            .occlude()
+            .flex()
+            .flex_col()
+            .w(SHEET_WIDTH)
+            .max_h(self.max_height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|help, event: &MouseDownEvent, _, cx| {
+                    if help.scroll.press(event.position) {
+                        cx.notify();
+                    }
+                }),
+            )
+            // The sheet tracks focus only to tell when focus leaves it, so a
+            // press within it leaves focus in the filter.
+            .on_any_mouse_down(|_, window, _| window.prevent_default())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_none()
+                    .px(ROW_INSET)
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(self.filter.clone()),
+            )
+            .child(self.list(&filter, &colors, cx))
+    }
 }
 
 #[cfg(test)]
