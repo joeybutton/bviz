@@ -2,6 +2,7 @@
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
 use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
+use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_playback::{Clock, DocumentClock};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
@@ -67,6 +68,15 @@ pub trait Panel: Render + Focusable + EventEmitter<PanelEvent> {
         Self: Sized,
     {
         None
+    }
+
+    /// The pointer gestures panels of this kind answer to, in the order their
+    /// table tries them.
+    fn gestures() -> Vec<GestureRow>
+    where
+        Self: Sized,
+    {
+        Vec::new()
     }
 
     fn status(&self, _cx: &App) -> Option<SharedString> {
@@ -145,6 +155,10 @@ impl AnyPanel {
 
     pub fn description(&self) -> Option<&'static str> {
         self.panel.description()
+    }
+
+    pub fn gestures(&self) -> Vec<GestureRow> {
+        self.panel.gestures()
     }
 
     pub fn status(&self, cx: &App) -> Option<SharedString> {
@@ -421,6 +435,7 @@ trait PanelOps {
     fn view_kind(&self) -> ViewKind;
     fn title(&self, cx: &App) -> SharedString;
     fn description(&self) -> Option<&'static str>;
+    fn gestures(&self) -> Vec<GestureRow>;
     fn status(&self, cx: &App) -> Option<SharedString>;
     fn icon(&self, cx: &App) -> Option<&'static str>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
@@ -442,6 +457,10 @@ impl<T: Panel> PanelOps for Entity<T> {
 
     fn description(&self) -> Option<&'static str> {
         T::description()
+    }
+
+    fn gestures(&self) -> Vec<GestureRow> {
+        T::gestures()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

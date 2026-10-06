@@ -83,7 +83,7 @@ pub fn action_label(action: &dyn Action, cx: &App) -> Option<&'static str> {
     documentation.lines().next()
 }
 
-fn glyphs(modifiers: &Modifiers) -> impl Iterator<Item = &'static str> {
+pub(crate) fn glyphs(modifiers: &Modifiers) -> impl Iterator<Item = &'static str> {
     [
         (modifiers.function, "fn"),
         (modifiers.control, "⌃"),
@@ -95,7 +95,7 @@ fn glyphs(modifiers: &Modifiers) -> impl Iterator<Item = &'static str> {
     .filter_map(|(held, glyph)| held.then_some(glyph))
 }
 
-fn words(modifiers: &Modifiers) -> impl Iterator<Item = &'static str> {
+pub(crate) fn words(modifiers: &Modifiers) -> impl Iterator<Item = &'static str> {
     [
         (modifiers.function, "Fn"),
         (modifiers.control, "Ctrl"),
