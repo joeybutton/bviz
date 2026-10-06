@@ -682,7 +682,8 @@ impl Render for StatsPanel {
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                            this.focus.focus(window, cx);
                             // A press on the scroll thumb/track drives the bar; the
                             // canvas paint re-installs the drag handlers while the
                             // drag is set, so repaint now.

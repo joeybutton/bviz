@@ -1451,7 +1451,8 @@ fn pick_list(
         .flex_col()
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+            cx.listener(|view, e: &MouseDownEvent, window, cx| {
+                view.focus.focus(window, cx);
                 view.pick_scroll.press(e.position);
                 cx.stop_propagation();
                 cx.notify();

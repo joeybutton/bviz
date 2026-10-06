@@ -501,7 +501,8 @@ impl CriticalPathPanel {
             .min_h_0()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|panel, e: &MouseDownEvent, _, cx| {
+                cx.listener(|panel, e: &MouseDownEvent, window, cx| {
+                    panel.focus.focus(window, cx);
                     if panel.summary_scroll.press(e.position) {
                         cx.stop_propagation();
                     }
@@ -650,7 +651,8 @@ fn list_pane(
         .min_h(px(STATS_ROW_HEIGHT))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |panel, e: &MouseDownEvent, _, cx| {
+            cx.listener(move |panel, e: &MouseDownEvent, window, cx| {
+                panel.focus.focus(window, cx);
                 if scroll_mut(panel).press(e.position) {
                     cx.stop_propagation();
                 }
