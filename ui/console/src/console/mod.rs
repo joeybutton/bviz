@@ -49,6 +49,8 @@ actions!(
         FindPrev,
         /// Close find bar
         FindClose,
+        /// Dismiss find bar or selection
+        Dismiss,
     ]
 );
 
@@ -131,6 +133,7 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("down", ScrollLineDown, grid_unless_find),
         KeyBinding::new("home", ScrollToTop, grid_unless_find),
         KeyBinding::new("end", ScrollToBottom, grid_unless_find),
+        KeyBinding::new("escape", Dismiss, grid_unless_find),
         // Paging and the commands work regardless of which region has focus.
         KeyBinding::new("pageup", ScrollPageUp, console),
         KeyBinding::new("pagedown", ScrollPageDown, console),
@@ -601,6 +604,15 @@ impl ConsolePanel {
         cx.notify();
     }
 
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_active {
+            self.find_close(&FindClose, window, cx);
+        } else if let Some(terminal) = self.terminal.as_mut() {
+            terminal.clear_selection();
+            cx.notify();
+        }
+    }
+
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -678,6 +690,7 @@ impl Render for ConsolePanel {
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::dismiss))
             .flex()
             .flex_col()
             .size_full();
