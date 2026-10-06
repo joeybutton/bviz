@@ -8,6 +8,7 @@ mod words;
 
 use crate::chart::format_duration;
 use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
+use crate::row_step;
 use crate::stats_panel::{line, table_cell};
 use crate::theme::Palette;
 use crate::{
@@ -243,7 +244,7 @@ impl CriticalPathPanel {
                 &self.nearly_critical_scroll,
             ),
         };
-        if let Some(row) = order::position(&order, index) {
+        if let Some(row) = row_step::position(&order, index) {
             scroll
                 .uniform_handle()
                 .scroll_to_item(row, ScrollStrategy::Nearest);
@@ -284,7 +285,7 @@ impl CriticalPathPanel {
                     Some(Chosen::NearlyCritical(index)) => Some(index),
                     _ => None,
                 };
-                order::moved(&self.nearly_critical_order(path), from, by)
+                row_step::moved(&self.nearly_critical_order(path), from, by)
                     .map(Chosen::NearlyCritical)
             }
             Listing::Steps => {
@@ -292,7 +293,7 @@ impl CriticalPathPanel {
                     Some(Chosen::Step(index)) => Some(index),
                     _ => None,
                 };
-                order::moved(&order::steps(path.steps(), self.steps_sort), from, by)
+                row_step::moved(&order::steps(path.steps(), self.steps_sort), from, by)
                     .map(Chosen::Step)
             }
         };

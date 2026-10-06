@@ -11,6 +11,7 @@ mod groups;
 mod model;
 mod rebuild;
 mod regions;
+mod row_step;
 mod stats_panel;
 #[cfg(test)]
 mod test_profile;
