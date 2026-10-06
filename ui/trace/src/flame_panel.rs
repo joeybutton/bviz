@@ -826,11 +826,12 @@ impl FlamePanel {
     /// The panel's pointer wiring, acting as [`GESTURES`] has it, a press on a
     /// scroll bar driving the bar instead of panning. Presses and the wheel
     /// stop propagation so they don't also reach the flame chart's handlers
-    /// underneath.
+    /// underneath, which leaves a press to focus the panel itself.
     fn panel_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+            cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                this.focus.focus(window, cx);
                 GESTURES.dispatch(Pointer::press(e), |intent| match intent {
                     FlameIntent::Pan => {
                         this.press(e.position, cx);
