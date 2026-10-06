@@ -5,17 +5,24 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod actions;
 mod attempts;
+mod critical;
 mod outcomes;
 mod runner;
+pub mod spawn;
 mod timings;
 
+pub use actions::{ActionGraph, ActionIndex};
 pub use attempts::{Attempt, Attempts, Done, Phase, State, Venue};
+pub use critical::CriticalStep;
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
 pub use runner::{Runner, Spawns};
 pub use timings::{Profiled, Share, Spent, Timing, Timings};
+
+use spawn::LoggedSpawns;
 
 const MICROS_PER_MILLI: i64 = 1_000;
 const MICROS_PER_SECOND: f64 = 1e6;
@@ -155,10 +162,38 @@ impl<T> Reported<T> {
 /// what it learns of the invocation, for the views of the other outputs to read.
 #[derive(Default)]
 pub struct Session {
+    /// Shared, as a derivation off the UI thread reads it.
+    action_graph: Reported<Option<Arc<ActionGraph>>>,
     attempts: Reported<Attempts>,
+    chosen: Reported<Option<Chosen>>,
     configurations: Configurations,
+    critical_path: Reported<Traced>,
+    /// Shared, as a derivation off the UI thread reads it. Held, every
+    /// spawn's outputs with it, for as long as the session is, whether or
+    /// not a view of the invocation reads them.
+    logged_spawns: Reported<Option<Arc<LoggedSpawns>>>,
     outcomes: Reported<Outcomes>,
     timings: Reported<Timings>,
+}
+
+/// What a [`Session`] holds of the critical path its invocation's profile
+/// records.
+#[derive(Default)]
+struct Traced {
+    /// In the order they started.
+    steps: Vec<CriticalStep>,
+    /// Least slack first.
+    nearly_critical: Vec<CriticalStep>,
+}
+
+/// What a reader chose of an invocation's critical path in a view of one of
+/// its outputs, for the views of the others to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chosen {
+    /// A step, by its place among the path's steps.
+    Step(usize),
+    /// An action nearly critical, by its place among those.
+    NearlyCritical(usize),
 }
 
 impl Session {
@@ -210,11 +245,191 @@ impl Session {
     pub fn report_attempts(&mut self, reported: Attempts) {
         self.attempts.replace(reported);
     }
+
+    /// The spawns the invocation's execution log records, `None` until one
+    /// is reported.
+    pub fn logged_spawns(&self) -> Option<&Arc<LoggedSpawns>> {
+        self.logged_spawns.value.as_ref()
+    }
+
+    pub fn logged_spawns_revision(&self) -> Revision {
+        self.logged_spawns.revision
+    }
+
+    pub fn report_logged_spawns(&mut self, reported: LoggedSpawns) {
+        self.logged_spawns.replace(Some(Arc::new(reported)));
+    }
+
+    /// The invocation's action graph, `None` until one is reported.
+    pub fn action_graph(&self) -> Option<&Arc<ActionGraph>> {
+        self.action_graph.value.as_ref()
+    }
+
+    pub fn action_graph_revision(&self) -> Revision {
+        self.action_graph.revision
+    }
+
+    /// Of several aqueries read as part of the invocation, the last read
+    /// stands for its graph, and goes on standing once its document is
+    /// closed.
+    pub fn report_action_graph(&mut self, reported: ActionGraph) {
+        self.action_graph.replace(Some(Arc::new(reported)));
+    }
+
+    /// The steps of the invocation's critical path in the order they
+    /// started, none until its profile's path is reported.
+    pub fn critical_path(&self) -> &[CriticalStep] {
+        &self.critical_path.value.steps
+    }
+
+    pub fn critical_path_revision(&self) -> Revision {
+        self.critical_path.revision
+    }
+
+    /// The actions off the invocation's critical path closest to becoming
+    /// critical, least slack first, none until reported.
+    pub fn nearly_critical(&self) -> &[CriticalStep] {
+        &self.critical_path.value.nearly_critical
+    }
+
+    /// Takes `steps` for the steps of the critical path the invocation's
+    /// profile records and `nearly_critical` for the actions closest to
+    /// becoming critical. Says whether either differs from what is held: the
+    /// same lists again are no new report, and a choice among a list that
+    /// changes is let go of.
+    pub fn report_critical_path(
+        &mut self,
+        steps: Vec<CriticalStep>,
+        nearly_critical: Vec<CriticalStep>,
+    ) -> bool {
+        let held = &self.critical_path.value;
+        let steps_changed = held.steps != steps;
+        let nearly_changed = held.nearly_critical != nearly_critical;
+        if !steps_changed && !nearly_changed {
+            return false;
+        }
+        self.critical_path.replace(Traced {
+            steps,
+            nearly_critical,
+        });
+        let chosen_changed = match self.chosen.value {
+            Some(Chosen::Step(_)) => steps_changed,
+            Some(Chosen::NearlyCritical(_)) => nearly_changed,
+            None => false,
+        };
+        if chosen_changed {
+            self.chosen.replace(None);
+        }
+        true
+    }
+
+    /// What of the [critical path](Self::critical_path) a reader last chose,
+    /// always one the path holds.
+    pub fn chosen(&self) -> Option<Chosen> {
+        self.chosen.value
+    }
+
+    /// Changes with every choice, of something or of nothing, the same
+    /// chosen again included, so that a view shows each choice once.
+    pub fn chosen_revision(&self) -> Revision {
+        self.chosen.revision
+    }
+
+    /// Takes `chosen` for what a reader chose of the critical path, or
+    /// nothing for `None`. Says whether it took it: a place past the list it
+    /// indexes holds nothing to choose.
+    pub fn choose(&mut self, chosen: Option<Chosen>) -> bool {
+        let held = match chosen {
+            Some(Chosen::Step(index)) => index < self.critical_path().len(),
+            Some(Chosen::NearlyCritical(index)) => index < self.nearly_critical().len(),
+            None => true,
+        };
+        if held {
+            self.chosen.replace(chosen);
+        }
+        held
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_critical_path_reported_again_alike_is_no_new_report() {
+        let mut session = Session::default();
+        let steps = || vec![CriticalStep::new(Some("bazel-out/a.o"), None)];
+        assert!(session.report_critical_path(steps(), Vec::new()));
+        let traced = session.critical_path_revision();
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert!(!session.report_critical_path(steps(), Vec::new()));
+        assert_eq!(session.critical_path_revision(), traced);
+        assert_eq!(
+            session.chosen(),
+            Some(Chosen::Step(0)),
+            "still a step of the path"
+        );
+        assert!(session.report_critical_path(Vec::new(), Vec::new()));
+        assert_ne!(session.critical_path_revision(), traced);
+    }
+
+    #[test]
+    fn a_critical_path_reported_anew_holds_no_step_chosen_of_the_last() {
+        let mut session = Session::default();
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/a.o"), None)],
+            Vec::new(),
+        );
+        let unchosen = session.chosen_revision();
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
+        let chosen = session.chosen_revision();
+        assert_ne!(chosen, unchosen);
+
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/b.o"), None)],
+            Vec::new(),
+        );
+        assert_eq!(session.chosen(), None);
+        assert_ne!(session.chosen_revision(), chosen);
+    }
+
+    #[test]
+    fn a_step_past_the_critical_path_is_not_chosen() {
+        let mut session = Session::default();
+        session.report_critical_path(
+            vec![CriticalStep::new(Some("bazel-out/a.o"), None)],
+            Vec::new(),
+        );
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let chosen = session.chosen_revision();
+        assert!(!session.choose(Some(Chosen::Step(1))));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
+        assert_eq!(session.chosen_revision(), chosen);
+        assert!(session.choose(None));
+        assert_eq!(session.chosen(), None);
+    }
+
+    #[test]
+    fn a_choice_is_let_go_of_only_where_the_list_it_indexes_changes() {
+        let mut session = Session::default();
+        let action = |output: &str| CriticalStep::new(Some(output), None);
+        let steps = || vec![action("bazel-out/a.o")];
+        session.report_critical_path(steps(), vec![action("bazel-out/n.o")]);
+        assert!(session.choose(Some(Chosen::NearlyCritical(0))));
+        assert!(!session.choose(Some(Chosen::NearlyCritical(1))));
+        assert_eq!(session.chosen(), Some(Chosen::NearlyCritical(0)));
+
+        assert!(session.report_critical_path(Vec::new(), vec![action("bazel-out/n.o")]));
+        assert_eq!(session.chosen(), Some(Chosen::NearlyCritical(0)));
+        assert!(session.report_critical_path(Vec::new(), vec![action("bazel-out/m.o")]));
+        assert_eq!(session.chosen(), None);
+
+        session.report_critical_path(steps(), Vec::new());
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert!(session.report_critical_path(steps(), vec![action("bazel-out/n.o")]));
+        assert_eq!(session.chosen(), Some(Chosen::Step(0)));
+    }
 
     #[test]
     fn millis_scale_to_micros_and_saturate() {
@@ -402,6 +617,52 @@ mod tests {
         session.report_attempts(Attempts::default());
         assert_ne!(session.attempts_revision(), attempted);
         assert!(session.attempts().is_empty());
+    }
+
+    #[test]
+    fn a_sessions_logged_spawns_are_revised_by_each_report_of_them_and_by_nothing_else() {
+        let mut session = Session::default();
+        let unlogged = session.logged_spawns_revision();
+        assert!(session.logged_spawns().is_none());
+        session.report_timings(Timings::default());
+        assert_eq!(session.logged_spawns_revision(), unlogged);
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = session.logged_spawns_revision();
+        assert_ne!(logged, unlogged);
+        assert!(
+            session
+                .logged_spawns()
+                .is_some_and(|spawns| spawns.is_empty())
+        );
+        session.report_outcomes(Outcomes::default());
+        assert_eq!(session.logged_spawns_revision(), logged);
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        assert_ne!(session.logged_spawns_revision(), logged);
+    }
+
+    #[test]
+    fn a_sessions_action_graph_is_revised_by_each_report_of_it_and_by_nothing_else() {
+        let mut session = Session::default();
+        let ungraphed = session.action_graph_revision();
+        assert!(session.action_graph().is_none());
+        session.report_logged_spawns(LoggedSpawns::default());
+        assert_eq!(session.action_graph_revision(), ungraphed);
+
+        session.report_action_graph(ActionGraph::new(
+            vec![Some("bazel-out/a.o".to_owned())],
+            Vec::new(),
+        ));
+        let graphed = session.action_graph_revision();
+        assert_ne!(graphed, ungraphed);
+        assert_eq!(session.action_graph().map(|graph| graph.len()), Some(1));
+        session.report_timings(Timings::default());
+        assert_eq!(session.action_graph_revision(), graphed);
+
+        session.report_action_graph(ActionGraph::default());
+        assert_ne!(session.action_graph_revision(), graphed);
+        assert!(session.action_graph().is_some_and(|graph| graph.is_empty()));
     }
 
     #[test]

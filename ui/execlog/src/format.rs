@@ -1,22 +1,6 @@
-//! How phases, durations and shares read on screen.
+//! How durations and shares read on screen.
 
-use bviz_execlog::Phase;
 use std::time::Duration;
-
-pub(crate) fn phase_name(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Parse => "parse",
-        Phase::Upload => "upload",
-        Phase::Network => "network",
-        Phase::Queue => "queue",
-        Phase::Setup => "setup",
-        Phase::Execute => "execute",
-        Phase::ProcessOutputs => "process outputs",
-        Phase::Fetch => "fetch",
-        Phase::Retry => "retry",
-        Phase::Other => "other",
-    }
-}
 
 const SECS_PER_MINUTE: f64 = 60.0;
 const SECS_PER_HOUR: f64 = 60.0 * SECS_PER_MINUTE;

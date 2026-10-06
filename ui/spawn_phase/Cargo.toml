@@ -1,0 +1,15 @@
+[package]
+name = "bviz_ui_spawn_phase"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_ui_spawn_phase"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+bviz_invocation = { workspace = true }
+bviz_ui_theme = { path = "../theme" }

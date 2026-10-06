@@ -1,5 +1,6 @@
 use crate::camera::{Camera, Rect, to_screen, visible_rect};
 use crate::colour::Colouring;
+use crate::critical::CriticalNodes;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
@@ -287,6 +288,19 @@ const HIGHLIGHT_WASH: f32 = 0.155;
 /// rest still says where in the graph that part sits.
 pub(crate) const UNMARKED_FADE: f32 = 0.2;
 
+/// Width of the halo around a box standing for a step of the critical path,
+/// in layout pixels: wide enough to read as a mark of its own beside the
+/// accent border a selection draws.
+const CRITICAL_HALO: f32 = 3.0;
+
+/// The narrowest the critical-path halo is drawn on screen, in pixels: it
+/// lies outside the box, so a box zoomed out to a few pixels is found by the
+/// halo's size rather than its own.
+const CRITICAL_HALO_FLOOR: f32 = 4.0;
+
+/// Radius of a box's corners, in layout pixels.
+const BOX_CORNER: f32 = 6.0;
+
 /// What a frame of the canvas draws from that is settled as its scene is
 /// built, owned so the `'static` paint closure holds no borrow of the view.
 pub(crate) struct Scene {
@@ -309,6 +323,8 @@ pub(crate) struct Scene {
     /// The document's playback time, which a colouring by playback reads;
     /// `None` where the document does not play back.
     pub(crate) at: Option<EpochMicros>,
+    /// Whether the boxes standing for the critical path's steps wear its halo.
+    pub(crate) critical_path: bool,
 }
 
 impl Scene {
@@ -432,6 +448,7 @@ pub(crate) fn canvas_body(
         };
         let statuses = loaded.statuses();
         let fills = Fills::of(scene.colouring, loaded.times().ok(), loaded.states());
+        let critical = scene.critical_path.then(|| loaded.critical());
         let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
             .boxes
             .iter()
@@ -457,7 +474,7 @@ pub(crate) fn canvas_body(
             )
             .filter(|p| visible.overlaps(&p.rect))
             .map(|p| {
-                let b = PaintBox::of(&p, &scene, &marks, statuses, &fills);
+                let b = PaintBox::of(&p, &scene, &marks, statuses, &fills, critical);
                 let rect = screen_rect(&b, bounds, camera);
                 paint_box(&b, rect, camera.zoom, &scene.palette, window);
                 (b, rect)
@@ -480,6 +497,9 @@ pub(crate) fn canvas_body(
                     }
                 }
             }
+        }
+        for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
+            paint_critical_halo(b, *rect, camera.zoom, &scene.palette, window);
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
@@ -892,6 +912,9 @@ struct PaintBox<'a> {
     /// out.
     alpha: f32,
     status: Option<Status>,
+    /// Whether the box stands for a step of the critical path, which a halo
+    /// around it says.
+    critical: bool,
 }
 
 impl<'a> PaintBox<'a> {
@@ -901,6 +924,7 @@ impl<'a> PaintBox<'a> {
         marks: &Marks,
         statuses: &Statuses,
         fills: &Fills,
+        critical: Option<&CriticalNodes>,
     ) -> Self {
         let Placed { b, rect, alpha, .. } = *p;
         let marked = marks.marks_box(b.id);
@@ -930,6 +954,7 @@ impl<'a> PaintBox<'a> {
             marked,
             alpha,
             status: statuses.get(b.id),
+            critical: critical.is_some_and(|nodes| nodes.marks(b.id, !b.compound)),
         }
     }
 
@@ -1391,7 +1416,7 @@ fn paint_box(
     palette: &Palette,
     window: &mut Window,
 ) {
-    let corner = px(6. * zoom);
+    let corner = px(BOX_CORNER * zoom);
     let ((border_w, border_c), mark) = box_emphasis(b, zoom, palette, rect, corner);
     window.paint_quad(quad(
         rect,
@@ -1404,9 +1429,36 @@ fn paint_box(
     mark(window);
 }
 
-/// A box's two emphases, told apart by the channel each takes: the quad border
-/// to stroke, which the accent carries from the themed border to itself and from
-/// a normal to a thick stroke, and a deferred paint of a marking's wash, which
+/// The halo around a box standing for a step of the critical path, outside
+/// the box so that it takes none of the channels a box's own emphases do. It
+/// is drawn in the label ink, which every fill keeps a label legible against,
+/// so it parts from whatever fill a colouring gives the box. Painted over the
+/// routes, which meet the box at its border, and under the labels.
+fn paint_critical_halo(
+    b: &PaintBox,
+    rect: Bounds<Pixels>,
+    zoom: f32,
+    palette: &Palette,
+    window: &mut Window,
+) {
+    let width = px((CRITICAL_HALO * zoom).max(CRITICAL_HALO_FLOOR));
+    let around = Bounds {
+        origin: rect.origin - point(width, width),
+        size: size(rect.size.width + width * 2., rect.size.height + width * 2.),
+    };
+    window.paint_quad(quad(
+        around,
+        px(BOX_CORNER * zoom) + width,
+        Hsla::transparent_black(),
+        width,
+        Hsla::from(faded(palette.label, b.alpha)),
+        BorderStyle::Solid,
+    ));
+}
+
+/// A box's emphases, told apart by the channel each takes: the quad border to
+/// stroke, which the accent carries from the themed border to itself and from a
+/// normal to a thick stroke, and a deferred paint of a marking's wash, which
 /// the fill alone carries.
 fn box_emphasis(
     b: &PaintBox,
@@ -2022,6 +2074,7 @@ mod tests {
             marked: false,
             alpha: p.alpha,
             status: None,
+            critical: false,
         }
     }
 

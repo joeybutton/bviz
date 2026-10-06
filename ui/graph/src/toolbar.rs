@@ -39,6 +39,16 @@ pub(crate) fn toolbar(
         );
     }
     bar = bar.child(controls.colour_picker);
+    if let Some(enabled) = controls.critical_path {
+        bar = bar.child(
+            Button::new(
+                "critical-path-toggle",
+                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_critical_path(cx)),
+            )
+            .label("critical path")
+            .selected(enabled),
+        );
+    }
     for card in [controls.report_control, controls.timecard_control]
         .into_iter()
         .flatten()

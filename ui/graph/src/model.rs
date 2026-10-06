@@ -1,5 +1,7 @@
 use crate::GraphPanel;
+use crate::actions::action_graph;
 use crate::build::{build_graph, loaded_inputs};
+use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -15,7 +17,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_set::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
-use bviz_invocation::{Configurations, Revision, Session};
+use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -122,6 +124,12 @@ pub(crate) struct Loaded {
     /// as the card over the graph lists it.
     timecard: Timecard,
     timed: Revision,
+    /// Where the steps of the invocation's critical path land.
+    critical: CriticalNodes,
+    traced: Revision,
+    /// Which of its session's choices of what to show of the critical path
+    /// was last shown.
+    chosen: Revision,
     dominators: Passes<TreeKey, Dominators>,
     scope_graphs: HashMap<Scope, Prepared<ScopeGraph>>,
     /// The graph's targets by repository, package and name.
@@ -149,6 +157,9 @@ impl Loaded {
             times: Err(Untimed::NoProfile),
             timecard: Timecard::default(),
             timed: Revision::default(),
+            critical: CriticalNodes::default(),
+            traced: Revision::default(),
+            chosen: Revision::default(),
             dominators: Passes::keeping_recent(RECENT_TREES),
             scope_graphs: HashMap::new(),
             states: None,
@@ -196,6 +207,16 @@ impl Loaded {
         self.states.as_ref()
     }
 
+    pub(crate) fn critical(&self) -> &CriticalNodes {
+        &self.critical
+    }
+
+    /// Which of a session's reports of the critical path
+    /// [`critical`](Self::critical) was resolved from.
+    pub(crate) fn traced(&self) -> Revision {
+        self.traced
+    }
+
     /// Takes up what the build and the profile of `session` report of the
     /// graph's nodes, and says whether that changed anything a view of the
     /// graph shows. Each is read again only once it is reported anew.
@@ -203,7 +224,8 @@ impl Loaded {
         let outcomes = self.take_up_outcomes(session);
         let timings = self.take_up_timings(session);
         let attempts = self.take_up_attempts(session);
-        outcomes || timings || attempts
+        let critical = self.take_up_critical_path(session);
+        outcomes || timings || attempts || critical
     }
 
     fn take_up_attempts(&mut self, session: &Session) -> bool {
@@ -219,6 +241,44 @@ impl Loaded {
         let states = NodeStates::resolve(&landings, base, attempts);
         let changed = self.states != states;
         self.states = states;
+        changed
+    }
+
+    /// Takes the choice of the critical path `session` holds as one shown:
+    /// one made before the graph landed is no choice to show it.
+    fn pass_over_choice(&mut self, session: &Session) {
+        self.chosen = session.chosen_revision();
+    }
+
+    /// The node of what `session` holds chosen of the critical path, where it
+    /// was chosen since this last asked and lands on the graph.
+    fn take_up_choice(&mut self, session: &Session) -> Option<Id> {
+        let revision = session.chosen_revision();
+        if self.chosen == revision {
+            return None;
+        }
+        self.chosen = revision;
+        match session.chosen()? {
+            Chosen::Step(index) => self.critical.step(index),
+            Chosen::NearlyCritical(index) => self.critical.nearly_critical(index),
+        }
+    }
+
+    fn take_up_critical_path(&mut self, session: &Session) -> bool {
+        let revision = session.critical_path_revision();
+        if self.traced == revision {
+            return false;
+        }
+        self.traced = revision;
+        let shared = &self.shared;
+        let critical = CriticalNodes::resolve(
+            &shared.base,
+            &shared.names,
+            session.critical_path(),
+            session.nearly_critical(),
+        );
+        let changed = self.critical != critical;
+        self.critical = critical;
         changed
     }
 
@@ -426,6 +486,18 @@ pub(crate) struct MapPlaced;
 pub(crate) struct RevealRequested {
     pub(crate) panel: EntityId,
     pub(crate) node: Id,
+    pub(crate) reveal: Reveal,
+}
+
+/// How a node is revealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reveal {
+    /// The node's own box is drawn, opening what holds it, and the panel is
+    /// brought forward with its pane made the active one.
+    Activate,
+    /// The drawing stays as it is, the box standing for the node there being
+    /// the one shown, and so does the panel's place among its pane's.
+    InPlace,
 }
 
 /// The graph panel the graph's other views defer to.
@@ -578,19 +650,30 @@ impl GraphModel {
             _changed: cx.observe(&session, |model, _, cx| model.take_up(cx)),
             session,
         });
+        let shares = joined.is_some();
         let work = load_in_background(
             cx,
             move || {
                 let read = load.join()?;
-                let described = configurations(&read.loaded.shared.facets);
-                Ok((read, described))
+                let shared = &read.loaded.shared;
+                let described = configurations(&shared.facets);
+                let actions = shares
+                    .then(|| action_graph(&shared.base, &shared.names))
+                    .flatten();
+                Ok((read, described, actions))
             },
-            move |model, result: Result<(Read, Configurations), String>, cx| {
+            move |model,
+                  result: Result<(Read, Configurations, Option<ActionGraph>), String>,
+                  cx| {
                 model.source = match result {
-                    Ok((read, described)) => {
+                    Ok((mut read, described, actions)) => {
                         if let Some(joined) = &model.joined {
+                            read.loaded.pass_over_choice(joined.session.read(cx));
                             joined.session.update(cx, |session, cx| {
                                 session.add_configurations(described);
+                                if let Some(actions) = actions {
+                                    session.report_action_graph(actions);
+                                }
                                 cx.notify();
                             });
                         }
@@ -612,11 +695,36 @@ impl GraphModel {
 
     /// Takes up what the session's build reports of the loaded graph.
     fn take_up(&mut self, cx: &mut Context<Self>) {
-        if let (Some(joined), Source::Loaded(loaded)) = (&self.joined, &mut self.source)
-            && loaded.report(joined.session.read(cx))
-        {
+        let Some(session) = self.joined.as_ref().map(|joined| joined.session.clone()) else {
+            return;
+        };
+        let (changed, reveal) = self.take_up_from(session.read(cx));
+        if changed {
             cx.notify();
         }
+        if let Some(reveal) = reveal {
+            cx.emit(reveal);
+        }
+    }
+
+    /// Takes up what `session` reports of the loaded graph, saying whether
+    /// that changed anything a view of it shows, and the reveal of what was
+    /// chosen of the critical path since, which the panel the graph's other
+    /// views defer to shows in place.
+    fn take_up_from(&mut self, session: &Session) -> (bool, Option<RevealRequested>) {
+        let Source::Loaded(loaded) = &mut self.source else {
+            return (false, None);
+        };
+        let changed = loaded.report(session);
+        let reveal = loaded
+            .take_up_choice(session)
+            .zip(self.deferred.as_ref())
+            .map(|(node, deferred)| RevealRequested {
+                panel: deferred.panel,
+                node,
+                reveal: Reveal::InPlace,
+            });
+        (changed, reveal)
     }
 
     /// Waits on `placing` and lands the map it places through `landing`.
@@ -813,6 +921,7 @@ impl GraphModel {
             cx.emit(RevealRequested {
                 panel: deferred.panel,
                 node: id,
+                reveal: Reveal::Activate,
             });
         }
     }
@@ -848,7 +957,8 @@ mod tests {
     use bviz_graph_layout::metrics::{Sizing, Unit};
     use bviz_graph_layout::{Input, Kind};
     use bviz_invocation::{
-        Attempts, BuildOutcome, ConfiguredTarget, Outcomes, Profiled, Runner, Spawns, Timings,
+        Attempts, BuildOutcome, Chosen, ConfiguredTarget, CriticalStep, Outcomes, Profiled, Runner,
+        Spawns, Timings,
     };
     use std::time::Duration;
 
@@ -993,6 +1103,117 @@ mod tests {
         session.report_attempts(Attempts::default());
         assert!(loaded.report(&session));
         assert!(loaded.states().is_none());
+    }
+
+    /// A critical path is taken up once per report of it, and one landing on
+    /// none of the graph's nodes marks nothing.
+    #[test]
+    fn a_graph_takes_up_the_critical_path_once_per_report_of_it() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+
+        session.report_critical_path(vec![step("bazel-out/bin/app/bin")], Vec::new());
+        assert!(loaded.report(&session));
+        assert!(loaded.critical().any());
+        assert!(!loaded.report(&session));
+
+        session.report_critical_path(vec![step("bazel-out/bin/app/other")], Vec::new());
+        assert!(loaded.report(&session));
+        assert!(!loaded.critical().any());
+    }
+
+    /// Each choice of a step is shown once, the same step chosen again
+    /// included, and a step landing off the graph is shown as none.
+    #[test]
+    fn a_graph_shows_each_chosen_critical_path_step_once() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let step = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+        session.report_critical_path(
+            vec![
+                step("bazel-out/bin/app/bin"),
+                step("bazel-out/bin/app/other"),
+            ],
+            Vec::new(),
+        );
+        loaded.report(&session);
+        assert_eq!(loaded.take_up_choice(&session), None);
+
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let shown = loaded.take_up_choice(&session);
+        assert!(shown.is_some());
+        assert_eq!(loaded.take_up_choice(&session), None);
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert_eq!(loaded.take_up_choice(&session), shown);
+
+        assert!(session.choose(Some(Chosen::Step(1))));
+        assert_eq!(loaded.take_up_choice(&session), None);
+        assert!(session.choose(None));
+        assert_eq!(loaded.take_up_choice(&session), None);
+    }
+
+    /// A chosen action nearly critical is shown on the node of its action,
+    /// which marks no node as on the path.
+    #[test]
+    fn a_graph_shows_a_chosen_nearly_critical_action() {
+        let mut loaded = loaded();
+        let mut session = Session::default();
+        let action = |primary_output: &str| CriticalStep::new(Some(primary_output), None);
+        session.report_critical_path(
+            vec![action("bazel-out/bin/app/other")],
+            vec![action("bazel-out/bin/app/bin")],
+        );
+        loaded.report(&session);
+        assert!(!loaded.critical().any());
+
+        assert!(session.choose(Some(Chosen::NearlyCritical(0))));
+        let shown = loaded.take_up_choice(&session);
+        assert!(shown.is_some());
+        assert_eq!(shown, loaded.critical().nearly_critical(0));
+    }
+
+    /// A step chosen before the graph landed is not shown on its landing.
+    #[test]
+    fn a_graph_passes_over_a_step_chosen_before_it_landed() {
+        let mut session = Session::default();
+        let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
+        session.report_critical_path(vec![step], Vec::new());
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let mut loaded = loaded();
+        loaded.pass_over_choice(&session);
+        loaded.report(&session);
+        assert_eq!(loaded.take_up_choice(&session), None);
+
+        assert!(session.choose(Some(Chosen::Step(0))));
+        assert!(loaded.take_up_choice(&session).is_some());
+    }
+
+    /// A chosen step is revealed in place, in the panel the graph's other
+    /// views defer to.
+    #[test]
+    fn a_chosen_step_is_revealed_in_place_in_the_deferred_to_panel() {
+        let mut session = Session::default();
+        let step = CriticalStep::new(Some("bazel-out/bin/app/bin"), None);
+        session.report_critical_path(vec![step], Vec::new());
+        let mut model = GraphModel::new(Task::ready(()));
+        model.source = Source::Loaded(loaded());
+        let panel = EntityId::from(1);
+        model.deferred = Some(Deferred {
+            panel,
+            filter: Filter::default(),
+            _released: Subscription::new(|| {}),
+        });
+        assert!(model.take_up_from(&session).1.is_none());
+
+        assert!(session.choose(Some(Chosen::Step(0))));
+        let (_, reveal) = model.take_up_from(&session);
+        let reveal = reveal.expect("a reveal");
+        assert_eq!((reveal.panel, reveal.reveal), (panel, Reveal::InPlace));
+        assert_eq!(
+            Some(reveal.node),
+            model.loaded().and_then(|l| l.critical().step(0))
+        );
     }
 
     /// Outcomes reported before the graph is read are the first it takes up.

@@ -41,7 +41,7 @@ impl Phase {
 }
 
 /// The phases a spawn reports itself, all of [`Phase::ALL`] but [`Phase::Other`].
-pub(crate) const REPORTED_PHASES: usize = Phase::ALL.len() - 1;
+pub const REPORTED_PHASES: usize = Phase::ALL.len() - 1;
 
 /// Spawn time by phase, for one spawn or summed over several.
 ///
@@ -49,22 +49,22 @@ pub(crate) const REPORTED_PHASES: usize = Phase::ALL.len() - 1;
 /// nothing where those phases overlap to exceed the total, so the phases sum
 /// to at least the total.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Timing {
+pub struct PhaseTiming {
     total: Duration,
     phases: [Duration; Phase::ALL.len()],
 }
 
-impl Timing {
+impl PhaseTiming {
     /// A spawn's timing from its total and its reported phases, in the order of
     /// [`Phase::ALL`].
-    pub(crate) fn new(total: Duration, reported: [Duration; REPORTED_PHASES]) -> Timing {
+    pub fn new(total: Duration, reported: [Duration; REPORTED_PHASES]) -> PhaseTiming {
         let accounted = reported
             .iter()
             .fold(Duration::ZERO, |sum, &phase| sum.saturating_add(phase));
         let mut phases = [Duration::ZERO; Phase::ALL.len()];
         phases[..REPORTED_PHASES].copy_from_slice(&reported);
         phases[Phase::Other.index()] = total.saturating_sub(accounted);
-        Timing { total, phases }
+        PhaseTiming { total, phases }
     }
 
     /// The spawn's total time, as Bazel measured it.
@@ -87,7 +87,7 @@ impl Timing {
                 .all(|phase| self.phase(phase).is_zero())
     }
 
-    pub(crate) fn add(&mut self, other: &Timing) {
+    pub fn add(&mut self, other: &PhaseTiming) {
         self.total = self.total.saturating_add(other.total);
         for (sum, phase) in self.phases.iter_mut().zip(other.phases) {
             *sum = sum.saturating_add(phase);
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn other_is_the_unaccounted_remainder() {
-        let timing = Timing::new(
+        let timing = PhaseTiming::new(
             ms(100),
             reported(&[(Phase::Network, 30), (Phase::Execute, 50)]),
         );
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn overlapping_phases_leave_no_other() {
-        let timing = Timing::new(
+        let timing = PhaseTiming::new(
             ms(100),
             reported(&[(Phase::Network, 80), (Phase::Fetch, 40)]),
         );
@@ -139,21 +139,21 @@ mod tests {
 
     #[test]
     fn execution_only_ignores_the_remainder() {
-        let sandboxed = Timing::new(ms(100), reported(&[(Phase::Execute, 90)]));
+        let sandboxed = PhaseTiming::new(ms(100), reported(&[(Phase::Execute, 90)]));
         assert!(sandboxed.reports_execution_only());
-        let remote = Timing::new(
+        let remote = PhaseTiming::new(
             ms(100),
             reported(&[(Phase::Execute, 90), (Phase::Queue, 1)]),
         );
         assert!(!remote.reports_execution_only());
-        let unmeasured = Timing::new(ms(100), reported(&[]));
+        let unmeasured = PhaseTiming::new(ms(100), reported(&[]));
         assert!(!unmeasured.reports_execution_only());
     }
 
     #[test]
     fn add_sums_totals_and_phases() {
-        let mut sum = Timing::new(ms(10), reported(&[(Phase::Execute, 4)]));
-        sum.add(&Timing::new(ms(5), reported(&[(Phase::Execute, 5)])));
+        let mut sum = PhaseTiming::new(ms(10), reported(&[(Phase::Execute, 4)]));
+        sum.add(&PhaseTiming::new(ms(5), reported(&[(Phase::Execute, 5)])));
         assert_eq!(sum.total(), ms(15));
         assert_eq!(sum.phase(Phase::Execute), ms(9));
         assert_eq!(sum.phase(Phase::Other), ms(6));
@@ -162,9 +162,9 @@ mod tests {
     #[test]
     fn corrupt_durations_saturate() {
         let huge = [Duration::MAX; REPORTED_PHASES];
-        let mut sum = Timing::new(Duration::MAX, huge);
+        let mut sum = PhaseTiming::new(Duration::MAX, huge);
         assert_eq!(sum.phase(Phase::Other), Duration::ZERO);
-        sum.add(&Timing::new(Duration::MAX, huge));
+        sum.add(&PhaseTiming::new(Duration::MAX, huge));
         assert_eq!(sum.total(), Duration::MAX);
         assert_eq!(sum.phase(Phase::Network), Duration::MAX);
     }

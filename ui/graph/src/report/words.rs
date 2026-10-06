@@ -150,9 +150,10 @@ impl Mismatches {
     }
 }
 
-/// Columns a row's hover wraps what the build said at: a tooltip wider than
-/// its window is cut off by it.
-const HOVER_COLUMNS: usize = 96;
+/// Columns a row's hover breaks what the build said at: few enough that the
+/// tooltip's own wrapping leaves each line whole, so that [`HOVER_LINES`]
+/// bounds its height.
+const HOVER_COLUMNS: usize = 64;
 
 /// Lines of what the build said a row's hover shows before it counts the
 /// rest: a tooltip taller than its window is cut off by it.

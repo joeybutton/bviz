@@ -386,7 +386,7 @@ such a column to its longest value and let it clip only on true overflow. Virtua
 window, cx| -> Vec<_>)` + a `UniformListScrollHandle` (renders only visible rows; requires
 uniform row height), keeping the header a separate non-scrolling row above it; drive a scroll
 bar from the handle's `base_handle` offset/extents as above. The stats table in
-`ui/trace/src/stats_panel.rs` (`stats_cell`, `stats_table`) is the worked example here.
+`ui/trace/src/stats_panel.rs` (`table_cell`, `stats_table`) is the worked example here.
 
 ## Stateful views vs stateless components
 

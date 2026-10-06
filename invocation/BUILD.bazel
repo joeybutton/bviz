@@ -7,6 +7,7 @@ rust_library(
     crate_name = "bviz_invocation",
     visibility = [
         "//bviz:__pkg__",
+        "//critical_path:__pkg__",
         "//execlog:__pkg__",
         "//terminal:__pkg__",
         "//trace/profile:__pkg__",
@@ -14,6 +15,7 @@ rust_library(
         "//ui/execlog:__pkg__",
         "//ui/graph:__pkg__",
         "//ui/playback:__pkg__",
+        "//ui/spawn_phase:__pkg__",
         "//ui/trace:__pkg__",
     ],
 )

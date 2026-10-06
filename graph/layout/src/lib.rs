@@ -6,6 +6,7 @@
 //! configured-target -> action/artifact hierarchy and cquery a target ->
 //! configured-target hierarchy; query yields one node per target. Edges run
 //! from each dependency to the target that consumes it.
+pub mod actions;
 pub mod aquery;
 pub mod capability;
 pub mod cquery;
@@ -35,6 +36,7 @@ pub mod transition;
 #[cfg(test)]
 mod test_support;
 
+pub use actions::{ActionDependencies, action_dependencies};
 pub use capability::{Axis, Capabilities, Support};
 pub use facets::Facets;
 pub use graph::{EdgeKind, Graph, Kind};

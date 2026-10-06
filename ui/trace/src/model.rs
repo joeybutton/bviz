@@ -1,18 +1,21 @@
 use crate::groups::{
-    GROUP_ORDER, GroupChrome, GroupLayoutState, build_grouped_layout, default_collapsed_groups,
+    ChartLanes, GroupChrome, GroupLayoutState, STACKED_GROUPS, build_grouped_layout,
+    default_collapsed_groups,
 };
 use crate::rebuild::Rebuild;
 use crate::track_label::shared_names;
 use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
-use bviz_invocation::Session;
+use bviz_critical_path::{CriticalPath, NearlyCritical, Step, Work};
+use bviz_invocation::spawn::LoggedSpawns;
+use bviz_invocation::{ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Revision, Session};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
-use bviz_trace_profile::{LaneClass, Profile};
+use bviz_trace_profile::{LaneClass, Profile, SliceAt, TimeSpan};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
-use gpui::{App, Context, Entity, EventEmitter, Task, WeakEntity};
+use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,32 +40,295 @@ pub(crate) struct SourceReplaced;
 /// rather than rebuilds.
 pub(crate) struct WorkingLanesDerived;
 
+/// The loaded profile's critical path is derived. Carried as an event because
+/// it concerns only the panel showing the path.
+pub(crate) struct CriticalPathDerived;
+
+/// Something was chosen of the critical path, or what was chosen let go of.
+/// Carried as an event because the timeline moves its view to what is chosen
+/// once, on the choice, and not on every notification after it, and redraws
+/// its lanes, which the chosen action's keeps in its group's sample.
+pub(crate) struct ChoiceChanged;
+
+/// Where the action span that ran `step` stands, where the path joined one.
+fn step_span(step: &Step) -> Option<SliceAt> {
+    match step.work() {
+        Work::Spanned(split) => Some(split.at),
+        Work::Unspanned(_) | Work::ChangePruned => None,
+    }
+}
+
+/// The slices standing for `step` in the profile: the action span that ran
+/// it, where the path joined one, then its own on the critical-path lane.
+pub(crate) fn step_slices(step: &Step) -> impl Iterator<Item = SliceAt> {
+    step_span(step).into_iter().chain([step.at()])
+}
+
+/// What was chosen of the critical path, as the profile records it.
+#[derive(Clone, Copy)]
+pub(crate) enum ChosenItem<'p> {
+    Step(&'p Step),
+    NearlyCritical(&'p NearlyCritical),
+}
+
+impl ChosenItem<'_> {
+    /// The slices standing for it in the profile, the action span that ran
+    /// it first where there is one.
+    pub(crate) fn slices(self) -> Vec<SliceAt> {
+        match self {
+            ChosenItem::Step(step) => step_slices(step).collect(),
+            ChosenItem::NearlyCritical(action) => vec![action.at],
+        }
+    }
+
+    /// From the first start to the last end of its slices.
+    pub(crate) fn time(self, profile: &Profile) -> TimeSpan {
+        let (own, span) = match self {
+            ChosenItem::Step(step) => (step.at(), step_span(step)),
+            ChosenItem::NearlyCritical(action) => (action.at, None),
+        };
+        let own = profile.slice(own);
+        span.map(|at| profile.slice(at)).into_iter().fold(
+            TimeSpan {
+                start_us: own.start_us,
+                end_us: own.end_us(),
+            },
+            |time, slice| TimeSpan {
+                start_us: time.start_us.min(slice.start_us),
+                end_us: time.end_us.max(slice.end_us()),
+            },
+        )
+    }
+}
+
+/// The actions nearly critical as the session of their invocation holds them.
+fn nearly_critical_actions(actions: &[NearlyCritical]) -> Vec<CriticalStep> {
+    actions
+        .iter()
+        .map(|action| {
+            let owner = action
+                .target
+                .as_deref()
+                .map(|label| ConfiguredTarget::new(label, action.configuration.as_deref()));
+            CriticalStep::new(Some(&action.primary_output), owner)
+        })
+        .collect()
+}
+
+/// `steps` as the session of their invocation holds them.
+fn critical_steps(steps: &[Step]) -> Vec<CriticalStep> {
+    steps
+        .iter()
+        .map(|step| {
+            let owner = step
+                .target()
+                .map(|label| ConfiguredTarget::new(label, step.configuration()));
+            CriticalStep::new(step.primary_output(), owner)
+        })
+        .collect()
+}
+
+/// Who holds what was chosen of the critical path in its panel.
+enum HeldChoice {
+    /// The invocation's session, which shares the choice with the views of
+    /// the invocation's other outputs and lets go of it where the path
+    /// reported to it changes.
+    InSession(Entity<Session>),
+    /// The model, for a profile opened alone, whose path is traced once.
+    Alone(Option<Chosen>),
+}
+
+impl HeldChoice {
+    fn get(&self, cx: &App) -> Option<Chosen> {
+        match self {
+            HeldChoice::InSession(session) => session.read(cx).chosen(),
+            HeldChoice::Alone(chosen) => *chosen,
+        }
+    }
+
+    fn set(&mut self, chosen: Option<Chosen>, cx: &mut App) {
+        match self {
+            HeldChoice::InSession(session) => session.update(cx, |session, cx| {
+                if session.choose(chosen) {
+                    cx.notify();
+                }
+            }),
+            HeldChoice::Alone(held) => *held = chosen,
+        }
+    }
+}
+
 /// A loaded profile with what is derived from it once for every reader of it.
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
-    working_lanes: DerivedLanes,
+    working_lanes: Derived<WorkingLanes>,
+    critical_path: TracedPath,
     /// Derives the profile's action timings and attempts and reports them to
     /// its session; held with the profile, so that a profile replaced before
     /// they are ready reports none.
     _reporting_timings: Option<Task<()>>,
 }
 
-/// A profile's [`WorkingLanes`], which are derived off the UI thread.
-enum DerivedLanes {
+/// What is derived from a profile off the UI thread.
+pub(crate) enum Derived<T> {
     Deriving {
         /// Held with the profile it reads, so that it ends once another is
         /// loaded.
         _derivation: Task<()>,
     },
-    Derived(WorkingLanes),
+    Derived(T),
+}
+
+/// A loaded profile's critical path, as far as it is traced.
+pub(crate) enum TracedPath {
+    Tracing(Tracing),
+    Traced {
+        /// `None` for a profile with no critical-path lane.
+        path: Option<Box<CriticalPath>>,
+        /// What of its session `path` is joined to.
+        joined: Joined,
+        /// Traces the path again, joined to spawns its session learned of
+        /// since; `path` stands until it lands.
+        rejoining: Option<Tracing>,
+    },
+}
+
+/// A tracing of a critical path under way, held with the profile it reads so
+/// that dropping it, once another profile is loaded or other spawns are
+/// logged, cancels it.
+pub(crate) struct Tracing {
+    /// What of its session the path is traced with.
+    joined: Joined,
+    _task: Task<()>,
+}
+
+/// What of its session a critical path is traced with, by the revisions the
+/// session held it at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Joined {
+    logged: Revision,
+    graphed: Revision,
+}
+
+impl Joined {
+    fn of(session: &Session) -> Joined {
+        Joined {
+            logged: session.logged_spawns_revision(),
+            graphed: session.action_graph_revision(),
+        }
+    }
+}
+
+/// What a critical path is joined to from its session: the spawns its
+/// execution log records and its action graph.
+#[derive(Default)]
+struct JoinedTo {
+    spawns: Option<Arc<LoggedSpawns>>,
+    graph: Option<Arc<ActionGraph>>,
+}
+
+impl TracedPath {
+    /// What the path was last asked to be joined to.
+    fn asked(&self) -> Joined {
+        match self {
+            TracedPath::Tracing(tracing)
+            | TracedPath::Traced {
+                rejoining: Some(tracing),
+                ..
+            } => tracing.joined,
+            TracedPath::Traced { joined, .. } => *joined,
+        }
+    }
+
+    /// Has `tracing` take the place of any tracing under way, keeping a path
+    /// already traced until it lands.
+    fn retrace(&mut self, tracing: Tracing) {
+        match self {
+            TracedPath::Tracing(under_way) => *under_way = tracing,
+            TracedPath::Traced { rejoining, .. } => *rejoining = Some(tracing),
+        }
+    }
+
+    /// Takes `path` as traced if it was traced joined to `joined` by the
+    /// tracing under way, and says whether it did.
+    fn adopt(&mut self, joined: Joined, path: Option<CriticalPath>) -> bool {
+        let under_way = match self {
+            TracedPath::Tracing(tracing)
+            | TracedPath::Traced {
+                rejoining: Some(tracing),
+                ..
+            } => Some(tracing.joined),
+            TracedPath::Traced { .. } => None,
+        };
+        let own = under_way == Some(joined);
+        if own {
+            *self = TracedPath::Traced {
+                path: path.map(Box::new),
+                joined,
+                rejoining: None,
+            };
+        }
+        own
+    }
+}
+
+/// Traces the critical path of `profile` off the UI thread, joined `to`
+/// what its session holds, for the model of `cx` to adopt as `joined`.
+fn trace(
+    profile: Arc<Profile>,
+    to: JoinedTo,
+    joined: Joined,
+    cx: &mut Context<TraceModel>,
+) -> Tracing {
+    let task = cx.spawn(async move |model, cx| {
+        let derive = async move {
+            let path = CriticalPath::of(&profile, to.spawns.as_deref(), to.graph.as_deref());
+            (profile, path)
+        };
+        let (profile, path) = cx.background_executor().spawn(derive).await;
+        model
+            .update(cx, |model, cx| {
+                if model.adopt_critical_path(&profile, joined, path) {
+                    model.report_critical_path(cx);
+                    cx.emit(CriticalPathDerived);
+                }
+            })
+            .ok();
+    });
+    Tracing {
+        joined,
+        _task: task,
+    }
+}
+
+/// What `session` holds for a critical path to be joined to, and as of when.
+fn joined_to(session: Option<&Entity<Session>>, cx: &Context<TraceModel>) -> (JoinedTo, Joined) {
+    match session {
+        Some(session) => {
+            let session = session.read(cx);
+            let to = JoinedTo {
+                spawns: session.logged_spawns().cloned(),
+                graph: session.action_graph().cloned(),
+            };
+            (to, Joined::of(session))
+        }
+        None => (JoinedTo::default(), Joined::default()),
+    }
+}
+
+/// The tasks deriving what a [`LoadedProfile`] derives off the UI thread.
+struct Derivations {
+    working_lanes: Task<()>,
+    critical_path: Tracing,
 }
 
 impl LoadedProfile {
-    /// `profile` as loaded, its working lanes on their way to the model of
-    /// `cx` and its action timings and attempts to `session`.
+    /// `profile` as loaded, its working lanes and critical path on their way
+    /// to the model of `cx` and its action timings and attempts to `session`,
+    /// its critical path joined to what `session` holds.
     fn new(
         profile: Profile,
-        session: Option<WeakEntity<Session>>,
+        session: Option<&Entity<Session>>,
         cx: &mut Context<TraceModel>,
     ) -> LoadedProfile {
         let flamer = Arc::new(TrackFlamer::new(&Arc::new(profile)));
@@ -81,7 +347,9 @@ impl LoadedProfile {
                 })
                 .ok();
         });
-        let reporting_timings = session.map(|session| {
+        let (to, joined) = joined_to(session, cx);
+        let tracing = trace(flamer.profile().clone(), to, joined, cx);
+        let reporting_timings = session.map(Entity::downgrade).map(|session| {
             let timed = flamer.profile().clone();
             cx.spawn(async move |_, cx| {
                 let (timings, attempts) = cx
@@ -99,14 +367,23 @@ impl LoadedProfile {
         });
         LoadedProfile {
             _reporting_timings: reporting_timings,
-            ..LoadedProfile::deriving(flamer, deriving)
+            ..LoadedProfile::deriving(
+                flamer,
+                Derivations {
+                    working_lanes: deriving,
+                    critical_path: tracing,
+                },
+            )
         }
     }
 
-    fn deriving(flamer: Arc<TrackFlamer>, _derivation: Task<()>) -> LoadedProfile {
+    fn deriving(flamer: Arc<TrackFlamer>, derivations: Derivations) -> LoadedProfile {
         LoadedProfile {
             flamer,
-            working_lanes: DerivedLanes::Deriving { _derivation },
+            working_lanes: Derived::Deriving {
+                _derivation: derivations.working_lanes,
+            },
+            critical_path: TracedPath::Tracing(derivations.critical_path),
             _reporting_timings: None,
         }
     }
@@ -120,9 +397,20 @@ impl LoadedProfile {
     fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
         let own = Arc::ptr_eq(&self.flamer, flamer);
         if own {
-            self.working_lanes = DerivedLanes::Derived(lanes);
+            self.working_lanes = Derived::Derived(lanes);
         }
         own
+    }
+
+    /// Takes `path` as its own if it was traced from its own profile, joined
+    /// to what it last asked for, and says whether it did.
+    fn adopt_critical_path(
+        &mut self,
+        profile: &Arc<Profile>,
+        joined: Joined,
+        path: Option<CriticalPath>,
+    ) -> bool {
+        Arc::ptr_eq(self.profile(), profile) && self.critical_path.adopt(joined, path)
     }
 }
 
@@ -148,7 +436,7 @@ pub(crate) struct TraceModel {
     /// and paint asks for a layout through a shared `&TraceModel`, several of them
     /// from inside a `read` of a panel that holds the model, where no `&mut` to
     /// the model can be taken. Filling on demand through the cell keeps
-    /// [`Self::lane_layout`] callable from those paths; the alternative is either
+    /// [`Self::chart_lanes`] callable from those paths; the alternative is either
     /// an exclusive borrow threaded through every read helper or building the
     /// layouts eagerly on each visibility change, which would move the cost of
     /// [`lay_out_lanes`] onto the load path.
@@ -163,13 +451,17 @@ pub(crate) struct TraceModel {
     /// The profile time the flame graph and stats aggregate over, intersected
     /// with the selected tracks.
     time_selection: TimeSelection,
+    chosen: HeldChoice,
     /// Which lane-class groups are collapsed in the chart, indexed by
-    /// [`GROUP_ORDER`]. Loading starts collapsed — it holds one lane per external
+    /// [`STACKED_GROUPS`]. Loading starts collapsed — it holds one lane per external
     /// repository, hundreds on a large build.
-    collapsed_groups: [bool; GROUP_ORDER.len()],
+    collapsed_groups: [bool; STACKED_GROUPS.len()],
     /// Which groups draw every lane rather than a sample, indexed by
-    /// [`GROUP_ORDER`].
-    group_show_all: [bool; GROUP_ORDER.len()],
+    /// [`STACKED_GROUPS`].
+    group_show_all: [bool; STACKED_GROUPS.len()],
+    /// The track the chosen action's slices are shown on, which its group's
+    /// sample keeps for as long as it stays chosen.
+    kept_in_sample: Option<usize>,
     /// The order every group stands its tracks in.
     track_sort: TrackSort,
     flame_mode: FlameMode,
@@ -182,7 +474,7 @@ pub(crate) struct TraceModel {
     /// The lane layout restricted to the visible tracks and restacked into
     /// lane-class groups, derived from `lanes` and cleared whenever the
     /// [`GroupLayoutState`] it was built under moves.
-    visible_lanes: RefCell<Option<Rc<LaneLayout>>>,
+    visible_lanes: RefCell<Option<Rc<ChartLanes>>>,
     /// The group headers and show-more rows over `visible_lanes`, built and
     /// cleared alongside it.
     group_chrome: RefCell<Option<Rc<GroupChrome>>>,
@@ -198,11 +490,16 @@ pub(crate) struct TraceModel {
     agg: Rebuild<u64>,
     /// The read that fills `source`, held so that it is not cancelled.
     _load: Task<()>,
+    /// Joins the critical path to the spawns and the action graph `session`
+    /// learns of.
+    _session_changed: Option<Subscription>,
 }
 
 impl EventEmitter<AggregateBuildStarted> for TraceModel {}
 impl EventEmitter<SourceReplaced> for TraceModel {}
 impl EventEmitter<WorkingLanesDerived> for TraceModel {}
+impl EventEmitter<CriticalPathDerived> for TraceModel {}
+impl EventEmitter<ChoiceChanged> for TraceModel {}
 
 impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
@@ -213,28 +510,49 @@ impl TraceModel {
         clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(
-            session,
-            clock,
-            load_in_background(
-                cx,
-                move || profile.join(),
-                |model, result, cx| {
-                    let source = match result {
-                        Ok(profile) => {
-                            let session = model.session.as_ref().map(Entity::downgrade);
-                            Source::Loaded(LoadedProfile::new(profile, session, cx))
-                        }
-                        Err(err) => Source::Failed(err),
-                    };
-                    model.set_source(source, cx);
-                    model.place_on_clock(cx);
-                },
-            ),
-        )
+        let session_changed = session
+            .as_ref()
+            .map(|session| cx.observe(session, |model, _, cx| model.rejoin(cx)));
+        let load = load_in_background(
+            cx,
+            move || profile.join(),
+            |model, result, cx| {
+                let source = match result {
+                    Ok(profile) => {
+                        let session = model.session.clone();
+                        Source::Loaded(LoadedProfile::new(profile, session.as_ref(), cx))
+                    }
+                    Err(err) => Source::Failed(err),
+                };
+                model.set_source(source, cx);
+                model.place_on_clock(cx);
+            },
+        );
+        Self {
+            _session_changed: session_changed,
+            ..Self::new(session, clock, load)
+        }
+    }
+
+    /// Traces the loaded profile's critical path again where its session
+    /// holds other spawns or another action graph than it was traced with.
+    fn rejoin(&mut self, cx: &mut Context<Self>) {
+        let (to, joined) = joined_to(self.session.as_ref(), cx);
+        let Source::Loaded(loaded) = &mut self.source else {
+            return;
+        };
+        if loaded.critical_path.asked() == joined {
+            return;
+        }
+        let tracing = trace(loaded.profile().clone(), to, joined, cx);
+        loaded.critical_path.retrace(tracing);
     }
 
     fn new(session: Option<Entity<Session>>, clock: Option<DocumentClock>, load: Task<()>) -> Self {
+        let chosen = match &session {
+            Some(session) => HeldChoice::InSession(session.clone()),
+            None => HeldChoice::Alone(None),
+        };
         Self {
             source: Source::Loading,
             session,
@@ -244,8 +562,10 @@ impl TraceModel {
             shared_track_names: Vec::new(),
             selected_tracks: Vec::new(),
             time_selection: TimeSelection::default(),
+            chosen,
             collapsed_groups: default_collapsed_groups(),
-            group_show_all: [false; GROUP_ORDER.len()],
+            group_show_all: [false; STACKED_GROUPS.len()],
+            kept_in_sample: None,
             track_sort: TrackSort::default(),
             flame_mode: FlameMode::default(),
             aggregate_key: 0,
@@ -255,6 +575,7 @@ impl TraceModel {
             aggregates: None,
             agg: Rebuild::new(),
             _load: load,
+            _session_changed: None,
         }
     }
 
@@ -308,7 +629,7 @@ impl TraceModel {
     pub(crate) fn working_lanes(&self) -> Option<&WorkingLanes> {
         match &self.source {
             Source::Loaded(LoadedProfile {
-                working_lanes: DerivedLanes::Derived(lanes),
+                working_lanes: Derived::Derived(lanes),
                 ..
             }) => Some(lanes),
             _ => None,
@@ -320,6 +641,161 @@ impl TraceModel {
             Source::Loaded(loaded) => loaded.adopt_working_lanes(flamer, lanes),
             _ => false,
         }
+    }
+
+    /// The loaded profile's critical path, as far as it is traced; `None`
+    /// until a profile is loaded.
+    pub(crate) fn critical_path(&self) -> Option<&TracedPath> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(&loaded.critical_path),
+            _ => None,
+        }
+    }
+
+    fn adopt_critical_path(
+        &mut self,
+        profile: &Arc<Profile>,
+        joined: Joined,
+        path: Option<CriticalPath>,
+    ) -> bool {
+        match &mut self.source {
+            Source::Loaded(loaded) => loaded.adopt_critical_path(profile, joined, path),
+            _ => false,
+        }
+    }
+
+    /// The traced path's steps; none while it is traced or where the profile
+    /// records no path.
+    fn steps(&self) -> &[Step] {
+        match self.critical_path() {
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => path.steps(),
+            _ => &[],
+        }
+    }
+
+    /// The actions nearly critical of the traced path; none while it is
+    /// traced or where no modeled build holds it.
+    fn nearly_critical(&self) -> &[NearlyCritical] {
+        match self.critical_path() {
+            Some(TracedPath::Traced {
+                path: Some(path), ..
+            }) => path
+                .modeled()
+                .map_or(&[], |modeled| modeled.nearly_critical()),
+            _ => &[],
+        }
+    }
+
+    /// Tells the session the steps of the traced path and the actions nearly
+    /// critical, which tracing the path again with other spawns mostly
+    /// leaves as they were, and lets the lane of what the session let go of
+    /// with them fall back to its group's sample.
+    fn report_critical_path(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let steps = critical_steps(self.steps());
+        let nearly_critical = nearly_critical_actions(self.nearly_critical());
+        session.update(cx, |session, cx| {
+            if session.report_critical_path(steps, nearly_critical) {
+                cx.notify();
+            }
+        });
+        if self.chosen.get(cx).is_none() && self.kept_in_sample.is_some() {
+            self.release_chosen_lane();
+            cx.emit(ChoiceChanged);
+        }
+    }
+
+    /// What is chosen of the critical path, and the profile's record of it.
+    pub(crate) fn chosen(&self, cx: &App) -> Option<(Chosen, ChosenItem<'_>)> {
+        let chosen = self.chosen.get(cx)?;
+        Some((chosen, self.item_of(chosen)?))
+    }
+
+    /// The profile's record of `chosen`, where the path holds it.
+    fn item_of(&self, chosen: Chosen) -> Option<ChosenItem<'_>> {
+        match chosen {
+            Chosen::Step(index) => self.steps().get(index).map(ChosenItem::Step),
+            Chosen::NearlyCritical(index) => self
+                .nearly_critical()
+                .get(index)
+                .map(ChosenItem::NearlyCritical),
+        }
+    }
+
+    /// Chooses `chosen` of the critical path and has the timeline and the
+    /// views of the invocation's other outputs show it.
+    pub(crate) fn choose(&mut self, chosen: Chosen, cx: &mut Context<Self>) {
+        if self.adopt_chosen(chosen) {
+            self.chosen.set(Some(chosen), cx);
+            cx.emit(ChoiceChanged);
+            cx.notify();
+        }
+    }
+
+    /// Opens the lane the timeline shows `chosen` on. Says whether the path
+    /// holds it.
+    fn adopt_chosen(&mut self, chosen: Chosen) -> bool {
+        let Some(profile) = self.profile().cloned() else {
+            return false;
+        };
+        let Some(item) = self.item_of(chosen) else {
+            return false;
+        };
+        let shown_on = item.slices().first().map(|at| at.track());
+        if let Some(track) = shown_on {
+            self.open_lane_of(&profile, track);
+        }
+        true
+    }
+
+    /// Has the chart draw the lane of `track`: kept in its group's sample,
+    /// and the group expanded where it is collapsed. A track the reader hid
+    /// stays hidden.
+    fn open_lane_of(&mut self, profile: &Profile, track: usize) {
+        self.keep_in_sample(Some(track));
+        let drawn = self
+            .chart_lanes()
+            .is_some_and(|chart| chart.lanes().any(|lane| lane.track == track));
+        if drawn || !self.visible_tracks.get(track).copied().unwrap_or(false) {
+            return;
+        }
+        let class = profile.threads()[track].lane_class;
+        if let Some(group) = STACKED_GROUPS.iter().position(|&g| g == class)
+            && self.collapsed_groups[group]
+        {
+            self.collapsed_groups[group] = false;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    fn keep_in_sample(&mut self, track: Option<usize>) {
+        if self.kept_in_sample != track {
+            self.kept_in_sample = track;
+            self.invalidate_visible_lanes();
+        }
+    }
+
+    /// Lets go of what is chosen of the critical path. Says whether anything
+    /// was.
+    pub(crate) fn unchoose(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.chosen(cx).is_none() {
+            return false;
+        }
+        self.chosen.set(None, cx);
+        self.release_chosen_lane();
+        cx.emit(ChoiceChanged);
+        cx.notify();
+        true
+    }
+
+    /// Lets the lane what was let go of was shown on fall back to its
+    /// group's sample.
+    fn release_chosen_lane(&mut self) {
+        self.keep_in_sample(None);
     }
 
     pub(crate) fn visible_tracks(&self) -> &[bool] {
@@ -364,15 +840,29 @@ impl TraceModel {
     /// selection (whose instants address the old profile's timeline) and, for a
     /// loaded profile, seeding the default track selection.
     pub(crate) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
-        self.lanes.borrow_mut().take();
-        self.visible_lanes.borrow_mut().take();
-        self.invalidate_aggregates();
-        self.time_selection.clear();
-        self.source = source;
+        if self.chosen.get(cx).is_some() {
+            self.chosen.set(None, cx);
+        }
+        self.replace_source(source);
         cx.emit(SourceReplaced);
         if let Some(profile) = self.profile().cloned() {
             self.init_tracks(&profile, cx);
         }
+    }
+
+    /// Takes `source` in place of the document, dropping what was derived
+    /// from the one it replaces and what was chosen in it, save what a
+    /// session holds chosen.
+    fn replace_source(&mut self, source: Source) {
+        self.lanes.borrow_mut().take();
+        self.visible_lanes.borrow_mut().take();
+        self.invalidate_aggregates();
+        self.time_selection.clear();
+        if let HeldChoice::Alone(chosen) = &mut self.chosen {
+            *chosen = None;
+        }
+        self.kept_in_sample = None;
+        self.source = source;
     }
 
     /// The default track selection for a freshly loaded profile: every
@@ -383,7 +873,7 @@ impl TraceModel {
         self.visible_tracks = vec![true; profile.threads().len()];
         self.shared_track_names = shared_names(profile);
         self.collapsed_groups = default_collapsed_groups();
-        self.group_show_all = [false; GROUP_ORDER.len()];
+        self.group_show_all = [false; STACKED_GROUPS.len()];
         self.track_sort = TrackSort::default();
         self.selected_tracks = profile
             .threads()
@@ -410,17 +900,18 @@ impl TraceModel {
         self.lanes.borrow().clone()
     }
 
-    /// The lane layout the flame chart draws: the full layout restricted to the
+    /// The lanes the flame chart draws: the full layout restricted to the
     /// visible tracks and restacked into lane-class groups, cached until the
     /// state it is built under moves. Every paint and hit-test
     /// works from this, so a lane hidden by its group is neither drawn nor
     /// selectable.
-    pub(crate) fn lane_layout(&self) -> Option<Rc<LaneLayout>> {
+    pub(crate) fn chart_lanes(&self) -> Option<Rc<ChartLanes>> {
         self.ensure_grouped();
         self.visible_lanes.borrow().clone()
     }
 
-    /// The group headers and show-more rows over [`Self::lane_layout`].
+    /// The group headers and show-more rows over [`Self::chart_lanes`]'
+    /// scrolled lanes.
     pub(crate) fn group_chrome(&self) -> Option<Rc<GroupChrome>> {
         self.ensure_grouped();
         self.group_chrome.borrow().clone()
@@ -444,6 +935,7 @@ impl TraceModel {
                 visible: &self.visible_tracks,
                 collapsed: &self.collapsed_groups,
                 show_all: &self.group_show_all,
+                kept: self.kept_in_sample,
                 sort: self.track_sort,
             },
         );
@@ -513,8 +1005,7 @@ impl TraceModel {
     }
 
     /// Shows or hides every track in one lane-class group at once.
-    pub(crate) fn set_group_visible(&mut self, group: usize, visible: bool) {
-        let class = GROUP_ORDER[group];
+    pub(crate) fn set_group_visible(&mut self, class: LaneClass, visible: bool) {
         let targets: Vec<usize> = {
             let Some(profile) = self.profile() else {
                 return;
@@ -744,7 +1235,7 @@ impl TraceModel {
     /// display order; `None` with no anchor or one no longer a visible lane.
     fn visible_run_to(&self, track: usize) -> Option<Vec<usize>> {
         let anchor = self.select_anchor?;
-        let order: Vec<usize> = self.lane_layout()?.lanes.iter().map(|l| l.track).collect();
+        let order: Vec<usize> = self.chart_lanes()?.lanes().map(|l| l.track).collect();
         let ai = order.iter().position(|&t| t == anchor)?;
         let ti = order.iter().position(|&t| t == track)?;
         Some(order[ai.min(ti)..=ai.max(ti)].to_vec())
@@ -765,12 +1256,22 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadedProfile, TraceModel, clock_source};
-    use crate::Source;
+    use super::{
+        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, TraceModel, TracedPath, Tracing,
+        clock_source, critical_steps, nearly_critical_actions, step_slices,
+    };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
+    use crate::groups::STACKED_GROUPS;
     use crate::track_order::TrackSort;
-    use bviz_trace_layout::{FlameDirection, FlameLabels, FlameMode, FlameWeight, TrackFlamer};
-    use bviz_trace_profile::Profile;
+    use crate::{Source, TOP_N_PER_GROUP};
+    use bviz_critical_path::CriticalPath;
+    use bviz_invocation::spawn::LoggedSpawns;
+    use bviz_invocation::{ActionGraph, ConfiguredTarget, Session};
+    use bviz_trace_layout::{
+        FlameDirection, FlameLabels, FlameMode, FlameWeight, TimeSelection, TrackFlamer,
+        span_between,
+    };
+    use bviz_trace_profile::{Profile, TimeSpan};
     use gpui::Task;
     use std::sync::Arc;
 
@@ -802,6 +1303,22 @@ mod tests {
         assert!(clock_source(&profile_started_at(None)).is_none());
     }
 
+    /// Derivations that have finished.
+    fn derivations() -> Derivations {
+        Derivations {
+            working_lanes: Task::ready(()),
+            critical_path: tracing(Joined::default()),
+        }
+    }
+
+    /// A tracing joined to `joined` that has finished.
+    fn tracing(joined: Joined) -> Tracing {
+        Tracing {
+            joined,
+            _task: Task::ready(()),
+        }
+    }
+
     /// The flamer of a profile of one lane working over `[0, 100)`.
     fn flamer() -> Arc<TrackFlamer> {
         let json = r#"{"traceEvents":[
@@ -819,13 +1336,295 @@ mod tests {
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
 
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), Task::ready(())));
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
         assert!(model.working_lanes().is_none());
 
         assert!(model.adopt_working_lanes(&loaded, loaded.working_lanes()));
         let adopted = model.working_lanes().expect("the loaded profile's lanes");
         assert_eq!(*adopted, loaded.working_lanes());
+    }
+
+    #[test]
+    fn a_critical_path_is_adopted_only_by_the_loaded_profile_it_was_derived_from() {
+        let unlogged = Joined::default();
+        let mut model = model();
+        let replaced = flamer();
+        assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
+
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Tracing { .. })
+        ));
+
+        assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Traced { path: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_path_traced_before_spawns_were_logged_stands_until_it_is_traced_again_with_them() {
+        let mut session = Session::default();
+        let unlogged = Joined::of(&session);
+        let mut model = model();
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
+
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = Joined::of(&session);
+        let Source::Loaded(loaded_profile) = &mut model.source else {
+            panic!("a loaded profile");
+        };
+        loaded_profile.critical_path.retrace(tracing(logged));
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Traced { path: None, .. })
+        ));
+        assert!(!model.adopt_critical_path(loaded.profile(), unlogged, None));
+        assert!(model.adopt_critical_path(loaded.profile(), logged, None));
+    }
+
+    #[test]
+    fn a_path_traced_before_the_action_graph_was_reported_is_traced_again_with_it() {
+        let mut session = Session::default();
+        let ungraphed = Joined::of(&session);
+        let mut model = model();
+        let loaded = flamer();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(model.adopt_critical_path(loaded.profile(), ungraphed, None));
+
+        session.report_action_graph(ActionGraph::default());
+        let graphed = Joined::of(&session);
+        assert_ne!(graphed, ungraphed);
+        let Source::Loaded(loaded_profile) = &mut model.source else {
+            panic!("a loaded profile");
+        };
+        assert_ne!(
+            loaded_profile.critical_path.asked(),
+            graphed,
+            "traced again"
+        );
+        loaded_profile.critical_path.retrace(tracing(graphed));
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Traced { path: None, .. })
+        ));
+        assert!(!model.adopt_critical_path(loaded.profile(), ungraphed, None));
+        assert!(model.adopt_critical_path(loaded.profile(), graphed, None));
+    }
+
+    #[test]
+    fn a_path_traced_after_the_action_graph_was_reported_is_joined_to_it_already() {
+        let mut session = Session::default();
+        session.report_action_graph(ActionGraph::default());
+        let graphed = Joined::of(&session);
+        let mut model = model();
+        let loaded = flamer();
+        let derived = Derivations {
+            critical_path: tracing(graphed),
+            ..derivations()
+        };
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derived));
+        assert!(model.adopt_critical_path(loaded.profile(), graphed, None));
+        let Source::Loaded(loaded_profile) = &model.source else {
+            panic!("a loaded profile");
+        };
+        assert_eq!(loaded_profile.critical_path.asked(), Joined::of(&session));
+    }
+
+    #[test]
+    fn a_tracing_under_way_gives_way_to_one_joined_to_spawns_logged_since() {
+        let mut session = Session::default();
+        let unlogged = Joined::of(&session);
+        session.report_logged_spawns(LoggedSpawns::default());
+        let logged = Joined::of(&session);
+        let mut model = model();
+        let loaded = flamer();
+        let mut loaded_profile = LoadedProfile::deriving(loaded.clone(), derivations());
+        loaded_profile.critical_path.retrace(tracing(logged));
+        model.source = Source::Loaded(loaded_profile);
+        assert!(matches!(
+            model.critical_path(),
+            Some(TracedPath::Tracing { .. })
+        ));
+        assert!(!model.adopt_critical_path(loaded.profile(), unlogged, None));
+        assert!(model.adopt_critical_path(loaded.profile(), logged, None));
+    }
+
+    /// The action span running the first step of [`traced`]'s path, on an
+    /// execution thread too idle for its group's sample.
+    const IDLE_TID: usize = TOP_N_PER_GROUP + 1;
+
+    /// A loaded profile whose critical path is traced: a link of
+    /// `[100, 1100)` run on [`IDLE_TID`], then a step of no length, every
+    /// track shown.
+    fn traced() -> TraceModel {
+        traced_with(None)
+    }
+
+    /// [`traced`], and where `graph` models the build, one whose action
+    /// writing `bazel-out/b.o` ran on [`IDLE_TID`] in `[0, 90)` off the path.
+    fn traced_with(graph: Option<&ActionGraph>) -> TraceModel {
+        let mut events = vec![
+            r#"{"name":"thread_name","ph":"M","tid":0,"args":{"name":"Critical Path"}}"#
+                .to_owned(),
+            r#"{"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":100,"dur":1000,"tid":0}"#.to_owned(),
+            r#"{"cat":"critical path component","name":"action 'Linking a'","ph":"i","ts":2000,"tid":0}"#.to_owned(),
+        ];
+        for tid in 1..=IDLE_TID {
+            events.push(format!(
+                r#"{{"name":"thread_name","ph":"M","tid":{tid},"args":{{"name":"skyframe-evaluator-execution-{tid}"}}}}"#
+            ));
+        }
+        for tid in 1..IDLE_TID {
+            for ts in [0, 10, 20] {
+                events.push(format!(
+                    r#"{{"cat":"general information","name":"busy","ph":"X","ts":{ts},"dur":5,"tid":{tid}}}"#
+                ));
+            }
+        }
+        events.push(format!(
+            r#"{{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":{IDLE_TID},"out":"bazel-out/a"}}"#
+        ));
+        events.push(format!(
+            r#"{{"cat":"action processing","name":"Compiling b","ph":"X","ts":0,"dur":90,"tid":{IDLE_TID},"out":"bazel-out/b.o"}}"#
+        ));
+        let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let path = CriticalPath::of(&profile, None, graph);
+        let loaded = Arc::new(TrackFlamer::new(&Arc::new(profile)));
+        let mut model = model();
+        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        assert!(model.adopt_critical_path(loaded.profile(), Joined::default(), path));
+        let tracks = loaded.profile().threads().len();
+        model.visible_tracks = vec![true; tracks];
+        model.selected_tracks = vec![true; tracks];
+        model
+    }
+
+    /// Whether the chart draws a lane of `track`.
+    fn drawn(model: &TraceModel, track: usize) -> bool {
+        let chart = model.chart_lanes().expect("a laid-out chart");
+        chart.lanes().any(|lane| lane.track == track)
+    }
+
+    #[test]
+    fn a_chosen_step_opens_the_lane_its_action_ran_on_until_let_go_of() {
+        let mut model = traced();
+        let step = model.steps().first().expect("a step");
+        let [span, own] = step_slices(step).collect::<Vec<_>>()[..] else {
+            panic!("a step joined to its span")
+        };
+        assert_eq!(own, step.at());
+        assert!(drawn(&model, own.track()));
+        assert!(!drawn(&model, span.track()), "left out of the sample");
+
+        assert!(model.adopt_chosen(Chosen::Step(0)));
+        assert!(drawn(&model, span.track()));
+        assert_eq!(model.group_show_all, [false; STACKED_GROUPS.len()]);
+
+        model.release_chosen_lane();
+        assert!(!drawn(&model, span.track()), "back out of the sample");
+    }
+
+    #[test]
+    fn choosing_a_step_and_letting_go_of_it_leave_the_time_selection() {
+        let mut model = traced();
+        let mut selection = TimeSelection::default();
+        selection.set(span_between(5, 50).expect("a region"));
+        selection.insert(span_between(2000, 2100).expect("a region"));
+        model.time_selection = selection.clone();
+        assert!(model.adopt_chosen(Chosen::Step(0)));
+        assert_eq!(model.time_selection, selection);
+        model.release_chosen_lane();
+        assert_eq!(model.time_selection, selection);
+    }
+
+    #[test]
+    fn a_replaced_document_holds_no_chosen_step() {
+        let mut model = traced();
+        assert!(model.adopt_chosen(Chosen::Step(0)));
+        model.chosen = HeldChoice::Alone(Some(Chosen::Step(0)));
+        model.replace_source(Source::Loading);
+        assert!(matches!(model.chosen, HeldChoice::Alone(None)));
+        assert_eq!(model.kept_in_sample, None);
+    }
+
+    #[test]
+    fn a_step_is_reported_by_its_primary_output_and_its_configured_target() {
+        const CONFIGURATION: &str =
+            "4f8a2bd4c1e07b3e9a6d5f2c8b1e0a7d3c6f9b2e5a8d1c4f7b0e3a6d9c2f5b8e";
+        let json = format!(
+            r#"{{"traceEvents":[
+            {{"name":"thread_name","ph":"M","tid":0,"args":{{"name":"Critical Path"}}}},
+            {{"name":"thread_name","ph":"M","tid":1,"args":{{"name":"skyframe-evaluator-execution-1"}}}},
+            {{"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":100,"dur":1000,"tid":0}},
+            {{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":1,"out":"bazel-out/a","args":{{"target":"//a:a","configuration":"{CONFIGURATION}"}}}},
+            {{"cat":"critical path component","name":"action 'Linking b'","ph":"X","ts":2000,"dur":10,"tid":0}}]}}"#
+        );
+        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let path = CriticalPath::of(&profile, None, None).expect("a critical path");
+        let steps = critical_steps(path.steps());
+        assert_eq!(steps[0].primary_output(), Some("bazel-out/a"));
+        assert_eq!(
+            steps[0].owner(),
+            Some(ConfiguredTarget::new("//a:a", Some(CONFIGURATION)))
+        );
+        assert_eq!((steps[1].primary_output(), steps[1].owner()), (None, None));
+    }
+
+    #[test]
+    fn a_step_past_the_path_is_not_chosen() {
+        let mut model = traced();
+        assert!(model.adopt_chosen(Chosen::Step(1)));
+        assert!(model.item_of(Chosen::Step(1)).is_some());
+        assert!(!model.adopt_chosen(Chosen::Step(2)));
+        assert!(model.item_of(Chosen::Step(2)).is_none());
+        assert!(
+            !model.adopt_chosen(Chosen::NearlyCritical(0)),
+            "none modeled"
+        );
+    }
+
+    #[test]
+    fn a_chosen_nearly_critical_action_opens_the_lane_of_its_span() {
+        let graph = ActionGraph::new(
+            vec![
+                Some("bazel-out/b.o".to_owned()),
+                Some("bazel-out/a".to_owned()),
+            ],
+            vec![(1, 0)],
+        );
+        let mut model = traced_with(Some(&graph));
+        let [action] = model.nearly_critical() else {
+            panic!("one action nearly critical")
+        };
+        let at = action.at;
+        assert_eq!(
+            nearly_critical_actions(model.nearly_critical())[0].primary_output(),
+            Some("bazel-out/b.o")
+        );
+        assert!(!drawn(&model, at.track()), "left out of the sample");
+
+        assert!(model.adopt_chosen(Chosen::NearlyCritical(0)));
+        assert!(drawn(&model, at.track()));
+        let item = model.item_of(Chosen::NearlyCritical(0)).expect("an action");
+        assert_eq!(item.slices(), [at]);
+        let profile = model.profile().expect("a profile").clone();
+        assert_eq!(
+            item.time(&profile),
+            TimeSpan {
+                start_us: 0,
+                end_us: 90
+            }
+        );
+        assert!(!model.adopt_chosen(Chosen::NearlyCritical(1)));
     }
 
     #[test]

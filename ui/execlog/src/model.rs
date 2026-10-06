@@ -1,8 +1,16 @@
 use crate::summary::Summary;
+use bviz_invocation::Session;
+use bviz_invocation::spawn::LoggedSpawns;
 use bviz_ui_components::{Pending, load_in_background};
-use gpui::{Context, Task};
+use gpui::{Context, Task, WeakEntity};
 
 pub(crate) type Source = bviz_ui_components::Source<Summary>;
+
+/// What reading an execution log yields.
+pub(crate) struct Read {
+    pub(crate) summary: Summary,
+    pub(crate) spawns: LoggedSpawns,
+}
 
 /// The summary of an execution log, held apart from the panel showing it so
 /// the panel can close and be shown again without the log being read afresh.
@@ -13,15 +21,31 @@ pub(crate) struct ExecLogModel {
 }
 
 impl ExecLogModel {
-    pub(crate) fn reading(log: Pending<Summary>, cx: &mut Context<Self>) -> Self {
+    /// The summary of the log `log` reads, its spawns reported to `session`
+    /// where it is read as one of an invocation's outputs.
+    pub(crate) fn reading(
+        log: Pending<Read>,
+        session: Option<WeakEntity<Session>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             source: Source::Loading,
             _load: load_in_background(
                 cx,
                 move || log.join(),
-                |model, result, _| {
+                move |model, result, cx| {
                     model.source = match result {
-                        Ok(log) => Source::Loaded(log),
+                        Ok(Read { summary, spawns }) => {
+                            if let Some(session) = session {
+                                session
+                                    .update(cx, |session, cx| {
+                                        session.report_logged_spawns(spawns);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }
+                            Source::Loaded(summary)
+                        }
                         Err(why) => Source::Failed(why),
                     };
                 },

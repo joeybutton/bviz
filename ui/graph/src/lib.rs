@@ -26,11 +26,13 @@ use gpui::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod actions;
 mod build;
 mod camera;
 mod checklist;
 mod colour;
 mod column;
+mod critical;
 mod derive;
 mod drag;
 mod duration;
@@ -74,7 +76,7 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, RevealRequested, SourceReplaced};
+use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
@@ -282,6 +284,9 @@ pub struct GraphPanel {
     /// the toolbar toggle so the marking can be turned off when it is more noise
     /// than help.
     neighborhood_enabled: bool,
+    /// Whether the boxes standing for the invocation's critical path wear its
+    /// halo.
+    critical_path_enabled: bool,
     /// Whether the card naming what the inputs cannot be filtered on is unfolded
     /// past its one-line reading.
     missing_open: bool,
@@ -437,7 +442,10 @@ impl GraphPanel {
         });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
-                reveal(view, event.node, cx);
+                match event.reveal {
+                    Reveal::Activate => reveal(view, event.node, cx),
+                    Reveal::InPlace => show_in_place(view, event.node, cx),
+                }
             }
         });
         let derived = Derived::new();
@@ -479,6 +487,7 @@ impl GraphPanel {
             relation_picker,
             _relation_choices: relations,
             neighborhood_enabled: true,
+            critical_path_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
             report: report::Card::new(),
@@ -542,8 +551,12 @@ impl GraphPanel {
                 states: loaded.states(),
                 attempted: loaded.attempted(),
             };
+            let haloed = legend::Haloed {
+                nodes: self.critical_path_enabled.then(|| loaded.critical()),
+                traced: loaded.traced(),
+            };
             self.legend
-                .card(&drawn, zoom, statuses, resolved, coloured, &palette)
+                .card(&drawn, zoom, statuses, resolved, coloured, haloed, &palette)
         });
         let entity = cx.entity();
         div()
@@ -723,6 +736,11 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
+    fn toggle_critical_path(&mut self, cx: &mut Context<Self>) {
+        self.critical_path_enabled = !self.critical_path_enabled;
+        self.invalidate_canvas(cx);
+    }
+
     /// Widens or narrows what the selected box marks.
     fn set_relation(&mut self, relation: Relation, cx: &mut Context<Self>) {
         self.selection.set_relation(relation);
@@ -798,6 +816,11 @@ impl Render for GraphPanel {
         match placeholder {
             Some(placeholder) => chrome.child(placeholder),
             None => {
+                let traced = self
+                    .model
+                    .read(cx)
+                    .loaded()
+                    .is_some_and(|loaded| loaded.critical().any());
                 let controls = Controls {
                     mode: self.mode,
                     search: search::field(&self.search, cx).into_any_element(),
@@ -813,6 +836,7 @@ impl Render for GraphPanel {
                     timecard_control: timecard::control(self, cx)
                         .map(IntoElement::into_any_element),
                     neighborhood_enabled: self.neighborhood_enabled,
+                    critical_path: traced.then_some(self.critical_path_enabled),
                     reduced: self.derived.reduced(),
                     relaying: self.derived.deriving(),
                 };
@@ -866,6 +890,7 @@ impl Render for GraphCanvas {
             highlight: view.emphasis.highlight(),
             colouring: view.colouring,
             at,
+            critical_path: view.critical_path_enabled,
             drawn,
         };
         let prepaint = build_prepaint(parent.clone(), content, recenter_target);
@@ -905,6 +930,9 @@ struct Controls {
     /// away, offered where a profile places time on the graph.
     timecard_control: Option<AnyElement>,
     neighborhood_enabled: bool,
+    /// Whether the critical path's halo is drawn, offered only where a path
+    /// lands on the graph.
+    critical_path: Option<bool>,
     /// `None` where the drawing offers no choice of edge set.
     reduced: Option<bool>,
     relaying: bool,
@@ -999,6 +1027,22 @@ fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     }
     view.framing.request_frame(framing::Frame::Node(id));
     cx.emit(PanelEvent::Activate);
+    view.invalidate_canvas(cx);
+}
+
+/// Selects and frames the box standing for `id` in the drawing as it is: in
+/// a layered drawing the innermost drawn box holding it, which opens none and
+/// so lays nothing out afresh.
+fn show_in_place(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
+    let shown = match view.mode {
+        LayoutMode::Layered => derive::drawn_holder(view, id),
+        LayoutMode::Map => Some(id),
+    };
+    let Some(shown) = shown else {
+        return;
+    };
+    view.selection.select(shown);
+    view.framing.request_frame(framing::Frame::Node(shown));
     view.invalidate_canvas(cx);
 }
 

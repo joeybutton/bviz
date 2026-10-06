@@ -4,11 +4,15 @@ use bviz_invocation::{
     Attempt, Attempts, ConfiguredTarget, Phase, Profiled, Runner, Spawns, Timings, Venue,
 };
 
-use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, TimeSpan};
+use crate::model::{CategoryId, LaneClass, OptStr, Profile, Slice, SliceAt, Str, TimeSpan};
 
 /// One action span the profile records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
+    pub at: SliceAt,
+    /// What Bazel's `describe()` says the action does, the span's name.
+    pub description: Str,
+    pub mnemonic: OptStr,
     /// The action's primary output (see [`crate::SliceDetail::out`]).
     pub out: OptStr,
     pub target: OptStr,
@@ -227,7 +231,7 @@ impl Profile {
             .map(|track| self.slices(track).iter().filter(|s| is_action(s)).count())
             .sum();
         let mut started = Vec::with_capacity(span_count);
-        for track in self.threads() {
+        for (track_at, track) in self.threads().iter().enumerate() {
             let slices = self.slices(track);
             for (i, (slice, detail)) in slices.iter().zip(self.details(track)).enumerate() {
                 if !is_action(slice) {
@@ -269,7 +273,13 @@ impl Profile {
                 if phases.is_empty() {
                     phases.saw(Phase::Running(Venue::Local), slice.start_us);
                 }
-                let action = Action {
+                started.push(Action {
+                    at: SliceAt {
+                        track: track_at,
+                        slice: i,
+                    },
+                    description: slice.name,
+                    mnemonic: detail.mnemonic,
                     out: detail.out,
                     target: detail.target,
                     configuration: detail.configuration,
@@ -279,8 +289,7 @@ impl Profile {
                     },
                     spawns,
                     phases,
-                };
-                started.push(action);
+                });
             }
         }
         started.sort_by_key(|action| action.span.start_us);
@@ -289,9 +298,14 @@ impl Profile {
 
     /// The time each of [its actions](Self::actions) took and where it ran.
     pub fn timings(&self) -> Timings {
-        let actions = self.actions();
+        self.timings_of(&self.actions())
+    }
+
+    /// [`timings`](Self::timings), of `actions` as [`actions`](Self::actions)
+    /// returned them.
+    pub fn timings_of(&self, actions: &[Action]) -> Timings {
         let mut timings = Timings::with_capacity(actions.len());
-        for action in &actions {
+        for action in actions {
             timings.record(Profiled {
                 primary_output: self.opt_str(action.out),
                 owner: self.owner(action),
@@ -386,7 +400,7 @@ mod tests {
         for ((out, nested), tid) in actions.iter().zip(ACTION_TIDS.into_iter().cycle()) {
             let out = out.map_or(String::new(), |out| format!(r#","out":"{out}""#));
             events.push(format!(
-                r#"{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":{at},"dur":100,"tid":{tid}{out},"args":{{"target":"//p:t","configuration":"c"}}}}"#
+                r#"{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":{at},"dur":100,"tid":{tid}{out},"args":{{"target":"//p:t","configuration":"c","mnemonic":"M"}}}}"#
             ));
             for (cat, name, ts, dur) in *nested {
                 events.push(format!(
@@ -567,6 +581,10 @@ mod tests {
         assert_eq!(
             (p.opt_str(a.target), p.opt_str(a.configuration), a.wall()),
             (Some("//p:t"), Some("c"), Duration::from_micros(100))
+        );
+        assert_eq!(
+            (p.str(a.description), p.opt_str(a.mnemonic)),
+            ("a", Some("M"))
         );
     }
 

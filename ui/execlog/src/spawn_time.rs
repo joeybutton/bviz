@@ -1,12 +1,14 @@
-use crate::format::{duration, exact_duration, phase_name, share};
+use crate::format::{duration, exact_duration, share};
 use crate::model::ExecLogModel;
 use crate::model::Source;
 use crate::palette::Palette;
 use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
-use bviz_execlog::{Phase, Timing};
+use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::{
-    Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, list_scrollbar,
+    Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, list_scrollbar,
+    sort_header,
 };
+use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -40,53 +42,32 @@ enum SortBy {
     Time,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct Sort {
-    by: SortBy,
-    descending: bool,
+/// The order the mnemonic table opens in.
+const DEFAULT_SORT: Sort<SortBy> = Sort {
+    by: SortBy::Time,
+    descending: true,
+};
+
+/// The sort a click on `by`'s title asks for of a table sorted by `sort`:
+/// names first sort from the start of the alphabet and counts from the
+/// largest.
+fn clicked(sort: Sort<SortBy>, by: SortBy) -> Sort<SortBy> {
+    sort.clicked(by, by != SortBy::Name)
 }
 
-impl Default for Sort {
-    fn default() -> Self {
-        Sort {
-            by: SortBy::Time,
-            descending: true,
-        }
-    }
+/// Rows equal in what `sort` is by go in order of name.
+fn compare(sort: Sort<SortBy>, a: &GroupRow, b: &GroupRow) -> Ordering {
+    let by = match sort.by {
+        SortBy::Name => a.name.cmp(&b.name),
+        SortBy::Spawns => a.spawns.cmp(&b.spawns),
+        SortBy::Time => a.timing.total().cmp(&b.timing.total()),
+    };
+    let by = if sort.descending { by.reverse() } else { by };
+    by.then_with(|| a.name.cmp(&b.name))
 }
 
-impl Sort {
-    /// The sort a click on `by`'s title asks for: the other direction where
-    /// the table is sorted by it, and otherwise names from the start of the
-    /// alphabet and counts from the largest.
-    fn clicked(self, by: SortBy) -> Sort {
-        if self.by == by {
-            Sort {
-                by,
-                descending: !self.descending,
-            }
-        } else {
-            Sort {
-                by,
-                descending: by != SortBy::Name,
-            }
-        }
-    }
-
-    /// Rows equal in what the sort is by go in order of name.
-    fn cmp(self, a: &GroupRow, b: &GroupRow) -> Ordering {
-        let by = match self.by {
-            SortBy::Name => a.name.cmp(&b.name),
-            SortBy::Spawns => a.spawns.cmp(&b.spawns),
-            SortBy::Time => a.timing.total().cmp(&b.timing.total()),
-        };
-        let by = if self.descending { by.reverse() } else { by };
-        by.then_with(|| a.name.cmp(&b.name))
-    }
-
-    fn apply(self, rows: &mut [GroupRow]) {
-        rows.sort_by(|a, b| self.cmp(a, b));
-    }
+fn apply(sort: Sort<SortBy>, rows: &mut [GroupRow]) {
+    rows.sort_by(|a, b| compare(sort, a, b));
 }
 
 /// What the panel shows of a loaded log.
@@ -97,7 +78,7 @@ struct Shown {
     /// runners' might mix sets.
     runner_picker: Entity<Dropdown>,
     _runner_picked: Subscription,
-    sort: Sort,
+    sort: Sort<SortBy>,
     /// Picks the phase the list of spawns longest in a phase ranks by.
     phase_picker: Entity<Dropdown>,
     _phase_picked: Subscription,
@@ -150,9 +131,9 @@ impl SpawnTimePanel {
             return;
         };
         let mut summary = summary.clone();
-        let sort = Sort::default();
+        let sort = DEFAULT_SORT;
         for runner in &mut summary.runners {
-            sort.apply(&mut runner.mnemonics);
+            apply(sort, &mut runner.mnemonics);
         }
         let names: Vec<SharedString> = summary
             .runners
@@ -181,9 +162,9 @@ impl SpawnTimePanel {
 
     fn sort_mnemonics(&mut self, by: SortBy, cx: &mut Context<Self>) {
         if let Some(shown) = &mut self.shown {
-            shown.sort = shown.sort.clicked(by);
+            shown.sort = clicked(shown.sort, by);
             for runner in &mut shown.summary.runners {
-                shown.sort.apply(&mut runner.mnemonics);
+                apply(shown.sort, &mut runner.mnemonics);
             }
             cx.notify();
         }
@@ -431,29 +412,17 @@ fn plain_header(name_title: &'static str, palette: &Palette) -> Div {
 
 /// The header of a table of mnemonics, whose titles but the bar's and the
 /// note's sort it.
-fn sorting_header(sort: Sort, palette: &Palette, cx: &mut Context<SpawnTimePanel>) -> Div {
+fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnTimePanel>) -> Div {
     let [name, spawns, time, bar, note] = GROUP_COLUMNS;
     let [spawns_title, time_title, bar_title, note_title] = GROUP_TITLES;
     let sorting = |column: Column, title: &'static str, by: SortBy| {
-        let caret = (sort.by == by).then(|| {
-            let icon = if sort.descending {
-                "caret-down"
-            } else {
-                "caret-up"
-            };
-            bviz_ui_assets::icon(icon)
-                .size(CARET)
-                .flex_shrink_0()
-                .text_color(palette.colors.text_muted)
-        });
-        let content = div().flex().items_center().gap_1();
-        // The caret stands on the side away from the title's alignment, so
-        // the title holds still as the sort moves between columns.
-        let content = if column.numeric {
-            content.children(caret).child(title)
-        } else {
-            content.child(title).children(caret)
-        };
+        let content = sort_header(
+            title,
+            sort.of(by),
+            column.numeric,
+            CARET,
+            palette.colors.text_muted,
+        );
         cell(column, content)
             .id(title)
             .cursor_pointer()
@@ -573,7 +542,7 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
 ///
 /// The phases of a runner that reports only execution are drawn as one
 /// unbroken bar, apart from a breakdown whose other phases took no time.
-fn phase_bar(timing: &Timing, longest: Duration, palette: &Palette) -> Div {
+fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div {
     let total = timing.total();
     let summed: Duration = Phase::ALL.into_iter().map(|p| timing.phase(p)).sum();
     let span = total.max(summed);
@@ -700,7 +669,7 @@ mod tests {
             .map(|&(name, spawns)| GroupRow {
                 name: name.to_owned().into(),
                 spawns,
-                timing: Timing::default(),
+                timing: PhaseTiming::default(),
             })
             .collect()
     }
@@ -711,36 +680,34 @@ mod tests {
 
     #[test]
     fn a_click_on_a_new_title_sorts_names_up_and_counts_down() {
-        let by_name = Sort::default().clicked(SortBy::Name);
+        let by_name = clicked(DEFAULT_SORT, SortBy::Name);
         assert!(!by_name.descending);
-        assert!(by_name.clicked(SortBy::Spawns).descending);
+        assert!(clicked(by_name, SortBy::Spawns).descending);
     }
 
     #[test]
     fn a_click_on_the_sorting_title_turns_the_order_round() {
-        let by_spawns = Sort::default().clicked(SortBy::Spawns);
-        assert!(!by_spawns.clicked(SortBy::Spawns).descending);
-        assert!(!Sort::default().clicked(SortBy::Time).descending);
+        let by_spawns = clicked(DEFAULT_SORT, SortBy::Spawns);
+        assert!(!clicked(by_spawns, SortBy::Spawns).descending);
+        assert!(!clicked(DEFAULT_SORT, SortBy::Time).descending);
     }
 
     #[test]
     fn rows_take_the_order_of_their_sort() {
         let mut table = rows(&[("CppLink", 2), ("CppCompile", 9), ("Genrule", 4)]);
-        Sort::default().clicked(SortBy::Name).apply(&mut table);
+        apply(clicked(DEFAULT_SORT, SortBy::Name), &mut table);
         assert_eq!(names(&table), ["CppCompile", "CppLink", "Genrule"]);
-        Sort::default().clicked(SortBy::Spawns).apply(&mut table);
+        apply(clicked(DEFAULT_SORT, SortBy::Spawns), &mut table);
         assert_eq!(names(&table), ["CppCompile", "Genrule", "CppLink"]);
     }
 
     #[test]
     fn ties_go_in_order_of_name_either_way() {
         let mut table = rows(&[("b", 1), ("c", 2), ("a", 1)]);
-        let ascending = Sort::default()
-            .clicked(SortBy::Spawns)
-            .clicked(SortBy::Spawns);
-        ascending.apply(&mut table);
+        let ascending = clicked(clicked(DEFAULT_SORT, SortBy::Spawns), SortBy::Spawns);
+        apply(ascending, &mut table);
         assert_eq!(names(&table), ["a", "b", "c"]);
-        ascending.clicked(SortBy::Spawns).apply(&mut table);
+        apply(clicked(ascending, SortBy::Spawns), &mut table);
         assert_eq!(names(&table), ["c", "a", "b"]);
     }
 }

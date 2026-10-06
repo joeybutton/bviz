@@ -1,10 +1,10 @@
-use crate::groups::{GROUP_ORDER, group_label};
+use crate::groups::{PINNED_CLASS, STACKED_GROUPS, group_label};
 use crate::model::TraceModel;
 use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, RULER_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
+    GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
     TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
@@ -17,6 +17,18 @@ use gpui::{
 /// Side of the menu's caret icons.
 const MENU_ICON: Pixels = px(12.);
 
+/// The lane classes the menu lists a group of, in order: the pinned class,
+/// then the stacked groups in the chart's order.
+const LISTED_GROUPS: [LaneClass; STACKED_GROUPS.len() + 1] = {
+    let mut listed = [PINNED_CLASS; STACKED_GROUPS.len() + 1];
+    let mut i = 0;
+    while i < STACKED_GROUPS.len() {
+        listed[i + 1] = STACKED_GROUPS[i];
+        i += 1;
+    }
+    listed
+};
+
 /// The tracks-visibility menu as a self-contained popover: a trigger in the
 /// gutter corner where the ruler meets the track-label column, and, when open, a
 /// filter field over a checklist of track names grouped by lane class. Owns its
@@ -26,11 +38,11 @@ const MENU_ICON: Pixels = px(12.);
 pub(crate) struct TracksMenu {
     /// Whether the menu is open.
     open: bool,
-    /// The reader's fold choice per lane-class group, indexed by [`GROUP_ORDER`],
+    /// The reader's fold choice per lane-class group, indexed by [`LISTED_GROUPS`],
     /// `None` where they have made none and the list's own length decides.
     /// Independent of the chart's collapse so the menu can manage a group's
     /// visibility while its lanes are collapsed in the chart.
-    folded_groups: [Option<bool>; GROUP_ORDER.len()],
+    folded_groups: [Option<bool>; LISTED_GROUPS.len()],
     /// The filter field; its text narrows the listed tracks.
     filter: Entity<TextInput>,
     /// Re-renders the menu as the filter text changes; `TextInput` notifies on
@@ -55,7 +67,7 @@ impl TracksMenu {
         let filter_observer = cx.observe(&filter, |_, _, cx| cx.notify());
         Self {
             open: false,
-            folded_groups: [None; GROUP_ORDER.len()],
+            folded_groups: [None; LISTED_GROUPS.len()],
             filter,
             _filter_observer: filter_observer,
             scroll: ListScroll::new(),
@@ -67,7 +79,7 @@ impl TracksMenu {
     /// Resets the view-local fold state and list scroll for a freshly loaded
     /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
-        self.folded_groups = [None; GROUP_ORDER.len()];
+        self.folded_groups = [None; LISTED_GROUPS.len()];
         self.scroll.to_top();
     }
 
@@ -122,7 +134,7 @@ impl TracksMenu {
         let threads = profile.threads();
         let shared_names = self.model.read(cx).shared_track_names().to_vec();
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (group, &class) in GROUP_ORDER.iter().enumerate() {
+        for (group, &class) in LISTED_GROUPS.iter().enumerate() {
             let mut tracks: Vec<usize> = (0..threads.len())
                 .filter(|&t| threads[t].lane_class == class)
                 .filter(|&t| {
@@ -230,7 +242,7 @@ impl TracksMenu {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.model
-                            .update(cx, |m, _| m.set_group_visible(group, !group_all_visible));
+                            .update(cx, |m, _| m.set_group_visible(class, !group_all_visible));
                         this.reflow_timeline(cx);
                         cx.notify();
                     }))
@@ -498,7 +510,7 @@ impl Render for TracksMenu {
             .left_0()
             .top_0()
             .w(px(gutter_width))
-            .h(px(RULER_HEIGHT))
+            .h(px(TICK_BAND_HEIGHT))
             .child(trigger)
             .children(self.popover(viewport, palette, cx))
             .into_any_element()

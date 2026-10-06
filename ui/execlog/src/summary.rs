@@ -1,6 +1,6 @@
 //! What the spawn-time view shows of a log, derived once off the UI thread.
 
-use bviz_execlog::{ExecLog, Group, Phase, Timing};
+use bviz_execlog::{ExecLog, Group, Phase, PhaseTiming};
 use gpui::SharedString;
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 pub(crate) struct GroupRow {
     pub(crate) name: SharedString,
     pub(crate) spawns: usize,
-    pub(crate) timing: Timing,
+    pub(crate) timing: PhaseTiming,
 }
 
 impl From<Group<'_>> for GroupRow {
@@ -45,7 +45,7 @@ pub(crate) struct TopSpawn {
 #[derive(Clone)]
 pub(crate) struct Summary {
     pub(crate) spawns: usize,
-    pub(crate) timing: Timing,
+    pub(crate) timing: PhaseTiming,
     /// Longest first.
     pub(crate) runners: Vec<Runner>,
     /// The spawns longest in each phase, longest first, indexed as

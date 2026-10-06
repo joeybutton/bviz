@@ -1,5 +1,6 @@
 load("@rules_rs//rs:cargo_build_script.bzl", "cargo_build_script")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 # The font/icon files come from Bazel http_archives; build.rs copies them into
 # OUT_DIR so lib.rs can embed them with include_bytes!.
@@ -20,7 +21,7 @@ cargo_build_script(
 
 rust_library(
     name = "assets",
-    srcs = ["src/lib.rs"],
+    srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_ui_assets",
     visibility = [
         "//ui/components:__pkg__",
@@ -36,4 +37,9 @@ rust_library(
         ":build_script",
         "@crates//:gpui",
     ],
+)
+
+rust_test(
+    name = "assets_test",
+    crate = ":assets",
 )
