@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use crate::model::ConsoleModel;
 use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url};
+use bviz_ui_components::gesture::{
+    self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{Button, Scrollbar, TextInput, text_input};
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
@@ -50,6 +53,49 @@ actions!(
 /// The key context scoping the console's own bindings, so a key pressed in this
 /// panel reaches it and no other.
 const CONSOLE_KEY_CONTEXT: &str = "Console";
+
+/// What the console does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum ConsoleIntent {
+    SelectLines,
+    SelectWords,
+    SelectText,
+    OpenLink,
+    Scroll,
+}
+
+const GESTURES: Gestures<ConsoleIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(gesture::Button::Left, Clicks::Triple)),
+        Place::Anywhere,
+        "Select by lines",
+        ConsoleIntent::SelectLines,
+    ),
+    Entry::new(
+        Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+        Place::Anywhere,
+        "Select by words",
+        ConsoleIntent::SelectWords,
+    ),
+    Entry::new(
+        Input::drag(gesture::Button::Left),
+        Place::Anywhere,
+        "Select text",
+        ConsoleIntent::SelectText,
+    ),
+    Entry::new(
+        Input::click(gesture::Button::Left),
+        Place::On("a link"),
+        "Open link",
+        ConsoleIntent::OpenLink,
+    ),
+    Entry::new(
+        Input::SCROLL,
+        Place::Anywhere,
+        "Scroll output",
+        ConsoleIntent::Scroll,
+    ),
+]);
 
 /// The key context of the region the scrollback grid is painted in.
 const GRID_KEY_CONTEXT: &str = "ConsoleGrid";
@@ -145,8 +191,9 @@ pub struct ConsolePanel {
     selection_anchor: Option<(i32, usize, Side)>,
     /// The URL under the cursor, highlighted and openable while hovered.
     hovered_url: Option<Url>,
-    /// The URL pressed on, opened on release if the press was a click, not a drag.
-    pressed_url: Option<String>,
+    /// The URL pressed on, with the click a release that selected nothing makes
+    /// of the press.
+    pressed_url: Option<(String, Pointer)>,
     /// While dragging the thumb, the cursor's offset from the thumb's top.
     drag_grab: Option<f32>,
     /// Whether the scroll bar is currently shown; it auto-hides after a scroll.
@@ -302,7 +349,16 @@ impl ConsolePanel {
             self.begin_scrollbar_drag(bar, event.position, cx);
             return;
         }
-        self.begin_selection(event, window, cx);
+        GESTURES.dispatch(Pointer::press(event), |intent| {
+            let selection = match intent {
+                ConsoleIntent::SelectLines => SelectionType::Lines,
+                ConsoleIntent::SelectWords => SelectionType::Semantic,
+                ConsoleIntent::SelectText => SelectionType::Simple,
+                _ => return false,
+            };
+            self.begin_selection(event, selection, window, cx);
+            true
+        });
     }
 
     /// Grabbing the thumb keeps the cursor at the same spot on it, while
@@ -321,6 +377,7 @@ impl ConsolePanel {
     fn begin_selection(
         &mut self,
         event: &MouseDownEvent,
+        selection: SelectionType,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -328,16 +385,12 @@ impl ConsolePanel {
         let Some((column, row, side)) = self.cell_at(event.position) else {
             return;
         };
-        // A double click selects the word under the cursor, a triple click the
-        // whole line; either can then be dragged to extend by words or lines.
-        let selection = match event.click_count {
-            2 => SelectionType::Semantic,
-            3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
-        };
-        // A press on a URL opens it on release, unless the press turns into a
-        // drag (a selection), so dragging from a link still selects its text.
-        self.pressed_url = self.hovered_url.as_ref().map(|url| url.text().to_string());
+        // A link pressed on is let go of without opening where the press
+        // selects text, so dragging from a link still selects its text.
+        self.pressed_url = self
+            .hovered_url
+            .as_ref()
+            .map(|url| (url.text().to_string(), Pointer::completing(event)));
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.begin_selection(selection, CellPos { column, row }, side);
             // The anchor's line counted from the top of the scrollback, fixed to its
@@ -543,6 +596,21 @@ impl ConsolePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        GESTURES.dispatch(Pointer::scroll(event), |intent| match intent {
+            ConsoleIntent::Scroll => {
+                self.scroll_by_wheel(event, window, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn scroll_by_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let line_height = window.line_height();
         let lines = (f32::from(event.delta.pixel_delta(line_height).y) / f32::from(line_height))
             .round() as i32;
@@ -567,6 +635,10 @@ impl Panel for ConsolePanel {
             label: "Console",
             key_context: CONSOLE_KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -727,5 +799,15 @@ impl ConsolePanel {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
     }
 }
