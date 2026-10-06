@@ -202,7 +202,16 @@ fn explain(chip: &Chip, outcome: Option<&Outcome>) -> SharedString {
         Ok(_) => outcome.and_then(explain_outcome),
     };
     let expanded = (chip.expanded() != chip.text()).then(|| chip.expanded());
-    let lines = [Some(chip.text()), expanded, explained.as_deref()];
+    let role = match chip.is_source() {
+        true => "a source, joining the union the stack starts from",
+        false => "a refinement of the set before it",
+    };
+    let lines = [
+        Some(chip.text()),
+        expanded,
+        Some(role),
+        explained.as_deref(),
+    ];
     let lines: Vec<&str> = lines.into_iter().flatten().collect();
     lines.join("\n").into()
 }
@@ -257,20 +266,32 @@ mod tests {
     }
 
     /// The pill may cut its text short, so the tooltip leads with it whole,
-    /// then what it expands to.
+    /// then what it expands to and which of the stack's groups it is in.
     #[test]
-    fn the_tooltip_reads_the_whole_text_then_its_expansion() {
+    fn the_tooltip_reads_the_whole_text_then_its_expansion_and_role() {
         use bviz_graph_layout::query_lang::Stack;
         let mut stack = Stack::default();
         let long = "//a/long/package/path/reaching/past/the/pill:and_its_name";
         let first = stack.push(long);
         let second = stack.push("except //a:b");
-        assert_eq!(explain(stack.chip(first).unwrap(), None), long);
+        let explained = explain(stack.chip(first).unwrap(), None);
+        let lines: Vec<&str> = explained.lines().collect();
+        assert_eq!(
+            lines,
+            [long, "a source, joining the union the stack starts from"]
+        );
         let chip = stack.chip(second).unwrap();
         assert_ne!(chip.expanded(), chip.text());
         let explained = explain(chip, None);
         let lines: Vec<&str> = explained.lines().collect();
-        assert_eq!(lines, [chip.text(), chip.expanded()]);
+        assert_eq!(
+            lines,
+            [
+                chip.text(),
+                chip.expanded(),
+                "a refinement of the set before it"
+            ]
+        );
     }
 
     #[test]

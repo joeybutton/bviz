@@ -1,14 +1,16 @@
-//! A query written as a stack of chips, each taking the set the enabled chips
-//! before it name and naming a set of its own.
+//! A query written as a stack of chips: sources, whose union the stack starts
+//! from, and refinements, each taking the set before it and naming another.
 //!
-//! A chip reads the set before it as `$_`, and three shorthands write that for
-//! it: a chip opening with a set operator applies it to `$_` (`+ //foo` is
-//! `$_ + //foo`); a call short only of its last expression argument takes
-//! `$_` there (`kind(cc_.*)` is `kind(cc_.*, $_)`); and an empty call whose
-//! first argument is an expression takes `$_` as it (`deps()` is `deps($_)`).
-//! A chip reading no `$_` narrows the set before it to what it names, and a
-//! negated chip takes what it names out of that set. The stack is the
-//! expression `let _ = c1 in let _ = c2 in … cn` over its enabled chips.
+//! A refinement reads the set before it as `$_`, and three shorthands write
+//! that for it: a chip opening with a set operator applies it to `$_`
+//! (`+ //foo` is `$_ + //foo`); a call short only of its last expression
+//! argument takes `$_` there (`kind(cc_.*)` is `kind(cc_.*, $_)`); and an
+//! empty call whose first argument is an expression takes `$_` as it
+//! (`deps()` is `deps($_)`). A chip reading no `$_` is a source, unless it is
+//! negated: a negated chip is a refinement taking what it names out of the set
+//! before it. The stack holds its sources ahead of its refinements and is the
+//! expression `let _ = (s1 + … + sm) in let _ = r1 in … rn` over its enabled
+//! chips; with no source enabled, the first refinement reads every node.
 
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -226,9 +228,15 @@ impl Chip {
         self.negated
     }
 
+    /// Whether the chip names a set of its own, which the stack unions with
+    /// its other sources, rather than refining the set before it.
+    pub fn is_source(&self) -> bool {
+        !self.negated && matches!(self.parsed, Ok(ChipExpr::Whole(_)))
+    }
+
     /// The expression the chip, parsed as `parsed`, stands for in its stack,
-    /// reading the set before it as `$_`; `first` where no enabled chip stands
-    /// before it.
+    /// reading the set before it as `$_`: a source joins that set, unless it
+    /// is the `first` enabled chip, which names the set alone.
     fn step(&self, parsed: &ChipExpr, first: bool) -> Expr {
         let expr = parsed.expr();
         let continued = || Expr {
@@ -248,7 +256,7 @@ impl Chip {
         };
         match parsed {
             _ if self.negated => applied(BinaryOp::Except),
-            ChipExpr::Whole(_) if !first => applied(BinaryOp::Caret),
+            ChipExpr::Whole(_) if !first => applied(BinaryOp::Plus),
             ChipExpr::Whole(expr) | ChipExpr::Continues(expr) => expr.clone(),
         }
     }
@@ -363,11 +371,52 @@ fn continued(before: Expr, step: &Expr) -> Expr {
     inlined.unwrap_or_else(|| bound(before, step.clone()))
 }
 
-/// A query written as chips. Each chip keeps its [`ChipId`] however the stack
-/// is edited around it.
+/// `sources` joined by `+`; `None` where there are none.
+fn union(sources: Vec<Expr>) -> Option<Expr> {
+    let mut sources = sources.into_iter();
+    let first = sources.next()?;
+    let rest: Vec<Expr> = sources.collect();
+    if rest.is_empty() {
+        return Some(first);
+    }
+    let span = first.span.clone();
+    Some(Expr {
+        kind: ExprKind::Binary {
+            op: BinaryOp::Plus,
+            first: Box::new(first),
+            rest,
+        },
+        span,
+    })
+}
+
+/// `$_ + source`.
+fn joined(source: Expr) -> Expr {
+    let span = source.span.clone();
+    let continued = Expr {
+        kind: ExprKind::Literal(Word {
+            text: CONTINUED_REF.to_string(),
+            span: span.clone(),
+        }),
+        span: span.clone(),
+    };
+    Expr {
+        kind: ExprKind::Binary {
+            op: BinaryOp::Plus,
+            first: Box::new(continued),
+            rest: vec![source],
+        },
+        span,
+    }
+}
+
+/// A query written as chips, its sources ahead of its refinements. Each chip
+/// keeps its [`ChipId`] however the stack is edited around it.
 #[derive(Clone, Default, Debug)]
 pub struct Stack {
-    chips: Vec<Chip>,
+    /// Every chip here [`Chip::is_source`], and none of `refinements` is.
+    sources: Vec<Chip>,
+    refinements: Vec<Chip>,
     minted: u64,
 }
 
@@ -382,103 +431,175 @@ pub struct Invalid {
 #[derive(Clone, Debug)]
 pub struct Compiled {
     pub expr: Expr,
-    /// Whether the first chip reads a set before it, which is then every node
+    /// Whether no source is enabled, so the first refinement reads every node
     /// of the graph: no query of Bazel's names that.
     pub from_everything: bool,
 }
 
 impl Stack {
-    pub fn chips(&self) -> &[Chip] {
-        &self.chips
+    /// The chips, the sources ahead of the refinements; a chip's position in
+    /// the stack is its place in this order.
+    pub fn chips(&self) -> impl DoubleEndedIterator<Item = &Chip> {
+        self.sources.iter().chain(&self.refinements)
+    }
+
+    pub fn len(&self) -> usize {
+        self.sources.len() + self.refinements.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chips.is_empty()
+        self.len() == 0
+    }
+
+    pub fn sources(&self) -> &[Chip] {
+        &self.sources
+    }
+
+    pub fn refinements(&self) -> &[Chip] {
+        &self.refinements
+    }
+
+    /// The chip at `at` among [`Self::chips`].
+    pub fn get(&self, at: usize) -> Option<&Chip> {
+        match at.checked_sub(self.sources.len()) {
+            None => self.sources.get(at),
+            Some(at) => self.refinements.get(at),
+        }
     }
 
     pub fn chip(&self, id: ChipId) -> Option<&Chip> {
-        self.chips.iter().find(|chip| chip.id == id)
+        self.chips().find(|chip| chip.id == id)
     }
 
     pub fn position(&self, id: ChipId) -> Option<usize> {
-        self.chips.iter().position(|chip| chip.id == id)
+        self.chips().position(|chip| chip.id == id)
     }
 
-    /// Adds a chip reading `text` on top of the stack.
+    /// Adds a chip reading `text` at the end of its group.
     pub fn push(&mut self, text: &str) -> ChipId {
         let id = ChipId(self.minted);
         self.minted += 1;
-        self.chips.push(Chip::new(id, text));
+        self.place(Chip::new(id, text));
         id
+    }
+
+    /// Puts `chip` at the end of its group.
+    fn place(&mut self, chip: Chip) {
+        match chip.is_source() {
+            true => self.sources.push(chip),
+            false => self.refinements.push(chip),
+        }
+    }
+
+    /// The group holding the chip `id`, and where in it the chip stands.
+    fn group_of(&mut self, id: ChipId) -> Option<(&mut Vec<Chip>, usize)> {
+        if let Some(at) = self.sources.iter().position(|chip| chip.id == id) {
+            return Some((&mut self.sources, at));
+        }
+        let at = self.refinements.iter().position(|chip| chip.id == id)?;
+        Some((&mut self.refinements, at))
+    }
+
+    /// Runs `change` on the chip `id`, moving it to the end of the group it
+    /// belongs to where the change took it out of its own.
+    fn change(&mut self, id: ChipId, change: impl FnOnce(&mut Chip)) {
+        let Some((group, at)) = self.group_of(id) else {
+            return;
+        };
+        let was = group[at].is_source();
+        change(&mut group[at]);
+        if group[at].is_source() != was {
+            let chip = group.remove(at);
+            self.place(chip);
+        }
     }
 
     /// Rewrites the chip `id` to read `text`, keeping whether it is enabled
     /// and negated.
     pub fn set_text(&mut self, id: ChipId, text: &str) {
-        if let Some(chip) = self.chip_mut(id) {
+        self.change(id, |chip| {
             *chip = Chip {
                 enabled: chip.enabled,
                 negated: chip.negated,
                 ..Chip::new(id, text)
             };
-        }
+        });
     }
 
     /// Takes the chip `id` off the stack, reporting where it stood.
     pub fn remove(&mut self, id: ChipId) -> Option<usize> {
         let at = self.position(id)?;
-        self.chips.remove(at);
+        let (group, within) = self.group_of(id)?;
+        group.remove(within);
         Some(at)
     }
 
     pub fn toggle_enabled(&mut self, id: ChipId) {
-        if let Some(chip) = self.chip_mut(id) {
-            chip.enabled = !chip.enabled;
-        }
+        self.change(id, |chip| chip.enabled = !chip.enabled);
     }
 
     pub fn toggle_negated(&mut self, id: ChipId) {
-        if let Some(chip) = self.chip_mut(id) {
-            chip.negated = !chip.negated;
-        }
+        self.change(id, |chip| chip.negated = !chip.negated);
     }
 
-    /// Moves the chip `id` `by` places towards the top of the stack, or the
-    /// bottom where negative, held to the stack; reports whether it moved.
+    /// Moves the chip `id` `by` places within its group, held to the group;
+    /// reports whether it moved.
     pub fn move_by(&mut self, id: ChipId, by: isize) -> bool {
-        let Some(at) = self.position(id) else {
+        let Some((group, at)) = self.group_of(id) else {
             return false;
         };
-        let to = at.saturating_add_signed(by).min(self.chips.len() - 1);
+        let to = at.saturating_add_signed(by).min(group.len() - 1);
         if to == at {
             return false;
         }
-        let chip = self.chips.remove(at);
-        self.chips.insert(to, chip);
+        let chip = group.remove(at);
+        group.insert(to, chip);
         true
     }
 
-    fn chip_mut(&mut self, id: ChipId) -> Option<&mut Chip> {
-        self.chips.iter_mut().find(|chip| chip.id == id)
-    }
-
-    /// The expression each enabled chip stands for, in order.
-    fn steps(&self) -> Result<Vec<Expr>, Invalid> {
-        let enabled = self.chips.iter().filter(|chip| chip.enabled);
-        let steps = enabled.enumerate().map(|(at, chip)| match &chip.parsed {
-            Ok(parsed) => Ok(chip.step(parsed, at == 0)),
-            Err(error) => Err(Invalid {
+    /// The union of the enabled sources, and the expression each enabled
+    /// refinement stands for, in order.
+    ///
+    /// A `let` takes the rest of the expression into its body, so sources
+    /// written as one stand last in the union, where nothing follows them;
+    /// where several do, the union is built a source at a time, binding what
+    /// would be swallowed.
+    fn steps(&self) -> Result<(Option<Expr>, Vec<Expr>), Invalid> {
+        fn parsed(chip: &Chip) -> Result<&ChipExpr, Invalid> {
+            chip.parsed.as_ref().map_err(|error| Invalid {
                 chip: chip.id,
                 error: error.clone(),
-            }),
-        });
-        steps.collect()
+            })
+        }
+        let mut sources: Vec<Expr> = Vec::with_capacity(self.sources.len());
+        for chip in self.sources.iter().filter(|chip| chip.enabled) {
+            sources.push(parsed(chip)?.expr().clone());
+        }
+        let mut refinements = Vec::with_capacity(self.refinements.len());
+        for chip in self.refinements.iter().filter(|chip| chip.enabled) {
+            let first = sources.is_empty() && refinements.is_empty();
+            refinements.push(chip.step(parsed(chip)?, first));
+        }
+        sources.sort_by_key(|source| matches!(source.kind, ExprKind::Let { .. }));
+        let lets = (sources.iter()).filter(|source| matches!(source.kind, ExprKind::Let { .. }));
+        let start = match lets.count() {
+            0 | 1 => union(sources),
+            _ => {
+                let mut sources = sources.into_iter();
+                let first = sources.next();
+                first.map(|first| {
+                    sources.fold(first, |before, source| bound(before, joined(source)))
+                })
+            }
+        };
+        Ok((start, refinements))
     }
 
     /// The enabled chips as one expression; `None` where no chip is enabled.
     pub fn compile(&self) -> Result<Option<Compiled>, Invalid> {
-        let steps = self.steps()?;
-        let from_everything = steps.first().is_some_and(|first| continued_refs(first) > 0);
+        let (start, refinements) = self.steps()?;
+        let from_everything = start.is_none();
+        let steps = start.into_iter().chain(refinements).collect::<Vec<_>>();
         let Some((last, before)) = steps.split_last() else {
             return Ok(None);
         };
@@ -498,14 +619,14 @@ impl Stack {
     /// reads every function the stack calls, and for the first of query,
     /// cquery and aquery that does otherwise.
     pub fn bazel_text(&self, preferred: Command) -> Result<BazelQuery, Unportable> {
-        let steps = self.steps().map_err(|_| Unportable::Invalid)?;
-        let Some((first, rest)) = steps.split_first() else {
-            return Err(Unportable::Empty);
+        let (start, refinements) = self.steps().map_err(|_| Unportable::Invalid)?;
+        let Some(start) = start else {
+            return match refinements.is_empty() {
+                true => Err(Unportable::Empty),
+                false => Err(Unportable::Extension(Extension::FromEverything)),
+            };
         };
-        if continued_refs(first) > 0 {
-            return Err(Unportable::Extension(Extension::FromEverything));
-        }
-        let expr = (rest.iter()).fold(first.clone(), continued);
+        let expr = (refinements.iter()).fold(start, continued);
         let mut calls = Calls::default();
         calls.gather(&expr);
         if calls.any_exec {
@@ -529,11 +650,11 @@ impl Stack {
     /// value of every run of chips evaluated before, so that an edit to one
     /// chip evaluates it and the chips above it alone.
     pub fn evaluate(&self, universe: &Universe, prefixes: &Prefixes) -> Evaluation {
-        let mut chips = Vec::with_capacity(self.chips.len());
+        let mut chips = Vec::with_capacity(self.len());
         let mut before: Option<Evaluated> = None;
         let mut fingerprint = 0;
         let mut broken = false;
-        for chip in &self.chips {
+        for chip in self.chips() {
             let outcome = match (&chip.parsed, chip.enabled) {
                 (_, false) => Outcome::Disabled,
                 _ if broken => Outcome::Blocked,
@@ -733,7 +854,8 @@ pub enum Unportable {
 /// read alike.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Extension {
-    /// The first chip reads a set before it, which is every node of the graph.
+    /// No source is enabled, so the first refinement reads every node of the
+    /// graph.
     FromEverything,
     /// `config()` names [`ANY_EXEC`].
     AnyExec,
@@ -749,7 +871,7 @@ impl fmt::Display for Unportable {
             Unportable::Empty => f.write_str("no chip is enabled"),
             Unportable::Invalid => f.write_str("a chip does not parse"),
             Unportable::Extension(Extension::FromEverything) => {
-                f.write_str("the first chip continues from every node of the graph")
+                f.write_str("no source is enabled, so the first refinement reads every node")
             }
             Unportable::Extension(Extension::AnyExec) => {
                 write!(f, "config() names '{ANY_EXEC}'")

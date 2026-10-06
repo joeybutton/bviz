@@ -225,10 +225,19 @@ impl Chips {
             .filter(|landed| landed.generation == self.generation)
     }
 
-    /// Scrolls the row of chips to its last chip, where one is added.
-    fn scroll_to_last(&self) {
-        if let Some(last) = self.stack.chips().len().checked_sub(1) {
-            self.scroll.scroll_to_item(last);
+    /// Scrolls the row of chips to the chip `id`, wherever its group put it.
+    /// The last source stands just ahead of the first refinement, so for it
+    /// the row scrolls to that refinement instead: both come into view, with
+    /// the rule between them, wherever the row holds room for the two.
+    fn scroll_to(&self, id: ChipId) {
+        let stack = &self.stack;
+        let last_source = stack.sources().last().map(|chip| chip.id());
+        let at = match last_source == Some(id) && !stack.refinements().is_empty() {
+            true => Some(stack.sources().len()),
+            false => stack.position(id),
+        };
+        if let Some(at) = at {
+            self.scroll.scroll_to_item(at);
         }
     }
 
@@ -401,11 +410,14 @@ fn commit(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         Some(id) if text.is_empty() => {
             view.chips.stack.remove(id);
         }
-        Some(id) => view.chips.stack.set_text(id, text),
+        Some(id) => {
+            view.chips.stack.set_text(id, text);
+            view.chips.scroll_to(id);
+        }
         None if text.is_empty() => {}
         None => {
-            view.chips.stack.push(text);
-            view.chips.scroll_to_last();
+            let id = view.chips.stack.push(text);
+            view.chips.scroll_to(id);
         }
     }
     view.chips.field.update(cx, |field, cx| field.clear(cx));
@@ -427,8 +439,8 @@ fn syntax_error(text: &str) -> Option<String> {
 
 /// Adds a chip reading `text` on top of the stack and applies it.
 pub(crate) fn push(view: &mut GraphPanel, text: &str, cx: &mut Context<GraphPanel>) {
-    view.chips.stack.push(text);
-    view.chips.scroll_to_last();
+    let id = view.chips.stack.push(text);
+    view.chips.scroll_to(id);
     changed(view, cx);
     let stack = view.chips.stack.clone();
     apply(view, stack, cx);
@@ -467,14 +479,15 @@ fn select(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Conte
 /// Moves the selection `step` chips along; past the last chip the field takes
 /// the focus.
 fn step(view: &mut GraphPanel, step: isize, window: &mut Window, cx: &mut Context<GraphPanel>) {
-    let chips = view.chips.stack.chips();
-    let at = (view.chips.selected).and_then(|id| view.chips.stack.position(id));
+    let stack = &view.chips.stack;
+    let at = (view.chips.selected).and_then(|id| stack.position(id));
     let Some(at) = at else {
         return;
     };
-    match at.checked_add_signed(step) {
-        Some(next) if next < chips.len() => select(view, chips[next].id(), window, cx),
-        Some(_) => focus(view, window, cx),
+    let next = at.checked_add_signed(step);
+    match next.map(|next| stack.get(next).map(|chip| chip.id())) {
+        Some(Some(next)) => select(view, next, window, cx),
+        Some(None) => focus(view, window, cx),
         None => {}
     }
 }
@@ -487,6 +500,7 @@ fn edit_selected(
 ) {
     if let Some(id) = view.chips.selected {
         edit(&mut view.chips.stack, id);
+        view.chips.scroll_to(id);
         changed(view, cx);
     }
 }
@@ -495,9 +509,7 @@ fn move_selected(view: &mut GraphPanel, by: isize, cx: &mut Context<GraphPanel>)
     if let Some(id) = view.chips.selected
         && view.chips.stack.move_by(id, by)
     {
-        if let Some(at) = view.chips.stack.position(id) {
-            view.chips.scroll.scroll_to_item(at);
-        }
+        view.chips.scroll_to(id);
         changed(view, cx);
     }
 }
@@ -512,8 +524,11 @@ fn remove(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Conte
         view.chips.field.update(cx, |field, cx| field.clear(cx));
     }
     changed(view, cx);
-    let chips = view.chips.stack.chips();
-    let next = chips.get(at).or_else(|| chips.last()).map(|chip| chip.id());
+    let stack = &view.chips.stack;
+    let next = stack
+        .get(at)
+        .or_else(|| stack.chips().last())
+        .map(|chip| chip.id());
     match next {
         Some(next) if view.chips.selected == Some(id) => select(view, next, window, cx),
         None if view.chips.selected == Some(id) => focus(view, window, cx),
@@ -588,6 +603,7 @@ fn open_menu(
             negate,
             act(|view, id, _, cx| {
                 view.chips.stack.toggle_negated(id);
+                view.chips.scroll_to(id);
                 changed(view, cx);
             }),
         )
@@ -721,12 +737,30 @@ pub(crate) fn bar(
         landed.evaluation.outcome(id).cloned()
     };
     let focused = chips.focus_handle.is_focused(window);
-    let mut pills = Vec::with_capacity(chips.stack.chips().len());
+    let mut pills = Vec::with_capacity(chips.stack.len());
+    let mut after_source = false;
     for chip in chips.stack.chips() {
         let selected = focused && chips.selected == Some(chip.id());
         let editing = chips.editing == Some(chip.id());
         let outcome = outcome(chip.id());
-        pills.push(pill::pill(chip, outcome, selected, editing, palette, cx));
+        let pill = pill::pill(chip, outcome, selected, editing, palette, cx);
+        let joins = match (after_source, chip.is_source()) {
+            (true, true) => Some(Joint::Or),
+            (true, false) => Some(Joint::Then),
+            (false, _) => None,
+        };
+        after_source = chip.is_source();
+        // A pill and what joins it to the one before are one child of the
+        // row, so the row's children stand at the chips' own positions.
+        pills.push(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .children(joins.map(|joint| joint.mark(palette)))
+                .child(pill),
+        );
     }
     let draft = current
         .and_then(|landed| Some((landed.draft?, landed)))
@@ -878,6 +912,36 @@ pub(crate) fn notice(view: &GraphPanel, palette: &Palette) -> Option<impl IntoEl
             .child(notice),
     )
 }
+
+/// What stands between a pill and the one before it: `or` between two
+/// sources, whose union the stack starts from, and a rule where the
+/// refinements of that union begin.
+#[derive(Clone, Copy)]
+enum Joint {
+    Or,
+    Then,
+}
+
+impl Joint {
+    fn mark(self, palette: &Palette) -> AnyElement {
+        match self {
+            Joint::Or => div()
+                .text_xs()
+                .text_color(palette.colors.text_muted)
+                .child("or")
+                .into_any_element(),
+            Joint::Then => div()
+                .w(JOINT_RULE_WIDTH)
+                .h(JOINT_RULE_HEIGHT)
+                .bg(palette.colors.border)
+                .into_any_element(),
+        }
+    }
+}
+
+/// The rule standing where a stack's refinements begin.
+const JOINT_RULE_WIDTH: Pixels = px(1.);
+const JOINT_RULE_HEIGHT: Pixels = px(16.);
 
 /// The size of the dot saying the stack holds changes not yet applied.
 const STAGED_DOT: Pixels = px(6.);
