@@ -7,7 +7,9 @@ mod divider;
 mod drag;
 mod dropdown;
 pub mod gesture;
+mod key_scope;
 mod keys;
+mod keys_help;
 mod layer;
 mod list_scroll;
 mod menu;
@@ -29,7 +31,9 @@ pub use canvas::{LabelBoxStyle, paint_labeled_box, shape_truncated};
 pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
+pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{KeyStyle, action_label, binding_text, key_text, key_text_in, keystroke_text};
+pub use keys_help::{KeyGroup, KeyRow, keys_in_effect};
 pub use layer::{cached_layer, overlay_canvas};
 pub use list_scroll::{ListScroll, list_scrollbar};
 pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
@@ -64,6 +68,7 @@ pub(crate) fn laid_out_width(measured: Pixels) -> Pixels {
 
 /// Register the key bindings the components rely on.
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(cx, [text_input::KEY_CONTEXT, multi_select::KEY_CONTEXT]);
     text_input::bind_keys(cx);
     multi_select::bind_keys(cx);
 }

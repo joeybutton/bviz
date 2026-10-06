@@ -12,7 +12,8 @@ use crate::{
 };
 use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{
-    Divider, DragEnd, Menu, MenuEvent, overlay_canvas, text_input, track_drag,
+    Divider, DragEnd, KeyScope, Menu, MenuEvent, declare_scopes, overlay_canvas, text_input,
+    track_drag,
 };
 use bviz_ui_playback::{
     Clock, PlayPause, PlaybackBar, SeekEnd, SeekStart, SpeedDown, SpeedUp, StepBack, StepForward,
@@ -77,7 +78,7 @@ actions!(
 
 /// The key context the workspace's own bindings are scoped to, so they reach a
 /// window this crate frames and no other.
-const KEY_CONTEXT: &str = "Workspace";
+const KEY_CONTEXT: KeyScope = KeyScope::new("Workspace", "Panes & windows");
 
 /// The hairline drawn between two sides of a split.
 const DIVIDER_LINE: Pixels = px(1.);
@@ -135,30 +136,32 @@ const MARK_FILL: f32 = 0.3;
 const MENU_LAYER: usize = 1;
 
 pub(crate) fn register_keys(cx: &mut App) {
+    declare_scopes(cx, [KEY_CONTEXT]);
+    let workspace = Some(KEY_CONTEXT.id());
     // Typed into a text field, the playback keys edit the text.
     let playback = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let playback = Some(playback.as_str());
     cx.bind_keys([
-        KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-w", ClosePanel, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-n", DetachPanel, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-d", ToggleDocuments, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k m", ToggleMaximize, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k =", EvenSplit, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k 0", ResetArrangement, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k left", FocusLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k right", FocusRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k up", FocusUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k down", FocusDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-left", MovePanelLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-right", MovePanelRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-up", MovePanelUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-down", MovePanelDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-left", SplitLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-right", SplitRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-up", SplitUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-down", SplitDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, workspace),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, workspace),
+        KeyBinding::new("secondary-shift-w", ClosePanel, workspace),
+        KeyBinding::new("secondary-shift-n", DetachPanel, workspace),
+        KeyBinding::new("secondary-shift-d", ToggleDocuments, workspace),
+        KeyBinding::new("secondary-k m", ToggleMaximize, workspace),
+        KeyBinding::new("secondary-k =", EvenSplit, workspace),
+        KeyBinding::new("secondary-k 0", ResetArrangement, workspace),
+        KeyBinding::new("secondary-k left", FocusLeft, workspace),
+        KeyBinding::new("secondary-k right", FocusRight, workspace),
+        KeyBinding::new("secondary-k up", FocusUp, workspace),
+        KeyBinding::new("secondary-k down", FocusDown, workspace),
+        KeyBinding::new("secondary-k shift-left", MovePanelLeft, workspace),
+        KeyBinding::new("secondary-k shift-right", MovePanelRight, workspace),
+        KeyBinding::new("secondary-k shift-up", MovePanelUp, workspace),
+        KeyBinding::new("secondary-k shift-down", MovePanelDown, workspace),
+        KeyBinding::new("secondary-k alt-left", SplitLeft, workspace),
+        KeyBinding::new("secondary-k alt-right", SplitRight, workspace),
+        KeyBinding::new("secondary-k alt-up", SplitUp, workspace),
+        KeyBinding::new("secondary-k alt-down", SplitDown, workspace),
         KeyBinding::new("space", PlayPause, playback),
         KeyBinding::new("left", StepBack, playback),
         KeyBinding::new("right", StepForward, playback),

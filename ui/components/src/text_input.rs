@@ -2,7 +2,7 @@
 //! movement, mouse selection, clipboard, and IME composition, built on gpui's
 //! platform input handler.
 
-use crate::track_drag;
+use crate::{KeyScope, track_drag};
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
@@ -50,7 +50,7 @@ gpui::actions!(
 
 /// The key context scoping the text field's own bindings, so a key pressed
 /// while it has focus edits the text rather than reaching an enclosing panel.
-pub const KEY_CONTEXT: &str = "TextInput";
+pub const KEY_CONTEXT: KeyScope = KeyScope::new("TextInput", "Text field");
 
 /// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {
@@ -59,7 +59,7 @@ pub fn bind_keys(cx: &mut App) {
 
 /// The text field's key bindings.
 pub fn bindings() -> Vec<KeyBinding> {
-    let ctx = Some(KEY_CONTEXT);
+    let ctx = Some(KEY_CONTEXT.id());
     vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),

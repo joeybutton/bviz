@@ -40,8 +40,8 @@ use bviz_ui_components::gesture::{
     Button as PointerButton, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
-    Scrollbar, overlay_canvas, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
+    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, overlay_canvas, track_drag,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -76,22 +76,40 @@ gpui::actions!(
 );
 
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(
+        cx,
+        [
+            TRACE_KEY_CONTEXT,
+            TIMELINE_KEY_CONTEXT,
+            stats_panel::STATS_KEY_CONTEXT,
+            flame_panel::FLAME_KEY_CONTEXT,
+            critical_path::KEY_CONTEXT,
+        ],
+    );
+    let timeline = Some(TIMELINE_KEY_CONTEXT.id());
+    let critical_path = Some(critical_path::KEY_CONTEXT.id());
     cx.bind_keys([
-        KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
-        KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
-        KeyBinding::new("up", ChoosePrevious, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("down", ChooseNext, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("escape", Unchoose, Some(critical_path::KEY_CONTEXT)),
+        KeyBinding::new("secondary-a", SelectAllTracks, timeline),
+        KeyBinding::new("escape", ClearTimeSelection, timeline),
+        KeyBinding::new("up", ChoosePrevious, critical_path),
+        KeyBinding::new("down", ChooseNext, critical_path),
+        KeyBinding::new("escape", Unchoose, critical_path),
     ]);
 }
 
 /// The key context of the trace panel, enclosing every sub-surface's.
-const TRACE_KEY_CONTEXT: &str = "Trace";
+const TRACE_KEY_CONTEXT: KeyScope = KeyScope::new("Trace", "Timeline");
 
 /// The key context scoping the timeline's own bindings, narrowing
 /// [`TRACE_KEY_CONTEXT`]. The timeline element carries it, so a key pressed in
 /// the tracks menu's filter field types there instead of dispatching one of them.
-const TIMELINE_KEY_CONTEXT: &str = "TraceTimeline";
+/// Its keys are the panel's own, so the help lists them under the panel's name.
+const TIMELINE_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &TRACE_KEY_CONTEXT,
+    Nesting::Inside,
+    "TraceTimeline",
+    TRACE_KEY_CONTEXT.label(),
+);
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the
@@ -576,7 +594,6 @@ impl Panel for TracePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace"),
-            label: "Timeline",
             key_context: TRACE_KEY_CONTEXT,
         }
     }

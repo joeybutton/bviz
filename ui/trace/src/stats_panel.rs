@@ -9,8 +9,9 @@ use crate::{
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip, Toolbar,
-    centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip,
+    Toolbar, centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header,
+    track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -23,7 +24,7 @@ use std::sync::Arc;
 
 /// The key context scoping the stats table's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const STATS_KEY_CONTEXT: &str = "TraceStats";
+pub(crate) const STATS_KEY_CONTEXT: KeyScope = KeyScope::new("TraceStats", "Stats");
 
 /// What the table does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -604,7 +605,6 @@ impl Panel for StatsPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-stats"),
-            label: "Stats",
             key_context: STATS_KEY_CONTEXT,
         }
     }
@@ -614,7 +614,7 @@ impl Panel for StatsPanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

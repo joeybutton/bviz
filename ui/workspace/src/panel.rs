@@ -2,6 +2,7 @@
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
 use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
+use bviz_ui_components::KeyScope;
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_playback::{Clock, DocumentClock};
 use gpui::{
@@ -44,11 +45,16 @@ impl ViewKind {
 #[derive(Clone, Copy)]
 pub struct PanelKind {
     pub view: ViewKind,
-    /// The name the view goes by among the views its document can show.
-    pub label: &'static str,
     /// The gpui key context this panel's own key bindings are scoped to; unique
     /// across kinds, so such a binding reaches only this panel.
-    pub key_context: &'static str,
+    pub key_context: KeyScope,
+}
+
+impl PanelKind {
+    /// The name the view goes by among the views its document can show.
+    pub fn label(&self) -> &'static str {
+        self.key_context.label()
+    }
 }
 
 /// A view a [`Workspace`] can host. It renders its own body; the workspace draws

@@ -134,6 +134,7 @@ fn main() {
             bviz_ui_graph::register_keys,
             bviz_ui_trace::register_keys,
             bviz_ui_console::register_keys,
+            bviz_ui_execlog::register_keys,
         ],
     );
 }

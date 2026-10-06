@@ -12,7 +12,7 @@ use bviz_trace_layout::{
 };
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Held, Input, Place, Pointer};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
     cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
     track_drag,
 };
@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
+pub(crate) const FLAME_KEY_CONTEXT: KeyScope = KeyScope::new("TraceFlameGraph", "Flame Graph");
 
 /// What the flame graph does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -854,7 +854,6 @@ impl Panel for FlamePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-flame-graph"),
-            label: "Flame Graph",
             key_context: FLAME_KEY_CONTEXT,
         }
     }
@@ -864,7 +863,7 @@ impl Panel for FlamePanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

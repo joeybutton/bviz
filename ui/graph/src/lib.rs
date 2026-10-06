@@ -6,8 +6,8 @@ use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
 use bviz_ui_components::gesture::{GestureRow, Pointer};
 use bviz_ui_components::{
-    DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
-    cached_layer, overlay_canvas, text_input,
+    DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
+    ScrollbarColors, cached_layer, declare_scopes, overlay_canvas, text_input,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -106,9 +106,19 @@ actions!(
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const KEY_CONTEXT: &str = "Graph";
+const KEY_CONTEXT: KeyScope = KeyScope::new("Graph", "Graph");
 
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(
+        cx,
+        [
+            KEY_CONTEXT,
+            exclusive::KEY_CONTEXT,
+            exclusive::ROOTS_KEY_CONTEXT,
+            scatter::KEY_CONTEXT,
+            scatter::PICKING,
+        ],
+    );
     cx.bind_keys(bindings());
 }
 
@@ -117,7 +127,7 @@ fn bindings() -> Vec<KeyBinding> {
     // bindings stand down inside one.
     let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let outside_text = Some(outside_text.as_str());
-    let graph = Some(KEY_CONTEXT);
+    let graph = Some(KEY_CONTEXT.id());
     let jumping = Some(jump::KEY_CONTEXT);
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
@@ -146,7 +156,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", jump::Close, jumping),
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
-        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
+        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT.id())),
         KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
         KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
         KeyBinding::new("left", exclusive::SelectPrevious, outside_roots),
@@ -160,7 +170,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
-            Some(exclusive::ROOTS_KEY_CONTEXT),
+            Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
@@ -845,7 +855,6 @@ impl Panel for GraphPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph"),
-            label: "Graph",
             key_context: KEY_CONTEXT,
         }
     }
@@ -1265,9 +1274,13 @@ mod tests {
         action.is_some_and(|action| action.partial_eq(&expected))
     }
 
-    const IN_PANEL: &[&str] = &[KEY_CONTEXT];
-    const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
-    const IN_PALETTE: &[&str] = &[KEY_CONTEXT, jump::KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_PANEL: &[&str] = &[KEY_CONTEXT.id()];
+    const IN_FIELD: &[&str] = &[KEY_CONTEXT.id(), text_input::KEY_CONTEXT.id()];
+    const IN_PALETTE: &[&str] = &[
+        KEY_CONTEXT.id(),
+        jump::KEY_CONTEXT,
+        text_input::KEY_CONTEXT.id(),
+    ];
 
     /// A letter typed into any text field is text, not one of the panel's
     /// keys.
@@ -1324,7 +1337,7 @@ mod tests {
                 assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
             }
         }
-        let exclusive = &[exclusive::KEY_CONTEXT];
+        let exclusive = &[exclusive::KEY_CONTEXT.id()];
         assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
         assert!(is(
             dispatched("alt-right", exclusive),
@@ -1332,28 +1345,28 @@ mod tests {
         ));
     }
 
-    const IN_CHIPS: &[&str] = &[KEY_CONTEXT, chips::KEY_CONTEXT];
+    const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT];
     const IN_CHIP_FIELD: &[&str] = &[
-        KEY_CONTEXT,
+        KEY_CONTEXT.id(),
         chips::KEY_CONTEXT,
         chips::FIELD_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
+        text_input::KEY_CONTEXT.id(),
     ];
 
     const IN_CHIP_COMPLETION: &[&str] = &[
-        KEY_CONTEXT,
+        KEY_CONTEXT.id(),
         chips::KEY_CONTEXT,
         chips::FIELD_KEY_CONTEXT,
         chips::COMPLETION_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
+        text_input::KEY_CONTEXT.id(),
     ];
     const IN_AIMED_COMPLETION: &[&str] = &[
-        KEY_CONTEXT,
+        KEY_CONTEXT.id(),
         chips::KEY_CONTEXT,
         chips::FIELD_KEY_CONTEXT,
         chips::COMPLETION_KEY_CONTEXT,
         chips::AIMED_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
+        text_input::KEY_CONTEXT.id(),
     ];
 
     /// While the list completing the field's word stands open, its keys

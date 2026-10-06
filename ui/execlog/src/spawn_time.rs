@@ -6,8 +6,8 @@ use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
-    Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, list_scrollbar,
-    sort_gesture, sort_header,
+    Dropdown, DropdownEvent, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip,
+    list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -18,6 +18,10 @@ use gpui::{
 };
 use std::cmp::Ordering;
 use std::time::Duration;
+
+/// The key context scoping the panel's own bindings, so a key pressed here
+/// reaches this panel and no other.
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("ExecLogSpawnTime", "Spawn time by phase");
 
 const ROW_HEIGHT: Pixels = px(24.);
 const TWO_LINE_ROW_HEIGHT: Pixels = px(44.);
@@ -628,8 +632,7 @@ impl Panel for SpawnTimePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("execlog-spawn-time"),
-            label: "Spawn time by phase",
-            key_context: "ExecLogSpawnTime",
+            key_context: KEY_CONTEXT,
         }
     }
 
@@ -638,7 +641,7 @@ impl Panel for SpawnTimePanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

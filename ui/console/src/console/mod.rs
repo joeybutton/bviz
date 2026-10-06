@@ -9,7 +9,9 @@ use bviz_terminal::{CellPos, Replay, Scroll, SelectionType, Side, Terminal, Url}
 use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
-use bviz_ui_components::{Button, Scrollbar, TextInput, text_input};
+use bviz_ui_components::{
+    Button, KeyScope, Nesting, Scrollbar, TextInput, declare_scopes, text_input,
+};
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
@@ -52,7 +54,7 @@ actions!(
 
 /// The key context scoping the console's own bindings, so a key pressed in this
 /// panel reaches it and no other.
-const CONSOLE_KEY_CONTEXT: &str = "Console";
+const CONSOLE_KEY_CONTEXT: KeyScope = KeyScope::new("Console", "Console");
 
 /// What the console does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -98,18 +100,32 @@ const GESTURES: Gestures<ConsoleIntent> = Gestures::new(&[
 ]);
 
 /// The key context of the region the scrollback grid is painted in.
-const GRID_KEY_CONTEXT: &str = "ConsoleGrid";
+const GRID_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &CONSOLE_KEY_CONTEXT,
+    Nesting::Inside,
+    "ConsoleGrid",
+    "Output",
+);
 
 /// The key context of the bar the find box opens as.
-const FIND_KEY_CONTEXT: &str = "ConsoleFind";
+const FIND_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &CONSOLE_KEY_CONTEXT,
+    Nesting::Inside,
+    "ConsoleFind",
+    "Find bar",
+);
 
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(
+        cx,
+        [CONSOLE_KEY_CONTEXT, GRID_KEY_CONTEXT, FIND_KEY_CONTEXT],
+    );
     let grid_unless_find = format!("{GRID_KEY_CONTEXT} && !{FIND_KEY_CONTEXT}");
     let grid_unless_find = Some(grid_unless_find.as_str());
-    let console = Some(CONSOLE_KEY_CONTEXT);
+    let console = Some(CONSOLE_KEY_CONTEXT.id());
     let outside_text = format!("{CONSOLE_KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
     let outside_text = Some(outside_text.as_str());
-    let find = Some(FIND_KEY_CONTEXT);
+    let find = Some(FIND_KEY_CONTEXT.id());
     cx.bind_keys([
         // Inert while the find field has focus, so they don't hijack cursor
         // movement there; home and end scroll here rather than seek.
@@ -632,7 +648,6 @@ impl Panel for ConsolePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("console"),
-            label: "Console",
             key_context: CONSOLE_KEY_CONTEXT,
         }
     }

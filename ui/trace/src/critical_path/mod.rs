@@ -20,8 +20,8 @@ use bviz_critical_path::{
 use bviz_invocation::Chosen;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice, centered_spinner,
-    list_scrollbar, sort_gesture, sort_header,
+    Button, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice,
+    centered_spinner, list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use by_height::ByHeight;
@@ -35,7 +35,7 @@ use order::{NEARLY_CRITICAL_SORT, NearlyCriticalKey, STEPS_SORT, StepKey};
 use std::time::Duration;
 use whole::whole_or_none;
 
-pub(crate) const KEY_CONTEXT: &str = "TraceCriticalPath";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("TraceCriticalPath", "Critical path");
 
 /// What the panel does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -1247,7 +1247,6 @@ impl Panel for CriticalPathPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-critical-path"),
-            label: "Critical path",
             key_context: KEY_CONTEXT,
         }
     }
@@ -1257,7 +1256,7 @@ impl Panel for CriticalPathPanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

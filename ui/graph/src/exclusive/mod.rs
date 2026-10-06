@@ -28,8 +28,9 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar, TooltipColors, beside_anchor,
-    cached_layer, centered_notice, centered_spinner, load_in_background, paint_tooltip,
+    KeyScope, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar, TooltipColors,
+    beside_anchor, cached_layer, centered_notice, centered_spinner, load_in_background,
+    paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -53,7 +54,7 @@ use transition::Transition;
 
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.
-pub(crate) const KEY_CONTEXT: &str = "GraphExclusive";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphExclusive", "Exclusive deps");
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 
@@ -1674,13 +1675,12 @@ impl Panel for ExclusivePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph-exclusive"),
-            label: "Exclusive deps",
             key_context: KEY_CONTEXT,
         }
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn description() -> Option<&'static str> {

@@ -30,9 +30,9 @@ use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Motion, Place};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
-    Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
-    menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
+    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS,
+    TextTooltip, Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar,
+    load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -51,11 +51,12 @@ use std::sync::Arc;
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.
-pub(crate) const KEY_CONTEXT: &str = "GraphScatter";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphScatter", "Scatter");
 
 /// The identifier the scatter plot's key context carries while a list of the
 /// points under a click is up, which the list's own bindings require.
-pub(crate) const PICKING: &str = "picking";
+pub(crate) const PICKING: KeyScope =
+    KeyScope::within(&KEY_CONTEXT, Nesting::State, "picking", "Pick list");
 
 gpui::actions!(
     bviz_graph,
@@ -1020,7 +1021,6 @@ impl Panel for ScatterPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph-scatter"),
-            label: "Scatter",
             key_context: KEY_CONTEXT,
         }
     }
@@ -1030,7 +1030,7 @@ impl Panel for ScatterPanel {
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1067,7 +1067,7 @@ impl Render for ScatterPanel {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let key_context = match self.picking() {
             true => format!("{} {PICKING}", Self::kind().key_context),
-            false => Self::kind().key_context.to_owned(),
+            false => Self::kind().key_context.to_string(),
         };
         let root = div()
             .key_context(key_context.as_str())
