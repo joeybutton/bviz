@@ -31,8 +31,9 @@ use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS,
-    TextTooltip, Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar,
-    load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
+    TextTooltip, Toolbar, TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    centered_spinner, list_scrollbar, load_in_background, menu_chrome, paint_tooltip,
+    paint_tooltip_box, tooltip_extent, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -416,6 +417,15 @@ impl ScatterPanel {
     fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
         if let Some(area) = self.area() {
             self.zoom_to(area.zoomed(at, factor), at, cx);
+        }
+    }
+
+    /// Zooms `factor` times closer about the middle of the plot, naming what
+    /// the pointer is over there.
+    fn zoom_centred(&mut self, factor: f32, window: &Window, cx: &mut Context<Self>) {
+        if let Some(area) = self.area() {
+            let zoom = area.zoomed(area.frame().center(), factor);
+            self.zoom_to(zoom, window.mouse_position(), cx);
         }
     }
 
@@ -1117,6 +1127,12 @@ impl Render for ScatterPanel {
             .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholePlot, window, cx| {
                 view.zoom_to(Zoom::WHOLE, window.mouse_position(), cx);
+            }))
+            .on_action(cx.listener(|view, _: &ZoomIn, window, cx| {
+                view.zoom_centred(ZOOM_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|view, _: &ZoomOut, window, cx| {
+                view.zoom_centred(ZOOM_KEY_STEP.recip(), window, cx);
             }))
             .on_action(cx.listener(|view, _: &AimUp, _, cx| view.step_aim(-1, cx)))
             .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))

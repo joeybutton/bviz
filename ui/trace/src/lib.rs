@@ -42,6 +42,7 @@ use bviz_ui_components::gesture::{
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
     SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, overlay_canvas, text_input, track_drag,
+    zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -106,6 +107,8 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
         KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
     ]);
+    cx.bind_keys(zoom_key_bindings(TIMELINE_KEY_CONTEXT));
+    cx.bind_keys(zoom_key_bindings(flame_panel::FLAME_KEY_CONTEXT));
 }
 
 /// The key context of the trace panel, enclosing every sub-surface's.

@@ -24,6 +24,7 @@ mod spinner;
 pub mod text_input;
 mod toolbar;
 mod tooltip;
+mod zoom_keys;
 
 pub use background::{Pending, load_in_background};
 pub use button::Button;
@@ -52,6 +53,7 @@ pub use tooltip::{
     TextTooltip, TooltipColors, beside_anchor, paint_tooltip, paint_tooltip_box, room_beside,
     tooltip_extent,
 };
+pub use zoom_keys::{ZOOM_KEY_STEP, ZoomIn, ZoomOut, zoom_key_bindings};
 
 use gpui::{App, Pixels, px};
 

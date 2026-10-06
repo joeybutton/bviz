@@ -22,7 +22,10 @@ use bviz_trace_profile::{Profile, Slice, SliceAt, SliceDetail, TimeSpan};
 use bviz_ui_components::gesture::{
     Button, Clicks, Entry, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
-use bviz_ui_components::{DragEnd, cached_layer, overlay_canvas, paint_tooltip_box, track_drag};
+use bviz_ui_components::{
+    DragEnd, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, overlay_canvas, paint_tooltip_box,
+    track_drag,
+};
 use bviz_ui_playback::Clock;
 use gpui::{
     App, Bounds, ContentMask, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
@@ -1199,6 +1202,12 @@ impl Timeline {
         });
     }
 
+    /// Zooms the time axis `factor` times closer about the middle of the view.
+    fn zoom_centred(&mut self, factor: f64, cx: &mut Context<Self>) {
+        let regions = self.regions(cx);
+        self.zoom_about(px(regions.content_left + regions.time_w / 2.), factor, cx);
+    }
+
     /// Zooms the time axis `factor` times closer about the window-space `x`.
     fn zoom_about(&mut self, x: Pixels, factor: f64, cx: &mut Context<Self>) {
         if self.model.read(cx).chart_lanes().is_none() {
@@ -1311,6 +1320,12 @@ impl Timeline {
             .on_action(cx.listener(|this, _: &ShowWholeTimeline, _, cx| {
                 this.show_whole(cx);
                 this.invalidate_canvas(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.into(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.recip().into(), cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,

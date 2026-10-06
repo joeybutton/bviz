@@ -15,8 +15,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
-    cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
-    track_drag,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, overlay_canvas,
+    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
@@ -836,6 +836,13 @@ impl FlamePanel {
         });
     }
 
+    /// Zooms `factor` times closer about the middle of the view.
+    fn zoom_centred(&mut self, factor: f64, cx: &mut Context<Self>) {
+        if let Some(fl) = self.layout(cx) {
+            self.zoom_about(px(fl.left + fl.width / 2.), factor, cx);
+        }
+    }
+
     /// Zooms `factor` times closer about the window-space `x`.
     fn zoom_about(&mut self, x: Pixels, factor: f64, cx: &mut Context<Self>) {
         let Some(fl) = self.layout(cx) else {
@@ -946,6 +953,12 @@ impl Render for FlamePanel {
             .on_action(cx.listener(|this, _: &ShowWholeFlameGraph, _, cx| {
                 this.show_whole();
                 this.invalidate_canvas(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.into(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.recip().into(), cx);
             }))
             .flex()
             .flex_col()

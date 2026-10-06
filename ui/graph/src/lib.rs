@@ -7,7 +7,8 @@ use bviz_invocation::Session;
 use bviz_ui_components::gesture::{GestureRow, Pointer, pinch_factor};
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
-    ScrollbarColors, cached_layer, declare_scopes, overlay_canvas, text_input,
+    ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes, overlay_canvas,
+    text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -181,6 +182,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
     bindings.extend(chips::bindings(outside_text));
+    bindings.extend(zoom_key_bindings(KEY_CONTEXT));
+    bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
     bindings
 }
 
@@ -841,6 +844,11 @@ impl GraphPanel {
         });
     }
 
+    /// Zooms `factor` times closer about the middle of the view.
+    fn zoom_centred(&mut self, factor: f32, cx: &mut Context<Self>) {
+        self.zoom_about(self.framing.viewport().center(), factor, cx);
+    }
+
     /// Zooms `factor` times closer about the window-space point `at`.
     fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
         let Some(content) = self.drawn().map(|d| d.content()) else {
@@ -959,6 +967,12 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
+            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| view.zoom_centred(ZOOM_KEY_STEP, cx)))
+            .on_action(
+                cx.listener(|view, _: &ZoomOut, _, cx| {
+                    view.zoom_centred(ZOOM_KEY_STEP.recip(), cx)
+                }),
+            )
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
