@@ -12,7 +12,9 @@ use crate::{
 use bviz_ui_components::{
     Divider, DragEnd, Menu, MenuEvent, overlay_canvas, text_input, track_drag,
 };
-use bviz_ui_playback::{Clock, PlaybackBar};
+use bviz_ui_playback::{
+    Clock, PlayPause, PlaybackBar, SeekEnd, SeekStart, SpeedDown, SpeedUp, StepBack, StepForward,
+};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -68,26 +70,6 @@ actions!(
         EvenSplit,
         /// Reset to opening arrangement
         ResetArrangement,
-    ]
-);
-
-actions!(
-    bviz_playback,
-    [
-        /// Play or pause
-        PlayPause,
-        /// Step back
-        StepBack,
-        /// Step forward
-        StepForward,
-        /// Jump to the start
-        SeekStart,
-        /// Jump to the end
-        SeekEnd,
-        /// Play faster
-        SpeedUp,
-        /// Play slower
-        SpeedDown,
     ]
 );
 
