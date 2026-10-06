@@ -53,12 +53,7 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
         "Pan across",
         FlameIntent::PanAcross,
     ),
-    Entry::new(
-        Input::SCROLL,
-        Place::Anywhere,
-        "Scroll up and down",
-        FlameIntent::Scroll,
-    ),
+    Entry::new(Input::SCROLL, Place::Anywhere, "Pan", FlameIntent::Scroll),
     Entry::new(
         Input::drag(gesture::Button::Left),
         Place::Anywhere,
@@ -792,7 +787,11 @@ impl FlamePanel {
                     fv.pan_px(dx + dy, width);
                     self.flame_view = fv;
                 }
-                FlameIntent::Scroll => self.scroll_by(dy, cx),
+                FlameIntent::Scroll => {
+                    self.scroll_by(dy, cx);
+                    fv.pan_px(dx, width);
+                    self.flame_view = fv;
+                }
                 _ => return false,
             }
             true
