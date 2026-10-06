@@ -557,6 +557,30 @@ impl Stack {
         true
     }
 
+    /// Moves the chip `id` to stand just ahead of the chip `before` of its
+    /// group, or at the group's end where `before` is `None`; reports whether
+    /// it moved. A `before` of the other group moves nothing, a chip standing
+    /// only in its own group.
+    pub fn move_before(&mut self, id: ChipId, before: Option<ChipId>) -> bool {
+        let Some((group, at)) = self.group_of(id) else {
+            return false;
+        };
+        let to = match before {
+            None => group.len() - 1,
+            Some(before) => match group.iter().position(|chip| chip.id == before) {
+                None => return false,
+                Some(to) if to > at => to - 1,
+                Some(to) => to,
+            },
+        };
+        if to == at {
+            return false;
+        }
+        let chip = group.remove(at);
+        group.insert(to, chip);
+        true
+    }
+
     /// The union of the enabled sources, and the expression each enabled
     /// refinement stands for, in order.
     ///

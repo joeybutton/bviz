@@ -162,6 +162,36 @@ fn a_chip_stands_in_the_group_it_reads_as() {
     assert_eq!(texts(&chips), ["//b:*", "//c:*", "//a:*", "- //a:lib"]);
 }
 
+/// A chip dropped ahead of another of its group stands there, and one
+/// dropped across into the other group stays where it was.
+#[test]
+fn a_chip_moves_ahead_of_another_of_its_group_alone() {
+    let mut chips = stack(&["//a:*", "//b:*", "//c:*", "kind(x)", "- //a:lib"]);
+    let [a, b, c, kind, minus] = [0, 1, 2, 3, 4].map(|at| id(&chips, at));
+    assert!(chips.move_before(c, Some(a)));
+    assert_eq!(
+        texts(&chips),
+        ["//c:*", "//a:*", "//b:*", "kind(x)", "- //a:lib"]
+    );
+    assert!(chips.move_before(c, None));
+    assert_eq!(
+        texts(&chips),
+        ["//a:*", "//b:*", "//c:*", "kind(x)", "- //a:lib"]
+    );
+    assert!(chips.move_before(a, Some(c)));
+    assert_eq!(
+        texts(&chips),
+        ["//b:*", "//a:*", "//c:*", "kind(x)", "- //a:lib"]
+    );
+    assert!(!chips.move_before(b, Some(kind)), "across the groups");
+    assert!(!chips.move_before(kind, Some(minus)), "where it stands");
+    assert!(chips.move_before(minus, Some(kind)));
+    assert_eq!(
+        texts(&chips),
+        ["//b:*", "//a:*", "//c:*", "- //a:lib", "kind(x)"]
+    );
+}
+
 #[test]
 fn a_negated_chip_takes_out_what_it_names_and_a_disabled_one_is_skipped() {
     let fixture = Fixture::new();

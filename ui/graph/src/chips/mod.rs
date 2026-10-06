@@ -7,6 +7,7 @@
 
 mod complete;
 mod pill;
+mod reorder;
 
 pub(crate) use complete::Completions;
 
@@ -136,6 +137,9 @@ pub(crate) struct Chips {
     prefixes: Arc<Prefixes>,
     /// Scrolls the row of chips.
     scroll: ScrollHandle,
+    /// Where a press on a pill stands, which carried far enough drags the
+    /// chip.
+    gesture: reorder::Gesture,
     completer: complete::Completer,
     menu: Option<OpenMenu>,
     _evaluating: Task<()>,
@@ -187,6 +191,7 @@ impl Chips {
             notice: None,
             prefixes: Arc::default(),
             scroll: ScrollHandle::new(),
+            gesture: reorder::Gesture::Idle,
             completer: complete::Completer::default(),
             menu: None,
             _evaluating: Task::ready(()),
@@ -747,6 +752,15 @@ pub(crate) fn bar(
         after_source = chip.is_source();
         // A pill and what joins it to the one before are one child of the
         // row, so the row's children stand at the chips' own positions.
+        let (ahead, behind) = reorder::marked(view, chip.id());
+        let drop_mark = |shown: bool| {
+            shown.then(|| {
+                div()
+                    .w(DROP_MARK_WIDTH)
+                    .h(JOINT_RULE_HEIGHT)
+                    .bg(palette.colors.accent)
+            })
+        };
         pills.push(
             div()
                 .flex()
@@ -754,7 +768,9 @@ pub(crate) fn bar(
                 .items_center()
                 .gap_1()
                 .children(joins.map(|joint| joint.mark(palette)))
-                .child(pill),
+                .children(drop_mark(ahead))
+                .child(pill)
+                .children(drop_mark(behind)),
         );
     }
     let draft = current
@@ -764,8 +780,10 @@ pub(crate) fn bar(
     let completing = complete::is_shown(view, window, cx);
     let aimed = completing && complete::is_aimed(view);
     let completions = complete::list(view, palette, window, cx);
+    let carrying = reorder::handlers(view, cx);
     div()
         .id("graph-chips")
+        .relative()
         .key_context(KEY_CONTEXT)
         .track_focus(&chips.focus_handle)
         .on_action(cx.listener(|view, _: &Leave, window, cx| leave(view, window, cx)))
@@ -798,6 +816,7 @@ pub(crate) fn bar(
         .min_w_0()
         .items_center()
         .gap_1()
+        .children(carrying)
         .when(!pills.is_empty(), |bar| {
             bar.child(
                 div()
@@ -932,6 +951,9 @@ impl Joint {
         }
     }
 }
+
+/// The width of the mark standing where a dragged chip would land.
+const DROP_MARK_WIDTH: Pixels = px(2.);
 
 /// The rule standing where a stack's refinements begin.
 const JOINT_RULE_WIDTH: Pixels = px(1.);

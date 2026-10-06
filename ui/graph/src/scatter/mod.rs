@@ -11,7 +11,7 @@ mod plot;
 
 use crate::Palette;
 use crate::colour;
-use crate::drag::{CLICK_SLOP, DOUBLE_CLICK};
+use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::hue::{Hue, Swatch, legend_strip};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
@@ -435,9 +435,7 @@ impl ScatterPanel {
         let Some(press) = &mut self.press else {
             return;
         };
-        let travelled = at - press.from;
-        let starts =
-            !press.dragged && f32::from(travelled.x).hypot(f32::from(travelled.y)) > CLICK_SLOP;
+        let starts = !press.dragged && past_slop(press.from, at);
         press.dragged |= starts;
         if !press.dragged {
             return;
@@ -799,7 +797,7 @@ struct Plot {
 }
 
 /// A press over the plot, which is a click until it is dragged past
-/// [`CLICK_SLOP`] and pans the plot from then on.
+/// [`CLICK_SLOP`](crate::drag::CLICK_SLOP) and pans the plot from then on.
 struct Press {
     from: Point<Pixels>,
     /// Where the pointer was at the last step of the pan.

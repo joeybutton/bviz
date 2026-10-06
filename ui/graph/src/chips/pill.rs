@@ -1,12 +1,12 @@
 //! A chip drawn as a pill: its text, what it named, and its menu.
 
-use super::{GraphPanel, edit, open_menu, select};
+use super::{GraphPanel, edit, open_menu, reorder, select};
 use crate::Palette;
 use bviz_graph_layout::query_lang::{Chip, Counts, Outcome};
 use bviz_ui_components::{Button, TextTooltip, TooltipColors};
 use gpui::{
-    ClickEvent, Context, Div, HighlightStyle, Hsla, Pixels, SharedString, Stateful,
-    StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*, px,
+    ClickEvent, Context, Div, HighlightStyle, Hsla, MouseButton, MouseDownEvent, Pixels,
+    SharedString, Stateful, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*, px,
 };
 use std::ops::Range;
 
@@ -61,7 +61,16 @@ pub(super) fn pill(
         .text_color(ink)
         .cursor_pointer()
         .hover(move |style| style.bg(hover))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                reorder::press(view, id, event.position, window, cx);
+            }),
+        )
         .on_click(cx.listener(move |view, event: &ClickEvent, window, cx| {
+            if reorder::swallows_click(view) {
+                return;
+            }
             let double = matches!(event, ClickEvent::Mouse(click) if click.down.click_count >= 2);
             match double {
                 true => edit(view, id, window, cx),
