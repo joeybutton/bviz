@@ -977,6 +977,18 @@ pub(crate) fn bar(
         .into_any_element()
 }
 
+/// The key contexts from the panel's in to the field's text while its
+/// completion's list stands open.
+pub(crate) fn completion_stack(aimed: bool) -> [KeyContext; 5] {
+    [
+        crate::KEY_CONTEXT.into(),
+        KEY_CONTEXT.into(),
+        FIELD_KEY_CONTEXT.into(),
+        completion_context(aimed),
+        text_input::KEY_CONTEXT.into(),
+    ]
+}
+
 /// The key context of the field while its completion's list stands open.
 fn completion_context(aimed: bool) -> KeyContext {
     let mut context = KeyContext::from(COMPLETION_KEY_CONTEXT);

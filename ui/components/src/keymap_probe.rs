@@ -11,13 +11,23 @@ pub fn dispatched(
     keys: &str,
     contexts: &[&str],
 ) -> Option<Box<dyn Action>> {
-    let keymap = Keymap::new(bindings);
     let stack: Vec<KeyContext> = contexts
         .iter()
         .map(|context| KeyContext::parse(context).expect("a key context"))
         .collect();
+    dispatched_within(bindings, keys, &stack)
+}
+
+/// The action `keys` dispatch under `bindings` with focus in the innermost of
+/// `stack`, which runs outermost first.
+pub fn dispatched_within(
+    bindings: Vec<KeyBinding>,
+    keys: &str,
+    stack: &[KeyContext],
+) -> Option<Box<dyn Action>> {
+    let keymap = Keymap::new(bindings);
     let keystroke = Keystroke::parse(keys).expect("a keystroke");
-    let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
+    let (matched, _) = keymap.bindings_for_input(&[keystroke], stack);
     matched
         .first()
         .map(|binding| binding.action().boxed_clone())

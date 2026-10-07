@@ -1407,34 +1407,27 @@ mod tests {
         text_input::KEY_CONTEXT.id(),
     ];
 
-    const IN_CHIP_COMPLETION: &[&str] = &[
-        KEY_CONTEXT.id(),
-        chips::KEY_CONTEXT.id(),
-        chips::FIELD_KEY_CONTEXT.id(),
-        chips::COMPLETION_KEY_CONTEXT.id(),
-        text_input::KEY_CONTEXT.id(),
-    ];
-    const IN_AIMED_COMPLETION: &[&str] = &[
-        KEY_CONTEXT.id(),
-        chips::KEY_CONTEXT.id(),
-        chips::FIELD_KEY_CONTEXT.id(),
-        "GraphChipCompletion GraphChipCompletionAimed",
-        text_input::KEY_CONTEXT.id(),
-    ];
+    /// The action `keys` dispatch with focus in the query field while its
+    /// completion's list stands open, with a row `aimed` at or not.
+    fn completing(keys: &str, aimed: bool) -> Option<std::boxed::Box<dyn gpui::Action>> {
+        let mut bindings = bindings();
+        bindings.extend(text_input::bindings());
+        keymap_probe::dispatched_within(bindings, keys, &chips::completion_stack(aimed))
+    }
 
     /// While the list completing the field's word stands open, its keys
     /// move through it, accept a row and close it ahead of the field's own;
     /// the field's text keys and the panel's apply still reach through.
     #[test]
     fn an_open_completion_takes_the_keys_ahead_of_the_field() {
-        for completion in [IN_CHIP_COMPLETION, IN_AIMED_COMPLETION] {
-            assert!(is(dispatched("up", completion), chips::CompletePrevious));
-            assert!(is(dispatched("down", completion), chips::CompleteNext));
-            assert!(is(dispatched("tab", completion), chips::AcceptCompletion));
-            assert!(is(dispatched("escape", completion), chips::CloseCompletion));
-            assert!(is(dispatched("secondary-enter", completion), chips::Apply));
-            assert!(is(dispatched("left", completion), text_input::Left));
-            assert!(dispatched("q", completion).is_none());
+        for aimed in [false, true] {
+            assert!(is(completing("up", aimed), chips::CompletePrevious));
+            assert!(is(completing("down", aimed), chips::CompleteNext));
+            assert!(is(completing("tab", aimed), chips::AcceptCompletion));
+            assert!(is(completing("escape", aimed), chips::CloseCompletion));
+            assert!(is(completing("secondary-enter", aimed), chips::Apply));
+            assert!(is(completing("left", aimed), text_input::Left));
+            assert!(completing("q", aimed).is_none());
         }
         for closed in ["up", "down", "tab"] {
             assert!(
@@ -1449,11 +1442,8 @@ mod tests {
     /// row, and accepts that row once they have.
     #[test]
     fn enter_accepts_a_completion_only_once_a_row_is_aimed_at() {
-        assert!(is(dispatched("enter", IN_CHIP_COMPLETION), chips::Commit));
-        assert!(is(
-            dispatched("enter", IN_AIMED_COMPLETION),
-            chips::AcceptCompletion
-        ));
+        assert!(is(completing("enter", false), chips::Commit));
+        assert!(is(completing("enter", true), chips::AcceptCompletion));
     }
 
     /// `q` reaches the query bar from the panel and is text in a field; the
