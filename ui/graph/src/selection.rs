@@ -1,4 +1,4 @@
-use crate::derive::Drawn;
+use crate::derive::Shown;
 use crate::neighborhood::{MarkingMemo, Neighborhood};
 use crate::relation::Relation;
 use bviz_graph_layout::Id;
@@ -57,17 +57,18 @@ impl Selection {
         self.relation = relation;
     }
 
-    /// What the selection marks in the view `drawn` shows at `zoom`. Empty
-    /// while nothing is selected, and while the selected node is folded away
-    /// into a container this view draws in its place.
-    pub(crate) fn marking(&mut self, drawn: &Drawn, zoom: f32) -> Rc<Neighborhood> {
-        self.marked.marking(drawn, zoom, self.node, self.relation)
+    /// What the selection marks in `shown`. Empty while nothing is selected,
+    /// and while the selected node is folded away into a container this view
+    /// draws in its place.
+    pub(crate) fn marking(&mut self, shown: Shown<'_>) -> Rc<Neighborhood> {
+        self.marked.marking(shown, self.node, self.relation)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::derive::Drawn;
     use crate::relation::Direction;
     use bviz_graph_layout::{Box, Connector, EdgeKind, Kind, LaidOut};
     use std::sync::Arc;
@@ -87,6 +88,10 @@ mod tests {
             compound: false,
             group: false,
         }
+    }
+
+    fn shown(drawn: &Drawn) -> Shown<'_> {
+        drawn.shown(ZOOM).expect("a layered view")
     }
 
     /// Two leaves, the first an input of the second.
@@ -112,7 +117,7 @@ mod tests {
     #[test]
     fn nothing_selected_marks_nothing() {
         let mut selection = Selection::none();
-        assert!(selection.marking(&pair(), ZOOM).boxes.is_empty());
+        assert!(selection.marking(shown(&pair())).boxes.is_empty());
     }
 
     #[test]
@@ -169,10 +174,10 @@ mod tests {
         let mut selection = Selection::none();
         selection.toggle(Id(0));
         selection.set_relation(Relation::None);
-        assert_eq!(selection.marking(&g, ZOOM).boxes.len(), 1);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
         selection.set_relation(Relation::Direct(Direction::Out));
-        assert_eq!(selection.marking(&g, ZOOM).boxes.len(), 2);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 2);
         selection.set_relation(Relation::Direct(Direction::In));
-        assert_eq!(selection.marking(&g, ZOOM).boxes.len(), 1);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
     }
 }

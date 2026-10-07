@@ -1,4 +1,4 @@
-use crate::derive::{Drawn, ViewKey};
+use crate::derive::{Shown, ViewKey};
 use crate::relation::{Direction, Relation};
 use bviz_graph_layout::{Id, LaidOut};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -37,27 +37,26 @@ struct Memoised {
 }
 
 impl MarkingMemo {
-    /// What marking `of` under `relation` picks out of the view `drawn` shows at
-    /// `zoom`; empty where `of` is `None` or that view is yet to be derived.
+    /// What marking `of` under `relation` picks out of `shown`; empty where `of`
+    /// is `None`.
     pub(crate) fn marking(
         &mut self,
-        drawn: &Drawn,
-        zoom: f32,
+        shown: Shown<'_>,
         of: Option<Id>,
         relation: Relation,
     ) -> Rc<Neighborhood> {
-        let (Some(of), Some(g)) = (of, drawn.view(zoom)) else {
+        let Some(of) = of else {
             self.0 = None;
             return Rc::new(Neighborhood::none());
         };
-        let view = drawn.view_key(zoom);
+        let view = shown.key();
         let memoised = match self.0.take() {
             Some(m) if m.view == view && m.of == of && m.relation == relation => m,
             _ => Memoised {
                 view,
                 of,
                 relation,
-                neighborhood: Rc::new(compute_neighborhood(g, of, relation)),
+                neighborhood: Rc::new(compute_neighborhood(shown.view(), of, relation)),
             },
         };
         Rc::clone(&self.0.insert(memoised).neighborhood)
@@ -274,7 +273,10 @@ fn trace_paths(
 mod tests {
     use super::*;
     use crate::camera::Rect;
-    use bviz_graph_layout::{Box, Connector, EdgeKind, Kind};
+    use crate::derive::Drawn;
+    use bviz_graph_layout::graph::Node;
+    use bviz_graph_layout::reduce::transitive_reduction;
+    use bviz_graph_layout::{Box, Connector, EdgeKind, Graph, Kind, map_layout};
     use std::sync::Arc;
 
     const LEAF_WIDTH: f64 = 100.0;
@@ -552,17 +554,20 @@ mod tests {
     fn a_memoised_marking_is_reused_until_what_it_was_derived_from_moves() {
         /// Any zoom: a layered drawing shows the one view at every zoom.
         const ZOOM: f32 = 1.0;
-        let shown = |number| Drawn::Layered {
+        fn shown(drawn: &Drawn) -> Shown<'_> {
+            drawn.shown(ZOOM).expect("a layered view")
+        }
+        let layered = |number| Drawn::Layered {
             view: Arc::new(drawing(vec![leaf(0), leaf(1)], &[(0, 1)], &[(0, 1)])),
             drawing: number,
         };
-        let (first, next) = (shown(0), shown(1));
+        let (first, next) = (layered(0), layered(1));
         let direct = Relation::Direct(Direction::Both);
         let mut memo = MarkingMemo::default();
-        let marked = memo.marking(&first, ZOOM, Some(Id(0)), direct);
+        let marked = memo.marking(shown(&first), Some(Id(0)), direct);
         assert!(Rc::ptr_eq(
             &marked,
-            &memo.marking(&first, ZOOM, Some(Id(0)), direct)
+            &memo.marking(shown(&first), Some(Id(0)), direct)
         ));
         let moved = [
             (&next, Id(0), direct),
@@ -570,12 +575,59 @@ mod tests {
             (&first, Id(0), Relation::None),
         ];
         for (drawn, of, relation) in moved {
-            let marked = memo.marking(&first, ZOOM, Some(Id(0)), direct);
+            let marked = memo.marking(shown(&first), Some(Id(0)), direct);
             assert!(!Rc::ptr_eq(
                 &marked,
-                &memo.marking(drawn, ZOOM, Some(of), relation)
+                &memo.marking(shown(drawn), Some(of), relation)
             ));
         }
-        assert!(memo.marking(&first, ZOOM, None, direct).boxes.is_empty());
+        assert!(memo.marking(shown(&first), None, direct).boxes.is_empty());
+    }
+
+    /// A map draws the derived level nearest the one its zoom calls for, so a
+    /// level landing under a steady zoom changes the view marked.
+    #[test]
+    fn a_memoised_marking_is_recomputed_when_a_finer_map_level_lands() {
+        /// A zoom far enough in that a map calls for its finest level.
+        const FINEST: f32 = f32::MAX;
+        let mut base = Graph::new();
+        let mut ids = (0..).map(Id);
+        let mut actions = Vec::new();
+        for package in ["a", "b"] {
+            let package_id = ids.next().expect("an id");
+            base.add_node(Node::new(package_id, package, Kind::Package, None));
+            let target = ids.next().expect("an id");
+            base.add_node(Node::new(target, "t", Kind::Target, Some(package_id)));
+            for action in ["compile", "link"] {
+                let id = ids.next().expect("an id");
+                base.add_node(Node::new(id, action, Kind::Action, Some(target)));
+                actions.push(id);
+            }
+        }
+        for pair in actions.windows(2) {
+            base.add_edge(pair[0], pair[1], EdgeKind::Query);
+        }
+        let reduced = transitive_reduction(&base);
+        let map = Arc::new(map_layout(Arc::new(base), Arc::new(reduced)));
+        assert!(map.level_count() > 1, "a level finer than the coarsest");
+        map.level(0);
+        let drawn = Drawn::Map {
+            map: Arc::clone(&map),
+            drawing: 0,
+        };
+        let direct = Relation::Direct(Direction::Both);
+        let shown = || drawn.shown(FINEST).expect("a derived level");
+        let mut memo = MarkingMemo::default();
+        let coarse = memo.marking(shown(), Some(Id(0)), direct);
+
+        let finest = map.level(map.level_count() - 1);
+        let fine = memo.marking(shown(), Some(Id(0)), direct);
+
+        assert!(!Rc::ptr_eq(&coarse, &fine));
+        assert_eq!(
+            fine.boxes,
+            compute_neighborhood(finest, Id(0), direct).boxes
+        );
+        assert_ne!(coarse.boxes, fine.boxes);
     }
 }

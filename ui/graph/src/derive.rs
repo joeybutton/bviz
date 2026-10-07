@@ -66,6 +66,25 @@ impl ViewKey {
     }
 }
 
+/// A view a [`Drawn`] resolves to, with the key identifying it. Both come from
+/// one reading of which map levels are derived, which a background thread
+/// advances, so work cached under the key is always derived from this view.
+#[derive(Clone, Copy)]
+pub(crate) struct Shown<'a> {
+    key: ViewKey,
+    view: &'a LaidOut,
+}
+
+impl<'a> Shown<'a> {
+    pub(crate) fn key(self) -> ViewKey {
+        self.key
+    }
+
+    pub(crate) fn view(self) -> &'a LaidOut {
+        self.view
+    }
+}
+
 /// A share in the layout a mode draws, cheap to clone into a `'static` paint
 /// closure. A map resolves to a view only once the camera is known, so the level
 /// a frame draws is picked at the same scale it paints at.
@@ -82,9 +101,26 @@ impl Drawn {
     /// deriving one costs a fold of the whole graph, which [`derive_view`]
     /// leaves to a background thread.
     pub(crate) fn view(&self, zoom: f32) -> Option<&LaidOut> {
+        self.shown(zoom).map(Shown::view)
+    }
+
+    /// [`view`](Self::view) at `zoom`, identified.
+    pub(crate) fn shown(&self, zoom: f32) -> Option<Shown<'_>> {
         match self {
-            Self::Layered { view, .. } => Some(view),
-            Self::Map { map, .. } => map.derived(shown_level(map, zoom)),
+            Self::Layered { view, drawing } => Some(Shown {
+                key: ViewKey::Layered(*drawing),
+                view,
+            }),
+            Self::Map { map, drawing } => {
+                let level = shown_level(map, zoom);
+                map.derived(level).map(|view| Shown {
+                    key: ViewKey::Map {
+                        drawing: *drawing,
+                        level,
+                    },
+                    view,
+                })
+            }
         }
     }
 
@@ -109,17 +145,6 @@ impl Drawn {
                     level,
                 })
             }
-        }
-    }
-
-    /// Identifies the view [`view`](Self::view) returns at `zoom`.
-    pub(crate) fn view_key(&self, zoom: f32) -> ViewKey {
-        match self {
-            Self::Layered { drawing, .. } => ViewKey::Layered(*drawing),
-            Self::Map { map, drawing } => ViewKey::Map {
-                drawing: *drawing,
-                level: shown_level(map, zoom),
-            },
         }
     }
 
@@ -1983,17 +2008,24 @@ mod tests {
         assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
+    /// Identifies the view `derived`'s map draws, deriving it first.
+    fn map_key(derived: &Derived) -> ViewKey {
+        let drawn = derived.drawn(LayoutMode::Map).expect("a map");
+        drawn.derive_view(1.0);
+        drawn.shown(1.0).expect("a derived view").key()
+    }
+
     /// A graph opened in place of another is told from it even where no
     /// derivation has landed on either, so work keyed on the old graph's view
     /// is not taken for the new one's.
     #[test]
     fn a_document_opened_into_a_panel_identifies_the_drawing_it_leaves() {
         let mut derived = opened(&document());
-        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let first = map_key(&derived);
 
         derived.opened_on(&document());
 
-        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let second = map_key(&derived);
         assert_ne!(first, second);
     }
 
@@ -2003,11 +2035,11 @@ mod tests {
     fn each_derivation_adopted_identifies_the_drawing_it_leaves() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let first = map_key(&derived);
 
         derived.adopt(landed(&loaded, 10.0));
 
-        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let second = map_key(&derived);
         assert_ne!(first, second);
     }
 
@@ -2070,7 +2102,10 @@ mod tests {
             described()
         );
         assert!(map.derived(finest).is_none());
-        assert_eq!(drawn.view_key(f32::MAX), drawn.view_key(0.0));
+        assert_eq!(
+            drawn.shown(f32::MAX).map(Shown::key),
+            drawn.shown(0.0).map(Shown::key)
+        );
         assert!(drawn.underived(f32::MAX).is_some());
     }
 

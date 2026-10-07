@@ -434,22 +434,22 @@ pub(crate) fn canvas_body(
             let view = entity.read(cx);
             (view.camera(), view.morph_frame())
         };
-        entity.update(cx, |view, cx| {
+        let Some((g, marks)) = entity.update(cx, |view, cx| {
             derive::derive_view(view, &scene.drawn, camera.zoom, cx);
-        });
-        let Some(g) = scene.drawn.view(camera.zoom) else {
+            let shown = scene.drawn.shown(camera.zoom)?;
+            let marks = Marks {
+                hover: view.hover_marking.marking(
+                    shown,
+                    scene.hovered,
+                    Relation::Direct(Direction::Both),
+                ),
+                selection: view.selection.marking(shown),
+            };
+            Some((shown.view(), marks))
+        }) else {
             return;
         };
         let visible = visible_rect(bounds, camera);
-        let marks = entity.update(cx, |view, _| Marks {
-            hover: view.hover_marking.marking(
-                &scene.drawn,
-                camera.zoom,
-                scene.hovered,
-                Relation::Direct(Direction::Both),
-            ),
-            selection: view.selection.marking(&scene.drawn, camera.zoom),
-        });
         let Some(loaded) = entity.read(cx).model.read(cx).loaded() else {
             return;
         };
