@@ -275,8 +275,6 @@ pub(crate) fn landed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     }
 }
 
-/// Puts away the offer to reveal a hidden node, and a reveal still waiting on
-/// a restriction; reports whether either was pending.
 /// Takes the card's own action on the node it offers to show, for the key
 /// answering it; a key no card stands for is left to what else binds it.
 pub(crate) fn accept(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
@@ -286,6 +284,8 @@ pub(crate) fn accept(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     }
 }
 
+/// Puts away the offer to reveal a hidden node, and a reveal still waiting on
+/// a derivation; reports whether either was pending.
 pub(crate) fn dismiss(view: &mut GraphPanel) -> bool {
     let pending = view.reveal != Reveal::Idle;
     view.reveal = Reveal::Idle;
