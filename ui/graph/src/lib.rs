@@ -1444,7 +1444,7 @@ mod tests {
             assert!(is(dispatched("down", completion), chips::CompleteNext));
             assert!(is(dispatched("tab", completion), chips::AcceptCompletion));
             assert!(is(dispatched("escape", completion), chips::CloseCompletion));
-            assert!(is(dispatched("ctrl-enter", completion), chips::Apply));
+            assert!(is(dispatched("secondary-enter", completion), chips::Apply));
             assert!(is(dispatched("left", completion), text_input::Left));
             assert!(dispatched("q", completion).is_none());
         }
@@ -1477,7 +1477,10 @@ mod tests {
         assert!(dispatched("q", IN_CHIP_FIELD).is_none());
         assert!(is(dispatched("enter", IN_CHIP_FIELD), chips::Commit));
         assert!(is(dispatched("escape", IN_CHIP_FIELD), chips::Leave));
-        assert!(is(dispatched("ctrl-enter", IN_CHIP_FIELD), chips::Apply));
+        assert!(is(
+            dispatched("secondary-enter", IN_CHIP_FIELD),
+            chips::Apply
+        ));
         assert!(is(
             dispatched("backspace", IN_CHIP_FIELD),
             text_input::Backspace
@@ -1504,38 +1507,50 @@ mod tests {
         assert!(is(dispatched("backspace", IN_CHIPS), chips::Remove));
         assert!(is(dispatched("enter", IN_CHIPS), chips::Edit));
         assert!(is(dispatched("escape", IN_CHIPS), chips::Leave));
-        assert!(is(dispatched("ctrl-enter", IN_CHIPS), chips::Apply));
+        assert!(is(dispatched("secondary-enter", IN_CHIPS), chips::Apply));
         assert!(is(dispatched("h", IN_CHIPS), ToggleNeighborhood));
-        assert!(is(dispatched("ctrl-c", IN_CHIPS), chips::CopyChip));
-        assert!(is(dispatched("ctrl-c", IN_CHIP_FIELD), text_input::Copy));
-        assert!(is(dispatched("ctrl-shift-c", IN_CHIPS), chips::CopyStack));
+        assert!(is(dispatched("secondary-c", IN_CHIPS), chips::CopyChip));
         assert!(is(
-            dispatched("ctrl-shift-c", IN_CHIP_FIELD),
+            dispatched("secondary-c", IN_CHIP_FIELD),
+            text_input::Copy
+        ));
+        assert!(is(
+            dispatched("secondary-shift-c", IN_CHIPS),
             chips::CopyStack
         ));
-        assert!(is(dispatched("ctrl-shift-c", IN_PANEL), chips::CopyStack));
         assert!(is(
-            dispatched("ctrl-shift-backspace", IN_CHIPS),
+            dispatched("secondary-shift-c", IN_CHIP_FIELD),
+            chips::CopyStack
+        ));
+        assert!(is(
+            dispatched("secondary-shift-c", IN_PANEL),
+            chips::CopyStack
+        ));
+        assert!(is(
+            dispatched("secondary-shift-backspace", IN_CHIPS),
             chips::ClearQuery
         ));
         assert!(is(
-            dispatched("ctrl-shift-backspace", IN_CHIP_FIELD),
+            dispatched("secondary-shift-backspace", IN_CHIP_FIELD),
             chips::ClearQuery
         ));
-        assert!(dispatched("ctrl-shift-backspace", IN_PANEL).is_none());
-        assert!(is(dispatched("ctrl-z", IN_CHIPS), chips::RevertQuery));
-        assert!(is(dispatched("ctrl-z", IN_CHIP_FIELD), chips::RevertQuery));
-        assert!(dispatched("ctrl-z", IN_PANEL).is_none());
-        assert!(dispatched("ctrl-shift-c", IN_FIELD).is_none());
+        assert!(dispatched("secondary-shift-backspace", IN_PANEL).is_none());
+        assert!(is(dispatched("secondary-z", IN_CHIPS), chips::RevertQuery));
+        assert!(is(
+            dispatched("secondary-z", IN_CHIP_FIELD),
+            chips::RevertQuery
+        ));
+        assert!(dispatched("secondary-z", IN_PANEL).is_none());
+        assert!(dispatched("secondary-shift-c", IN_FIELD).is_none());
     }
 
     /// A staged stack is applied from anywhere in the panel but the text
-    /// fields, the palette keeping its own Ctrl-Enter.
+    /// fields, the palette keeping its own secondary-Enter.
     #[test]
-    fn ctrl_enter_applies_the_stack_outside_the_palette() {
-        assert!(is(dispatched("ctrl-enter", IN_PANEL), chips::Apply));
+    fn secondary_enter_applies_the_stack_outside_the_palette() {
+        assert!(is(dispatched("secondary-enter", IN_PANEL), chips::Apply));
         assert!(is(dispatched("secondary-enter", IN_PALETTE), jump::AskWhy));
-        assert!(dispatched("ctrl-enter", IN_FIELD).is_none());
+        assert!(dispatched("secondary-enter", IN_FIELD).is_none());
     }
 
     #[test]
