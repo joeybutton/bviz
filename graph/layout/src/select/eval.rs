@@ -23,18 +23,23 @@ impl Filter {
             .map(|(index, rule)| Resolved::of(index, rule, facets, ids))
             .collect();
 
-        // A node outside the scope is stated by nothing, so that one holding a
-        // node drawn is drawn as context around it.
         let mut stated: Vec<Option<Stated>> = vec![None; ids];
-        let mut out_of_scope = vec![false; ids];
+        let mut unscoped: Vec<Option<Unscoped>> = vec![None; ids];
         for node in &graph.nodes {
             let id = node.id.0 as usize;
-            if self.scope.as_ref().is_some_and(|scope| !scope.holds(node)) {
-                out_of_scope[id] = true;
-            } else if let Some(rule) = rules.iter().rev().find(|rule| rule.matches(node, facets)) {
-                stated[id] = Some(Stated::Rule {
+            let in_scope = self.scope.as_ref().is_none_or(|scope| scope.holds(node));
+            let rule = rules.iter().rev().find(|rule| rule.matches(node, facets));
+            if in_scope {
+                stated[id] = rule.map(|rule| Stated::Rule {
                     index: rule.index,
                     visibility: rule.visibility,
+                });
+            } else {
+                unscoped[id] = Some(match rule {
+                    Some(rule) if rule.visibility == Visibility::Hidden => {
+                        Unscoped::Unwrapped(rule.index)
+                    }
+                    _ => Unscoped::Framing,
                 });
             }
         }
@@ -45,18 +50,26 @@ impl Filter {
         }
 
         let unmatched = Reached::of(self.base.visibility(), Hiding::Base);
-        let mut by_id: Vec<Reached> = (stated.iter().zip(&out_of_scope))
-            .map(|(stated, &out_of_scope)| match stated {
+        let mut by_id: Vec<Reached> = (stated.iter().zip(&unscoped))
+            .map(|(stated, unscoped)| match stated {
                 Some(stated) => stated.reached(),
-                None if out_of_scope => Reached::hidden(Hiding::Scope),
+                None if unscoped.is_some() => Reached::hidden(Hiding::Scope),
                 None => unmatched,
             })
             .collect();
         let parents = Parents::of(graph, ids);
         hide_empty_frames(graph, &parents, &mut by_id);
-        frame_drawn_nodes(graph, &parents, &stated, &mut by_id);
+        frame_drawn_nodes(graph, &parents, &stated, &unscoped, &mut by_id);
         Verdicts { by_id, unmatched }
     }
+}
+
+/// What a node the scope leaves out is drawn as around a drawn node it holds.
+#[derive(Clone, Copy, Debug)]
+enum Unscoped {
+    Framing,
+    /// Nothing, the hiding rule at this index unwrapping it.
+    Unwrapped(u32),
 }
 
 /// What decided one node's visibility before where it sits in the containment
@@ -238,13 +251,14 @@ fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Reached]) {
 
 /// Turns into a [`Verdict::Context`] frame every containment ancestor of a drawn
 /// node that `stated` leaves to the base or the scope and `by_id` therefore
-/// hides. Each
-/// ancestor is decided on its own, so a rule hiding one of them unwraps that one
-/// while the frames above and below it stand.
+/// hides, but for one `unscoped` names a hiding rule of, which that rule
+/// unwraps. Each ancestor is decided on its own, so a rule hiding one of them
+/// unwraps that one while the frames above and below it stand.
 fn frame_drawn_nodes(
     graph: &Graph,
     parents: &Parents,
     stated: &[Option<Stated>],
+    unscoped: &[Option<Unscoped>],
     by_id: &mut [Reached],
 ) {
     for node in &graph.nodes {
@@ -255,7 +269,10 @@ fn frame_drawn_nodes(
         let mut at = parents.above(id);
         while let Some(ancestor) = at {
             if stated[ancestor].is_none() && !by_id[ancestor].drawn() {
-                by_id[ancestor] = Reached::CONTEXT;
+                by_id[ancestor] = match unscoped[ancestor] {
+                    Some(Unscoped::Unwrapped(index)) => Reached::hidden(Hiding::Rule(index)),
+                    _ => Reached::CONTEXT,
+                };
             }
             at = parents.above(ancestor);
         }
@@ -1010,6 +1027,72 @@ mod tests {
         filter.pins.insert(fixture.id(LINK), Pin::Revealed);
         let verdicts = fixture.evaluate(&filter);
         assert_eq!(verdicts.get(fixture.id(LINK)), Verdict::Shown);
+    }
+
+    /// A box the scope leaves out frames what it keeps, unless a rule hides
+    /// the box, which unwraps it as it would a box in scope.
+    #[test]
+    fn a_rule_hiding_a_box_outside_the_scope_unwraps_it() {
+        let fixture = Nested::new();
+        let mut filter = fixture.scoped(&[COMPILE]);
+        filter.rules.push(Rule {
+            predicate: Predicate {
+                kinds: Values::new([Kind::Target]),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        });
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.hiding(fixture.id(TARGET)), Some(Hiding::Rule(0)));
+        assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Shown);
+        assert_eq!(verdicts.hiding(fixture.id(LINK)), Some(Hiding::Scope));
+    }
+
+    /// A box holding nothing drawn has nothing to unwrap, so the scope alone
+    /// hides it.
+    #[test]
+    fn a_rule_hiding_a_box_outside_the_scope_framing_nothing_leaves_it_to_the_scope() {
+        let fixture = Nested::new();
+        let mut filter = fixture.scoped(&[COMPILE]);
+        filter.rules.push(Rule {
+            predicate: Predicate {
+                kinds: Values::new([Kind::Target]),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        });
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(
+            verdicts.hiding(fixture.id(OTHER_TARGET)),
+            Some(Hiding::Scope)
+        );
+    }
+
+    /// A query narrows and never widens, so a rule showing or fading a box the
+    /// scope leaves out leaves it the frame of what the scope keeps.
+    #[test]
+    fn a_rule_showing_a_box_outside_the_scope_leaves_it_a_frame() {
+        let fixture = Nested::new();
+        for visibility in [Visibility::Shown, Visibility::Faded] {
+            let mut filter = fixture.scoped(&[COMPILE]);
+            filter.rules.push(Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target]),
+                    ..Predicate::default()
+                },
+                visibility,
+            });
+            let verdicts = fixture.evaluate(&filter);
+
+            assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
+            assert_eq!(
+                verdicts.hiding(fixture.id(OTHER_TARGET)),
+                Some(Hiding::Scope)
+            );
+        }
     }
 
     #[test]

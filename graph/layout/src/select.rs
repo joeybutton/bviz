@@ -1,12 +1,8 @@
 //! Which nodes of a graph a filter shows, stated as rules over their facets.
 //!
-//! A node is read by the last [`Rule`] matching it, by the filter's [`Base`]
-//! where no rule does, as hidden where it lies outside the filter's [`Scope`],
-//! and by its pin where it carries one; [`Verdict`] names
-//! what those readings, taken with where the node sits in the containment
-//! forest, leave of it. Rules and the base name no node by id, so they hold
-//! of a graph rebuilt from the same inputs; a scope and the pins name nodes by
-//! id, so they hold only of the graph they were made over.
+//! Rules and the base name no node by id, so they hold of a graph rebuilt from
+//! the same inputs; a scope and the pins name nodes by id, so they hold only of
+//! the graph they were made over.
 
 mod eval;
 pub mod labels;
@@ -82,10 +78,11 @@ pub struct Rule {
 /// The rules are read in order and the last one matching a node decides it, as
 /// a gitignore file's patterns do, so a rule narrows or widens the ones before
 /// it without either being rewritten. The scope hides what lies outside it
-/// ahead of every rule, so no rule draws back a node the scope leaves out. `pins`
-/// decide the nodes they name whatever the scope and the rules say, which is
-/// what lets a node shown or hidden on its own outlast a change to a rule that
-/// has nothing to do with it.
+/// ahead of every rule, so no rule draws back a node the scope leaves out; a box
+/// it leaves out around a node drawn is drawn as its frame, unless a rule hides
+/// the box, which unwraps it. `pins` decide the nodes they name whatever the
+/// scope and the rules say, which is what lets a node shown or hidden on its
+/// own outlast a change to a rule that has nothing to do with it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Filter {
     pub base: Base,
