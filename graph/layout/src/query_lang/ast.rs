@@ -130,6 +130,7 @@ pub enum Function {
     Rdeps,
     RepoCategory,
     RuleCategory,
+    RunfilesPlumbing,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -154,6 +155,7 @@ pub(super) enum Evaluable {
     Rdeps,
     RepoCategory,
     RuleCategory,
+    RunfilesPlumbing,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -188,7 +190,11 @@ impl Function {
     ];
 
     /// Every function bviz accepts that Bazel does not, sorted by name.
-    pub const EXTENSIONS: [Function; 2] = [Function::RepoCategory, Function::RuleCategory];
+    pub const EXTENSIONS: [Function; 3] = [
+        Function::RepoCategory,
+        Function::RuleCategory,
+        Function::RunfilesPlumbing,
+    ];
 
     /// Every function bviz accepts: Bazel's, then the extensions.
     pub const ALL: [Function; Function::BAZEL.len() + Function::EXTENSIONS.len()] = {
@@ -209,7 +215,7 @@ impl Function {
     /// than one of [`Function::BAZEL`].
     pub fn is_extension(self) -> bool {
         match self {
-            Function::RepoCategory | Function::RuleCategory => true,
+            Function::RepoCategory | Function::RuleCategory | Function::RunfilesPlumbing => true,
             Function::AllPaths
             | Function::AllRdeps
             | Function::Attr
@@ -255,6 +261,7 @@ impl Function {
             Function::Rdeps => "rdeps",
             Function::RepoCategory => "repo_category",
             Function::RuleCategory => "rule_category",
+            Function::RunfilesPlumbing => "runfiles_plumbing",
             Function::SamePkgDirectRdeps => "same_pkg_direct_rdeps",
             Function::Siblings => "siblings",
             Function::Some => "some",
@@ -293,6 +300,7 @@ impl Function {
             Function::Rdeps => return Ok(Evaluable::Rdeps),
             Function::RepoCategory => return Ok(Evaluable::RepoCategory),
             Function::RuleCategory => return Ok(Evaluable::RuleCategory),
+            Function::RunfilesPlumbing => return Ok(Evaluable::RunfilesPlumbing),
             Function::SamePkgDirectRdeps => return Ok(Evaluable::SamePkgDirectRdeps),
             Function::Siblings => return Ok(Evaluable::Siblings),
             Function::Some => return Ok(Evaluable::Some),
@@ -321,6 +329,7 @@ impl Function {
             Function::BuildFiles
             | Function::Executables
             | Function::LoadFiles
+            | Function::RunfilesPlumbing
             | Function::SamePkgDirectRdeps
             | Function::Siblings
             | Function::Tests => (&[E], 1),

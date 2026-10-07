@@ -1661,3 +1661,54 @@ fn rule_category_keeps_what_a_matching_rule_holds() {
     assert_eq!(query("rule_category(other, //c:lib)"), query("//c:lib"));
     assert!(query("rule_category(test, //c:lib)").is_empty());
 }
+
+#[test]
+fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
+    use crate::test_support::{ActionSpec, action_graph};
+    let out = |name: &str| format!("bazel-out/k8-fastbuild/bin/p/{name}");
+    let (binary, manifest, tree) = (
+        out("bin"),
+        out("bin.runfiles_manifest"),
+        out("bin.runfiles"),
+    );
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &["p/main.o"],
+            outputs: &[&binary],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "SourceSymlinkManifest",
+            inputs: &[],
+            outputs: &[&manifest],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "SymlinkTree",
+            inputs: &[&manifest],
+            outputs: &[&tree],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    let plumbing = [format!("action:{tree}"), format!("action:{manifest}")];
+    assert_eq!(query("runfiles_plumbing(//p:bin)"), plumbing);
+    assert_eq!(
+        query("runfiles_plumbing(mnemonic(SymlinkTree, //p:bin))"),
+        [format!("action:{tree}")]
+    );
+    assert!(query("runfiles_plumbing(mnemonic(CppLink, //p:bin))").is_empty());
+    assert_eq!(
+        Fixture::new().error("runfiles_plumbing(//a:lib)"),
+        "runfiles_plumbing() needs the actions of an aquery, which the graph's inputs do not \
+         include"
+    );
+}

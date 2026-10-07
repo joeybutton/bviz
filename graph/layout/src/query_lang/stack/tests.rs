@@ -93,6 +93,10 @@ fn the_shorthand_writes_out_the_set_a_chip_reads() {
         written("repo_category(main)"),
         continuing("repo_category(main, $_)")
     );
+    assert_eq!(
+        written("runfiles_plumbing()"),
+        continuing("runfiles_plumbing($_)")
+    );
 }
 
 #[test]
@@ -525,6 +529,10 @@ fn a_stack_using_an_extension_has_no_bazel_query() {
     assert_eq!(
         bazel(&["//a:all", "rule_category(test)"]),
         extension(Extension::Function(Function::RuleCategory))
+    );
+    assert_eq!(
+        bazel(&["//p:all", "runfiles_plumbing()"]),
+        extension(Extension::Function(Function::RunfilesPlumbing))
     );
     assert_eq!(
         Unportable::Extension(Extension::Function(Function::RepoCategory)).to_string(),

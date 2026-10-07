@@ -8,6 +8,7 @@
 use crate::rules::{self, Term, Value};
 use bviz_graph_layout::facets::RuleCategory;
 use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::query_lang::RUNFILES_MNEMONICS;
 use bviz_graph_layout::repo::RepoCategory;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Axis, Capabilities, Facets, Kind, Support};
@@ -20,26 +21,6 @@ const EXTERNAL_ORIGINS: [RepoCategory; 4] = [
     RepoCategory::ModuleExtension,
     RepoCategory::Builtin,
     RepoCategory::WorkspaceOrUnknown,
-];
-
-/// The mnemonics of the actions that build a runfiles tree or lay down a
-/// symlink, manifest or expanded template: the wiring between the actions that
-/// do the build's work rather than work itself.
-///
-/// Bazel 9 names the runfiles-tree action `RunfilesTree` where Bazel 8 and
-/// earlier name it `Middleman`, and bviz reads a dump from either, so both stand
-/// here.
-const RUNFILES_MNEMONICS: [&str; 10] = [
-    "SymlinkTree",
-    "SourceSymlinkManifest",
-    "PackagingSourcesManifest",
-    "RepoMappingManifest",
-    "Symlink",
-    "ExecutableSymlink",
-    "FileWrite",
-    "TemplateExpand",
-    "RunfilesTree",
-    "Middleman",
 ];
 
 /// What a preset leaves on the terms it is written over, which is what its

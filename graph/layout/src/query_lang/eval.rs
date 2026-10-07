@@ -237,6 +237,11 @@ impl Universe {
                 let (values, _) = arguments()?;
                 Ok(self.rule_category(&regex, &values[0]))
             }
+            Evaluable::RunfilesPlumbing => {
+                self.filters_actions(function).map_err(fail)?;
+                let (values, _) = arguments()?;
+                Ok(self.runfiles_plumbing(&values[0]))
+            }
             Evaluable::Config => {
                 let (values, _) = arguments()?;
                 let written = expressions(args)[0].to_string();

@@ -38,10 +38,30 @@ use super::declared::Attribute;
 use super::universe::Universe;
 use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
 use crate::exec_path::{ExecPath, LeftOutInputs};
-use crate::facets::RuleCategory;
+use crate::facets::{RuleCategory, Sym};
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
+
+/// The mnemonics of the actions that build a runfiles tree or lay down a
+/// symlink, manifest or expanded template: the wiring between the actions that
+/// do the build's work rather than work itself.
+///
+/// Bazel 9 names the runfiles-tree action `RunfilesTree` where Bazel 8 and
+/// earlier name it `Middleman`, and bviz reads a dump from either, so both stand
+/// here.
+pub const RUNFILES_MNEMONICS: [&str; 10] = [
+    "SymlinkTree",
+    "SourceSymlinkManifest",
+    "PackagingSourcesManifest",
+    "RepoMappingManifest",
+    "Symlink",
+    "ExecutableSymlink",
+    "FileWrite",
+    "TemplateExpand",
+    "RunfilesTree",
+    "Middleman",
+];
 
 /// The most patterns a [`Patterns`] cache keeps compiled. A query names few,
 /// but a session of edits to one names many, so the cache empties when full.
@@ -328,6 +348,18 @@ impl Universe {
                 && writes.as_mut().is_none_or(|matcher| {
                     self.any_path_matches(self.index.dependents(action), matcher)
                 })
+        })
+    }
+
+    /// The actions of `value`, and those its configured targets hold, whose
+    /// mnemonic is one of [`RUNFILES_MNEMONICS`].
+    pub(super) fn runfiles_plumbing(&self, value: &FixedBitSet) -> FixedBitSet {
+        let strings = self.facets.strings();
+        let mnemonics: Vec<Sym> = (RUNFILES_MNEMONICS.iter())
+            .filter_map(|mnemonic| strings.get(mnemonic))
+            .collect();
+        self.retain_actions(value, |action| {
+            (self.facets.mnemonic(action)).is_some_and(|mnemonic| mnemonics.contains(&mnemonic))
         })
     }
 
