@@ -7,7 +7,7 @@ use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
-    cached_layer, overlay_canvas,
+    cached_layer, overlay_canvas, text_input,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -40,7 +40,9 @@ mod emphasis;
 mod exclusive;
 mod framing;
 mod hints;
+mod history;
 mod hue;
+mod jump;
 mod legend;
 mod missing;
 mod mode;
@@ -54,6 +56,7 @@ mod point;
 mod preset;
 mod relation;
 mod report;
+mod reveal;
 mod rules;
 mod scatter;
 mod scroll;
@@ -85,17 +88,32 @@ use scroll::{scrollbar_hit, start_scroll_drag};
 use search::Search;
 use selection::Selection;
 
-actions!(bviz_graph, [ToggleNeighborhood, ToggleReduce, Dismiss]);
+actions!(
+    bviz_graph,
+    [
+        ToggleNeighborhood,
+        ToggleReduce,
+        Dismiss,
+        JumpBack,
+        JumpForward
+    ]
+);
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
 const KEY_CONTEXT: &str = "Graph";
 
 pub fn register_keys(cx: &mut App) {
-    // A bare letter types into the search field rather than dispatching, so the
-    // panel's own bindings stand down inside it.
-    let predicate = format!("{KEY_CONTEXT} && !{}", search::KEY_CONTEXT);
-    let outside_search = Some(predicate.as_str());
+    cx.bind_keys(bindings());
+}
+
+fn bindings() -> Vec<KeyBinding> {
+    // A bare character typed into a text field is text, so the panel's own
+    // bindings stand down inside one.
+    let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    let outside_text = Some(outside_text.as_str());
+    let graph = Some(KEY_CONTEXT);
+    let jumping = Some(jump::KEY_CONTEXT);
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
     let exclusive = format!(
@@ -104,10 +122,22 @@ pub fn register_keys(cx: &mut App) {
         exclusive::ROOTS_KEY_CONTEXT
     );
     let outside_roots = Some(exclusive.as_str());
-    cx.bind_keys([
-        KeyBinding::new("h", ToggleNeighborhood, outside_search),
-        KeyBinding::new("r", ToggleReduce, outside_search),
-        KeyBinding::new("escape", Dismiss, outside_search),
+    vec![
+        KeyBinding::new("h", ToggleNeighborhood, outside_text),
+        KeyBinding::new("r", ToggleReduce, outside_text),
+        KeyBinding::new("escape", Dismiss, outside_text),
+        KeyBinding::new("alt-left", JumpBack, outside_text),
+        KeyBinding::new("alt-right", JumpForward, outside_text),
+        KeyBinding::new("cmd-f", jump::Open, graph),
+        KeyBinding::new("ctrl-f", jump::Open, graph),
+        KeyBinding::new("/", jump::Open, outside_text),
+        KeyBinding::new("up", jump::Previous, jumping),
+        KeyBinding::new("down", jump::Next, jumping),
+        KeyBinding::new("enter", jump::Go, jumping),
+        KeyBinding::new("ctrl-enter", jump::AskWhy, jumping),
+        KeyBinding::new("escape", jump::Close, jumping),
+        KeyBinding::new("tab", jump::NextScope, jumping),
+        KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
         // Escape acts on the innermost thing holding focus: in the field that
         // is the card the typed pattern put up over the drawing.
         KeyBinding::new("escape", search::DismissResults, Some(search::KEY_CONTEXT)),
@@ -131,7 +161,7 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
-    ]);
+    ]
 }
 
 /// Padding around the graph, in layout pixels.
@@ -145,6 +175,10 @@ const CARD_MAX_SHARE: f32 = 0.45;
 /// Largest zoom-in factor. The smallest is computed per graph so the whole graph
 /// always fits the viewport.
 const MAX_ZOOM: f32 = 4.0;
+
+/// The most a frame request zooms in to show what it names, at which a label
+/// reads at a comfortable size however small the box framed.
+const MAX_FRAME_ZOOM: f32 = 1.5;
 
 /// Factor one wheel notch scales the zoom by, small enough that a notch nudges
 /// the view rather than jumping it.
@@ -257,6 +291,7 @@ pub struct GraphPanel {
     _preset_choices: Subscription,
     /// The label search, whose pattern shows or hides the nodes it names.
     search: Search,
+    jump: jump::Finder,
     /// Carries what is typed into the search field into the search.
     _search_typing: Subscription,
     /// Redraws as the graph is read.
@@ -292,6 +327,8 @@ pub struct GraphPanel {
     missing_open: bool,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
+    reveal: reveal::Reveal,
+    jumps: reveal::Jumps,
     report: report::Card,
     timecard: timecard::Card,
     /// The dependency paths asked for, which the panel draws in place of its
@@ -443,8 +480,8 @@ impl GraphPanel {
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
                 match event.reveal {
-                    Reveal::Activate => reveal(view, event.node, cx),
-                    Reveal::InPlace => show_in_place(view, event.node, cx),
+                    Reveal::Activate => reveal::reveal(view, event.node, cx),
+                    Reveal::InPlace => reveal::show_in_place(view, event.node, cx),
                 }
             }
         });
@@ -476,6 +513,7 @@ impl GraphPanel {
             preset_filter,
             _preset_choices: preset_choices,
             search,
+            jump: jump::Finder::default(),
             _search_typing: search_typing,
             _changed: changed,
             _clock_moved: clock_moved,
@@ -490,6 +528,8 @@ impl GraphPanel {
             critical_path_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
+            reveal: reveal::Reveal::Idle,
+            jumps: reveal::Jumps::default(),
             report: report::Card::new(),
             timecard: timecard::Card::new(),
             why: why::Why::new(),
@@ -528,7 +568,12 @@ impl GraphPanel {
     /// Frames the layer drawing the selected mode's layout, or a spinner while
     /// that layout is still being computed — the toolbar stays above either, so
     /// the picker remains reachable.
-    fn viewport(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn viewport(
+        &mut self,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let laying_out = || bviz_ui_components::centered_spinner("Laying out…", &palette.colors);
         let Some(drawn) = self.drawn() else {
             let entity = cx.entity();
@@ -582,12 +627,14 @@ impl GraphPanel {
             )
             .child(
                 column::Column::new()
+                    .held(reveal::card(self, &palette, cx))
                     .held(pins::panel(self, &palette, cx))
                     .folding(report::card(self, &palette, cx))
                     .folding(timecard::card(self, &palette, cx))
                     .foot(why::card(self, &palette, cx)),
             )
             .children(search::card(self, &palette, cx))
+            .children(jump::overlay(self, &palette, window, cx))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -641,9 +688,10 @@ impl GraphPanel {
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // The card occludes the canvas, so a press reaching here landed outside
-        // it.
+        // The card and the palette occlude the canvas, so a press reaching here
+        // landed outside them.
         search::dismiss(self, cx);
+        jump::dismiss(self, cx);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
         if let Some(axis) = scrollbar_hit(self, e.position) {
@@ -657,6 +705,7 @@ impl GraphPanel {
     /// drops the selection where the press lands on no box.
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         search::dismiss(self, cx);
+        jump::dismiss(self, cx);
         select_box_at(self, e.position, cx);
     }
 
@@ -720,10 +769,12 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
-    /// Puts away the innermost thing the reader set up: the selection, and
-    /// with none the dependency paths asked for.
+    /// Puts away the innermost thing the reader set up: a reveal pending, then
+    /// the selection, and with neither the dependency paths asked for.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.selection.node().is_some() {
+        if reveal::dismiss(self) {
+            cx.notify();
+        } else if self.selection.node().is_some() {
             self.selection.clear();
             self.invalidate_canvas(cx);
         } else {
@@ -807,6 +858,15 @@ impl Render for GraphPanel {
             )
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &JumpBack, _, cx| {
+                jump::dismiss(view, cx);
+                reveal::back(view, cx);
+            }))
+            .on_action(cx.listener(|view, _: &JumpForward, _, cx| {
+                jump::dismiss(view, cx);
+                reveal::forward(view, cx);
+            }))
+            .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -847,7 +907,7 @@ impl Render for GraphPanel {
                             .flex_1()
                             .flex()
                             .overflow_hidden()
-                            .child(self.viewport(palette, cx)),
+                            .child(self.viewport(palette, window, cx)),
                     )
             }
         }
@@ -1018,34 +1078,6 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     view.invalidate_canvas(cx);
 }
 
-/// Selects `id` and moves the view onto it, opening what holds it in a layered
-/// drawing, and asks for the panel to be shown.
-fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    view.selection.select(id);
-    if view.mode == LayoutMode::Layered {
-        derive::expand_to(view, id, cx);
-    }
-    view.framing.request_frame(framing::Frame::Node(id));
-    cx.emit(PanelEvent::Activate);
-    view.invalidate_canvas(cx);
-}
-
-/// Selects and frames the box standing for `id` in the drawing as it is: in
-/// a layered drawing the innermost drawn box holding it, which opens none and
-/// so lays nothing out afresh.
-fn show_in_place(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    let shown = match view.mode {
-        LayoutMode::Layered => derive::drawn_holder(view, id),
-        LayoutMode::Map => Some(id),
-    };
-    let Some(shown) = shown else {
-        return;
-    };
-    view.selection.select(shown);
-    view.framing.request_frame(framing::Frame::Node(shown));
-    view.invalidate_canvas(cx);
-}
-
 /// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
 /// eased it to while one drawing settles onto another.
 fn placed_rect(b: &bviz_graph_layout::Box, morph: Option<&Frame>) -> Rect {
@@ -1174,6 +1206,90 @@ mod tests {
             compound: false,
             group: false,
         }
+    }
+
+    /// The action `keys` dispatch with focus in the innermost of `contexts`,
+    /// under the panel's bindings and those of the text field.
+    fn dispatched(keys: &str, contexts: &[&str]) -> Option<std::boxed::Box<dyn gpui::Action>> {
+        let mut bindings = bindings();
+        bindings.extend(text_input::bindings());
+        let keymap = gpui::Keymap::new(bindings);
+        let stack: Vec<gpui::KeyContext> = contexts
+            .iter()
+            .map(|context| gpui::KeyContext::parse(context).expect("a key context"))
+            .collect();
+        let keystroke = gpui::Keystroke::parse(keys).expect("a keystroke");
+        let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
+        matched
+            .first()
+            .map(|binding| binding.action().boxed_clone())
+    }
+
+    fn is<A: gpui::Action>(action: Option<std::boxed::Box<dyn gpui::Action>>, expected: A) -> bool {
+        action.is_some_and(|action| action.partial_eq(&expected))
+    }
+
+    const IN_PANEL: &[&str] = &[KEY_CONTEXT];
+    const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_PALETTE: &[&str] = &[KEY_CONTEXT, jump::KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_SEARCH: &[&str] = &[KEY_CONTEXT, search::KEY_CONTEXT, text_input::KEY_CONTEXT];
+
+    /// A letter typed into any text field is text, not one of the panel's
+    /// keys.
+    #[test]
+    fn the_panels_letters_stand_down_in_any_text_field() {
+        assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
+        assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
+        for field in [IN_SEARCH, IN_FIELD] {
+            assert!(dispatched("h", field).is_none());
+            assert!(dispatched("r", field).is_none());
+        }
+    }
+
+    #[test]
+    fn slash_opens_the_palette_only_where_it_types_nothing() {
+        assert!(is(dispatched("/", IN_PANEL), jump::Open));
+        assert!(dispatched("/", IN_SEARCH).is_none());
+        assert!(dispatched("/", IN_PALETTE).is_none());
+        for find in ["ctrl-f", "cmd-f"] {
+            assert!(is(dispatched(find, IN_PANEL), jump::Open), "{find}");
+            assert!(is(dispatched(find, IN_SEARCH), jump::Open), "{find}");
+        }
+    }
+
+    /// A letter typed into the palette's field is text, and the keys moving
+    /// through its rows reach it before the panel's own.
+    #[test]
+    fn the_palette_takes_its_keys_before_the_panel() {
+        assert!(dispatched("h", IN_PALETTE).is_none());
+        assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
+        assert!(is(dispatched("escape", IN_PALETTE), jump::Close));
+        assert!(is(dispatched("escape", IN_PANEL), Dismiss));
+        assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
+        assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
+        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
+        assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
+        assert!(is(dispatched("shift-tab", IN_PALETTE), jump::PreviousScope));
+    }
+
+    /// The panel's own jumps and the exclusive view's foci are walked by the
+    /// same keys, each in its own panel, and a text field keeps them.
+    #[test]
+    fn alt_arrows_walk_the_history_of_the_panel_holding_focus() {
+        assert!(is(dispatched("alt-left", IN_PANEL), JumpBack));
+        assert!(is(dispatched("alt-right", IN_PANEL), JumpForward));
+        for keys in ["alt-left", "alt-right"] {
+            for field in [IN_PALETTE, IN_SEARCH] {
+                assert!(!is(dispatched(keys, field), JumpBack), "{keys}");
+                assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
+            }
+        }
+        let exclusive = &[exclusive::KEY_CONTEXT];
+        assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
+        assert!(is(
+            dispatched("alt-right", exclusive),
+            exclusive::FocusForward
+        ));
     }
 
     #[test]

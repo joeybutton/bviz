@@ -3,7 +3,6 @@
 //! drawn as an icicle.
 
 mod cell_menu;
-mod history;
 mod icicle;
 mod paint;
 mod roots;
@@ -12,6 +11,7 @@ mod transition;
 
 use crate::Palette;
 use crate::drag::DOUBLE_CLICK;
+use crate::history::History;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
@@ -36,7 +36,6 @@ use gpui::{
     NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
     WeakEntity, Window, anchored, canvas, deferred, div, point, prelude::*, px, relative,
 };
-use history::History;
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
     HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,

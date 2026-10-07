@@ -12,7 +12,7 @@ use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::facets::{ConfigRef, Sym};
 use bviz_graph_layout::paths::{self, Paths};
-use bviz_graph_layout::select::labels::carried_label;
+use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Kind, Names, Support};
 use bviz_ui_components::{
@@ -115,8 +115,18 @@ enum Answer {
 
 /// How the card names `id`: by the label of the target it belongs to, and the
 /// configuration it is built in where it states one, which tells the configured
-/// targets of one label apart.
+/// targets of one label apart. A package box is named whole by its path.
 fn name(names: &Names, facets: &Facets, id: Id) -> Named {
+    if let Some(package) = package_label(names, id) {
+        let package = SharedString::from(package);
+        return Named {
+            id,
+            target: package.clone(),
+            package: None,
+            label: package,
+            config: None,
+        };
+    }
     let label = carried_label(names, facets, id).unwrap_or_else(|| names.resolve(id));
     let config = facets.config(id).map(|config| Config {
         handle: config,
@@ -758,6 +768,17 @@ mod tests {
             (spelling.name(&unlabelled).as_ref(), unlabelled.package),
             ("action7", None)
         );
+    }
+
+    #[test]
+    fn a_package_is_named_whole_by_its_path() {
+        let (mut names, facets) = (Names::default(), Facets::default());
+        let package = names.intern("pkg:ui/components");
+        let named = name(&names, &facets, package);
+        let spelling = Spelling::of(&facets, [&named].into_iter());
+        assert_eq!(spelling.name(&named), "//ui/components");
+        assert_eq!(named.package, None);
+        assert_eq!(spelling.full(&named), "//ui/components");
     }
 
     /// Two configurations sharing a mnemonic read the same by it, so where the

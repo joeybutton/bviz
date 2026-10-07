@@ -5,7 +5,7 @@ use crate::camera::{
 use crate::derive::Drawn;
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use bviz_graph_layout::Id;
-use gpui::{App, Bounds, Entity, Pixels, Window};
+use gpui::{App, Bounds, Entity, Pixels, Window, px};
 use std::time::Instant;
 
 /// What a frame request moves the view onto.
@@ -30,6 +30,15 @@ pub(crate) enum Target {
     Resolved(Option<Rect>),
 }
 
+/// A view a [`Framing`] stood at, to be returned to.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Held {
+    camera: Camera,
+    chosen_zoom: f32,
+    /// The fit the camera stood under, which no other fit's view is of.
+    fit: u32,
+}
+
 /// Where the graph sits in the window, and the ease that carries it from one
 /// placement to the next. Every step over it is a function of this value alone,
 /// so none of them needs the entity or the window.
@@ -43,14 +52,18 @@ pub(crate) struct Framing {
     chosen_zoom: f32,
     /// Whether the fit-to-window view has been established.
     fitted: bool,
+    /// How many fits have been established, which tells the views of one fit,
+    /// and of the extent it fitted, from those of another.
+    fits: u32,
     /// The canvas bounds as last measured, by a prepaint or by
     /// [`measure`](Self::measure), so hit-testing and the pan/zoom handlers
     /// can work in the same frame the canvas painted.
     viewport: Bounds<Pixels>,
     recenter: bool,
     /// What a prepaint is to move the view onto outright, once the panel has a
-    /// drawing and a fitted camera to resolve it at.
-    frame: Option<Frame>,
+    /// drawing and a fitted camera to resolve it at, and how far down the
+    /// viewport's top an overlay covers it.
+    frame: Option<(Frame, Pixels)>,
     /// The settle ease in flight, stepped once per frame; `None` at rest.
     anim: Option<Settle>,
 }
@@ -65,6 +78,7 @@ impl Framing {
             },
             chosen_zoom: 1.0,
             fitted: false,
+            fits: 0,
             viewport: Bounds::default(),
             recenter: false,
             frame: None,
@@ -122,7 +136,37 @@ impl Framing {
 
     /// Asks a prepaint to move the view onto what `frame` names.
     pub(crate) fn request_frame(&mut self, frame: Frame) {
-        self.frame = Some(frame);
+        self.request_frame_below(frame, px(0.));
+    }
+
+    /// As [`request_frame`](Self::request_frame), under an overlay covering
+    /// the viewport's top `covered`.
+    pub(crate) fn request_frame_below(&mut self, frame: Frame, covered: Pixels) {
+        self.frame = Some((frame, covered));
+    }
+
+    /// Where the view stands, for [`return_to`](Self::return_to) to bring it
+    /// back to; `None` before the first fit, when it stands at no view.
+    pub(crate) fn hold(&self) -> Option<Held> {
+        self.fitted.then_some(Held {
+            camera: self.camera,
+            chosen_zoom: self.chosen_zoom,
+            fit: self.fits,
+        })
+    }
+
+    /// Eases the view back to where `held` found it, dropping any frame or
+    /// recenter pending, which would carry it off again. A framing refitted
+    /// since is of another extent, which `held` says nothing of, so it is left
+    /// where it stands.
+    pub(crate) fn return_to(&mut self, held: Held) {
+        if !self.fitted || held.fit != self.fits {
+            return;
+        }
+        self.frame = None;
+        self.recenter = false;
+        self.chosen_zoom = held.chosen_zoom;
+        self.ease_to(held.camera.zoom, held.camera.pan);
     }
 
     /// Drops the established framing, so the next prepaint fits the content
@@ -174,6 +218,7 @@ impl Framing {
             self.camera = Camera { zoom: z, pan: p };
             self.chosen_zoom = z;
             self.fitted = true;
+            self.fits = self.fits.wrapping_add(1);
         } else if prev.size != bounds.size {
             self.anim = None;
             let old_fit = fit_zoom(prev.size, content);
@@ -204,9 +249,9 @@ impl Framing {
     /// drops a pending recenter, which would otherwise pull the view off what
     /// was named onto whatever a relayout emphasized.
     fn arm_frame(&mut self, content: (f32, f32), target: Target) {
-        if self.frame.is_none() {
+        let Some((_, covered)) = self.frame else {
             return;
-        }
+        };
         let Target::Resolved(target) = target else {
             return;
         };
@@ -215,7 +260,7 @@ impl Framing {
             return;
         };
         self.recenter = false;
-        let (zoom, pan) = frame_view(target, self.viewport.size, content);
+        let (zoom, pan) = frame_view(target, self.viewport.size, covered, content);
         self.chosen_zoom = zoom;
         self.ease_to(zoom, pan);
     }
@@ -295,7 +340,7 @@ fn escapes(window: Rect, boxes: &[bviz_graph_layout::Box]) -> bool {
 /// at the fitted camera, where the request still wants it. Framing is a camera
 /// move, so every box stays where the layout put it.
 fn frame_target(view: &GraphPanel) -> Target {
-    let Some(frame) = view.framing.frame else {
+    let Some((frame, _)) = view.framing.frame else {
         return Target::Resolved(None);
     };
     let Some(drawn) = view.drawn() else {
@@ -376,10 +421,35 @@ mod tests {
             chosen_zoom: zoom,
             viewport: bounds,
             fitted: true,
+            fits: 1,
             recenter: false,
             frame: None,
             anim: None,
         }
+    }
+
+    /// A held view is eased back to under the fit it was held at, and left
+    /// alone once the framing has been fitted to the window afresh.
+    #[test]
+    fn a_held_view_is_returned_to_only_under_the_fit_it_was_held_at() {
+        let bounds = canvas_bounds(800., 600.);
+        let away = Camera {
+            zoom: 2.0,
+            pan: (40.0, 30.0),
+        };
+        let mut f = framed(1.0, (0.0, 0.0), bounds);
+        let held = f.hold().expect("a fitted framing holds its view");
+        f.camera = away;
+        f.return_to(held);
+        let settle = f.anim.as_ref().expect("an ease back");
+        assert_eq!((settle.to_zoom, settle.to_pan), (1.0, (0.0, 0.0)));
+
+        f.anim = None;
+        f.refit();
+        f.fit_or_rescale(bounds, (400.0, 300.0));
+        f.camera = away;
+        f.return_to(held);
+        assert!(f.anim.is_none());
     }
 
     /// The camera the settle tests ease away from: off the identity zoom and
@@ -604,7 +674,7 @@ mod tests {
         let a = f.anim.expect("the frame request armed no ease");
         assert_eq!(
             (a.to_zoom, a.to_pan),
-            frame_view(NAMED, vp(800., 600.), CONTENT)
+            frame_view(NAMED, vp(800., 600.), px(0.), CONTENT)
         );
         assert_eq!(
             f.chosen_zoom, a.to_zoom,
@@ -622,13 +692,13 @@ mod tests {
 
         f.arm_frame(CONTENT, Target::Pending);
         assert!(f.anim.is_none());
-        assert_eq!(f.frame, Some(Frame::Drawing));
+        assert_eq!(f.frame, Some((Frame::Drawing, px(0.))));
 
         f.arm_frame(CONTENT, Target::Resolved(Some(NAMED)));
         let a = f.anim.expect("the frame request armed no ease");
         assert_eq!(
             (a.to_zoom, a.to_pan),
-            frame_view(NAMED, vp(800., 600.), CONTENT)
+            frame_view(NAMED, vp(800., 600.), px(0.), CONTENT)
         );
         assert!(f.frame.is_none());
     }

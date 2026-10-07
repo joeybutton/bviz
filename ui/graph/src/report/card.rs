@@ -2,8 +2,9 @@ use super::{Badged, Report, Row};
 use crate::column::{Folding, line};
 use crate::legend::status_swatch;
 use crate::model::Loaded;
+use crate::reveal::reveal;
 use crate::status::{Status, Statuses};
-use crate::{GraphPanel, Palette, reveal, why};
+use crate::{GraphPanel, Palette, why};
 use bviz_graph_layout::Id;
 use bviz_invocation::Configurations;
 use bviz_ui_components::{

@@ -4,7 +4,7 @@
 use crate::facets::{Facets, WrittenRepos};
 use crate::graph::Graph;
 use crate::intern::{Id, Names};
-use crate::label::target_node_label;
+use crate::label::{package_node_parts, target_node_label};
 use crate::select::pattern::Pattern;
 use std::borrow::Cow;
 use std::ops::Range;
@@ -13,6 +13,13 @@ use std::ops::Range;
 /// target is its own; `None` for a node belonging to none.
 pub fn carried_label<'a>(names: &'a Names, facets: &Facets, id: Id) -> Option<&'a str> {
     target_node_label(names.resolve(facets.label(id)?))
+}
+
+/// The directory the package box `id` stands for, written as a label writes
+/// a package ahead of its `:`; `None` for a node that is no package box.
+pub fn package_label(names: &Names, id: Id) -> Option<String> {
+    let (repo, path) = package_node_parts(names.resolve(id))?;
+    Some(format!("{repo}//{path}"))
 }
 
 /// Every target the nodes of one graph belong to: the id of the node naming the
@@ -231,5 +238,24 @@ mod tests {
 
         assert_eq!(fixture.index().len(), 5);
         assert_eq!(fixture.graph.nodes.len(), 7);
+    }
+
+    #[test]
+    fn a_package_box_is_written_as_a_labels_package() {
+        let mut names = Names::default();
+        let written = |names: &mut Names, id: &str| {
+            let id = names.intern(id);
+            package_label(names, id)
+        };
+        assert_eq!(
+            written(&mut names, "pkg:ui/components").as_deref(),
+            Some("//ui/components")
+        );
+        assert_eq!(written(&mut names, "pkg:").as_deref(), Some("//"));
+        assert_eq!(
+            written(&mut names, "pkg:@crates//serde").as_deref(),
+            Some("@crates//serde")
+        );
+        assert_eq!(written(&mut names, "target://ui:lib"), None);
     }
 }

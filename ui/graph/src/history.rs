@@ -1,5 +1,5 @@
-//! The foci the icicle has been drawn from, walked back and forth as a
-//! browser walks the pages it has shown.
+//! Steps a view has taken, walked back and forth as a browser walks the pages
+//! it has shown.
 
 use std::collections::VecDeque;
 

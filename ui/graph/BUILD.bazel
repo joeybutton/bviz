@@ -19,8 +19,10 @@ rust_library(
         "//ui/playback",
         "//ui/theme",
         "//ui/workspace",
+        "//util/parallel",
         "@crates//:clap",
         "@crates//:gpui",
+        "@crates//:nucleo",
         "@crates//:rustc-hash",
     ],
 )

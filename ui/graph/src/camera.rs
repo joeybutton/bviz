@@ -1,5 +1,5 @@
 use crate::emphasis::Emphasis;
-use crate::{FIT_MARGIN, MARGIN, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
+use crate::{FIT_MARGIN, MARGIN, MAX_FRAME_ZOOM, MAX_ZOOM, RECENTER_PAD, ZOOM_PER_NOTCH};
 use bviz_graph_layout::LaidOut;
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::ops::RangeInclusive;
@@ -146,7 +146,7 @@ pub(crate) struct Settle {
 
 /// The pan/zoom viewport transform: `zoom` scales layout units to pixels and
 /// `pan` is the screen offset of the content's near edges.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Camera {
     pub(crate) zoom: f32,
     pub(crate) pan: (f32, f32),
@@ -313,7 +313,10 @@ pub(crate) fn settle_view(
 }
 
 /// The zoom and pan that put `target` on screen centered and at the size it
-/// fills the viewport to, held between the whole-graph fit and [`MAX_ZOOM`].
+/// fills the viewport to, held between the whole-graph fit and
+/// [`MAX_FRAME_ZOOM`]. The viewport's top `covered`, which an overlay hides,
+/// is left out of what it fills, and the pan may carry the graph that much
+/// further down to keep `target` below it.
 ///
 /// Where a settle disturbs the view as little as bringing its target into frame
 /// allows, this moves the view onto `target` outright: it answers a gesture that
@@ -321,16 +324,28 @@ pub(crate) fn settle_view(
 pub(crate) fn frame_view(
     target: Rect,
     viewport: Size<Pixels>,
+    covered: Pixels,
     content: (f32, f32),
 ) -> (f32, (f32, f32)) {
-    let zoom = fit_rect_zoom(target, viewport)
-        .unwrap_or(MAX_ZOOM)
-        .clamp(fit_zoom(viewport, content), MAX_ZOOM);
-    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let covered = covered.min(viewport.height);
+    let clear = Size {
+        width: viewport.width,
+        height: viewport.height - covered,
+    };
+    let zoom = fit_rect_zoom(target, clear)
+        .unwrap_or(MAX_FRAME_ZOOM)
+        .clamp(fit_zoom(viewport, content), MAX_FRAME_ZOOM);
+    let (vw, vh) = (f32::from(clear.width), f32::from(clear.height));
     let center = |near: f64, extent: f64| (near + extent / 2.) as f32 + MARGIN as f32;
     let (cx, cy) = (center(target.x, target.w), center(target.y, target.h));
-    let pan = (vw / 2. - cx * zoom, vh / 2. - cy * zoom);
-    (zoom, clamp_pan(pan, zoom, viewport, content))
+    let pan = (
+        vw / 2. - cx * zoom,
+        f32::from(covered) + vh / 2. - cy * zoom,
+    );
+    let (x, _) = clamp_pan(pan, zoom, viewport, content);
+    let down = pan_range(f32::from(viewport.height), content.1 * zoom);
+    let y = pan.1.clamp(*down.start(), *down.end() + f32::from(covered));
+    (zoom, (x, y))
 }
 
 /// The rect enclosing every box `g` draws; `None` for a drawing holding none.
@@ -415,7 +430,7 @@ mod tests {
             w: 400.0,
             h: 240.0,
         };
-        let (zoom, pan) = frame_view(target, vp(800., 600.), WIDE_CONTENT);
+        let (zoom, pan) = frame_view(target, vp(800., 600.), px(0.), WIDE_CONTENT);
 
         assert!(
             zoom > fit_zoom(vp(800., 600.), WIDE_CONTENT) * 10.,
@@ -432,6 +447,50 @@ mod tests {
         );
     }
 
+    /// A target framed under an overlay covering the viewport's top is
+    /// centered in, and fitted to, what the overlay leaves clear.
+    #[test]
+    fn framing_puts_the_target_below_what_covers_the_viewport() {
+        let target = Rect {
+            x: 50_000.0,
+            y: 30_000.0,
+            w: 400.0,
+            h: 240.0,
+        };
+        let covered = 200.;
+        let (zoom, pan) = frame_view(target, vp(800., 600.), px(covered), WIDE_CONTENT);
+
+        let (x0, x1, y0, y1) = on_screen(target, zoom, pan);
+        assert!(
+            ((x0 + x1) / 2. - 400.).abs() < 0.5 && ((y0 + y1) / 2. - 400.).abs() < 0.5,
+            "off the clear band's center: {x0}..{x1}, {y0}..{y1}"
+        );
+        assert!(
+            y0 >= covered && y1 <= 600.,
+            "not wholly below the cover: {y0}..{y1}"
+        );
+    }
+
+    /// A target at the very top of the graph is still carried below the
+    /// cover, past the clearance the pan otherwise leaves above the graph.
+    #[test]
+    fn a_target_at_the_top_of_the_graph_is_framed_below_the_cover() {
+        let target = Rect {
+            x: 30_000.0,
+            y: 0.0,
+            w: 400.0,
+            h: 240.0,
+        };
+        let covered = 400.;
+        let (zoom, pan) = frame_view(target, vp(800., 600.), px(covered), WIDE_CONTENT);
+
+        let (_, _, y0, y1) = on_screen(target, zoom, pan);
+        assert!(
+            y0 >= covered && y1 <= 600.,
+            "not wholly below the cover: {y0}..{y1}"
+        );
+    }
+
     #[test]
     fn framing_holds_between_the_whole_graph_fit_and_the_zoom_cap() {
         let speck = Rect {
@@ -440,7 +499,20 @@ mod tests {
             w: 1.0,
             h: 1.0,
         };
-        assert_eq!(frame_view(speck, vp(800., 600.), WIDE_CONTENT).0, MAX_ZOOM);
+        assert_eq!(
+            frame_view(speck, vp(800., 600.), px(0.), WIDE_CONTENT).0,
+            MAX_FRAME_ZOOM
+        );
+        let leaf = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: 120.0,
+            h: 30.0,
+        };
+        assert_eq!(
+            frame_view(leaf, vp(800., 600.), px(0.), WIDE_CONTENT).0,
+            MAX_FRAME_ZOOM
+        );
 
         let whole = Rect {
             x: 0.0,
@@ -449,7 +521,7 @@ mod tests {
             h: WIDE_CONTENT.1 as f64,
         };
         let fit = fit_zoom(vp(800., 600.), WIDE_CONTENT);
-        assert!(frame_view(whole, vp(800., 600.), WIDE_CONTENT).0 >= fit);
+        assert!(frame_view(whole, vp(800., 600.), px(0.), WIDE_CONTENT).0 >= fit);
     }
 
     fn lbox(x: f64, y: f64, w: f64, h: f64) -> bviz_graph_layout::Box {

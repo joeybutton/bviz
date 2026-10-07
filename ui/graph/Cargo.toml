@@ -14,10 +14,12 @@ clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
 bviz_graph_layout = { path = "../../graph/layout" }
 bviz_invocation = { workspace = true }
+bviz_parallel = { workspace = true }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }
 bviz_ui_graph_args = { path = "args" }
 bviz_ui_playback = { path = "../playback" }
 bviz_ui_theme = { path = "../theme" }
 bviz_ui_workspace = { path = "../workspace" }
+nucleo = { workspace = true }
 rustc-hash = { workspace = true }

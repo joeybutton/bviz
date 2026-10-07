@@ -39,8 +39,13 @@ pub const KEY_CONTEXT: &str = "TextInput";
 
 /// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(bindings());
+}
+
+/// The text field's key bindings.
+pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(KEY_CONTEXT);
-    cx.bind_keys([
+    vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
@@ -56,7 +61,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
-    ]);
+    ]
 }
 
 /// What a [`TextInput`] holds changed.

@@ -15,7 +15,7 @@ use crate::{CARD_MAX_SHARE, GraphPanel, Palette, checklist, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::select::pattern::Pattern;
-use bviz_graph_layout::select::{Base, Filter, Predicate, Rule, Visibility};
+use bviz_graph_layout::select::{Base, Filter, Pin, Predicate, Rule, Visibility};
 use bviz_ui_components::{Button, QueryField, QueryFieldEvent};
 use gpui::{
     ClickEvent, Context, Div, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels,
@@ -24,8 +24,8 @@ use gpui::{
 
 actions!(bviz_graph, [DismissResults]);
 
-/// The key context the search field carries, by which the panel's own
-/// single-key bindings stand down while a pattern is being typed into it.
+/// The key context the search field carries, scoping the keys that act on the
+/// card of its results.
 pub(crate) const KEY_CONTEXT: &str = "GraphSearch";
 
 /// How many matches the result list names. It is a sample of what the pattern
@@ -373,6 +373,11 @@ pub(crate) fn acting(filter: &Filter) -> Option<Act> {
     filter.rules.iter().find_map(written)
 }
 
+/// Whether the search wrote `rule`.
+pub(crate) fn wrote(rule: &Rule) -> bool {
+    written(rule).is_some()
+}
+
 /// What `rule` does with the labels it names, where it is one the search wrote:
 /// a rule over the label term and nothing besides.
 fn written(rule: &Rule) -> Option<Act> {
@@ -469,7 +474,7 @@ fn row(
     cx: &mut Context<GraphPanel>,
 ) -> Stateful<Div> {
     let target = matched.target;
-    let kept = pins::pinned(filter, target) == Some(Visibility::Shown);
+    let kept = pins::pinned(filter, target) == Some(Pin::Set(Visibility::Shown));
     div()
         .id(("search-match", target.0 as usize))
         .flex()
