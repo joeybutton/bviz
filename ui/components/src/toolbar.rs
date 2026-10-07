@@ -6,14 +6,14 @@ use gpui::{
 /// Space the strip leaves above and below its controls.
 const PADDING: Pixels = px(4.);
 
+/// The rule drawn along the strip's foot.
+const RULE: Pixels = px(1.);
+
 /// A horizontal strip of controls acting on the content below it.
 #[derive(IntoElement, Default)]
 pub struct Toolbar {
     leading: Vec<AnyElement>,
     trailing: Vec<AnyElement>,
-    /// Holds the leading group to one row, scrolling it sideways past the
-    /// strip's width, where set; the id keeps the scroll.
-    one_row: Option<ElementId>,
 }
 
 impl Toolbar {
@@ -30,12 +30,12 @@ impl Toolbar {
         self
     }
 
-    /// Holds the strip to one row of one height, the leading group scrolling
-    /// sideways where it outgrows the strip, so that what the strip holds
-    /// never moves the content below it. `id` keeps the group's scroll.
-    pub fn one_row(mut self, id: impl Into<ElementId>) -> Self {
-        self.one_row = Some(id.into());
-        self
+    /// Holds the strip to one row. `id` keeps the leading group's scroll.
+    pub fn one_row(self, id: impl Into<ElementId>) -> OneRow {
+        OneRow {
+            strip: self,
+            scroll: id.into(),
+        }
     }
 
     /// Add to the group held against the right edge, which keeps its room
@@ -48,36 +48,74 @@ impl Toolbar {
 
 impl RenderOnce for Toolbar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let colors = bviz_ui_theme::theme(window, cx).colors;
-        div()
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap_2()
-            // Hold the strip's height in a flex column, so a growing sibling
-            // (the content it acts on) cannot squeeze the controls.
-            .flex_none()
-            .py(PADDING)
-            .px_2()
-            .bg(colors.surface)
-            .border_b_1()
-            .border_color(colors.border)
-            .child(match self.one_row {
-                Some(id) => group(self.leading)
-                    .id(id)
-                    .h(CONTROL_HEIGHT)
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .into_any_element(),
-                None => group(self.leading)
-                    .flex_wrap()
-                    .flex_1()
-                    .min_w_0()
-                    .into_any_element(),
-            })
-            .child(group(self.trailing).flex_none())
+        let leading = group(self.leading).flex_wrap().flex_1().min_w_0();
+        strip(leading, self.trailing, window, cx)
     }
+}
+
+/// A [`Toolbar`] held to one row, [`height`](Self::height) tall, its leading
+/// group scrolling sideways where it outgrows the strip, so that what the strip
+/// holds never moves the content below it.
+#[derive(IntoElement)]
+pub struct OneRow {
+    strip: Toolbar,
+    scroll: ElementId,
+}
+
+impl OneRow {
+    /// The strip's height, so a layout can reserve its room without building it.
+    pub fn height() -> Pixels {
+        CONTROL_HEIGHT + PADDING * 2. + RULE
+    }
+
+    /// As [`Toolbar::child`], the group held to one row.
+    pub fn child(mut self, child: impl IntoElement) -> Self {
+        self.strip = self.strip.child(child);
+        self
+    }
+
+    /// As [`Toolbar::trailing`].
+    pub fn trailing(mut self, child: impl IntoElement) -> Self {
+        self.strip = self.strip.trailing(child);
+        self
+    }
+}
+
+impl RenderOnce for OneRow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let leading = group(self.strip.leading)
+            .id(self.scroll)
+            .h(CONTROL_HEIGHT)
+            .flex_1()
+            .min_w_0()
+            .overflow_x_scroll();
+        strip(leading, self.strip.trailing, window, cx).h(Self::height())
+    }
+}
+
+/// The strip around its `leading` group and its `trailing` controls.
+fn strip(
+    leading: impl IntoElement,
+    trailing: Vec<AnyElement>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let colors = bviz_ui_theme::theme(window, cx).colors;
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        // Hold the strip's height in a flex column, so a growing sibling
+        // (the content it acts on) cannot squeeze the controls.
+        .flex_none()
+        .py(PADDING)
+        .px_2()
+        .bg(colors.surface)
+        .border_b(RULE)
+        .border_color(colors.border)
+        .child(leading)
+        .child(group(trailing).flex_none())
 }
 
 /// One group's controls, each row of it as tall as a control so the two groups
