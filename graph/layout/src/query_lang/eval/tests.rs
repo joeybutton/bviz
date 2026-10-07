@@ -215,6 +215,54 @@ fn attr_reads_tags_as_bazel_prints_a_list() {
     );
 }
 
+/// What `kind(rust_library, ...)` and `kind(alias, ...)` name of the
+/// dependencies of the alias `@crates//:x-1.0` in `joint`.
+fn kinds_behind_an_alias(joint: crate::joint::Joint) -> [Vec<String>; 2] {
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    [
+        query("kind(rust_library, deps(@crates//:x-1.0))"),
+        query("kind(alias, deps(@crates//:x-1.0))"),
+    ]
+}
+
+#[test]
+fn kind_matches_an_alias_as_an_alias_rule_and_not_as_its_actual() {
+    use crate::test_support::{configuration, configured};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let alias = || {
+        let mut alias =
+            crate::test_support::rule("@crates//:x-1.0", "alias", &["@crates__x//:x"], Vec::new());
+        alias.rule.as_mut().unwrap().configured_rule_input = vec![ConfiguredRuleInput {
+            label: Some("@crates__x//:x".to_string()),
+            configuration_id: Some(1),
+            ..Default::default()
+        }];
+        alias
+    };
+    let actual = || crate::test_support::rule("@crates__x//:x", "rust_library", &[], Vec::new());
+    assert_eq!(
+        kinds_behind_an_alias(build_joint(None, None, Some(&[alias(), actual()]), false)),
+        [["@crates__x//:x"], ["@crates//:x-1.0"]]
+    );
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![configured(alias(), 1), configured(actual(), 1)],
+        configurations: vec![configuration(1, "aa11", "k8-fastbuild", false)],
+    }];
+    assert_eq!(
+        kinds_behind_an_alias(build_joint(None, Some(&cquery), None, false)),
+        [
+            ["@crates__x//:x", "ct:@crates__x//:x#aa11"],
+            ["@crates//:x-1.0", "ct:@crates//:x-1.0#aa11"]
+        ]
+    );
+}
+
 #[test]
 fn a_pattern_the_regex_crate_rejects_fails_naming_the_construct() {
     let fixture = Fixture::new();
