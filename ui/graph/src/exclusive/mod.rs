@@ -898,7 +898,7 @@ impl ExclusivePanel {
             Offer::Root { node, caveat } => {
                 let label = label(node);
                 let explained = caveat.map(|caveat| caveat.explain(&label));
-                let item = MenuItem::new("Use as Root", deed(Deed::Root(label.into())));
+                let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
                 match explained {
                     Some(explained) => item.tooltip(explained),
                     None => item,
@@ -906,7 +906,7 @@ impl ExclusivePanel {
             }
             Offer::CopyLabel { node } => {
                 let label = label(node);
-                MenuItem::new("Copy Label", move |_, cx| {
+                MenuItem::new("Copy label", move |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
                 })
             }

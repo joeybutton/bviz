@@ -118,14 +118,14 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
         .collect();
     if !edges.is_empty() {
         rows.push(Row::Submenu {
-            label: "Move to Window Edge".into(),
+            label: "Move to window edge".into(),
             under: edges,
         });
     }
     rows.push(Row::Offer(Offer::NewWindow));
     if !windows.is_empty() {
         rows.push(Row::Submenu {
-            label: "Move to Window".into(),
+            label: "Move to window".into(),
             under: windows
                 .iter()
                 .map(|(window, title)| Under {
@@ -358,7 +358,7 @@ mod tests {
                 "Split(Right)",
                 "Split(Top)",
                 "Split(Bottom)",
-                "Move to Window Edge",
+                "Move to window edge",
                 "  Left",
                 "  Right",
                 "  Top",
@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(
             labels(&offers(&split(), 'a', true)),
             [
-                "Move to Window Edge",
+                "Move to window edge",
                 "  Right",
                 "  Top",
                 "  Bottom",
@@ -403,7 +403,7 @@ mod tests {
                 "Split(Right)",
                 "Split(Top)",
                 "Split(Bottom)",
-                "Move to Window Edge",
+                "Move to window edge",
                 "  Left",
                 "  Right",
                 "  Top",
@@ -487,7 +487,7 @@ mod tests {
             labels(&offered(&standing, &windows(["1. b.profile.gz"]))),
             [
                 "NewWindow",
-                "Move to Window",
+                "Move to window",
                 "  1. b.profile.gz",
                 "KeysHelp",
                 "Close",
@@ -507,7 +507,7 @@ mod tests {
         let arrangement = Arrangement::new(Layout::Pane('a'));
         let standing = standing(&arrangement, &'a', true);
         let offered = offered(&standing, &windows(["second", "third", "fourth"]));
-        let listed = under(&offered, "Move to Window");
+        let listed = under(&offered, "Move to window");
         let named: Vec<&Place<Window>> = listed.iter().map(|under| &under.place).collect();
         assert_eq!(
             named,
