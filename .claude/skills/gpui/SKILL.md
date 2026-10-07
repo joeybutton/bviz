@@ -679,13 +679,25 @@ lays a graph out reaches its first frame almost at once and the view many second
 Size it from the app's own measured load time with room to spare, and confirm the
 capture shows the view rather than a spinner before drawing any conclusion from it.
 
+**Driving input.** `cage` delivers no injected input. `screenshot-input.sh` runs the app in
+headless `sway` instead, with a virtual pointer and `wtype`'s virtual keyboard, and sources a
+steps file that moves, clicks, scrolls, types and captures (its header lists the commands):
+
+```
+.claude/skills/gpui/screenshot-input.sh <steps-file> <app-binary> [args...]
+```
+
+It holds one `wtype` keyboard on the seat for the whole run, which is what lets the keys of
+each later `wtype` call reach the app. Click into the window before a modified key or wheel,
+so the window holds keyboard focus (see the wheel-modifier note under Scrolling).
+
 **A capture proves the frame, not the behaviour.** Bit-identical PNGs across a refactor are
 strong evidence that nothing moved — build the binary before and after, capture both, and
 compare with `sha256sum`; that is the cheapest proof a "no visible change" claim can have.
-But they say nothing about state that only a gesture reaches. `cage` cannot inject input,
-so for a behavioural claim (a position surviving a reflow, a selection surviving a rebuild)
-drive the sequence programmatically with the *same* throwaway instrumentation on both
-revisions, and take **three** captures — control, old-revision cycle, new-revision cycle —
+But they say nothing about state that only a gesture reaches. For a behavioural claim (a
+position surviving a reflow, a selection surviving a rebuild) drive the same sequence on both
+revisions, through `screenshot-input.sh` or the *same* throwaway instrumentation, and take
+**three** captures — control, old-revision cycle, new-revision cycle —
 so the result distinguishes "fixed" from merely "different". `references/scroll-model.md`
 has the full method, including which region to diff and how to pick a perturbation that
 actually moves the bound.
