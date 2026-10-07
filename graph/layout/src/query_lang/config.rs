@@ -1,14 +1,16 @@
 //! `config()`, which names the targets of a value as built in one
 //! configuration, as cquery's `ConfiguredTargetQueryEnvironment` names them.
 //!
-//! `target` names the configurations Bazel builds its top-level targets in,
-//! which neither cquery's proto nor aquery's marks. They are taken to be the
-//! configurations, other than a tool's, of the configured targets nothing in
-//! the graph depends on by a cquery edge: a configured target some other one
-//! depends on, or whose target another depends on by label, is reached
-//! through that dependent and is not top-level. A graph holding no cquery
-//! edges, as an aquery's holds none, makes every configured target top-level,
-//! and a top-level target that is also a dependency of another is missed.
+//! Which targets are top-level, which `target` turns on, neither cquery's
+//! proto nor aquery's marks. They are taken to be the configured targets, outside a
+//! tool configuration, that nothing in the graph depends on by a cquery edge,
+//! neither as configured targets nor by label. A graph holding no cquery
+//! edges, as an aquery's holds none, makes every configured target top-level.
+//! A top-level target that another top-level target also depends on is
+//! indistinguishable from a dependency, so where a transition builds it in a
+//! configuration of its own, `target` misses that configured target; only the
+//! Build Event Protocol of the same invocation names the top-level targets, by
+//! its `TargetConfigured` and `TargetCompleted` event ids.
 
 use fixedbitset::FixedBitSet;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -22,9 +24,16 @@ use crate::intern::Id;
 pub(super) struct Configurations {
     /// Each configuration's checksum, and what it builds, sorted by checksum.
     checksums: Vec<(Box<str>, Role)>,
-    /// The configuration of each configured target, by its position in
-    /// `checksums`.
-    built_in: FxHashMap<Id, u32>,
+    built_in: FxHashMap<Id, Built>,
+}
+
+/// How a configured target is built.
+#[derive(Clone, Copy)]
+struct Built {
+    /// Its configuration's position in [`Configurations::checksums`].
+    configuration: u32,
+    /// Whether it is taken for a top-level target.
+    top_level: bool,
 }
 
 impl Configurations {
@@ -44,7 +53,10 @@ impl Configurations {
             .filter(|edge| edge.kind == EdgeKind::Cquery)
             .map(|edge| edge.from)
             .collect();
-        let mut built_in = FxHashMap::default();
+        let configured = (graph.nodes.iter())
+            .filter(|node| node.kind == Kind::ConfiguredTarget)
+            .count();
+        let mut built_in = FxHashMap::with_capacity_and_hasher(configured, Default::default());
         for node in &graph.nodes {
             if node.kind != Kind::ConfiguredTarget {
                 continue;
@@ -56,9 +68,15 @@ impl Configurations {
             let Ok(at) = checksums.binary_search_by(|(held, _)| (**held).cmp(checksum)) else {
                 continue;
             };
-            built_in.insert(node.id, at as u32);
             let top_level = !depended.contains(&node.id)
                 && node.parent.is_none_or(|target| !depended.contains(&target));
+            built_in.insert(
+                node.id,
+                Built {
+                    configuration: at as u32,
+                    top_level,
+                },
+            );
             if top_level && checksums[at].1 == Role::Dependency {
                 checksums[at].1 = Role::TopLevel;
             }
@@ -89,7 +107,9 @@ enum Role {
 /// The configuration `config()`'s second argument names.
 #[derive(Clone, Copy)]
 enum Wanted {
-    /// A configuration of [`Role::TopLevel`].
+    /// A top-level target's own configuration, and for any other target the
+    /// first configuration of [`Role::TopLevel`] by checksum building it, as
+    /// `getTargetConfiguredTarget` picks it.
     Target,
     /// No configuration, which is a source file's or a package group's.
     Null,
@@ -213,6 +233,7 @@ impl Universe {
             let held = self.index.children(target);
             held.filter_map(|child| Some((child, *configurations.built_in.get(&child)?)))
         };
+        let role = |built: Built| configurations.checksums[built.configuration as usize].1;
         match wanted {
             Wanted::Null => {
                 if matches!(
@@ -222,21 +243,23 @@ impl Universe {
                     named.insert(target.0 as usize);
                 }
             }
-            Wanted::Target => named.extend(
-                configured()
-                    .filter(|&(_, at)| configurations.checksums[at as usize].1 == Role::TopLevel)
-                    .map(|(child, _)| child.0 as usize),
-            ),
+            Wanted::Target => {
+                let top_level = configured().filter(|&(_, built)| role(built) == Role::TopLevel);
+                let first =
+                    top_level.min_by_key(|&(_, built)| (!built.top_level, built.configuration));
+                if let Some((child, _)) = first {
+                    named.insert(child.0 as usize);
+                }
+            }
             Wanted::AnyExec => {
-                let tools = configured()
-                    .filter(|&(_, at)| configurations.checksums[at as usize].1 == Role::Tool);
-                if let Some((child, _)) = tools.min_by_key(|&(_, at)| at) {
+                let tools = configured().filter(|&(_, built)| role(built) == Role::Tool);
+                if let Some((child, _)) = tools.min_by_key(|&(_, built)| built.configuration) {
                     named.insert(child.0 as usize);
                 }
             }
             Wanted::Checksum(wanted) => named.extend(
                 configured()
-                    .filter(|&(_, at)| at == wanted)
+                    .filter(|&(_, built)| built.configuration == wanted)
                     .map(|(child, _)| child.0 as usize),
             ),
         }

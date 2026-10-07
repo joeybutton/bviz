@@ -367,6 +367,65 @@ fn config_target_leaves_out_a_configuration_only_a_dependency_is_built_in() {
     );
 }
 
+/// A cquery under `--transitions` of `//c:t`, built in configuration `aa11`,
+/// and `//c:app`, built in `bb22`, each depending on `//c:lib` in its own
+/// configuration, and `//c:t` also on `//c:app` in `aa11`.
+fn two_top_level_configurations() -> (Universe, Names) {
+    use crate::test_support::{configuration, configured, rule};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let depending = |name: &str, deps: &[(&str, u32)]| {
+        let labels: Vec<&str> = deps.iter().map(|&(label, _)| label).collect();
+        let mut target = rule(name, "genrule", &labels, Vec::new());
+        target.rule.as_mut().unwrap().configured_rule_input = (deps.iter())
+            .map(|&(label, config)| ConfiguredRuleInput {
+                label: Some(label.to_string()),
+                configuration_id: Some(config),
+                ..Default::default()
+            })
+            .collect();
+        target
+    };
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(depending("//c:t", &[("//c:lib", 1), ("//c:app", 1)]), 1),
+            configured(depending("//c:app", &[("//c:lib", 1)]), 1),
+            configured(depending("//c:app", &[("//c:lib", 2)]), 2),
+            configured(depending("//c:lib", &[]), 1),
+            configured(depending("//c:lib", &[]), 2),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "aarch64-fastbuild", false),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn config_target_takes_a_dependency_in_the_first_top_level_configuration() {
+    let (universe, names) = two_top_level_configurations();
+    assert_eq!(
+        configured_query(&universe, &names, "config(//c:lib, target)").unwrap(),
+        ["ct://c:lib#aa11"]
+    );
+}
+
+#[test]
+fn config_target_takes_a_top_level_target_in_its_own_configuration() {
+    let (universe, names) = two_top_level_configurations();
+    assert_eq!(
+        configured_query(&universe, &names, "config(//c:app, target)").unwrap(),
+        ["ct://c:app#bb22"]
+    );
+}
+
 #[test]
 fn config_anyexec_takes_the_first_tool_configuration_by_checksum() {
     let (universe, names) = configured(true);
