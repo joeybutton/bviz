@@ -497,12 +497,13 @@ pub(crate) fn canvas_body(
             order_fence(bounds, window);
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
+            let mut courses = Courses::default();
             for c in &g.connectors {
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let filtered = scene.edge_strength(c.from, c.to);
                     let alpha = marks.connector_alpha(marked, filtered, edges, camera.zoom);
-                    ink_lanes(c, marked, alpha, bounds, camera, &mut ink);
+                    ink_lanes(c, marked, alpha, bounds, camera, &mut courses, &mut ink);
                     connectors += 1;
                     if let Some(transition) = c.transition {
                         badges.push((c, transition, marks.badge_alpha(marked, filtered, edges)));
@@ -1017,6 +1018,14 @@ impl<'a> PaintBox<'a> {
     }
 }
 
+/// The screen polylines of the connector being inked and of the lane being
+/// drawn off it, which every connector of a frame reuses.
+#[derive(Default)]
+struct Courses {
+    route: Vec<(f32, f32)>,
+    lane: Vec<(f32, f32)>,
+}
+
 /// Inks a connector's provenances as evenly spaced parallel lanes centered on
 /// its route, `marked` where a marking has picked the connector out.
 fn ink_lanes(
@@ -1025,27 +1034,26 @@ fn ink_lanes(
     alpha: f32,
     bounds: Bounds<Pixels>,
     camera: Camera,
+    courses: &mut Courses,
     ink: &mut ConnectorInk,
 ) {
     let z = camera.zoom;
-    let screen: Vec<(f32, f32)> = c
-        .points
-        .iter()
-        .map(|(x, y)| {
-            let s = to_screen(*x, *y, bounds, camera);
-            (f32::from(s.x), f32::from(s.y))
-        })
-        .collect();
+    let Courses { route, lane } = courses;
+    route.clear();
+    route.extend(c.points.iter().map(|(x, y)| {
+        let s = to_screen(*x, *y, bounds, camera);
+        (f32::from(s.x), f32::from(s.y))
+    }));
     let n = c.kinds.len() as f32;
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
-        let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
+        let course = lane_polyline(route, slot * PARALLEL_SPACING * z, lane);
         let style = Ink {
             kind: *kind,
             marked,
             alpha,
         };
-        ink.add_lane(&lane, style);
+        ink.add_lane(course, style);
     }
 }
 
@@ -1791,10 +1799,15 @@ fn paint_caret(
 /// Every vertex is pushed off its segments' normals — the endpoints perpendicular
 /// to their one segment, the interior mitered at the corners — so a lane stays
 /// parallel to the route along its whole length and meets each node offset
-/// alongside its siblings rather than converging to a single point.
-pub(crate) fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
+/// alongside its siblings rather than converging to a single point. An offset
+/// lane is laid out in `out`.
+pub(crate) fn lane_polyline<'a>(
+    pts: &'a [(f32, f32)],
+    d: f32,
+    out: &'a mut Vec<(f32, f32)>,
+) -> &'a [(f32, f32)] {
     if d == 0.0 || pts.len() < 2 {
-        return pts.to_vec();
+        return pts;
     }
     let left_normal = |from: (f32, f32), to: (f32, f32)| {
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1802,7 +1815,8 @@ pub(crate) fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
         (-dy / l, dx / l)
     };
     let n = pts.len();
-    let mut out = Vec::with_capacity(n);
+    out.clear();
+    out.reserve(n);
     let ns = left_normal(pts[0], pts[1]);
     out.push((pts[0].0 + ns.0 * d, pts[0].1 + ns.1 * d));
     for i in 1..n - 1 {

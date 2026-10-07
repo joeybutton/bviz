@@ -1672,7 +1672,8 @@ mod tests {
     #[test]
     fn lane_polyline_offsets_every_vertex_in_parallel() {
         // An L route: right to (100,0), then down to (100,100).
-        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0);
+        let mut out = Vec::new();
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0, &mut out);
         // Endpoints are pushed perpendicular too (not anchored), so the first and
         // last segments stay parallel to the route and meet the node offset.
         assert!(
@@ -1700,14 +1701,14 @@ mod tests {
     #[test]
     fn lane_polyline_zero_offset_is_identity() {
         let route = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
-        assert_eq!(lane_polyline(&route, 0.0), route);
+        assert_eq!(lane_polyline(&route, 0.0, &mut Vec::new()), route);
     }
 
     #[test]
     fn lane_polyline_opposite_signs_nest_on_opposite_sides() {
         let route = vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
-        let plus = lane_polyline(&route, 4.0)[1];
-        let minus = lane_polyline(&route, -4.0)[1];
+        let plus = lane_polyline(&route, 4.0, &mut Vec::new())[1];
+        let minus = lane_polyline(&route, -4.0, &mut Vec::new())[1];
         // The two lanes never cross: their corners fall on opposite sides.
         assert_ne!(plus.1.signum(), minus.1.signum(), "{plus:?} {minus:?}");
     }
@@ -1715,7 +1716,8 @@ mod tests {
     #[test]
     fn lane_polyline_parallel_shifts_a_straight_run() {
         // A straight two-point edge shifts whole, both ends offset perpendicular.
-        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0);
+        let mut out = Vec::new();
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0, &mut out);
         assert_eq!(lane.len(), 2);
         assert!(
             (lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5,
