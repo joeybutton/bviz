@@ -21,7 +21,8 @@ use crate::intern::{Id, Names};
 
 /// Returns a graph in which interchangeable `source`/`artifact` leaves are
 /// merged, together with the box each input node became: a collapsed group's
-/// members map to the group id, everything else is absent (it kept its own id).
+/// members map to the group id and a source or artifact merged with none to
+/// its own id; every other node is absent (it kept its own id).
 /// Projecting another edge set over the same nodes through this map lands it on
 /// the same boxes, which a caller uses to draw a reduced edge subset.
 ///
