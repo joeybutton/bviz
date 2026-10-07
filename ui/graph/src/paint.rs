@@ -3,7 +3,7 @@ use crate::colour::Colouring;
 use crate::critical::CriticalNodes;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
-use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::neighborhood::Neighborhood;
 use crate::pan_bench::{self, Phase, Tally};
 use crate::playback::{NodeState, NodeStates, Running, Stage};
 use crate::relation::{Direction, Relation};
@@ -355,7 +355,7 @@ impl Scene {
 /// out is drawn marked, so a selection holds its marks under a hover passing
 /// over another part of the graph.
 struct Marks {
-    hover: Neighborhood,
+    hover: Rc<Neighborhood>,
     selection: Rc<Neighborhood>,
 }
 
@@ -441,15 +441,15 @@ pub(crate) fn canvas_body(
             return;
         };
         let visible = visible_rect(bounds, camera);
-        // A hover is gone the moment the pointer moves, so its marking is derived
-        // afresh; a selection outlives the frames that draw it, so it holds its
-        // own and hands out a share in it.
-        let marks = Marks {
-            hover: compute_neighborhood(g, scene.hovered, Relation::Direct(Direction::Both)),
-            selection: entity.update(cx, |view, _| {
-                view.selection.marking(&scene.drawn, camera.zoom)
-            }),
-        };
+        let marks = entity.update(cx, |view, _| Marks {
+            hover: view.hover_marking.marking(
+                &scene.drawn,
+                camera.zoom,
+                scene.hovered,
+                Relation::Direct(Direction::Both),
+            ),
+            selection: view.selection.marking(&scene.drawn, camera.zoom),
+        });
         let Some(loaded) = entity.read(cx).model.read(cx).loaded() else {
             return;
         };
@@ -3865,7 +3865,7 @@ mod colors {
     #[test]
     fn a_selection_stands_a_connector_off_the_graph_by_as_much_at_every_zoom() {
         let marks = Marks {
-            hover: Neighborhood::none(),
+            hover: Rc::new(Neighborhood::none()),
             selection: Rc::new(Neighborhood {
                 boxes: HashSet::from([Id(0)]),
                 edges: HashSet::new(),
@@ -3885,7 +3885,7 @@ mod colors {
     #[test]
     fn a_morph_takes_its_routes_all_the_way_out_at_every_zoom() {
         let marks = Marks {
-            hover: Neighborhood::none(),
+            hover: Rc::new(Neighborhood::none()),
             selection: Rc::new(Neighborhood::none()),
         };
         for zoom in STROKE_ZOOMS {

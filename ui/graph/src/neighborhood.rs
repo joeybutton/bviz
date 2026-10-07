@@ -57,7 +57,7 @@ impl MarkingMemo {
                 view,
                 of,
                 relation,
-                neighborhood: Rc::new(compute_neighborhood(g, Some(of), relation)),
+                neighborhood: Rc::new(compute_neighborhood(g, of, relation)),
             },
         };
         Rc::clone(&self.0.insert(memoised).neighborhood)
@@ -67,14 +67,7 @@ impl MarkingMemo {
 /// What marking `of` under `relation` picks out. Its subtree is derived
 /// geometrically, the layout nesting a box's children within its own rect, so the
 /// boxes falling inside it are exactly its descendants.
-pub(crate) fn compute_neighborhood(
-    g: &LaidOut,
-    of: Option<Id>,
-    relation: Relation,
-) -> Neighborhood {
-    let Some(of) = of else {
-        return Neighborhood::none();
-    };
+fn compute_neighborhood(g: &LaidOut, of: Id, relation: Relation) -> Neighborhood {
     let Some(h) = g.boxes.iter().find(|b| b.id == of) else {
         return Neighborhood::none();
     };
@@ -352,7 +345,7 @@ mod tests {
 
     /// What hovering `id` marks.
     fn hover(g: &LaidOut, id: u32) -> Neighborhood {
-        compute_neighborhood(g, Some(Id(id)), Relation::Direct(Direction::Both))
+        compute_neighborhood(g, Id(id), Relation::Direct(Direction::Both))
     }
 
     fn ids(of: &[u32]) -> HashSet<Id> {
@@ -449,13 +442,6 @@ mod tests {
         assert!(n.edges.is_empty());
     }
 
-    #[test]
-    fn no_hover_marks_nothing() {
-        let n = compute_neighborhood(&reduced_chain(2), None, Relation::Direct(Direction::Both));
-        assert!(n.boxes.is_empty());
-        assert!(n.edges.is_empty());
-    }
-
     /// A row of leaves the middle one has an input and an output in, so a
     /// directed marking from it takes one and leaves the other.
     fn one_in_one_out() -> LaidOut {
@@ -468,7 +454,7 @@ mod tests {
 
     #[test]
     fn marking_no_relation_marks_the_selected_node_alone() {
-        let n = compute_neighborhood(&one_in_one_out(), Some(Id(1)), Relation::None);
+        let n = compute_neighborhood(&one_in_one_out(), Id(1), Relation::None);
         assert_eq!(n.boxes, ids(&[1]));
         assert!(n.edges.is_empty());
     }
@@ -476,10 +462,10 @@ mod tests {
     #[test]
     fn a_direct_marking_takes_only_the_direction_it_runs_in() {
         let g = one_in_one_out();
-        let inputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::In));
+        let inputs = compute_neighborhood(&g, Id(1), Relation::Direct(Direction::In));
         assert_eq!(inputs.boxes, ids(&[0, 1]));
         assert_eq!(inputs.edges, pairs(&[(0, 1)]));
-        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::Out));
+        let outputs = compute_neighborhood(&g, Id(1), Relation::Direct(Direction::Out));
         assert_eq!(outputs.boxes, ids(&[1, 2]));
         assert_eq!(outputs.edges, pairs(&[(1, 2)]));
     }
@@ -492,7 +478,7 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3)],
             &[(0, 1), (1, 2), (2, 3)],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        let n = compute_neighborhood(&g, Id(0), Relation::Direct(Direction::Out));
         assert_eq!(n.boxes, ids(&[0, 1]));
         assert_eq!(n.edges, pairs(&[(0, 1)]));
     }
@@ -504,13 +490,13 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3)],
             &[(0, 1), (1, 2), (2, 3)],
         );
-        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Out));
+        let outputs = compute_neighborhood(&g, Id(1), Relation::Transitive(Direction::Out));
         assert_eq!(outputs.boxes, ids(&[1, 2, 3]));
         assert_eq!(outputs.edges, pairs(&[(1, 2), (2, 3)]));
-        let inputs = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::In));
+        let inputs = compute_neighborhood(&g, Id(2), Relation::Transitive(Direction::In));
         assert_eq!(inputs.boxes, ids(&[0, 1, 2]));
         assert_eq!(inputs.edges, pairs(&[(0, 1), (1, 2)]));
-        let both = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Both));
+        let both = compute_neighborhood(&g, Id(1), Relation::Transitive(Direction::Both));
         assert_eq!(both.boxes, ids(&[0, 1, 2, 3]));
         assert_eq!(both.edges, pairs(&[(0, 1), (1, 2), (2, 3)]));
     }
@@ -524,7 +510,7 @@ mod tests {
             &[(0, 1), (0, 2), (2, 3)],
             &[(0, 1), (0, 2), (2, 3)],
         );
-        let n = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::Out));
+        let n = compute_neighborhood(&g, Id(2), Relation::Transitive(Direction::Out));
         assert_eq!(n.boxes, ids(&[2, 3]));
         assert_eq!(n.edges, pairs(&[(2, 3)]));
     }
@@ -535,7 +521,7 @@ mod tests {
     fn a_transitive_marking_needs_no_path_traced_to_a_reduced_neighbor() {
         let n = compute_neighborhood(
             &reduced_chain(3),
-            Some(Id(0)),
+            Id(0),
             Relation::Transitive(Direction::Out),
         );
         assert_eq!(n.boxes, ids(&[0, 1, 2, 3]));
@@ -557,7 +543,7 @@ mod tests {
             &[(1, 2), (3, 1), (2, 4)],
             &[(1, 2), (3, 1), (2, 4)],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        let n = compute_neighborhood(&g, Id(0), Relation::Direct(Direction::Out));
         assert_eq!(n.boxes, ids(&[0, 1, 2, 4]));
         assert_eq!(n.edges, pairs(&[(1, 2), (2, 4)]));
     }

@@ -86,6 +86,7 @@ use legend::Legend;
 use mode::LayoutMode;
 use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
+use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
 pub use scatter::ScatterPanel;
@@ -335,6 +336,7 @@ pub struct GraphPanel {
     _reveal_requested: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
+    hover_marking: MarkingMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
     /// set by a secondary click and offered by the toolbar's relation picker.
     selection: Selection,
@@ -559,6 +561,7 @@ impl GraphPanel {
             _map_placed: map_placed,
             _reveal_requested: reveal_requested,
             hovered: None,
+            hover_marking: MarkingMemo::default(),
             selection,
             relation_picker,
             _relation_choices: relations,
