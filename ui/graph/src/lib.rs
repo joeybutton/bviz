@@ -166,6 +166,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
+        KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
@@ -1383,6 +1384,26 @@ mod tests {
             dispatched("alt-right", exclusive),
             exclusive::FocusForward
         ));
+    }
+
+    /// The exclusive-deps panel's roots field is reached by the keys reaching
+    /// the graph's query bar and finder, and `q` is text inside it.
+    #[test]
+    fn the_roots_field_is_reached_by_q_and_the_find_keys() {
+        const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
+        const IN_ROOTS: &[&str] = &[
+            exclusive::KEY_CONTEXT.id(),
+            exclusive::ROOTS_KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        for keys in ["q", "secondary-f", "/"] {
+            assert!(
+                is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
+                "{keys}"
+            );
+        }
+        assert!(dispatched("q", IN_ROOTS).is_none());
+        assert!(dispatched("/", IN_ROOTS).is_none());
     }
 
     const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT];
