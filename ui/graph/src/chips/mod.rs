@@ -18,6 +18,7 @@ use bviz_graph_layout::query_lang::{
     ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
 };
 use bviz_graph_layout::select::{Filter, Scope};
+use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
     Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
     load_in_background, text_input,
@@ -794,6 +795,11 @@ pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElemen
 /// anywhere in the panel.
 pub(crate) fn apply_staged(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     commit(view, cx);
+}
+
+/// The gestures the bar answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    pill::GESTURES.rows()
 }
 
 /// The bar: the chips, the field, and what applies them.

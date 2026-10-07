@@ -900,7 +900,7 @@ impl Panel for GraphPanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().collect()
+        GESTURES.rows().chain(chips::gestures()).collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
