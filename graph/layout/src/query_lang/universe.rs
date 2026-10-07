@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap;
 use super::config::Configurations;
 use super::declared::Declared;
 use super::narrow::Patterns;
+use super::stack::Value;
 use crate::capability::{Axis, Capabilities, Support};
 use crate::facets::Facets;
 use crate::graph::{Graph, Kind, id_span};
@@ -136,15 +137,16 @@ impl Universe {
     }
 
     /// A filter's scope over `value`, which `query` named.
-    pub fn scope(&self, query: impl Into<Arc<str>>, value: &FixedBitSet) -> Scope {
+    pub fn scope(&self, query: impl Into<Arc<str>>, value: &Value) -> Scope {
         Scope::new(query.into(), self.scope_nodes(value))
     }
 
-    /// What a scope over `value` holds: each node of `value` with every node
+    /// What a scope over `value` holds: each node of its set with every node
     /// it holds, and the files each action among those writes, which the graph
-    /// holds beside the action in its configured target.
-    pub(super) fn scope_nodes(&self, value: &FixedBitSet) -> FixedBitSet {
-        self.closure(value, true)
+    /// holds beside the action in its configured target; but for what `value`
+    /// denies.
+    pub(super) fn scope_nodes(&self, value: &Value) -> FixedBitSet {
+        self.closure(&value.set, true, |id| !value.denied.contains(id))
     }
 
     /// `value` with every node its members hold, at any depth: what each
@@ -154,12 +156,18 @@ impl Universe {
     /// keeping it takes or keeps its configured targets, their actions and the
     /// files those hold.
     pub(super) fn with_held(&self, value: &FixedBitSet) -> FixedBitSet {
-        self.closure(value, false)
+        self.closure(value, false, |_| true)
     }
 
-    /// `value` with every node its members hold, and, where `writes`, the
-    /// files each action reached writes along with what those hold.
-    fn closure(&self, value: &FixedBitSet, writes: bool) -> FixedBitSet {
+    /// `value` with every node `admits` that its members hold, and, where
+    /// `writes`, the files each action reached writes along with what those
+    /// hold.
+    fn closure(
+        &self,
+        value: &FixedBitSet,
+        writes: bool,
+        admits: impl Fn(usize) -> bool,
+    ) -> FixedBitSet {
         let mut closure = value.clone();
         let mut open: Vec<Id> = Vec::with_capacity(value.count_ones(..));
         open.extend(value.ones().map(|id| Id(id as u32)));
@@ -170,7 +178,8 @@ impl Universe {
                 .flatten()
                 .filter(|&file| self.index.kind(file) == Some(Kind::Artifact));
             for reached in self.index.children(id).chain(written) {
-                if !closure.put(reached.0 as usize) {
+                let at = reached.0 as usize;
+                if admits(at) && !closure.put(at) {
                     open.push(reached);
                 }
             }

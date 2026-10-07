@@ -4,6 +4,7 @@ use bazel_query_proto::blaze_query::Target;
 use fixedbitset::FixedBitSet;
 
 use super::super::parse;
+use super::super::stack::{Prefixes, Stack, Value};
 use super::*;
 use crate::capability::Axis;
 use crate::facets::{FacetsBuilder, Tri};
@@ -722,12 +723,20 @@ fn an_aquery_filter_keeps_the_actions_matching_in_full() {
 
 /// A scope over an action holds the files it writes, which stand beside it in
 /// its configured target, and a scope over a target holds all it holds.
+/// What a scope over `set` holds where no chip denies anything.
+fn undenied_scope(universe: &Universe, set: FixedBitSet) -> FixedBitSet {
+    universe.scope_nodes(&Value {
+        set: Arc::new(set),
+        denied: Arc::new(universe.empty()),
+    })
+}
+
 #[test]
 fn a_scope_holds_what_a_node_holds_and_what_an_action_writes() {
     let (universe, names) = actions();
     let scope = |expr: &str| {
         let value = universe.evaluate(&parse(expr).unwrap()).unwrap();
-        labels(&names, &universe.scope_nodes(&value))
+        labels(&names, &undenied_scope(&universe, value))
     };
     let genrule = scope("mnemonic(Genrule, //p:gen)");
     assert_eq!(genrule.len(), 3, "{genrule:?}");
@@ -1675,10 +1684,15 @@ fn rule_category_keeps_what_a_matching_rule_holds() {
     assert!(query("rule_category(test, //c:lib)").is_empty());
 }
 
-#[test]
-fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
+/// The output path of `name` in `//p`.
+fn out(name: &str) -> String {
+    format!("bazel-out/k8-fastbuild/bin/p/{name}")
+}
+
+/// An aquery of `//p:bin`, whose CppLink action links `bin` and whose
+/// SourceSymlinkManifest and SymlinkTree actions wire its runfiles.
+fn runfiles() -> (Universe, Names) {
     use crate::test_support::{ActionSpec, action_graph};
-    let out = |name: &str| format!("bazel-out/k8-fastbuild/bin/p/{name}");
     let (binary, manifest, tree) = (
         out("bin"),
         out("bin.runfiles_manifest"),
@@ -1711,7 +1725,14 @@ fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
         &Arc::new(joint.facets),
         &joint.capabilities,
     );
-    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    (universe, joint.names)
+}
+
+#[test]
+fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
+    let (universe, names) = runfiles();
+    let (manifest, tree) = (out("bin.runfiles_manifest"), out("bin.runfiles"));
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
     let plumbing = [format!("action:{tree}"), format!("action:{manifest}")];
     assert_eq!(query("runfiles_plumbing(//p:bin)"), plumbing);
     assert_eq!(
@@ -1805,4 +1826,133 @@ fn tool_configured_needs_every_configured_targets_configuration() {
         "tool_configured() needs the configuration each configured target is built in, which \
          the graph's inputs do not state for every one"
     );
+}
+
+/// What the stack of `chips` scopes `universe` to, the chips at `negated`
+/// negated and those at `disabled` disabled.
+fn scoped(
+    (universe, names): &(Universe, Names),
+    chips: &[&str],
+    negated: &[usize],
+    disabled: &[usize],
+) -> Vec<String> {
+    let mut stack = Stack::default();
+    let ids: Vec<_> = chips.iter().map(|chip| stack.push(chip)).collect();
+    negated.iter().for_each(|&at| stack.toggle_negated(ids[at]));
+    disabled
+        .iter()
+        .for_each(|&at| stack.toggle_enabled(ids[at]));
+    let evaluation = stack.evaluate(universe, &Prefixes::default());
+    let value = evaluation.value.expect("a stack naming a set");
+    labels(names, &universe.scope_nodes(&value))
+}
+
+#[test]
+fn a_chip_taking_out_the_tool_configurations_leaves_them_undrawn() {
+    let tools = tools(true);
+    let everything = scoped(&tools, &["//..."], &[], &[]);
+    assert_eq!(
+        everything,
+        [
+            "//t:gen",
+            "act:exec",
+            "act:target",
+            "ct:exec",
+            "ct:target",
+            "out:exec",
+            "out:target"
+        ]
+    );
+    let built = ["//t:gen", "act:target", "ct:target", "out:target"];
+    assert_eq!(
+        scoped(&tools, &["//...", "tool_configured()"], &[1], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "except tool_configured()"], &[], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "- tool_configured()"], &[], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(
+            &tools,
+            &[
+                "//...",
+                "$_ - mnemonic(NoSuch, $_) except tool_configured($_)"
+            ],
+            &[],
+            &[]
+        ),
+        built,
+        "a run of except and - is one operator"
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "except tool_configured()"], &[], &[1]),
+        everything,
+        "a disabled chip denies nothing"
+    );
+}
+
+/// A chip adding a target back adds it and its configured targets, which a
+/// pattern names, and each of those stands for what it holds, so the scope
+/// draws what a chip below took out of them.
+#[test]
+fn a_node_added_back_draws_what_it_holds_that_a_chip_below_took_out() {
+    let tools = tools(true);
+    assert_eq!(
+        scoped(
+            &tools,
+            &["//...", "except tool_configured()", "+ //t:gen"],
+            &[],
+            &[]
+        ),
+        scoped(&tools, &["//..."], &[], &[])
+    );
+}
+
+/// An `except` within a chip's expression narrows its value alone, so the
+/// scope draws what the nodes it keeps hold.
+#[test]
+fn an_except_within_a_chip_denies_nothing() {
+    let tools = tools(true);
+    let drawn = scoped(
+        &tools,
+        &["//...", "deps($_ except tool_configured($_))"],
+        &[],
+        &[],
+    );
+    assert!(drawn.contains(&"act:exec".to_string()), "{drawn:?}");
+    let drawn = scoped(
+        &tools,
+        &["//...", "$_ except tool_configured($_) + //t:gen"],
+        &[],
+        &[],
+    );
+    assert!(drawn.contains(&"act:exec".to_string()), "{drawn:?}");
+}
+
+#[test]
+fn a_chip_taking_out_runfiles_plumbing_leaves_its_actions_undrawn() {
+    let runfiles = runfiles();
+    let drawn = scoped(
+        &runfiles,
+        &["//p:bin", "except runfiles_plumbing()"],
+        &[],
+        &[],
+    );
+    let actions: Vec<&String> = drawn.iter().filter(|n| n.starts_with("action:")).collect();
+    assert_eq!(actions, [&format!("action:{}", out("bin"))]);
+}
+
+#[test]
+fn a_chip_taking_out_every_mnemonic_leaves_no_action_drawn() {
+    let runfiles = runfiles();
+    let all = scoped(&runfiles, &["//p:bin"], &[], &[]);
+    assert_eq!(all.iter().filter(|n| n.starts_with("action:")).count(), 3);
+    let drawn = scoped(&runfiles, &["//p:bin", "except mnemonic('.*')"], &[], &[]);
+    assert!(!drawn.iter().any(|n| n.starts_with("action:")), "{drawn:?}");
+    assert!(drawn.iter().any(|n| n.starts_with("artifact")), "{drawn:?}");
 }

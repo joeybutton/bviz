@@ -29,7 +29,7 @@ pub use narrow::RUNFILES_MNEMONICS;
 pub use parse::parse;
 pub use stack::{
     BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,
-    Prefixes, Stack, Unportable,
+    Prefixes, Stack, Unportable, Value,
 };
 pub use universe::{Counts, Universe};
 

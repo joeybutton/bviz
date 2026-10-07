@@ -44,7 +44,7 @@ impl Fixture {
         let evaluation = stack.evaluate(&self.universe, &Prefixes::default());
         let value = evaluation.value.expect("a stack naming a set");
         let name = |id: usize| self.names.resolve(Id(id as u32));
-        let mut labels: Vec<String> = (value.ones())
+        let mut labels: Vec<String> = (value.set.ones())
             .map(|id| name(id).trim_start_matches("target:").to_string())
             .collect();
         labels.sort();
@@ -411,6 +411,18 @@ fn chained_aquery_filters_filter_as_their_bazel_query_does() {
             Command::Aquery,
             "inputs('.*java', inputs('.*foo.*', //p:all))"
         )
+    );
+}
+
+/// A chip naming the set before it unchanged leaves the filter run standing,
+/// so the chips around it filter as one.
+#[test]
+fn a_chip_naming_the_set_before_it_keeps_the_filter_run() {
+    let fixture = java();
+    let chips = ["//p:all", "inputs('.*foo.*')", "$_", "inputs('.*java')"];
+    assert_eq!(
+        fixture.named(&stack(&chips)),
+        ["action:bazel-out/k8-fastbuild/bin/p/b.class"]
     );
 }
 

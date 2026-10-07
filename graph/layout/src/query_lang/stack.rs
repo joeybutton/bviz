@@ -709,14 +709,37 @@ impl Stack {
                     let step = chip.step(parsed, first);
                     fingerprint = chip.fingerprint(fingerprint, first);
                     let named = prefixes.get_or_insert(fingerprint, || {
-                        let from = (before.as_ref()).map_or_else(
-                            || Named::new(universe.members().clone()),
-                            |before| before.named.clone(),
-                        );
-                        let named = universe.evaluate_with(&step, CONTINUED, from)?;
+                        let (from, denied) = match before.as_ref() {
+                            None => (
+                                Named::new(universe.members().clone()),
+                                Arc::new(universe.empty()),
+                            ),
+                            Some(before) => (before.named.clone(), Arc::clone(&before.denied)),
+                        };
+                        let (named, denied) = match subtrahends(&step) {
+                            None => {
+                                let read = Arc::clone(from.set());
+                                let named = universe.evaluate_with(&step, CONTINUED, from)?;
+                                let denied = readmitted(universe, denied, &read, named.set());
+                                (named, denied)
+                            }
+                            Some(operands) => {
+                                let mut taken = universe.empty();
+                                for operand in operands {
+                                    let named =
+                                        universe.evaluate_with(operand, CONTINUED, from.clone())?;
+                                    taken.union_with(&universe.with_held(named.set()));
+                                }
+                                let mut kept = from.set().as_ref().clone();
+                                kept.difference_with(&taken);
+                                taken.union_with(&denied);
+                                (Named::new(kept), Arc::new(taken))
+                            }
+                        };
                         Ok(Evaluated {
                             counts: universe.counts(named.set()),
                             named,
+                            denied,
                         })
                     });
                     match named {
@@ -739,9 +762,48 @@ impl Stack {
         }
         Evaluation {
             chips,
-            value: (before.filter(|_| !broken)).map(|before| before.named.set().clone()),
+            value: (before.filter(|_| !broken)).map(|before| Value {
+                set: Arc::clone(before.named.set()),
+                denied: before.denied,
+            }),
         }
     }
+}
+
+/// The operands `step` takes out of the set before it, where it is `$_`
+/// followed by a run of `except` and `-` operands.
+fn subtrahends(step: &Expr) -> Option<Vec<&Expr>> {
+    let ExprKind::Binary {
+        op: BinaryOp::Except | BinaryOp::Minus,
+        first,
+        rest,
+    } = &step.kind
+    else {
+        return None;
+    };
+    let mut operands = match &first.kind {
+        ExprKind::Literal(word) if word.text == CONTINUED_REF => Vec::new(),
+        _ => subtrahends(first)?,
+    };
+    operands.extend(rest);
+    Some(operands)
+}
+
+/// `denied` without what a step reading `read` and naming `named` adds.
+fn readmitted(
+    universe: &Universe,
+    denied: Arc<FixedBitSet>,
+    read: &FixedBitSet,
+    named: &FixedBitSet,
+) -> Arc<FixedBitSet> {
+    let mut added = named.clone();
+    added.difference_with(read);
+    if denied.is_clear() || added.is_clear() {
+        return denied;
+    }
+    let mut readmitted = denied.as_ref().clone();
+    readmitted.difference_with(&universe.with_held(&added));
+    Arc::new(readmitted)
 }
 
 /// The functions an expression calls, and whether it names [`ANY_EXEC`].
@@ -953,6 +1015,8 @@ impl fmt::Display for Unportable {
 struct Evaluated {
     named: Named,
     counts: Counts,
+    /// [`Value::denied`] of the chips up to this one.
+    denied: Arc<FixedBitSet>,
 }
 
 /// The values of the chip prefixes a stack has evaluated, by fingerprint,
@@ -1013,8 +1077,24 @@ pub enum Outcome {
 pub struct Evaluation {
     /// Each chip, in the stack's order.
     pub chips: Vec<(ChipId, Outcome)>,
-    /// The set the stack names; `None` where no chip is enabled, or one fails.
-    pub value: Option<Arc<FixedBitSet>>,
+    /// `None` where no chip is enabled, or one fails.
+    pub value: Option<Value>,
+}
+
+/// What a stack names, and what its scope is not to draw back.
+#[derive(Clone, Debug)]
+pub struct Value {
+    pub set: Arc<FixedBitSet>,
+    /// The nodes the stack's chips take out with `except`, which a scope over
+    /// `set` draws only where `set` holds them. A refinement chip standing for
+    /// `$_ except E1 … except En` (a negated chip, or one led by `except` or
+    /// `-`, the two spellings of one operator) denies each `E` with every node
+    /// it holds, the nodes it takes out of the set before it; an `except`
+    /// within an argument or joined with any other operator in the chip's
+    /// expression denies nothing. A later chip adding a node to the set before
+    /// it lifts the denial of that node and every node it holds, as a set
+    /// holding a node stands for what the node holds.
+    pub denied: Arc<FixedBitSet>,
 }
 
 impl Evaluation {
