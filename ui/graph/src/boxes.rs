@@ -67,24 +67,6 @@ pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         .update(cx, |control, cx| control.set_options(options, cx));
 }
 
-/// Draws the graph through `filter` from here on and restates the boxes menu
-/// over it, so a rule and the checkmark reading it move together.
-pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
-    derive::set_filter(view, filter, cx);
-    restate(view, cx);
-}
-
-/// As [`set_filter`], for a filter set by a gesture that named what to look at:
-/// the camera moves onto what the filter leaves drawn.
-pub(crate) fn set_filter_framed(
-    view: &mut GraphPanel,
-    filter: Filter,
-    cx: &mut Context<GraphPanel>,
-) {
-    derive::set_filter_framed(view, filter, cx);
-    restate(view, cx);
-}
-
 /// `filter` with the box classes the boxes menu's `event` names drawn, or
 /// unwrapped.
 ///
@@ -115,7 +97,7 @@ pub(crate) fn choose_boxes(
     cx: &mut Context<GraphPanel>,
 ) {
     let filter = boxes_chosen(view.derived.filter(), &view.box_classes, event);
-    set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 #[cfg(test)]

@@ -973,6 +973,7 @@ fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Con
     crate::why::put_away(view, cx);
     view.derived.show_paths(None);
     view.derived.filter = filter;
+    crate::boxes::restate(view, cx);
     publish_filter(view, cx);
     view.derived.frame_on_landing = frame;
     request(view, cx);

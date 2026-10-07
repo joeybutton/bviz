@@ -29,9 +29,9 @@ use gpui::{
 use std::time::{Duration, Instant};
 
 mod actions;
+mod boxes;
 mod build;
 mod camera;
-mod checklist;
 mod chips;
 mod colour;
 mod column;
@@ -453,7 +453,7 @@ impl GraphPanel {
         });
         let boxes = cx.new(|cx| MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx));
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
-            checklist::choose_boxes(view, event, cx);
+            boxes::choose_boxes(view, event, cx);
         });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
@@ -485,7 +485,7 @@ impl GraphPanel {
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             derive::opened(view, cx);
-            checklist::adopt(view, cx);
+            boxes::adopt(view, cx);
         });
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
