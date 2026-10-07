@@ -17,7 +17,8 @@ use std::ops::Range;
 const MARK_THICKNESS: Pixels = px(1.);
 
 /// The widest a pill stands: a longer text is cut at its start, which keeps
-/// the end of a label, its name, in view; the tooltip reads it whole.
+/// the end of a label, its name, in view, though not the set operator a chip
+/// opens with, which decides what the chip does; the tooltip reads it whole.
 const PILL_MAX_WIDTH: Pixels = px(240.);
 
 /// What a pill does for a gesture in [`GESTURES`].
@@ -68,7 +69,17 @@ pub(super) fn pill(
     };
     let error = chip.parsed().err().map(|error| error.span.clone());
     let marks = marks(chip.text(), error, !chip.enabled(), colors.error, ink);
-    let text = StyledText::new(SharedString::from(chip.text().to_string())).with_highlights(marks);
+    let whole = chip.text();
+    let operator = chip.leading_operator();
+    let rest = operator.as_ref().map_or(0, |operator| {
+        whole.len() - whole[operator.end..].trim_start().len()
+    });
+    let styled = |span: Range<usize>| {
+        StyledText::new(SharedString::from(whole[span.clone()].to_string()))
+            .with_highlights(clipped(&marks, span))
+    };
+    let operator = operator.map(styled);
+    let text = styled(rest..whole.len());
     let explained = explain(chip, outcome.as_ref());
     let border = match selected {
         true => colors.border_focused,
@@ -127,6 +138,7 @@ pub(super) fn pill(
             chip.negated()
                 .then(|| div().flex_none().text_color(colors.warning).child("not")),
         )
+        .children(operator.map(|operator| div().flex_none().child(operator)))
         .child(
             div()
                 .min_w_0()
@@ -216,6 +228,21 @@ fn marks(
     marks
 }
 
+/// The parts of `marks` falling within `span`, as spans of that part of the
+/// text.
+fn clipped(
+    marks: &[(Range<usize>, HighlightStyle)],
+    span: Range<usize>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    (marks.iter())
+        .filter_map(|(marked, style)| {
+            let start = marked.start.max(span.start);
+            let end = marked.end.min(span.end);
+            (start < end).then(|| (start - span.start..end - span.start, *style))
+        })
+        .collect()
+}
+
 /// The span of `text` an error at `span` underlines: the whole text where the
 /// error points between characters, at the end of a chip cut short.
 fn underlined(text: &str, span: Range<usize>) -> Range<usize> {
@@ -296,6 +323,13 @@ mod tests {
     fn every_gesture_is_reachable_and_fits_the_help() {
         assert_eq!(GESTURES.unreachable(), []);
         assert_eq!(GESTURES.overlong(), []);
+    }
+
+    #[test]
+    fn a_clipped_mark_covers_its_part_of_the_span_alone() {
+        let style = HighlightStyle::default();
+        let marks = [(0..3, style), (5..9, style), (12..14, style)];
+        assert_eq!(clipped(&marks, 2..10), [(0..1, style), (3..7, style)]);
     }
 
     #[test]

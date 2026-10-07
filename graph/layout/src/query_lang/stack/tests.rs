@@ -673,3 +673,10 @@ fn a_chip_keeps_its_id_and_switches_through_edits_and_moves() {
     assert_eq!(chips.remove(a), Some(0));
     assert_eq!(chips.position(b), Some(1));
 }
+
+#[test]
+fn a_chip_names_the_set_operator_it_opens_with() {
+    let chips = stack(&["except kind(test)", "kind(test)", "  - //a:all"]);
+    let operators: Vec<_> = chips.chips().map(Chip::leading_operator).collect();
+    assert_eq!(operators, [Some(0..6), None, Some(2..3)]);
+}

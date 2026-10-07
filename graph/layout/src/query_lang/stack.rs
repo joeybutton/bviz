@@ -89,6 +89,7 @@ struct Written {
     /// Each insertion as the position in the chip's text it was made at and
     /// the length it inserted, by increasing position.
     insertions: Vec<(usize, usize)>,
+    leading_operator: Option<Range<usize>>,
 }
 
 impl Written {
@@ -113,7 +114,10 @@ impl Written {
             .into_iter()
             .chain(continued_argument(call))
             .collect();
-        Written::inserting(text, &inserts)
+        Written {
+            leading_operator: opens_with_operator.then(|| tokens[0].span.clone()),
+            ..Written::inserting(text, &inserts)
+        }
     }
 
     /// `text` with each of `inserts`, by increasing position, inserted at its
@@ -130,7 +134,11 @@ impl Written {
             copied = at;
         }
         source.push_str(&text[copied..]);
-        Written { source, insertions }
+        Written {
+            source,
+            insertions,
+            leading_operator: None,
+        }
     }
 
     /// The span of the chip's text that `span` of the source covers; a span
@@ -228,6 +236,11 @@ impl Chip {
 
     pub fn parsed(&self) -> Result<&ChipExpr, &SyntaxError> {
         self.parsed.as_ref()
+    }
+
+    /// The span of the chip's text holding the set operator it opens with.
+    pub fn leading_operator(&self) -> Option<Range<usize>> {
+        self.written.leading_operator.clone()
     }
 
     /// The chip's text with its shorthand written out.
