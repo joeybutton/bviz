@@ -22,9 +22,9 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
-    canvas, div, prelude::*, px, size,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription,
+    WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -749,6 +749,30 @@ impl GraphPanel {
         });
     }
 
+    fn on_navigate_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::GoBack => {
+                self.go_back(cx);
+                true
+            }
+            CanvasIntent::GoForward => {
+                self.go_forward(cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        jump::dismiss(self, cx);
+        reveal::back(self, cx);
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        jump::dismiss(self, cx);
+        reveal::forward(self, cx);
+    }
+
     /// Ends the drag on the release the element receives directly, which the
     /// window-global handlers can miss: they are installed only once a frame
     /// paints with a drag in progress, so a press-release quick enough to finish
@@ -946,14 +970,8 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
-            .on_action(cx.listener(|view, _: &JumpBack, _, cx| {
-                jump::dismiss(view, cx);
-                reveal::back(view, cx);
-            }))
-            .on_action(cx.listener(|view, _: &JumpForward, _, cx| {
-                jump::dismiss(view, cx);
-                reveal::forward(view, cx);
-            }))
+            .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
+            .on_action(cx.listener(|view, _: &JumpForward, _, cx| view.go_forward(cx)))
             .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .on_action(
                 cx.listener(|view, _: &chips::Focus, window, cx| chips::focus(view, window, cx)),
@@ -966,6 +984,14 @@ impl Render for GraphPanel {
                 cx.listener(|view, _: &ZoomOut, _, cx| {
                     view.zoom_centred(ZOOM_KEY_STEP.recip(), cx)
                 }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(Self::on_navigate_down),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(Self::on_navigate_down),
             )
             .track_focus(&self.focus_handle)
             .flex_1()

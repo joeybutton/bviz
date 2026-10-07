@@ -33,6 +33,8 @@ pub(crate) enum CanvasIntent {
     Zoom,
     PanAcross,
     Scroll,
+    GoBack,
+    GoForward,
 }
 
 const BOX: Place = Place::On("a box");
@@ -87,6 +89,18 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
         CanvasIntent::PanAcross,
     ),
     Entry::new(Input::SCROLL, Place::Anywhere, "Pan", CanvasIntent::Scroll),
+    Entry::new(
+        Input::press(Button::Back),
+        Place::Anywhere,
+        "Go back",
+        CanvasIntent::GoBack,
+    ),
+    Entry::new(
+        Input::press(Button::Forward),
+        Place::Anywhere,
+        "Go forward",
+        CanvasIntent::GoForward,
+    ),
 ]);
 
 /// The pointer gesture the view is in the middle of.
