@@ -89,7 +89,7 @@ impl RepoCategory {
     ];
 
     /// The word a query names the category by.
-    pub fn spelling(self) -> &'static str {
+    pub const fn spelling(self) -> &'static str {
         match self {
             RepoCategory::Main => "main",
             RepoCategory::Module => "module",

@@ -21,7 +21,9 @@ mod bazel_goldens;
 use std::fmt;
 use std::ops::Range;
 
-pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Word};
+pub use ast::{
+    Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Vocabulary, Word,
+};
 pub use config::ANY_EXEC;
 pub use cursor::{Place, TypedWord, word_at, written_word};
 pub use eval::EvalError;

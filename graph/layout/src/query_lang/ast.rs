@@ -4,7 +4,10 @@
 use std::fmt;
 use std::ops::Range;
 
+use super::config::{ANY_EXEC, NULL, TARGET};
 use super::lex;
+use crate::facets::RuleCategory;
+use crate::repo::RepoCategory;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Expr {
@@ -104,6 +107,47 @@ impl Signature {
         match self.params {
             Params::Fixed(types) => types.get(index).copied(),
             Params::Repeated(ty) => Some(ty),
+        }
+    }
+}
+
+/// The words an argument a function reads as a word is one of, where they
+/// are few and known before any graph is read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vocabulary {
+    RepoCategory,
+    RuleCategory,
+    /// The configurations `config()` names by a word of its own rather than
+    /// by a checksum.
+    Configuration,
+}
+
+impl Vocabulary {
+    const REPO_CATEGORIES: [&'static str; RepoCategory::ALL.len()] = {
+        let mut words = [""; RepoCategory::ALL.len()];
+        let mut at = 0;
+        while at < words.len() {
+            words[at] = RepoCategory::ALL[at].spelling();
+            at += 1;
+        }
+        words
+    };
+
+    const RULE_CATEGORIES: [&'static str; RuleCategory::ALL.len()] = {
+        let mut words = [""; RuleCategory::ALL.len()];
+        let mut at = 0;
+        while at < words.len() {
+            words[at] = RuleCategory::ALL[at].spelling();
+            at += 1;
+        }
+        words
+    };
+
+    pub fn words(self) -> &'static [&'static str] {
+        match self {
+            Vocabulary::RepoCategory => &Vocabulary::REPO_CATEGORIES,
+            Vocabulary::RuleCategory => &Vocabulary::RULE_CATEGORIES,
+            Vocabulary::Configuration => &[TARGET, NULL, ANY_EXEC],
         }
     }
 }
@@ -325,6 +369,17 @@ impl Function {
         Err(format!(
             "{name}() needs {unloaded}, which bviz does not load into its graph"
         ))
+    }
+
+    /// The vocabulary of the argument at `index`, where the function reads
+    /// it as one of a few known words.
+    pub fn vocabulary(self, index: usize) -> Option<Vocabulary> {
+        match (self, index) {
+            (Function::RepoCategory, 0) => Some(Vocabulary::RepoCategory),
+            (Function::RuleCategory, 0) => Some(Vocabulary::RuleCategory),
+            (Function::Config, 1) => Some(Vocabulary::Configuration),
+            _ => None,
+        }
     }
 
     /// The signature Bazel declares for the function, or bviz for an extension.

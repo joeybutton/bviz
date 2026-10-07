@@ -132,6 +132,12 @@ fn generators(graph: &Graph, node_of: &[Option<&Node>], held_by: &[Option<Id>]) 
     generator
 }
 
+/// The word `config()` names [`Wanted::Target`] by.
+pub(super) const TARGET: &str = "target";
+
+/// The word `config()` names [`Wanted::Null`] by.
+pub(super) const NULL: &str = "null";
+
 /// The configuration `config()` names as the first tool configuration by
 /// checksum a target is built in: a bviz extension of the Bazel 9.2.0
 /// language bviz reads, which Bazel accepts from 10.0.0-pre.20260128.2.
@@ -234,8 +240,8 @@ impl Universe {
                            hash instead"
                     .to_string(),
             ),
-            "target" => Ok(Wanted::Target),
-            "null" => Ok(Wanted::Null),
+            TARGET => Ok(Wanted::Target),
+            NULL => Ok(Wanted::Null),
             ANY_EXEC if checksums.iter().any(|&(_, role)| role == Role::Tool) => {
                 Ok(Wanted::AnyExec)
             }
