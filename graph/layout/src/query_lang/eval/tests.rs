@@ -473,6 +473,191 @@ fn actions() -> (Universe, Names) {
 }
 
 #[test]
+fn config_target_leaves_out_a_configuration_an_aquery_builds_only_dependencies_in() {
+    use crate::test_support::{ActionSpec, action_graph, configuration};
+    let lib = |configuration: &str| format!("bazel-out/{configuration}/bin/p/lib.o");
+    let (built_for_bin, built_for_host) = (lib("aarch64-fastbuild"), lib("k8-fastbuild"));
+    let mut aquery = action_graph(&[
+        ActionSpec {
+            label: "//p:lib",
+            mnemonic: "CppCompile",
+            inputs: &["p/lib.cc"],
+            outputs: &[&built_for_bin],
+        },
+        ActionSpec {
+            label: "//p:lib",
+            mnemonic: "CppCompile",
+            inputs: &["p/lib.cc"],
+            outputs: &[&built_for_host],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &[&built_for_bin],
+            outputs: &["bazel-out/k8-fastbuild/bin/p/bin"],
+        },
+    ]);
+    let other = configuration(2, "a0a0", "aarch64-fastbuild", false);
+    aquery.actions[0].configuration_id = other.id;
+    aquery.configuration.push(other);
+    let joint = build_joint(Some(&[aquery]), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    assert_eq!(
+        configured_query(&universe, &joint.names, "config(//p:lib, target)").unwrap(),
+        ["ct://p:lib#c0ffee"]
+    );
+}
+
+/// An aquery of `actions` with the query `targets` naming its labeled outputs,
+/// each action of `in_a0a0` built in configuration `a0a0` and every other in
+/// `c0ffee`.
+fn labeled_outputs(
+    actions: &[crate::test_support::ActionSpec],
+    in_a0a0: &[usize],
+    targets: &[Target],
+) -> (Universe, Names) {
+    use crate::test_support::{action_graph, configuration};
+    let mut aquery = action_graph(actions);
+    let other = configuration(2, "a0a0", "aarch64-fastbuild", false);
+    for &at in in_a0a0 {
+        aquery.actions[at].configuration_id = other.id;
+    }
+    aquery.configuration.push(other);
+    let joint = build_joint(Some(&[aquery]), None, Some(targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn config_target_takes_the_configured_target_of_a_top_level_rule_writing_a_labeled_output() {
+    use crate::test_support::ActionSpec;
+    let (universe, names) = labeled_outputs(
+        &[
+            ActionSpec {
+                label: "//p:t",
+                mnemonic: "JavaBuild",
+                inputs: &["p/T.java"],
+                outputs: &["bazel-out/k8-fastbuild/bin/p/t.jar"],
+            },
+            ActionSpec {
+                label: "//p:t",
+                mnemonic: "JavaBuild",
+                inputs: &["p/T.java"],
+                outputs: &["bazel-out/aarch64-fastbuild/bin/p/t.jar"],
+            },
+            ActionSpec {
+                label: "//p:app",
+                mnemonic: "Link",
+                inputs: &["bazel-out/aarch64-fastbuild/bin/p/t.jar"],
+                outputs: &["bazel-out/aarch64-fastbuild/bin/p/app"],
+            },
+        ],
+        &[1, 2],
+        &[
+            rule("//p:t", &[], &[]),
+            generated("//p:t.jar", "//p:t"),
+            rule("//p:app", &["//p:t.jar"], &[]),
+        ],
+    );
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("config(//p:t, target)"), ["ct://p:t#c0ffee"]);
+    assert_eq!(query("config(//p:t.jar, target)"), ["ct://p:t.jar#c0ffee"]);
+}
+
+#[test]
+fn config_target_leaves_out_a_configuration_whose_labeled_output_nothing_reads() {
+    use crate::test_support::ActionSpec;
+    let (universe, names) = labeled_outputs(
+        &[
+            ActionSpec {
+                label: "//p:gen",
+                mnemonic: "Gen",
+                inputs: &[],
+                outputs: &[
+                    "bazel-out/aarch64-fastbuild/bin/p/out.txt",
+                    "bazel-out/aarch64-fastbuild/bin/p/gen.o",
+                ],
+            },
+            ActionSpec {
+                label: "//p:gen",
+                mnemonic: "Gen",
+                inputs: &[],
+                outputs: &[
+                    "bazel-out/k8-fastbuild/bin/p/out.txt",
+                    "bazel-out/k8-fastbuild/bin/p/gen.o",
+                ],
+            },
+            ActionSpec {
+                label: "//p:bin",
+                mnemonic: "Link",
+                inputs: &[
+                    "bazel-out/aarch64-fastbuild/bin/p/gen.o",
+                    "bazel-out/k8-fastbuild/bin/p/gen.o",
+                ],
+                outputs: &["bazel-out/k8-fastbuild/bin/p/bin"],
+            },
+        ],
+        &[0],
+        &[
+            rule("//p:gen", &[], &[]),
+            generated("//p:out.txt", "//p:gen"),
+            rule("//p:bin", &["//p:gen"], &[]),
+        ],
+    );
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("config(//p:gen, target)"), ["ct://p:gen#c0ffee"]);
+    assert_eq!(
+        query("config(//p:out.txt, target)"),
+        ["ct://p:out.txt#c0ffee"]
+    );
+}
+
+#[test]
+fn config_target_takes_a_top_level_rule_generating_a_file_in_its_own_configuration() {
+    use crate::test_support::{configuration, configured};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let mut app = crate::test_support::rule("//p:app", "genrule", &["//p:t"], Vec::new());
+    app.rule.as_mut().unwrap().configured_rule_input = vec![ConfiguredRuleInput {
+        label: Some("//p:t".to_string()),
+        configuration_id: Some(1),
+        ..Default::default()
+    }];
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(rule("//p:t", &[], &[]), 1),
+            configured(rule("//p:t", &[], &[]), 2),
+            configured(generated("//p:t.jar", "//p:t"), 2),
+            configured(app, 1),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "aarch64-fastbuild", false),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    assert_eq!(
+        configured_query(&universe, &joint.names, "config(//p:t, target)").unwrap(),
+        ["ct://p:t#bb22"]
+    );
+}
+
+#[test]
 fn an_aquery_filter_keeps_the_actions_matching_in_full() {
     let (universe, names) = actions();
     let query = |expr| configured_query(&universe, &names, expr);
