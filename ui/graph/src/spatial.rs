@@ -63,11 +63,11 @@ impl<'a> Indexed<'a> {
     /// at: every box that is, and some that lie near it. A morph moves boxes off
     /// the rects the index holds them at, so while one runs every box is a
     /// candidate.
-    pub(crate) fn boxes_near(
+    pub(crate) fn boxes_near<'m>(
         &self,
         r: &Rect,
-        morph: Option<&'a Frame>,
-    ) -> impl Iterator<Item = (&'a Box, Rect, f32)> + use<'a> {
+        morph: Option<&'m Frame>,
+    ) -> impl Iterator<Item = (&'a Box, Rect, f32)> + use<'a, 'm> {
         let candidates = match morph {
             Some(_) => Candidates::Every(0..self.g.boxes.len()),
             None => Candidates::Near(self.spatial.boxes.near(r, 0).into_ones()),
@@ -458,6 +458,34 @@ mod tests {
                     .collect();
                 assert_eq!(over, scanned);
             }
+        }
+    }
+
+    #[test]
+    fn boxes_near_a_point_hold_every_box_over_it_in_drawing_order() {
+        let mut rng = fastrand::Rng::with_seed(5);
+        let g = random_drawing(&mut rng, 400, 0);
+        let indexed = Indexed::of(&g);
+        for _ in 0..2000 {
+            let (x, y) = (rng.f32() * 1200.0 - 200.0, rng.f32() * 1200.0 - 200.0);
+            let at = Rect {
+                x: x as f64,
+                y: y as f64,
+                w: 0.0,
+                h: 0.0,
+            };
+            let over: Vec<Id> = indexed
+                .boxes_near(&at, None)
+                .filter(|(_, rect, _)| rect.covers(x, y))
+                .map(|(b, ..)| b.id)
+                .collect();
+            let scanned: Vec<Id> = g
+                .boxes
+                .iter()
+                .filter(|b| Rect::of(b).covers(x, y))
+                .map(|b| b.id)
+                .collect();
+            assert_eq!(over, scanned);
         }
     }
 

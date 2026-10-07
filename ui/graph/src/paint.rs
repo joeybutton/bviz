@@ -2430,6 +2430,7 @@ mod tests {
     use super::*;
     use crate::camera::from_screen;
     use crate::morph::Transition;
+    use crate::spatial::Indexed;
     use bviz_graph_layout::LaidOut;
     use gpui::rgb;
     use std::collections::HashSet;
@@ -2603,7 +2604,8 @@ mod tests {
                     true => floating += 1,
                     false => banded += 1,
                 }
-                let resolved = crate::box_at(&titles, &g, None, viewport(), camera, at);
+                let resolved =
+                    crate::box_at(&titles, &Indexed::of(&g), None, viewport(), camera, at);
                 assert_eq!(
                     resolved.map(|b| b.id),
                     Some(id),
@@ -2617,8 +2619,9 @@ mod tests {
                     "zoom {zoom}: the caret drawn for {id:?} toggles nothing"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered +=
-                    (crate::hit_box(&g.boxes, None, gx, gy).map(|b| b.id) != Some(id)) as u32;
+                covered += (crate::innermost(crate::boxes_over(&Indexed::of(&g), None, gx, gy))
+                    .map(|b| b.id)
+                    != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
@@ -2658,13 +2661,23 @@ mod tests {
             for DrawnCaret { id, at, floats } in carets {
                 floating += floats as u32;
                 assert_eq!(
-                    crate::box_at(&titles, &g, Some(&frame), viewport(), camera, at).map(|b| b.id),
+                    crate::box_at(
+                        &titles,
+                        &Indexed::of(&g),
+                        Some(&frame),
+                        viewport(),
+                        camera,
+                        at
+                    )
+                    .map(|b| b.id),
                     Some(id),
                     "zoom {zoom}: the caret a morph drew for {id:?} resolves to another box"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered += (crate::hit_box(&g.boxes, Some(&frame), gx, gy).map(|b| b.id)
-                    != Some(id)) as u32;
+                covered +=
+                    (crate::innermost(crate::boxes_over(&Indexed::of(&g), Some(&frame), gx, gy))
+                        .map(|b| b.id)
+                        != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
@@ -3153,7 +3166,7 @@ mod tests {
         let left = carets.iter().find(|c| c.id == Id(0));
         let at = left.expect("the left container drew no title").at;
         assert_eq!(
-            crate::box_at(&titles, &g, None, viewport(), camera, at).map(|b| b.id),
+            crate::box_at(&titles, &Indexed::of(&g), None, viewport(), camera, at).map(|b| b.id),
             Some(Id(0))
         );
 
@@ -3164,12 +3177,13 @@ mod tests {
         let moved = slid(&g, -CONTAINER_WIDTH);
         let (gx, gy) = from_screen(at, viewport().origin, camera);
         assert_eq!(
-            crate::hit_box(&moved.boxes, None, gx, gy).map(|b| b.id),
+            crate::innermost(crate::boxes_over(&Indexed::of(&moved), None, gx, gy)).map(|b| b.id),
             Some(Id(1)),
             "the slide left the caret over no other container, so nothing was displaced"
         );
         assert_eq!(
-            crate::box_at(&titles, &moved, None, viewport(), camera, at).map(|b| b.id),
+            crate::box_at(&titles, &Indexed::of(&moved), None, viewport(), camera, at)
+                .map(|b| b.id),
             Some(Id(1)),
             "a title from a frame the layout has moved on from still answered for it"
         );

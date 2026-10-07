@@ -93,7 +93,7 @@ use relation::Relation;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
-use spatial::SpatialMemo;
+use spatial::{Indexed, SpatialMemo};
 
 actions!(
     bviz_graph,
@@ -890,14 +890,15 @@ impl GraphPanel {
     }
 
     /// The box drawn under the window-space `position`, if any.
-    fn box_id_at(&self, position: Point<Pixels>) -> Option<Id> {
+    fn box_id_at(&mut self, position: Point<Pixels>) -> Option<Id> {
         let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
         drawn
-            .view(camera.zoom)
-            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, position))
+            .shown(camera.zoom)
+            .map(|shown| self.spatial.indexed(shown))
+            .and_then(|g| box_at(&self.titles, &g, morph.as_ref(), vp, camera, position))
             .map(|b| b.id)
     }
 
@@ -1233,23 +1234,24 @@ struct Controls {
 /// boxes inside it: there the innermost box under the cursor is one of those,
 /// and the opaque title covering it is both what the user sees and what the
 /// user is aiming at. A title is taken only where the box it names is drawn over
-/// the cursor in `g` under `camera` and `morph`. Since a title is always painted
-/// within its own box, that leaves a set recorded from a frame the view has moved
-/// on from — a relayout, a mode switch, a camera step — resolving to the box
-/// under the cursor instead.
+/// the cursor in `indexed` under `camera` and `morph`. Since a title is always
+/// painted within its own box, that leaves a set recorded from a frame the view
+/// has moved on from — a relayout, a mode switch, a camera step — resolving to
+/// the box under the cursor instead.
 fn box_at<'a>(
     titles: &[TitleTarget],
-    g: &'a bviz_graph_layout::LaidOut,
+    indexed: &Indexed<'a>,
     morph: Option<&Frame>,
     viewport: Bounds<Pixels>,
     camera: Camera,
     pos: Point<Pixels>,
 ) -> Option<&'a bviz_graph_layout::Box> {
     let (gx, gy) = from_screen(pos, viewport.origin, camera);
+    let over: Vec<_> = boxes_over(indexed, morph, gx, gy).collect();
     let titled = paint::title_at(titles, pos)
-        .and_then(|id| g.boxes.iter().find(|b| b.id == id))
-        .filter(|b| placed_rect(b, morph).covers(gx, gy));
-    titled.or_else(|| hit_box(&g.boxes, morph, gx, gy))
+        .and_then(|id| over.iter().find(|(b, _)| b.id == id))
+        .map(|&(b, _)| b);
+    titled.or_else(|| innermost(over))
 }
 
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
@@ -1264,13 +1266,14 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     let Some(drawn) = view.drawn() else {
         return;
     };
-    let Some(g) = drawn.view(camera.zoom) else {
+    let Some(shown) = drawn.shown(camera.zoom) else {
         return;
     };
+    let g = view.spatial.indexed(shown);
     let morph = view.morph_frame();
     let expandable = view.expandable();
     let hit =
-        box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
+        box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
@@ -1293,8 +1296,8 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         .drawn()
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
-            let g = drawn.view(camera.zoom)?;
-            box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
+            let g = view.spatial.indexed(drawn.shown(camera.zoom)?);
+            box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
         });
     match hit {
         Some(id) => view.selection.toggle(id),
@@ -1303,28 +1306,36 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     view.invalidate_canvas(cx);
 }
 
-/// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
-/// eased it to while one drawing settles onto another.
-fn placed_rect(b: &bviz_graph_layout::Box, morph: Option<&Frame>) -> Rect {
-    morph.map_or(Rect::of(b), |frame| frame.place(b).0)
+/// The smallest-area (in layout space) of the boxes `over` draws, so an inner
+/// member or header wins over its enclosing container; the first of equals.
+fn innermost<'a>(
+    over: impl IntoIterator<Item = (&'a bviz_graph_layout::Box, Rect)>,
+) -> Option<&'a bviz_graph_layout::Box> {
+    over.into_iter()
+        .min_by(|(_, a), (_, b)| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .map(|(b, _)| b)
 }
 
-/// The smallest-area box (in layout space) drawn over `(gx, gy)`, so an inner
-/// member or header wins over its enclosing container; `None` if outside all.
-/// The boxes a morph is fading out are absent from `boxes`, so a gesture passes
-/// through them to whatever the new drawing puts there.
-fn hit_box<'a>(
-    boxes: &'a [bviz_graph_layout::Box],
+/// The boxes drawn over `(gx, gy)` under `morph`, in the drawing's order, each
+/// with the rect it is drawn at. The boxes a morph is fading out are absent from
+/// the drawing, so a gesture passes through them to whatever the new drawing
+/// puts there.
+fn boxes_over<'a>(
+    indexed: &Indexed<'a>,
     morph: Option<&Frame>,
     gx: f32,
     gy: f32,
-) -> Option<&'a bviz_graph_layout::Box> {
-    boxes
-        .iter()
-        .map(|b| (b, placed_rect(b, morph)))
-        .filter(|(_, rect)| rect.covers(gx, gy))
-        .min_by(|(_, a), (_, b)| (a.w * a.h).total_cmp(&(b.w * b.h)))
-        .map(|(b, _)| b)
+) -> impl Iterator<Item = (&'a bviz_graph_layout::Box, Rect)> {
+    let at = Rect {
+        x: gx as f64,
+        y: gy as f64,
+        w: 0.0,
+        h: 0.0,
+    };
+    indexed
+        .boxes_near(&at, morph)
+        .filter(move |(_, rect, _)| rect.covers(gx, gy))
+        .map(|(b, rect, _)| (b, rect))
 }
 
 /// A joint graph being read and laid out.
@@ -1741,23 +1752,27 @@ mod tests {
     #[test]
     fn hit_box_picks_innermost_and_none_outside() {
         // An outer container (id 0) with a small inner box (id 1) nested in it.
-        let boxes = vec![
-            lbox(0, 0.0, 0.0, 100.0, 100.0),
-            lbox(1, 20.0, 20.0, 30.0, 30.0),
-        ];
+        let g = bviz_graph_layout::LaidOut {
+            boxes: vec![
+                lbox(0, 0.0, 0.0, 100.0, 100.0),
+                lbox(1, 20.0, 20.0, 30.0, 30.0),
+            ],
+            ..Default::default()
+        };
+        let boxes = Indexed::of(&g);
         // Inside both rects: the smaller (inner) wins.
         assert_eq!(
-            hit_box(&boxes, None, 30.0, 30.0).unwrap().id,
+            innermost(boxes_over(&boxes, None, 30.0, 30.0)).unwrap().id,
             bviz_graph_layout::Id(1)
         );
         // Inside only the container.
         assert_eq!(
-            hit_box(&boxes, None, 5.0, 5.0).unwrap().id,
+            innermost(boxes_over(&boxes, None, 5.0, 5.0)).unwrap().id,
             bviz_graph_layout::Id(0)
         );
         // Outside everything.
-        assert!(hit_box(&boxes, None, 200.0, 200.0).is_none());
-        assert!(hit_box(&boxes, None, -1.0, 50.0).is_none());
+        assert!(innermost(boxes_over(&boxes, None, 200.0, 200.0)).is_none());
+        assert!(innermost(boxes_over(&boxes, None, -1.0, 50.0)).is_none());
     }
 
     #[test]

@@ -763,12 +763,12 @@ mod tests {
              against either would answer the same",
         );
         let hit = |r: Rect| {
-            crate::hit_box(
-                &after.boxes,
+            crate::innermost(crate::boxes_over(
+                &crate::spatial::Indexed::of(&after),
                 Some(&frame),
                 r.x as f32 + 1.0,
                 r.y as f32 + 1.0,
-            )
+            ))
             .map(|b| b.id)
         };
         assert_eq!(
