@@ -489,6 +489,7 @@ pub(crate) fn canvas_body(
         // under where the route crosses a container's title band.
         let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
         if edges > 0.0 {
+            order_fence(bounds, window);
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             for c in &g.connectors {
                 if drawn_route(c, &visible, &on_screen) {
@@ -502,6 +503,7 @@ pub(crate) fn canvas_body(
                     }
                 }
             }
+            order_fence(bounds, window);
         }
         pan_bench::tally(Tally::Connectors, connectors);
         for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
@@ -546,6 +548,16 @@ pub(crate) fn canvas_body(
             window,
         );
     }
+}
+
+/// Draws everything painted after it within `bounds` over everything painted
+/// before it. gpui's wgpu renderer draws a run of paths as one batch, a single
+/// offscreen multisampled pass, only while no other primitive's draw order
+/// falls among theirs, and a primitive otherwise takes its order from whatever
+/// it overlaps; fencing a run of paths on both sides keeps it one batch however
+/// its members interleave on screen with the primitives around them.
+fn order_fence(bounds: Bounds<Pixels>, window: &mut Window) {
+    window.paint_layer(bounds, |_| {});
 }
 
 /// Whether a frame draws the route `c`: it crosses the view, and either the
