@@ -9,6 +9,7 @@ mod dropdown;
 mod find_keys;
 pub mod gesture;
 mod key_scope;
+pub mod keymap_probe;
 mod keys;
 mod keys_help;
 mod layer;

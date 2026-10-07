@@ -129,7 +129,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Action, KeyContext, Keymap, Keystroke};
+    use bviz_ui_components::keymap_probe::{self, is};
+    use gpui::Action;
 
     actions!(bviz_window_test, [Inner]);
 
@@ -138,20 +139,7 @@ mod tests {
     fn dispatched(keys: &str, contexts: &[&str]) -> Option<Box<dyn Action>> {
         let mut bindings = bindings();
         bindings.push(KeyBinding::new("tab", Inner, Some("Inner")));
-        let keymap = Keymap::new(bindings);
-        let stack: Vec<KeyContext> = contexts
-            .iter()
-            .map(|context| KeyContext::parse(context).expect("a key context"))
-            .collect();
-        let keystroke = Keystroke::parse(keys).expect("a keystroke");
-        let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
-        matched
-            .first()
-            .map(|binding| binding.action().boxed_clone())
-    }
-
-    fn is<A: Action>(action: Option<Box<dyn Action>>, expected: A) -> bool {
-        action.is_some_and(|action| action.partial_eq(&expected))
+        keymap_probe::dispatched(bindings, keys, contexts)
     }
 
     /// Tab cycles the focus wherever nothing inside the window binds it, and

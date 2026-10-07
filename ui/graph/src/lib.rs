@@ -1285,6 +1285,7 @@ mod tests {
     use crate::paint::lane_polyline;
     use bviz_graph_layout::Box;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
+    use bviz_ui_components::keymap_probe::{self, is};
     use gpui::{Bounds, Size, point};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
@@ -1306,20 +1307,7 @@ mod tests {
     fn dispatched(keys: &str, contexts: &[&str]) -> Option<std::boxed::Box<dyn gpui::Action>> {
         let mut bindings = bindings();
         bindings.extend(text_input::bindings());
-        let keymap = gpui::Keymap::new(bindings);
-        let stack: Vec<gpui::KeyContext> = contexts
-            .iter()
-            .map(|context| gpui::KeyContext::parse(context).expect("a key context"))
-            .collect();
-        let keystroke = gpui::Keystroke::parse(keys).expect("a keystroke");
-        let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
-        matched
-            .first()
-            .map(|binding| binding.action().boxed_clone())
-    }
-
-    fn is<A: gpui::Action>(action: Option<std::boxed::Box<dyn gpui::Action>>, expected: A) -> bool {
-        action.is_some_and(|action| action.partial_eq(&expected))
+        keymap_probe::dispatched(bindings, keys, contexts)
     }
 
     const IN_PANEL: &[&str] = &[KEY_CONTEXT.id()];
