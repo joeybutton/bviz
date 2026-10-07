@@ -91,7 +91,7 @@ fn reduce_view(
 /// every unexpanded container away, merge interchangeable leaves, then lay out
 /// only the resulting visible view, transitively reduced when `reduced`. The
 /// result's `full_edges` is the visible view's unreduced connectivity, for
-/// hover.
+/// hover. Returned beside it is the remap [`quotient::quotient`] returns.
 ///
 /// Each connector carries the transition of `transitions`, found over `base`,
 /// that the edges folded into it cross.
@@ -109,7 +109,7 @@ pub(crate) fn relayout(
     reduced: bool,
     transitions: &Transitions,
     pinned: Option<&HashMap<Id, Anchor>>,
-) -> LaidOut {
+) -> (LaidOut, BTreeMap<Id, Id>) {
     let (visible, folding) = bviz_graph_layout::lod::collapse_folded(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
     let full_edges: Vec<(Id, Id)> = view
@@ -132,7 +132,7 @@ pub(crate) fn relayout(
         let (from, to) = folding.pair(from, to)?;
         Some((box_of(from), box_of(to)))
     });
-    laid
+    (laid, remap)
 }
 
 #[cfg(test)]
@@ -175,7 +175,7 @@ mod tests {
         let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
 
         for (expanded, from) in [(HashSet::new(), tool), ([tool].into(), built)] {
-            let laid = relayout(
+            let (laid, _) = relayout(
                 &base,
                 &reduced_base,
                 &expanded,
@@ -269,6 +269,7 @@ mod tests {
                 &Transitions::default(),
                 pinned,
             )
+            .0
         }
 
         fn label_of(&self, id: Id) -> &str {

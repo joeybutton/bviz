@@ -23,7 +23,7 @@ use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
 use rustc_hash::FxHashSet;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -354,6 +354,9 @@ enum Relaid {
 #[derive(Clone)]
 struct Layered {
     view: Arc<LaidOut>,
+    /// The remap of [`bviz_graph_layout::quotient::quotient`] `view` was laid out
+    /// through.
+    groups: Arc<BTreeMap<Id, Id>>,
     base: Arc<Graph>,
     expanded: HashSet<Id>,
     reduced: bool,
@@ -364,6 +367,17 @@ impl Layered {
     /// `reduced`, is what drew this.
     fn draws(&self, base: &Arc<Graph>, expanded: &HashSet<Id>, reduced: bool) -> bool {
         Arc::ptr_eq(&self.base, base) && self.expanded == *expanded && self.reduced == reduced
+    }
+
+    /// The innermost box of this drawing standing for `id`: its own, else that
+    /// of the merge group it is merged into, else that of the innermost
+    /// container holding it.
+    fn holder(&self, id: Id) -> Option<Id> {
+        let boxes: HashSet<Id> = self.view.boxes.iter().map(|b| b.id).collect();
+        std::iter::once(id)
+            .chain(self.groups.get(&id).copied())
+            .chain(holders(&self.base, id))
+            .find(|candidate| boxes.contains(candidate))
     }
 }
 
@@ -831,13 +845,9 @@ pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPan
     request(view, cx);
 }
 
-/// The containers holding `id` in the layered layout's graph, innermost
-/// first.
-fn holders(view: &GraphPanel, id: Id) -> Vec<Id> {
-    let Some(slice) = &view.derived.slice else {
-        return Vec::new();
-    };
-    let nodes = &slice.base.nodes;
+/// The containers holding `id` in `base`, innermost first.
+fn holders(base: &Graph, id: Id) -> Vec<Id> {
+    let nodes = &base.nodes;
     let mut parents: HashMap<Id, Id> = HashMap::with_capacity(nodes.len());
     parents.extend(
         nodes
@@ -848,18 +858,11 @@ fn holders(view: &GraphPanel, id: Id) -> Vec<Id> {
     std::iter::successors(parent(id), |&container| parent(container)).collect()
 }
 
-/// The innermost box of the layered drawing on screen standing for `id`: its
-/// own, or else that of the innermost container holding it, opening none.
-/// `None` where the drawing holds neither, or is yet to be derived.
+/// The innermost box of the layered drawing on screen standing for `id`, as
+/// [`Layered::holder`] finds it, opening none. `None` where the drawing holds
+/// none, or is yet to be derived.
 pub(crate) fn drawn_holder(view: &GraphPanel, id: Id) -> Option<Id> {
-    let drawn = view.derived.drawn(LayoutMode::Layered)?;
-    let Drawn::Layered { view: laid, .. } = &drawn else {
-        return None;
-    };
-    let boxes: HashSet<Id> = laid.boxes.iter().map(|b| b.id).collect();
-    std::iter::once(id)
-        .chain(holders(view, id))
-        .find(|candidate| boxes.contains(candidate))
+    view.derived.layered.as_ref()?.holder(id)
 }
 
 /// Opens `expanded` onto `id` in `base`: every container holding it, then the
@@ -1006,8 +1009,8 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let layered = match lays_out {
                 false => Relaid::Nothing,
                 true if keeps_held(&slice.base, &expanded) => Relaid::Held,
-                true => Relaid::Fresh(Layered {
-                    view: Arc::new(build::relayout(
+                true => {
+                    let (laid, groups) = build::relayout(
                         &slice.base,
                         &slice.reduced,
                         &expanded,
@@ -1015,11 +1018,15 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                         reduced,
                         &slice.transitions,
                         held.as_ref().map(|held| &held.view.anchors),
-                    )),
-                    base: Arc::clone(&slice.base),
-                    expanded: expanded.clone(),
-                    reduced,
-                }),
+                    );
+                    Relaid::Fresh(Layered {
+                        view: Arc::new(laid),
+                        groups: Arc::new(groups),
+                        base: Arc::clone(&slice.base),
+                        expanded: expanded.clone(),
+                        reduced,
+                    })
+                }
             };
             Landed {
                 slice,
@@ -1404,13 +1411,38 @@ mod tests {
         );
     }
 
+    /// The document, and the slice hiding its actions leaves of it.
+    fn actions_hidden() -> (Loaded, Slice) {
+        let loaded = document();
+        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        (loaded, slice)
+    }
+
+    #[test]
+    fn a_target_whose_children_a_filter_hides_shrinks_in_place() {
+        let (loaded, slice) = actions_hidden();
+        let target = id(&loaded, "//a:t");
+
+        let whole = finest(loaded.shared.map.placed())
+            .boxes
+            .iter()
+            .find(|b| b.id == target)
+            .expect("the document draws the target");
+        let shrunk = finest(slice.map())
+            .boxes
+            .iter()
+            .find(|b| b.id == target)
+            .expect("the filter keeps the target");
+        assert_eq!((shrunk.x, shrunk.y), (whole.x, whole.y));
+        assert!(shrunk.width < whole.width && shrunk.height < whole.height);
+    }
+
     /// A restriction places what survives where the whole graph places it, so a
     /// filter change leaves the view looking at the same place rather than at a
     /// graph redrawn under it.
     #[test]
     fn a_restricted_map_draws_a_survivor_where_the_document_draws_it() {
-        let loaded = document();
-        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        let (loaded, slice) = actions_hidden();
 
         let whole = finest(loaded.shared.map.placed());
         for b in &finest(slice.map()).boxes {
@@ -1717,28 +1749,75 @@ mod tests {
         assert!(derived.restricting());
     }
 
+    /// A package holding a target whose action reads two sources, which the
+    /// quotient merges into one group.
+    struct MergedSources {
+        base: Graph,
+        names: Names,
+        package: Id,
+        target: Id,
+        sources: [Id; 2],
+    }
+
+    impl MergedSources {
+        fn new() -> Self {
+            let mut names = Names::default();
+            let mut base = Graph::new();
+            let package = names.intern("//p");
+            base.add_node(Node::new(package, "p", Kind::Package, None));
+            let target = names.intern("//p:t");
+            base.add_node(Node::new(target, "t", Kind::Target, Some(package)));
+            let action = names.intern("//p:t#compile");
+            base.add_node(Node::new(action, "compile", Kind::Action, Some(target)));
+            let sources = ["//p:a.c", "//p:b.c"].map(|name| {
+                let source = names.intern(name);
+                base.add_node(Node::new(source, name, Kind::Source, Some(target)));
+                base.add_edge(source, action, EdgeKind::Aquery);
+                source
+            });
+            Self {
+                base,
+                names,
+                package,
+                target,
+                sources,
+            }
+        }
+
+        /// The drawing laid out at `expanded`, over every edge.
+        fn layered(&mut self, expanded: HashSet<Id>) -> Layered {
+            let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&self.base);
+            let (laid, groups) = build::relayout(
+                &self.base,
+                &reduced_base,
+                &expanded,
+                &mut self.names,
+                false,
+                &Transitions::default(),
+                None,
+            );
+            Layered {
+                view: Arc::new(laid),
+                groups: Arc::new(groups),
+                base: Arc::new(self.base.clone()),
+                expanded,
+                reduced: false,
+            }
+        }
+    }
+
     /// Opening onto a source a target's action reads with another opens the
     /// package and target holding it and the group the two merge into, so the
     /// quotient the layout draws keeps a box of the source's own.
     #[test]
     fn opening_onto_a_merged_source_opens_its_containers_and_its_group() {
-        let mut names = Names::default();
-        let mut base = Graph::new();
-        let package = names.intern("//p");
-        base.add_node(Node::new(package, "p", Kind::Package, None));
-        let target = names.intern("//p:t");
-        base.add_node(Node::new(target, "t", Kind::Target, Some(package)));
-        let action = names.intern("//p:t#compile");
-        base.add_node(Node::new(action, "compile", Kind::Action, Some(target)));
-        let sources: Vec<Id> = ["//p:a.c", "//p:b.c"]
-            .into_iter()
-            .map(|name| {
-                let source = names.intern(name);
-                base.add_node(Node::new(source, name, Kind::Source, Some(target)));
-                base.add_edge(source, action, EdgeKind::Aquery);
-                source
-            })
-            .collect();
+        let MergedSources {
+            base,
+            mut names,
+            package,
+            target,
+            sources,
+        } = MergedSources::new();
         let revealed = sources[1];
         let mut expanded = HashSet::new();
 
@@ -1748,6 +1827,23 @@ mod tests {
         let visible = bviz_graph_layout::lod::collapse(&base, &expanded);
         let (drawn, _) = bviz_graph_layout::quotient::quotient(&visible, &expanded, &mut names);
         assert!(drawn.nodes.iter().any(|node| node.id == revealed));
+    }
+
+    /// A source merged into a collapsed group is stood for by the group's box,
+    /// not the target holding the group; once the group opens, by its own.
+    #[test]
+    fn a_merged_source_is_held_by_its_group_box_until_the_group_opens() {
+        let mut fixture = MergedSources::new();
+        let [first, second] = fixture.sources;
+        let folded = fixture.layered([fixture.package, fixture.target].into());
+
+        let group = folded.holder(first).expect("a box standing for the source");
+        assert_ne!(group, fixture.target);
+        assert_ne!(group, first);
+        assert_eq!(folded.holder(second), Some(group));
+
+        let opened = fixture.layered([fixture.package, fixture.target, group].into());
+        assert_eq!(opened.holder(first), Some(first));
     }
 
     #[test]
@@ -1814,6 +1910,7 @@ mod tests {
     fn layered(loaded: &Loaded, width: f64) -> Layered {
         Layered {
             view: drawing(width),
+            groups: Arc::default(),
             base: Arc::clone(&loaded.shared.base),
             expanded: HashSet::new(),
             reduced: true,

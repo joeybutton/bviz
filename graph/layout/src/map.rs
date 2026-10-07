@@ -64,7 +64,7 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
         expandable: Arc::new(expandable),
         coarsest: Level::opening(Arc::new(HashSet::new())),
         finer,
-        kept: None,
+        restriction: None,
     }
 }
 
@@ -107,9 +107,31 @@ pub struct MapLayout {
     coarsest: Level,
     /// Ascending by the scale each view takes over from.
     finer: Vec<(f64, Level)>,
-    /// Which ids a restriction keeps, indexed by id; `None` for a map of the
-    /// whole placed graph, which keeps every node it places.
-    kept: Option<Vec<bool>>,
+    /// `None` for a map of the whole placed graph, which draws every node it
+    /// places where the drawing places it.
+    restriction: Option<Restriction>,
+}
+
+/// What a [`restricted`](MapLayout::restricted) map draws differently from the
+/// drawing it shares.
+struct Restriction {
+    /// Indexed by id.
+    kept: Vec<bool>,
+    /// By id, the box drawn for a kept container that the restriction leaves
+    /// without a child.
+    emptied: FxHashMap<Id, Placed>,
+}
+
+impl Restriction {
+    fn placed(&self, id: Id, drawing: &Drawing) -> Option<Placed> {
+        if !self.kept.get(id.0 as usize).copied().unwrap_or(false) {
+            return None;
+        }
+        self.emptied
+            .get(&id)
+            .copied()
+            .or_else(|| drawing.placed(id))
+    }
 }
 
 impl MapLayout {
@@ -122,17 +144,7 @@ impl MapLayout {
     /// The view at `index`, deriving it if this is the first call for it.
     pub fn level(&self, index: usize) -> &LaidOut {
         let level = self.level_at(index);
-        level.view.get_or_init(|| {
-            view_of(
-                &self.base,
-                &self.reduced,
-                &self.transitions,
-                &level.open,
-                &self.drawing,
-                &self.containment,
-                &self.expandable,
-            )
-        })
+        level.view.get_or_init(|| self.view_of(&level.open))
     }
 
     /// The view at `index`, where it has been derived.
@@ -161,7 +173,9 @@ impl MapLayout {
 
     /// The levels `base` leaves of this map, each drawn at the positions this
     /// map places its nodes at: a node this map places and `base` does not hold
-    /// leaves a hole where it stood, and everything else stays put.
+    /// leaves a hole where it stood, and everything else stays put. A container
+    /// `base` holds no child of is drawn leaf-sized in its placed box's top-left
+    /// corner, so it neither frames empty space nor moves.
     ///
     /// `base`'s nodes must be a subset of the placed graph's, keyed by the same
     /// ids; `reduced` must be its transitive reduction, and `transitions` those
@@ -174,12 +188,37 @@ impl MapLayout {
         reduced: Arc<Graph>,
         transitions: Arc<Transitions>,
     ) -> MapLayout {
-        let mut kept = vec![false; id_span(&base)];
+        let span = id_span(&base);
+        let mut kept = vec![false; span];
+        let mut parents = vec![false; span];
+        let mut containers = 0;
         for node in &base.nodes {
             kept[node.id.0 as usize] = true;
+            if let Some(parent) = node.parent {
+                parents[parent.0 as usize] = true;
+            }
+            containers += usize::from(self.drawing.container(node.id).is_some());
+        }
+        let mut emptied: FxHashMap<Id, Placed> =
+            FxHashMap::with_capacity_and_hasher(containers, Default::default());
+        for node in &base.nodes {
+            if parents[node.id.0 as usize] {
+                continue;
+            }
+            if let Some(placed) = self.drawing.container(node.id) {
+                let (width, height) = leaf_size(&node.label);
+                emptied.insert(
+                    node.id,
+                    Placed {
+                        width,
+                        height,
+                        ..placed
+                    },
+                );
+            }
         }
         MapLayout {
-            kept: Some(kept),
+            restriction: Some(Restriction { kept, emptied }),
             base,
             reduced,
             transitions,
@@ -209,11 +248,34 @@ impl MapLayout {
     /// graph holds no node of, and for one a restriction drops, which no level
     /// draws.
     pub fn placed(&self, id: Id) -> Option<Placed> {
-        let kept = self
-            .kept
-            .as_ref()
-            .is_none_or(|kept| kept.get(id.0 as usize).copied().unwrap_or(false));
-        self.drawing.placed(id).filter(|_| kept)
+        match &self.restriction {
+            None => self.drawing.placed(id),
+            Some(restriction) => restriction.placed(id, &self.drawing),
+        }
+    }
+
+    /// The view of `base` with `open` opened, drawn at its nodes' global
+    /// positions.
+    fn view_of(&self, open: &HashSet<Id>) -> LaidOut {
+        let (visible, folding) = lod::collapse_folded(&self.base, open);
+        let mut connected: FxHashSet<(Id, Id)> =
+            FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
+        connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
+        let placed = |id| self.placed(id);
+        let boxes = boxes(&visible, placed, &self.containment);
+        let drawn = drawn_edges(visible, &self.reduced, open, &self.expandable);
+        let mut connectors = connectors(&drawn, placed);
+        self.transitions
+            .mark(&mut connectors, |from, to| folding.pair(from, to));
+        LaidOut {
+            boxes,
+            connectors,
+            // The frames are laid out by layout_flat, which numbers no node.
+            anchors: HashMap::new(),
+            full_edges: connected.into_iter().collect(),
+            width: self.drawing.width,
+            height: self.drawing.height,
+        }
     }
 }
 
@@ -248,6 +310,8 @@ struct Drawing {
     /// Each id's box, indexed by id over the placed graph's id space, `None`
     /// where that graph holds no node of the id.
     placed: Vec<Option<Placed>>,
+    /// Indexed as `placed`, whether the id was placed as a container.
+    container: Vec<bool>,
     width: f64,
     height: f64,
 }
@@ -255,6 +319,12 @@ struct Drawing {
 impl Drawing {
     fn placed(&self, id: Id) -> Option<Placed> {
         self.placed.get(id.0 as usize).copied().flatten()
+    }
+
+    /// `id`'s box, where it was placed as a container.
+    fn container(&self, id: Id) -> Option<Placed> {
+        self.placed(id)
+            .filter(|_| self.container.get(id.0 as usize).copied().unwrap_or(false))
     }
 }
 
@@ -326,6 +396,7 @@ fn place(
     }
     Drawing {
         placed: absolute(graph, containment, |id| forest.size(id), &offset),
+        container: forest.fitted.iter().map(|f| f.get().is_some()).collect(),
         width: top.width,
         height: top.height,
     }
@@ -429,10 +500,15 @@ fn leaf_sizes(graph: &Graph, children_of: &HashMap<Id, Vec<&Node>>) -> FxHashMap
         FxHashMap::with_capacity_and_hasher(graph.nodes.len(), Default::default());
     for node in &graph.nodes {
         if !children_of.contains_key(&node.id) {
-            size.insert(node.id, (layout::leaf_width(&node.label), LEAF_HEIGHT));
+            size.insert(node.id, leaf_size(&node.label));
         }
     }
     size
+}
+
+/// The size of a leaf box holding `label`.
+fn leaf_size(label: &str) -> (f64, f64) {
+    (layout::leaf_width(label), LEAF_HEIGHT)
 }
 
 /// A container's box, sized around the frame holding its children, and where
@@ -568,35 +644,6 @@ fn open_at(expandable: &HashSet<Id>, drawing: &Drawing, scale: f64) -> HashSet<I
         .collect()
 }
 
-/// The view of `base` with `open` opened, drawn at its nodes' global positions.
-fn view_of(
-    base: &Graph,
-    reduced: &Graph,
-    transitions: &Transitions,
-    open: &HashSet<Id>,
-    drawing: &Drawing,
-    containment: &Containment,
-    expandable: &HashSet<Id>,
-) -> LaidOut {
-    let (visible, folding) = lod::collapse_folded(base, open);
-    let mut connected: FxHashSet<(Id, Id)> =
-        FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
-    connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
-    let boxes = boxes(&visible, drawing, containment);
-    let drawn = drawn_edges(visible, reduced, open, expandable);
-    let mut connectors = connectors(&drawn, drawing);
-    transitions.mark(&mut connectors, |from, to| folding.pair(from, to));
-    LaidOut {
-        boxes,
-        connectors,
-        // The frames are laid out by layout_flat, which numbers no node.
-        anchors: HashMap::new(),
-        full_edges: connected.into_iter().collect(),
-        width: drawing.width,
-        height: drawing.height,
-    }
-}
-
 /// The edges a level draws: those `visible` holds that the reduced base holds
 /// between the same boxes. Folding a subtree into one box makes edges redundant
 /// that are not redundant between nodes, so a view that folds anything is
@@ -616,13 +663,17 @@ fn drawn_edges(
 }
 
 /// Reads each visible node's global box.
-fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<Box> {
+fn boxes(
+    visible: &Graph,
+    placed: impl Fn(Id) -> Option<Placed>,
+    containment: &Containment,
+) -> Vec<Box> {
     let mut parents: FxHashSet<Id> =
         FxHashSet::with_capacity_and_hasher(visible.nodes.len(), Default::default());
     parents.extend(visible.nodes.iter().filter_map(|n| n.parent));
     let mut boxes: Vec<(u32, Box)> = Vec::with_capacity(visible.nodes.len());
     for node in &visible.nodes {
-        let Some(placed) = drawing.placed(node.id) else {
+        let Some(placed) = placed(node.id) else {
             continue;
         };
         boxes.push((
@@ -645,7 +696,7 @@ fn boxes(visible: &Graph, drawing: &Drawing, containment: &Containment) -> Vec<B
 }
 
 /// One connector per drawn node pair.
-fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
+fn connectors(drawn: &Graph, placed: impl Fn(Id) -> Option<Placed>) -> Vec<Connector> {
     let mut kinds_of: BTreeMap<(Id, Id), Vec<EdgeKind>> = BTreeMap::new();
     for edge in &drawn.edges {
         let kinds = kinds_of.entry((edge.from, edge.to)).or_default();
@@ -656,7 +707,7 @@ fn connectors(drawn: &Graph, drawing: &Drawing) -> Vec<Connector> {
     let mut connectors: Vec<Connector> = Vec::with_capacity(kinds_of.len());
     for ((from, to), mut kinds) in kinds_of {
         kinds.sort_unstable();
-        let (Some(tail), Some(head)) = (drawing.placed(from), drawing.placed(to)) else {
+        let (Some(tail), Some(head)) = (placed(from), placed(to)) else {
             continue;
         };
         connectors.push(Connector {
@@ -1104,6 +1155,92 @@ mod tests {
         assert!(map.placed(dropped).is_some());
         assert_eq!(sliced.placed(dropped), None);
         assert_eq!(sliced.placed(kept), map.placed(kept));
+    }
+
+    /// Restricts `base`, as mapped by `map`, to every node but `dropped`.
+    fn restrict(map: &MapLayout, base: &Graph, names: &Names, dropped: &[&str]) -> MapLayout {
+        let dropped: HashSet<Id> = dropped.iter().map(|id| names.get(id).unwrap()).collect();
+        let keep: HashSet<Id> = base
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .filter(|id| !dropped.contains(id))
+            .collect();
+        let restricted = crate::filter::filter(base, &map.reduced, &keep);
+        let reduced = reduce::transitive_reduction(&restricted);
+        map.restricted(Arc::new(restricted), Arc::new(reduced), Arc::default())
+    }
+
+    /// A connector into the emptied container meets the box it is drawn as.
+    #[test]
+    fn a_container_a_restriction_empties_is_drawn_leaf_sized_where_it_was_placed() {
+        let mut base = Graph::new();
+        let mut names = Names::default();
+        let outer = names.intern("outer");
+        base.add_node(Node::new(outer, "outer", Kind::Target, None));
+        let kids = ["a-long-leaf-label", "another-long-leaf-label"].map(|kid| {
+            let id = names.intern(kid);
+            base.add_node(Node::new(id, kid, Kind::Action, Some(outer)));
+            id
+        });
+        base.add_edge(kids[0], kids[1], EdgeKind::Aquery);
+        let other = names.intern("other");
+        base.add_node(Node::new(other, "other", Kind::Target, None));
+        base.add_edge(other, outer, EdgeKind::Query);
+        let map = mapped(&base);
+        let sliced = restrict(
+            &map,
+            &base,
+            &names,
+            &["a-long-leaf-label", "another-long-leaf-label"],
+        );
+
+        let whole = map.placed(outer).unwrap();
+        let (width, height) = leaf_size("outer");
+        let leaf = Placed {
+            width,
+            height,
+            ..whole
+        };
+        assert!(leaf.width < whole.width && leaf.height < whole.height);
+        assert_eq!(sliced.placed(outer), Some(leaf));
+        for i in 0..sliced.level_count() {
+            let view = sliced.level(i);
+            let drawn = box_of(view, &names, "outer").unwrap();
+            assert_eq!(
+                (drawn.x, drawn.y, drawn.width, drawn.height),
+                (leaf.x, leaf.y, leaf.width, leaf.height),
+                "level {i}",
+            );
+            assert!(!drawn.compound, "level {i}");
+            let connector = view
+                .connectors
+                .iter()
+                .find(|c| c.from == other && c.to == outer)
+                .unwrap();
+            let end = *connector.points.last().unwrap();
+            let slack = 1e-6;
+            assert!(
+                (leaf.x - slack..=leaf.x + leaf.width + slack).contains(&end.0)
+                    && (leaf.y - slack..=leaf.y + leaf.height + slack).contains(&end.1),
+                "level {i} ends the connector off the drawn box at {end:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_container_a_restriction_keeps_a_child_of_is_drawn_at_its_placed_size() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let sliced = restrict(&map, &base, &names, &["wide.2"]);
+        let wide = names.get("wide").unwrap();
+        let drawn = box_of(sliced.level(0), &names, "wide").unwrap();
+        assert!(box_of(sliced.level(0), &names, "wide.0").is_none());
+        assert_eq!(sliced.placed(wide), map.placed(wide));
+        assert_eq!(
+            Some((drawn.x, drawn.y, drawn.width, drawn.height)),
+            map.placed(wide).map(|p| (p.x, p.y, p.width, p.height)),
+        );
     }
 
     #[test]

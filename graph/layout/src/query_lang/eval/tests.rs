@@ -215,6 +215,54 @@ fn attr_reads_tags_as_bazel_prints_a_list() {
     );
 }
 
+/// What `kind(rust_library, ...)` and `kind(alias, ...)` name of the
+/// dependencies of the alias `@crates//:x-1.0` in `joint`.
+fn kinds_behind_an_alias(joint: crate::joint::Joint) -> [Vec<String>; 2] {
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    [
+        query("kind(rust_library, deps(@crates//:x-1.0))"),
+        query("kind(alias, deps(@crates//:x-1.0))"),
+    ]
+}
+
+#[test]
+fn kind_matches_an_alias_as_an_alias_rule_and_not_as_its_actual() {
+    use crate::test_support::{configuration, configured};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let alias = || {
+        let mut alias =
+            crate::test_support::rule("@crates//:x-1.0", "alias", &["@crates__x//:x"], Vec::new());
+        alias.rule.as_mut().unwrap().configured_rule_input = vec![ConfiguredRuleInput {
+            label: Some("@crates__x//:x".to_string()),
+            configuration_id: Some(1),
+            ..Default::default()
+        }];
+        alias
+    };
+    let actual = || crate::test_support::rule("@crates__x//:x", "rust_library", &[], Vec::new());
+    assert_eq!(
+        kinds_behind_an_alias(build_joint(None, None, Some(&[alias(), actual()]), false)),
+        [["@crates__x//:x"], ["@crates//:x-1.0"]]
+    );
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![configured(alias(), 1), configured(actual(), 1)],
+        configurations: vec![configuration(1, "aa11", "k8-fastbuild", false)],
+    }];
+    assert_eq!(
+        kinds_behind_an_alias(build_joint(None, Some(&cquery), None, false)),
+        [
+            ["@crates__x//:x", "ct:@crates__x//:x#aa11"],
+            ["@crates//:x-1.0", "ct:@crates//:x-1.0#aa11"]
+        ]
+    );
+}
+
 #[test]
 fn a_pattern_the_regex_crate_rejects_fails_naming_the_construct() {
     let fixture = Fixture::new();
@@ -367,6 +415,65 @@ fn config_target_leaves_out_a_configuration_only_a_dependency_is_built_in() {
     );
 }
 
+/// A cquery under `--transitions` of `//c:t`, built in configuration `aa11`,
+/// and `//c:app`, built in `bb22`, each depending on `//c:lib` in its own
+/// configuration, and `//c:t` also on `//c:app` in `aa11`.
+fn two_top_level_configurations() -> (Universe, Names) {
+    use crate::test_support::{configuration, configured, rule};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let depending = |name: &str, deps: &[(&str, u32)]| {
+        let labels: Vec<&str> = deps.iter().map(|&(label, _)| label).collect();
+        let mut target = rule(name, "genrule", &labels, Vec::new());
+        target.rule.as_mut().unwrap().configured_rule_input = (deps.iter())
+            .map(|&(label, config)| ConfiguredRuleInput {
+                label: Some(label.to_string()),
+                configuration_id: Some(config),
+                ..Default::default()
+            })
+            .collect();
+        target
+    };
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(depending("//c:t", &[("//c:lib", 1), ("//c:app", 1)]), 1),
+            configured(depending("//c:app", &[("//c:lib", 1)]), 1),
+            configured(depending("//c:app", &[("//c:lib", 2)]), 2),
+            configured(depending("//c:lib", &[]), 1),
+            configured(depending("//c:lib", &[]), 2),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "aarch64-fastbuild", false),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn config_target_takes_a_dependency_in_the_first_top_level_configuration() {
+    let (universe, names) = two_top_level_configurations();
+    assert_eq!(
+        configured_query(&universe, &names, "config(//c:lib, target)").unwrap(),
+        ["ct://c:lib#aa11"]
+    );
+}
+
+#[test]
+fn config_target_takes_a_top_level_target_in_its_own_configuration() {
+    let (universe, names) = two_top_level_configurations();
+    assert_eq!(
+        configured_query(&universe, &names, "config(//c:app, target)").unwrap(),
+        ["ct://c:app#bb22"]
+    );
+}
+
 #[test]
 fn config_anyexec_takes_the_first_tool_configuration_by_checksum() {
     let (universe, names) = configured(true);
@@ -411,6 +518,191 @@ fn actions() -> (Universe, Names) {
         &joint.capabilities,
     );
     (universe, joint.names)
+}
+
+#[test]
+fn config_target_leaves_out_a_configuration_an_aquery_builds_only_dependencies_in() {
+    use crate::test_support::{ActionSpec, action_graph, configuration};
+    let lib = |configuration: &str| format!("bazel-out/{configuration}/bin/p/lib.o");
+    let (built_for_bin, built_for_host) = (lib("aarch64-fastbuild"), lib("k8-fastbuild"));
+    let mut aquery = action_graph(&[
+        ActionSpec {
+            label: "//p:lib",
+            mnemonic: "CppCompile",
+            inputs: &["p/lib.cc"],
+            outputs: &[&built_for_bin],
+        },
+        ActionSpec {
+            label: "//p:lib",
+            mnemonic: "CppCompile",
+            inputs: &["p/lib.cc"],
+            outputs: &[&built_for_host],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &[&built_for_bin],
+            outputs: &["bazel-out/k8-fastbuild/bin/p/bin"],
+        },
+    ]);
+    let other = configuration(2, "a0a0", "aarch64-fastbuild", false);
+    aquery.actions[0].configuration_id = other.id;
+    aquery.configuration.push(other);
+    let joint = build_joint(Some(&[aquery]), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    assert_eq!(
+        configured_query(&universe, &joint.names, "config(//p:lib, target)").unwrap(),
+        ["ct://p:lib#c0ffee"]
+    );
+}
+
+/// An aquery of `actions` with the query `targets` naming its labeled outputs,
+/// each action of `in_a0a0` built in configuration `a0a0` and every other in
+/// `c0ffee`.
+fn labeled_outputs(
+    actions: &[crate::test_support::ActionSpec],
+    in_a0a0: &[usize],
+    targets: &[Target],
+) -> (Universe, Names) {
+    use crate::test_support::{action_graph, configuration};
+    let mut aquery = action_graph(actions);
+    let other = configuration(2, "a0a0", "aarch64-fastbuild", false);
+    for &at in in_a0a0 {
+        aquery.actions[at].configuration_id = other.id;
+    }
+    aquery.configuration.push(other);
+    let joint = build_joint(Some(&[aquery]), None, Some(targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn config_target_takes_the_configured_target_of_a_top_level_rule_writing_a_labeled_output() {
+    use crate::test_support::ActionSpec;
+    let (universe, names) = labeled_outputs(
+        &[
+            ActionSpec {
+                label: "//p:t",
+                mnemonic: "JavaBuild",
+                inputs: &["p/T.java"],
+                outputs: &["bazel-out/k8-fastbuild/bin/p/t.jar"],
+            },
+            ActionSpec {
+                label: "//p:t",
+                mnemonic: "JavaBuild",
+                inputs: &["p/T.java"],
+                outputs: &["bazel-out/aarch64-fastbuild/bin/p/t.jar"],
+            },
+            ActionSpec {
+                label: "//p:app",
+                mnemonic: "Link",
+                inputs: &["bazel-out/aarch64-fastbuild/bin/p/t.jar"],
+                outputs: &["bazel-out/aarch64-fastbuild/bin/p/app"],
+            },
+        ],
+        &[1, 2],
+        &[
+            rule("//p:t", &[], &[]),
+            generated("//p:t.jar", "//p:t"),
+            rule("//p:app", &["//p:t.jar"], &[]),
+        ],
+    );
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("config(//p:t, target)"), ["ct://p:t#c0ffee"]);
+    assert_eq!(query("config(//p:t.jar, target)"), ["ct://p:t.jar#c0ffee"]);
+}
+
+#[test]
+fn config_target_leaves_out_a_configuration_whose_labeled_output_nothing_reads() {
+    use crate::test_support::ActionSpec;
+    let (universe, names) = labeled_outputs(
+        &[
+            ActionSpec {
+                label: "//p:gen",
+                mnemonic: "Gen",
+                inputs: &[],
+                outputs: &[
+                    "bazel-out/aarch64-fastbuild/bin/p/out.txt",
+                    "bazel-out/aarch64-fastbuild/bin/p/gen.o",
+                ],
+            },
+            ActionSpec {
+                label: "//p:gen",
+                mnemonic: "Gen",
+                inputs: &[],
+                outputs: &[
+                    "bazel-out/k8-fastbuild/bin/p/out.txt",
+                    "bazel-out/k8-fastbuild/bin/p/gen.o",
+                ],
+            },
+            ActionSpec {
+                label: "//p:bin",
+                mnemonic: "Link",
+                inputs: &[
+                    "bazel-out/aarch64-fastbuild/bin/p/gen.o",
+                    "bazel-out/k8-fastbuild/bin/p/gen.o",
+                ],
+                outputs: &["bazel-out/k8-fastbuild/bin/p/bin"],
+            },
+        ],
+        &[0],
+        &[
+            rule("//p:gen", &[], &[]),
+            generated("//p:out.txt", "//p:gen"),
+            rule("//p:bin", &["//p:gen"], &[]),
+        ],
+    );
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("config(//p:gen, target)"), ["ct://p:gen#c0ffee"]);
+    assert_eq!(
+        query("config(//p:out.txt, target)"),
+        ["ct://p:out.txt#c0ffee"]
+    );
+}
+
+#[test]
+fn config_target_takes_a_top_level_rule_generating_a_file_in_its_own_configuration() {
+    use crate::test_support::{configuration, configured};
+    use bazel_query_proto::blaze_query::ConfiguredRuleInput;
+    let mut app = crate::test_support::rule("//p:app", "genrule", &["//p:t"], Vec::new());
+    app.rule.as_mut().unwrap().configured_rule_input = vec![ConfiguredRuleInput {
+        label: Some("//p:t".to_string()),
+        configuration_id: Some(1),
+        ..Default::default()
+    }];
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(rule("//p:t", &[], &[]), 1),
+            configured(rule("//p:t", &[], &[]), 2),
+            configured(generated("//p:t.jar", "//p:t"), 2),
+            configured(app, 1),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "aarch64-fastbuild", false),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    assert_eq!(
+        configured_query(&universe, &joint.names, "config(//p:t, target)").unwrap(),
+        ["ct://p:t#bb22"]
+    );
 }
 
 #[test]
@@ -493,6 +785,91 @@ fn inputs_matches_a_file_the_graph_left_out() {
         configured_query(&universe, &names, "inputs('external/.*/x\\.h', //p:all)").unwrap(),
         ["action:bazel-out/k8-fastbuild/bin/p/lib.o"]
     );
+}
+
+#[test]
+fn nested_inputs_patterns_match_one_file_left_out_or_not() {
+    let (universe, names) = actions();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert!(query("inputs('.*x\\.h', inputs('.*out\\.c', //p:all))").is_empty());
+    assert_eq!(
+        query("inputs('external/.*', inputs('.*\\.h', //p:all))"),
+        ["action:bazel-out/k8-fastbuild/bin/p/lib.o"]
+    );
+}
+
+/// An aquery of `//p:a`, whose Genrule reads `p/a.java` and `p/foo.txt` and
+/// writes `a.class` and `foo.log`, and of `//p:b`, whose Genrule reads
+/// `p/foo.java` and writes `foo.class`.
+fn java() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let out = |name: &str| format!("bazel-out/k8-fastbuild/bin/p/{name}");
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:a",
+            mnemonic: "Genrule",
+            inputs: &["p/a.java", "p/foo.txt"],
+            outputs: &[&out("a.class"), &out("foo.log")],
+        },
+        ActionSpec {
+            label: "//p:b",
+            mnemonic: "Genrule",
+            inputs: &["p/foo.java"],
+            outputs: &[&out("foo.class")],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+/// Bazel's aquery gathers the filter calls nested in one another into one
+/// filter (`AqueryUtils.matchesAqueryFilters`), which one file read must
+/// match in full, and one file written.
+#[test]
+fn nested_file_filters_match_one_file_as_aquery_does() {
+    let (universe, names) = java();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    let b = ["action:bazel-out/k8-fastbuild/bin/p/foo.class"];
+    assert_eq!(query("inputs('.*java', inputs('.*foo.*', //p:all))"), b);
+    assert_eq!(
+        query("inputs('.*java', mnemonic(Genrule, inputs('.*foo.*', //p:all)))"),
+        b
+    );
+    assert_eq!(query("outputs('.*class', outputs('.*foo.*', //p:all))"), b);
+    assert_eq!(
+        query("let v = inputs('.*foo.*', //p:all) in inputs('.*java', $v)"),
+        b,
+        "a run reading a variable bound to another run joins it"
+    );
+}
+
+#[test]
+fn a_variable_holding_a_filter_run_names_its_filtered_set() {
+    let (universe, names) = java();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(
+        query("let v = inputs('.*foo\\.java', //p:all) in $v + //p:a"),
+        query("inputs('.*foo\\.java', //p:all) + //p:a")
+    );
+}
+
+/// Bazel rejects a filter call below a call of another function, so a run
+/// broken by one filters apart: a bviz extension.
+#[test]
+fn a_filter_run_broken_by_another_function_filters_apart() {
+    let (universe, names) = java();
+    let found = configured_query(
+        &universe,
+        &names,
+        "inputs('.*java', deps(inputs('.*foo.*', //p:all)))",
+    );
+    assert!((found.unwrap()).contains(&"action:bazel-out/k8-fastbuild/bin/p/a.class".to_string()));
 }
 
 #[test]

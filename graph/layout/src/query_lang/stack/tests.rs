@@ -285,6 +285,72 @@ fn a_stack_compiles_to_a_let_chain_bazel_parses_back() {
     assert!(refined.expect("an enabled chip").from_everything);
 }
 
+/// An aquery of `//p:a`, whose Genrule reads `p/a.java` and `p/foo.txt` and
+/// writes `a.class`, and of `//p:b`, whose Genrule reads `p/foo.java` and
+/// writes `b.class`.
+fn java() -> Fixture {
+    use crate::test_support::{ActionSpec, action_graph};
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:a",
+            mnemonic: "Genrule",
+            inputs: &["p/a.java", "p/foo.txt"],
+            outputs: &["bazel-out/k8-fastbuild/bin/p/a.class"],
+        },
+        ActionSpec {
+            label: "//p:b",
+            mnemonic: "Genrule",
+            inputs: &["p/foo.java"],
+            outputs: &["bazel-out/k8-fastbuild/bin/p/b.class"],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    Fixture {
+        universe: Universe::new(
+            &joint.graph,
+            &joint.names,
+            &Arc::new(joint.facets),
+            &joint.capabilities,
+        ),
+        names: joint.names,
+    }
+}
+
+/// Chips reading each set once write out nested aquery filter calls, which
+/// aquery gathers into one filter, so evaluating the chips and their compiled
+/// `let` chain gather them alike.
+#[test]
+fn chained_aquery_filters_filter_as_their_bazel_query_does() {
+    let fixture = java();
+    let chips = ["//p:all", "inputs('.*foo.*')", "inputs('.*java')"];
+    let b = ["action:bazel-out/k8-fastbuild/bin/p/b.class"];
+    assert_eq!(fixture.named(&stack(&chips)), b);
+    let compiled = stack(&chips).compile().unwrap().expect("enabled chips");
+    let value = fixture.universe.evaluate(&compiled.expr).unwrap();
+    let name = |id: usize| fixture.names.resolve(Id(id as u32)).to_string();
+    assert_eq!(value.ones().map(name).collect::<Vec<_>>(), b);
+    assert_eq!(
+        bazel(&chips),
+        query(
+            Command::Aquery,
+            "inputs('.*java', inputs('.*foo.*', //p:all))"
+        )
+    );
+}
+
+/// A negated filter chip joins the run before it, and takes what the joined
+/// run keeps out of what that run named.
+#[test]
+fn a_negated_filter_chip_takes_out_what_the_joined_run_keeps() {
+    let fixture = java();
+    let mut chips = stack(&["//p:all", "inputs('.*foo.*')", "inputs('.*java')"]);
+    chips.toggle_negated(id(&chips, 2));
+    assert_eq!(
+        fixture.named(&chips),
+        ["action:bazel-out/k8-fastbuild/bin/p/a.class"]
+    );
+}
+
 fn bazel(chips: &[&str]) -> Result<BazelQuery, Unportable> {
     stack(chips).bazel_text(Command::Query)
 }

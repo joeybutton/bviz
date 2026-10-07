@@ -23,8 +23,9 @@ use rustc_hash::FxHashMap;
 use super::SyntaxError;
 use super::ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Word};
 use super::config::ANY_EXEC;
-use super::eval::EvalError;
+use super::eval::{EvalError, Named};
 use super::lex::{self, Token, TokenKind};
+use super::narrow::ActionFilter;
 use super::parse::parse;
 use super::universe::{Counts, Universe};
 
@@ -690,14 +691,15 @@ impl Stack {
                     let first = before.is_none();
                     let step = chip.step(parsed, first);
                     fingerprint = chip.fingerprint(fingerprint, first);
-                    let from = before
-                        .as_ref()
-                        .map_or(universe.members(), |b| b.value.as_ref());
                     let named = prefixes.get_or_insert(fingerprint, || {
-                        let value = universe.evaluate_with(&step, CONTINUED, from)?;
+                        let from = (before.as_ref()).map_or_else(
+                            || Named::new(universe.members().clone()),
+                            |before| before.named.clone(),
+                        );
+                        let named = universe.evaluate_with(&step, CONTINUED, from)?;
                         Ok(Evaluated {
-                            counts: universe.counts(&value),
-                            value: Arc::new(value),
+                            counts: universe.counts(named.set()),
+                            named,
                         })
                     });
                     match named {
@@ -720,7 +722,7 @@ impl Stack {
         }
         Evaluation {
             chips,
-            value: before.filter(|_| !broken).map(|named| named.value),
+            value: (before.filter(|_| !broken)).map(|before| before.named.set().clone()),
         }
     }
 }
@@ -762,13 +764,6 @@ impl Calls {
     }
 }
 
-fn is_action_filter(function: Function) -> bool {
-    matches!(
-        function,
-        Function::Mnemonic | Function::Inputs | Function::Outputs
-    )
-}
-
 /// Whether every aquery filter call in `expr` stands where Bazel's aquery
 /// filters by it (`AqueryProcessor.buildActionFilters`): on the chain of calls
 /// from the outermost expression through each call's first argument that is a
@@ -781,7 +776,7 @@ fn action_filters_on_chain(expr: &Expr) -> bool {
         let ExprKind::Call { function, args } = &call.kind else {
             break;
         };
-        if is_action_filter(*function) {
+        if ActionFilter::of(*function).is_some() {
             if below_other {
                 return false;
             }
@@ -813,7 +808,7 @@ fn every_action_filter(expr: &Expr, holds: &mut impl FnMut(&Expr) -> bool) -> bo
             every_action_filter(value, holds) && every_action_filter(body, holds)
         }
         ExprKind::Call { function, args } => {
-            (!is_action_filter(*function) || holds(expr))
+            (ActionFilter::of(*function).is_none() || holds(expr))
                 && args.iter().all(|arg| match arg {
                     Arg::Expr(expr) => every_action_filter(expr, holds),
                     Arg::Word(_) | Arg::Int(_) => true,
@@ -914,7 +909,7 @@ impl fmt::Display for Unportable {
 /// What one chip names, with its counts.
 #[derive(Clone, Debug)]
 struct Evaluated {
-    value: Arc<FixedBitSet>,
+    named: Named,
     counts: Counts,
 }
 

@@ -10,8 +10,12 @@
 //! calls on the chain that starts at the outermost expression and follows
 //! each call's first argument that is itself a call, and rejects such a call
 //! below a call of another function. A call anywhere else, such as an operand
-//! of a set operator, names its argument unfiltered. Here each call filters
-//! wherever it stands.
+//! of a set operator, names its argument unfiltered. It gathers the patterns
+//! of the calls on the chain into one filter, whatever their order. Here each
+//! run of filter calls nested directly in one another filters as one
+//! [`ActionFilters`], wherever it stands. A run continues through a variable
+//! read, so `let v = inputs(p, X) in inputs(q, $v)` is one run, but not
+//! through a `let` expression or any other function or operator.
 //!
 //! A pattern is matched with the `regex-automata` engine in its ASCII mode,
 //! where `\w`, `\d`, `\s` and `\b` mean what they mean to `java.util.regex`.
@@ -114,6 +118,54 @@ fn build(hir: &Hir) -> Result<Regex, String> {
     built.map_err(|error| error.to_string())
 }
 
+/// The aquery filter functions.
+#[derive(Clone, Copy)]
+pub(super) enum ActionFilter {
+    Mnemonic,
+    Inputs,
+    Outputs,
+}
+
+impl ActionFilter {
+    pub(super) fn of(function: Function) -> Option<ActionFilter> {
+        match function {
+            Function::Mnemonic => Some(ActionFilter::Mnemonic),
+            Function::Inputs => Some(ActionFilter::Inputs),
+            Function::Outputs => Some(ActionFilter::Outputs),
+            _ => None,
+        }
+    }
+}
+
+/// The patterns of aquery filter calls, by function, as
+/// `AqueryUtils.matchesAqueryFilters` applies them: an action passes where its
+/// mnemonic matches every mnemonic pattern, one file it reads matches every
+/// inputs pattern, and one file it writes matches every outputs pattern. A
+/// function with no pattern passes every action.
+#[derive(Default, Debug)]
+pub(super) struct ActionFilters {
+    mnemonic: Vec<Regex>,
+    inputs: Vec<Regex>,
+    outputs: Vec<Regex>,
+}
+
+impl ActionFilters {
+    pub(super) fn add(&mut self, filter: ActionFilter, regex: Regex) {
+        match filter {
+            ActionFilter::Mnemonic => self.mnemonic.push(regex),
+            ActionFilter::Inputs => self.inputs.push(regex),
+            ActionFilter::Outputs => self.outputs.push(regex),
+        }
+    }
+
+    /// Adds the patterns of `other`.
+    pub(super) fn extend(&mut self, other: &ActionFilters) {
+        self.mnemonic.extend_from_slice(&other.mnemonic);
+        self.inputs.extend_from_slice(&other.inputs);
+        self.outputs.extend_from_slice(&other.outputs);
+    }
+}
+
 impl Universe {
     /// `pattern` compiled for `function`, or the message Bazel's engine fails
     /// with for a pattern it cannot compile.
@@ -184,37 +236,48 @@ impl Universe {
         })
     }
 
-    /// The actions of `value`, and those its configured targets hold, whose
-    /// mnemonic `regex` matches.
-    pub(super) fn mnemonic(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
+    /// The actions of `value`, and those its configured targets hold, that
+    /// `filters` keeps, whether the graph holds a node for a file read or left
+    /// it out.
+    pub(super) fn filter_actions(
+        &self,
+        filters: &ActionFilters,
+        value: &FixedBitSet,
+    ) -> FixedBitSet {
+        let ActionFilters {
+            mnemonic,
+            inputs,
+            outputs,
+        } = filters;
+        let mut reads = (!inputs.is_empty()).then(|| {
+            let left_out = LeftOutMatcher::new(self.facets.left_out_inputs());
+            (PathMatcher::new(inputs), left_out)
+        });
+        let mut writes = (!outputs.is_empty()).then(|| PathMatcher::new(outputs));
         self.retain_actions(value, |action| {
-            let mnemonic = self.facets.mnemonic(action);
-            let mnemonic = mnemonic.map(|mnemonic| self.facets.strings().resolve(mnemonic));
-            mnemonic.is_some_and(|mnemonic| regex.is_match(mnemonic.as_bytes()))
+            (mnemonic.is_empty() || self.mnemonic_matches(action, mnemonic))
+                && reads.as_mut().is_none_or(|(matcher, left_out)| {
+                    self.any_path_matches(self.index.dependencies(action), matcher)
+                        || left_out.read_by(action, matcher)
+                })
+                && writes.as_mut().is_none_or(|matcher| {
+                    self.any_path_matches(self.index.dependents(action), matcher)
+                })
         })
     }
 
-    /// The actions of `value`, and those its configured targets hold, reading
-    /// a file whose exec path `regex` matches, whether the graph holds a node
-    /// for the file or left it out.
-    pub(super) fn inputs(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
-        let mut paths = PathMatcher::new(regex);
-        let mut left_out = LeftOutMatcher::new(self.facets.left_out_inputs());
-        self.retain_actions(value, |action| {
-            let files = self.index.dependencies(action);
-            (files.filter_map(|file| self.facets.exec_path(file))).any(|path| paths.matches(path))
-                || left_out.read_by(action, &mut paths)
+    /// Whether `action` has a mnemonic every one of `regexes` matches.
+    fn mnemonic_matches(&self, action: Id, regexes: &[Regex]) -> bool {
+        let mnemonic = self.facets.mnemonic(action);
+        let mnemonic = mnemonic.map(|mnemonic| self.facets.strings().resolve(mnemonic));
+        mnemonic.is_some_and(|mnemonic| {
+            (regexes.iter()).all(|regex| regex.is_match(mnemonic.as_bytes()))
         })
     }
 
-    /// The actions of `value`, and those its configured targets hold, writing
-    /// a file whose exec path `regex` matches.
-    pub(super) fn outputs(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
-        let mut paths = PathMatcher::new(regex);
-        self.retain_actions(value, |action| {
-            let files = self.index.dependents(action);
-            (files.filter_map(|file| self.facets.exec_path(file))).any(|path| paths.matches(path))
-        })
+    /// Whether `matcher` matches the exec path of one of `files`.
+    fn any_path_matches(&self, files: impl Iterator<Item = Id>, matcher: &mut PathMatcher) -> bool {
+        (files.filter_map(|file| self.facets.exec_path(file))).any(|path| matcher.matches(path))
     }
 
     /// Why `function` cannot filter this graph's actions, if it cannot: the
@@ -274,28 +337,29 @@ impl Universe {
     }
 }
 
-/// Matches exec paths against one pattern, joining each into one buffer.
+/// Matches exec paths against every one of some patterns, joining each into
+/// one buffer.
 struct PathMatcher<'a> {
-    regex: &'a Regex,
+    regexes: &'a [Regex],
     joined: Vec<u8>,
 }
 
 impl<'a> PathMatcher<'a> {
-    fn new(regex: &'a Regex) -> Self {
+    fn new(regexes: &'a [Regex]) -> Self {
         PathMatcher {
-            regex,
+            regexes,
             joined: Vec::new(),
         }
     }
 
     fn matches(&mut self, path: ExecPath) -> bool {
         path.write_into(&mut self.joined);
-        self.regex.is_match(&self.joined)
+        (self.regexes.iter()).all(|regex| regex.is_match(&self.joined))
     }
 }
 
 /// Whether the inputs an action reads that the graph left out match a
-/// pattern, each path and each nested set asked once.
+/// [`PathMatcher`], each path and each nested set asked once.
 struct LeftOutMatcher<'a> {
     inputs: &'a LeftOutInputs,
     paths: Vec<Option<bool>>,

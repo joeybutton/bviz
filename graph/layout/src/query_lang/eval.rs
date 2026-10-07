@@ -8,11 +8,12 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 use fixedbitset::FixedBitSet;
-use regex_automata::meta::Regex;
 
 use super::ast::{Arg, BinaryOp, Evaluable, Expr, ExprKind, Function, Word};
+use super::narrow::{ActionFilter, ActionFilters};
 use super::universe::Universe;
 use crate::target_pattern::TargetPattern;
 
@@ -33,8 +34,31 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
+/// The nodes an expression names, and the filters of the run of aquery filter
+/// calls naming them, if one does, for a run reading them through a variable
+/// to join.
+#[derive(Clone, Debug)]
+pub(super) struct Named {
+    set: Arc<FixedBitSet>,
+    filters: Option<Arc<ActionFilters>>,
+}
+
+impl Named {
+    /// `set`, named by no run of aquery filter calls.
+    pub(super) fn new(set: FixedBitSet) -> Self {
+        Named {
+            set: Arc::new(set),
+            filters: None,
+        }
+    }
+
+    pub(super) fn set(&self) -> &Arc<FixedBitSet> {
+        &self.set
+    }
+}
+
 /// The values of the `let` variables in scope, the innermost last.
-type Scope<'a> = Vec<(&'a str, FixedBitSet)>;
+type Scope<'a> = Vec<(&'a str, Named)>;
 
 impl Universe {
     /// The nodes `expr` names.
@@ -42,14 +66,31 @@ impl Universe {
         self.eval(expr, &mut Scope::new())
     }
 
-    /// The nodes `expr` names with the variable `name` bound to `bound`.
+    /// What `expr` names with the variable `name` bound to `bound`.
     pub(super) fn evaluate_with<'a>(
         &self,
         expr: &'a Expr,
         name: &'a str,
-        bound: &FixedBitSet,
-    ) -> Result<FixedBitSet, EvalError> {
-        self.eval(expr, &mut vec![(name, bound.clone())])
+        bound: Named,
+    ) -> Result<Named, EvalError> {
+        self.named(expr, &mut vec![(name, bound)])
+    }
+
+    /// What `expr` names, keeping the filters of the run of aquery filter
+    /// calls it is or the variable it reads holds.
+    fn named<'a>(&self, expr: &'a Expr, scope: &mut Scope<'a>) -> Result<Named, EvalError> {
+        match &expr.kind {
+            ExprKind::Call { function, .. } if ActionFilter::of(*function).is_some() => {
+                self.filter_run(expr, scope)
+            }
+            ExprKind::Literal(word) if let Some(bound) = variable(word, scope) => {
+                bound.cloned().map_err(|message| EvalError {
+                    message,
+                    span: expr.span.clone(),
+                })
+            }
+            _ => Ok(Named::new(self.eval(expr, scope)?)),
+        }
     }
 
     fn eval<'a>(&self, expr: &'a Expr, scope: &mut Scope<'a>) -> Result<FixedBitSet, EvalError> {
@@ -85,7 +126,7 @@ impl Universe {
                         "invalid variable name '{name}' in let expression"
                     )));
                 }
-                let value = self.eval(value, scope)?;
+                let value = self.named(value, scope)?;
                 scope.push((&name.text, value));
                 let body = self.eval(body, scope);
                 scope.pop();
@@ -109,15 +150,10 @@ impl Universe {
     /// What the literal `word` names: the value of the variable it refers to,
     /// or the targets of the pattern it writes.
     fn literal(&self, word: &Word, scope: &Scope<'_>) -> Result<FixedBitSet, String> {
-        let text = word.text.as_str();
-        if let Some(name) = text.strip_prefix('$').filter(|name| is_variable_name(name)) {
-            let bound = scope.iter().rev().find(|(bound, _)| *bound == name);
-            return match bound {
-                Some((_, value)) => Ok(value.clone()),
-                None => Err(format!("undefined variable '{name}'")),
-            };
+        if let Some(bound) = variable(word, scope) {
+            return bound.map(|named| named.set.as_ref().clone());
         }
-        let pattern = TargetPattern::parse(text)?;
+        let pattern = TargetPattern::parse(&word.text)?;
         Ok(self.with_configured(self.targets.targets(&pattern)?))
     }
 
@@ -196,37 +232,48 @@ impl Universe {
                 let config = self.config(&values[0], words(args)[0], &written);
                 config.map_err(fail)
             }
-            Evaluable::Mnemonic => self.filter_actions(call, function, args, scope, Self::mnemonic),
-            Evaluable::Inputs => self.filter_actions(call, function, args, scope, Self::inputs),
-            Evaluable::Outputs => self.filter_actions(call, function, args, scope, Self::outputs),
+            Evaluable::Mnemonic | Evaluable::Inputs | Evaluable::Outputs => {
+                let named = self.filter_run(call, scope)?;
+                Ok(Arc::unwrap_or_clone(named.set))
+            }
         }
     }
 
-    /// Evaluates a call of the aquery filter `function`, which keeps the
-    /// actions `keep` keeps by the pattern of its first argument.
-    fn filter_actions<'a>(
-        &self,
-        call: &'a Expr,
-        function: Function,
-        args: &'a [Arg],
-        scope: &mut Scope<'a>,
-        keep: fn(&Self, &Regex, &FixedBitSet) -> FixedBitSet,
-    ) -> Result<FixedBitSet, EvalError> {
-        let fail = |message: String| EvalError {
-            message,
-            span: call.span.clone(),
-        };
-        let regex = self.whole_regex(function, words(args)[0]).map_err(fail)?;
-        self.filters_actions(function).map_err(fail)?;
-        let (values, _) = self.arguments(args, scope)?;
-        let Some(value) = values.first() else {
-            return Err(fail(
-                "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 \
-                 arguments,except when --skyframe_state is used."
-                    .to_string(),
-            ));
-        };
-        Ok(keep(self, &regex, value))
+    /// What the run of aquery filter calls opening at `call` names: `call`
+    /// and each filter call standing as the expression argument of the one
+    /// before it, filtering as one what the innermost argument names.
+    fn filter_run<'a>(&self, call: &'a Expr, scope: &mut Scope<'a>) -> Result<Named, EvalError> {
+        let mut filters = ActionFilters::default();
+        let mut at = call;
+        while let ExprKind::Call { function, args } = &at.kind
+            && let Some(filter) = ActionFilter::of(*function)
+        {
+            let fail = |message: String| EvalError {
+                message,
+                span: at.span.clone(),
+            };
+            let regex = self.whole_regex(*function, words(args)[0]).map_err(fail)?;
+            self.filters_actions(*function).map_err(fail)?;
+            filters.add(filter, regex);
+            let Some(&argument) = expressions(args).first() else {
+                return Err(fail(
+                    "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 \
+                     arguments,except when --skyframe_state is used."
+                        .to_string(),
+                ));
+            };
+            at = argument;
+        }
+        let inner = self.named(at, scope)?;
+        // The joined filters keep only actions the inner run's keep, so they
+        // keep from its set what they would from what it filtered.
+        if let Some(inner) = &inner.filters {
+            filters.extend(inner);
+        }
+        Ok(Named {
+            set: Arc::new(self.filter_actions(&filters, &inner.set)),
+            filters: Some(Arc::new(filters)),
+        })
     }
 
     /// The values of the expressions among `args`, in order, and the integer
@@ -265,6 +312,18 @@ fn words(args: &[Arg]) -> Vec<&str> {
         Arg::Expr(_) | Arg::Int(_) => None,
     });
     words.collect()
+}
+
+/// The value of the variable the literal `word` reads, or why it has none;
+/// `None` where `word` reads no variable.
+fn variable<'s>(word: &Word, scope: &'s Scope<'_>) -> Option<Result<&'s Named, String>> {
+    let name = (word.text.strip_prefix('$')).filter(|name| is_variable_name(name))?;
+    let bound = scope.iter().rev().find(|(bound, _)| *bound == name);
+    Some(
+        bound
+            .map(|(_, named)| named)
+            .ok_or_else(|| format!("undefined variable '{name}'")),
+    )
 }
 
 /// Whether `name` is a variable name `let` binds (`LetExpression.NAME_PATTERN`).
