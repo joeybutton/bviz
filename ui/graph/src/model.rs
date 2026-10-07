@@ -516,8 +516,8 @@ pub(crate) enum Reveal {
     /// The node's own box is drawn, opening what holds it, and the panel is
     /// brought forward with its pane made the active one.
     Activate,
-    /// The drawing stays as it is, the box standing for the node there being
-    /// the one shown, and so does the panel's place among its pane's.
+    /// The node is shown as [`crate::reveal::Ask::InPlace`] asks, and the panel
+    /// keeps its place among its pane's.
     InPlace,
 }
 

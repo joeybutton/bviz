@@ -56,11 +56,14 @@ impl HiddenBy {
     }
 }
 
-/// What a reveal waiting on a restriction does once it lands.
+/// What a reveal waiting on a derivation does once it lands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Ask {
     /// Show the node where it is drawn, and offer to reveal it otherwise.
     Show,
+    /// Frame the node in the drawing as it is, opening nothing, and offer to
+    /// reveal it where the drawing leaves it out.
+    InPlace,
     /// Show the node whatever hides it, where anything can.
     Anyway,
 }
@@ -69,7 +72,7 @@ pub(crate) enum Ask {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Reveal {
     Idle,
-    /// A restriction in flight decides whether the node is drawn, so the
+    /// A derivation in flight decides whether the node is drawn, so the
     /// request is answered once it lands.
     Waiting(Id, Ask),
     /// The node was found hidden by what this names, and the panel offers to
@@ -190,19 +193,10 @@ pub(crate) fn reveal_anyway(view: &mut GraphPanel, id: Id, cx: &mut Context<Grap
     view.invalidate_canvas(cx);
 }
 
-/// Selects and frames the box standing for `id` in the drawing as it is: in
-/// a layered drawing the innermost drawn box holding it, which opens none and
-/// so lays nothing out afresh.
+/// Moves the view onto `id` as [`Ask::InPlace`] asks, without recording a jump
+/// or asking for the panel to be shown.
 pub(crate) fn show_in_place(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    let shown = match view.mode {
-        LayoutMode::Layered => derive::drawn_holder(view, id),
-        LayoutMode::Map => Some(id),
-    };
-    let Some(shown) = shown else {
-        return;
-    };
-    view.selection.select(shown);
-    view.framing.request_frame(Frame::Node(shown));
+    ask(view, id, Ask::InPlace, cx);
     view.invalidate_canvas(cx);
 }
 
@@ -212,6 +206,15 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
         return;
     }
     match (hidden_by(view, id), asked) {
+        (None, Ask::InPlace) => match standing_for(view, id) {
+            Some(shown) => {
+                view.reveal = Reveal::Idle;
+                view.selection.select(shown);
+                view.framing.request_frame(Frame::Node(shown));
+            }
+            None if view.derived.deriving() => view.reveal = Reveal::Waiting(id, Ask::InPlace),
+            None => view.reveal = Reveal::Idle,
+        },
         (None, _) => {
             view.reveal = Reveal::Idle;
             show(view, id, cx);
@@ -236,6 +239,16 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
     }
 }
 
+/// The box standing for `id` in the drawing as it is: in a layered drawing the
+/// innermost drawn box holding it, which opens none and so lays nothing out
+/// afresh.
+fn standing_for(view: &GraphPanel, id: Id) -> Option<Id> {
+    match view.mode {
+        LayoutMode::Layered => derive::drawn_holder(view, id),
+        LayoutMode::Map => Some(id),
+    }
+}
+
 fn show(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     view.selection.select(id);
     if view.mode == LayoutMode::Layered {
@@ -244,7 +257,7 @@ fn show(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     view.framing.request_frame(Frame::Node(id));
 }
 
-/// Answers a reveal that waited on the restriction that has landed, and puts
+/// Answers a reveal that waited on the derivation that has landed, and puts
 /// away an offer to reveal a node the drawing that landed holds.
 pub(crate) fn landed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if view.derived.restricting() {
