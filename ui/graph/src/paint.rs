@@ -38,6 +38,12 @@ const LABEL_SIZE: f64 = 13.0;
 /// name shows it rather than fading to a blank rectangle.
 const LABEL_FLOOR: f32 = 11.0;
 
+/// Screen-pixel step a label's font size is snapped to above the floor. Text is
+/// shaped and its glyphs rasterized per distinct size, so on the snapped sizes
+/// successive zoom frames, and a zoom back to an earlier size, reuse both. A
+/// label is drawn within half a step of its zoomed size.
+const LABEL_SIZE_STEP: f32 = 0.25;
+
 /// Screen-pixel clearance held between a label and its box's edges, so a label
 /// held at the floor is not painted flush against the border.
 const LABEL_PAD: f32 = 2.0;
@@ -1559,7 +1565,8 @@ impl LabelPlacement {
     /// truncation in a narrower one names nothing, so the box is left bare.
     fn of(b: &PaintBox, rect: Bounds<Pixels>, zoom: f32) -> Option<Self> {
         let (w, h) = (f32::from(rect.size.width), f32::from(rect.size.height));
-        let size = (LABEL_SIZE as f32 * zoom).max(LABEL_FLOOR);
+        let size = ((LABEL_SIZE as f32 * zoom / LABEL_SIZE_STEP).round() * LABEL_SIZE_STEP)
+            .max(LABEL_FLOOR);
         let needed = size + 2. * LABEL_PAD;
         if h < needed {
             return None;
