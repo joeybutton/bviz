@@ -1544,6 +1544,21 @@ mod tests {
         assert!(dispatched("secondary-shift-c", IN_FIELD).is_none());
     }
 
+    /// Each key reaching the query bar from the panel and from within the bar
+    /// is one binding, which the keys help lists once.
+    #[test]
+    fn the_bars_keys_reaching_it_from_the_panel_are_bound_once() {
+        let bindings = bindings();
+        let bound = |action: &dyn gpui::Action| {
+            bindings
+                .iter()
+                .filter(|binding| binding.action().partial_eq(action))
+                .count()
+        };
+        assert_eq!(bound(&chips::Apply), 1);
+        assert_eq!(bound(&chips::CopyStack), 1);
+    }
+
     /// A staged stack is applied from anywhere in the panel but the text
     /// fields, the palette keeping its own secondary-Enter.
     #[test]

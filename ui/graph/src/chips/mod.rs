@@ -124,6 +124,10 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
     let on_chips = Some(on_chips.as_str());
     let completing = Some(COMPLETION_KEY_CONTEXT.id());
     let aimed = Some(AIMED_KEY_CONTEXT.id());
+    // Outside the panel's text fields, or anywhere in the bar, its own field
+    // included: one predicate, which the keys help lists once.
+    let panel_or_bar = unless_typing.map(|panel| format!("{panel} || {KEY_CONTEXT}"));
+    let panel_or_bar = panel_or_bar.as_deref();
     vec![
         KeyBinding::new("up", CompletePrevious, completing),
         KeyBinding::new("down", CompleteNext, completing),
@@ -131,8 +135,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", AcceptCompletion, aimed),
         KeyBinding::new("escape", CloseCompletion, completing),
         KeyBinding::new("q", Focus, unless_typing),
-        KeyBinding::new("secondary-enter", Apply, unless_typing),
-        KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT.id())),
+        KeyBinding::new("secondary-enter", Apply, panel_or_bar),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),
         KeyBinding::new("left", SelectPrevious, on_chips),
@@ -146,8 +149,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", Edit, on_chips),
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
-        KeyBinding::new("secondary-shift-c", CopyStack, unless_typing),
-        KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT.id())),
+        KeyBinding::new("secondary-shift-c", CopyStack, panel_or_bar),
         KeyBinding::new(
             "secondary-shift-backspace",
             ClearQuery,
