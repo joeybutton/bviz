@@ -1,10 +1,10 @@
-//! The per-node metadata a graph filter selects on, held as interned handles.
+//! The per-node metadata a graph query selects on, held as interned handles.
 //!
 //! Facet values — a configuration key, a rule class — are strings shared by
 //! many nodes, so they are interned once into a [`FacetStrings`] table and
 //! carried per node as a four-byte handle; a repository is carried the same
 //! way, by a handle into the table of repositories the inputs named. The tables
-//! are the filter's own; node ids keep theirs, whose indices double as positions
+//! are the facets' own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
 use std::borrow::Cow;
@@ -270,7 +270,7 @@ impl ConfigOptions {
     }
 }
 
-/// The role a rule class plays, so that a filter can offer the tests, the
+/// The role a rule class plays, so that a query can name the tests, the
 /// aliases, or the build's own plumbing without naming each rule class that
 /// qualifies.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -795,13 +795,6 @@ impl Facets {
     /// Every configuration the nodes are built in, in no particular order.
     pub fn configs(&self) -> impl Iterator<Item = (ConfigRef, &ConfigEntry)> {
         self.configs.iter().map(|(&config, entry)| (config, entry))
-    }
-
-    /// Every rule class the nodes were declared by, in no particular order.
-    pub fn rule_classes(&self) -> impl Iterator<Item = (RuleClassRef, RuleCategory)> {
-        self.rule_classes
-            .iter()
-            .map(|(&rule_class, &category)| (rule_class, category))
     }
 
     /// Moves every facet to the node id `remap` gives its node, which must map

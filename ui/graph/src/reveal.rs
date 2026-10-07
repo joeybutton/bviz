@@ -385,7 +385,6 @@ mod tests {
             rules: vec![Rule {
                 predicate: Predicate {
                     kinds: bviz_graph_layout::select::Values::new([Kind::Action]),
-                    testonly: Some(true),
                     ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,

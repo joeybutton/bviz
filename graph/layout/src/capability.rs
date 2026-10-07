@@ -17,7 +17,7 @@ pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
 /// canonical name.
 pub const CONSISTENT_LABELS_FLAG: &str = "--consistent_labels";
 
-/// A property a filter predicate selects nodes by.
+/// A property a query selects nodes by.
 ///
 /// The discriminants index [`Axis::ALL`], which lists them in that same order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

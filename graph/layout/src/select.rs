@@ -1,4 +1,5 @@
-//! Which nodes of a graph a filter shows, stated as rules over their facets.
+//! Which nodes of a graph a filter shows, stated as rules over their kinds and
+//! whether they hold another node.
 //!
 //! Rules and the base name no node by id, so they hold of a graph rebuilt from
 //! the same inputs; a scope and the pins name nodes by id, so they hold only of
@@ -7,17 +8,14 @@
 mod eval;
 pub mod labels;
 
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use fixedbitset::FixedBitSet;
 
-use crate::facets::{RuleCategory, Tri};
 use crate::graph::Kind;
 use crate::intern::Id;
-use crate::repo::{RepoCategory, RepoName};
 pub use eval::{Hiding, Verdict, Verdicts};
 
 /// What a filter says is to become of one node.
@@ -149,14 +147,8 @@ impl<T: Ord> Values<T> {
         (!values.is_empty()).then_some(Values(values))
     }
 
-    pub fn contains<Q>(&self, value: &Q) -> bool
-    where
-        T: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.0
-            .binary_search_by(|held| held.borrow().cmp(value))
-            .is_ok()
+    pub fn contains(&self, value: &T) -> bool {
+        self.0.binary_search(value).is_ok()
     }
 }
 
@@ -166,114 +158,46 @@ impl<T> Values<T> {
     }
 }
 
-/// What a predicate asks of the aspects that took part in producing a node.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Aspects {
-    /// At least one aspect, whichever it is.
-    Any,
-    /// No aspect. The inputs say nothing of an aspect either for a node no
-    /// aspect ran on or for one described without the aspects being asked for,
-    /// so this covers both; which of the two a graph holds is what
-    /// [`Axis::Aspect`](crate::capability::Axis::Aspect)'s support states.
-    None,
-    Named(Values<String>),
-}
-
-/// A conjunction of terms over one node's facets, each of which constrains the
-/// nodes matching only where it is set.
-///
-/// A term reading a facet the node does not carry never holds: a source file
-/// states no rule class, and a term over rule classes must take that for no rule
-/// class rather than for one of its own.
+/// A conjunction of terms over one node, each of which constrains the nodes
+/// matching only where it is set.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Predicate {
     pub kinds: Option<Values<Kind>>,
     /// Whether the node must hold another node of the graph.
     pub holding: bool,
-    pub repo_categories: Option<Values<RepoCategory>>,
-    /// Repositories, each by the name identifying it.
-    pub repos: Option<Values<RepoName<String>>>,
-    pub rule_classes: Option<Values<String>>,
-    pub rule_categories: Option<Values<RuleCategory>>,
-    /// Configuration checksums.
-    pub configs: Option<Values<String>>,
-    /// Whether the node is built in a configuration for a tool the build runs.
-    pub is_tool: Option<bool>,
-    /// Action mnemonics.
-    pub mnemonics: Option<Values<String>>,
-    pub aspects: Option<Aspects>,
-    /// Tags, of which the node's target must carry one.
-    pub tags: Option<Values<String>>,
-    pub testonly: Option<bool>,
-}
-
-/// The [`Tri`] a node must carry to answer `yes`, an unstated facet answering
-/// neither.
-pub(crate) fn stating(yes: bool) -> Tri {
-    if yes { Tri::Yes } else { Tri::No }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facets::{Facets, FacetsBuilder};
     use crate::graph::{Graph, Node};
     use crate::intern::Names;
 
-    /// A graph of one `cc_test` target in the main repository with an action
-    /// below it, one `cc_library` target in an external repository, and one
-    /// source file that no input described beyond its label.
+    /// A graph of one target with an action below it, a second target holding
+    /// nothing, and one source file.
     struct Fixture {
         graph: Graph,
         names: Names,
-        facets: Facets,
     }
+
+    const APP: &str = "target://foo:app";
+    const ACTION: &str = "action0";
+    const LIB: &str = "target://bar:lib";
+    const SOURCE: &str = "target://foo:main.c";
 
     impl Fixture {
         fn new() -> Self {
             let mut graph = Graph::new();
             let mut names = Names::default();
-            let mut builder = FacetsBuilder::default();
-
-            let app = names.intern("target://foo:app");
+            let app = names.intern(APP);
             graph.add_node(Node::new(app, ":app", Kind::Target, None));
-            builder.describe_label(app, None, "//foo:app");
-            builder.set_tags(app, ["manual", "flaky"]);
-            builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
-            let facets = builder.facets();
-            let rule_class = facets.intern_rule_class("cc_test");
-            facets.set_rule_class(app, Some(rule_class));
-            let config = facets.intern_config("ck1", Some("k8-fastbuild"), Tri::No);
-            facets.set_config(app, Some(config));
-            facets.set_testonly(app, Tri::Yes);
-
-            let action = names.intern("action0");
+            let action = names.intern(ACTION);
             graph.add_node(Node::new(action, "CppCompile", Kind::Action, Some(app)));
-            let facets = builder.facets();
-            let mnemonic = facets.intern_mnemonic("CppCompile");
-            facets.set_mnemonic(action, Some(mnemonic));
-            facets.inherit(action, app);
-
-            let lib = names.intern("target:@@rules_foo+//bar:lib");
+            let lib = names.intern(LIB);
             graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
-            builder.describe_label(lib, None, "@@rules_foo+//bar:lib");
-            let facets = builder.facets();
-            let rule_class = facets.intern_rule_class("cc_library");
-            facets.set_rule_class(lib, Some(rule_class));
-            let exec = facets.intern_config("ck2", Some("k8-opt-exec"), Tri::Yes);
-            facets.set_config(lib, Some(exec));
-            facets.set_testonly(lib, Tri::No);
-
-            let source = names.intern("target://foo:main.c");
+            let source = names.intern(SOURCE);
             graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
-            builder.describe_label(source, None, "//foo:main.c");
-
-            let (facets, _) = builder.seal();
-            Fixture {
-                graph,
-                names,
-                facets,
-            }
+            Fixture { graph, names }
         }
 
         fn id(&self, name: &str) -> Id {
@@ -282,9 +206,7 @@ mod tests {
 
         /// What `filter` makes of the node `name`.
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
-            filter
-                .evaluate(&self.graph, &self.facets)
-                .get(self.id(name))
+            filter.evaluate(&self.graph).get(self.id(name))
         }
 
         /// The nodes a filter showing `predicate` alone draws as selected.
@@ -294,22 +216,14 @@ mod tests {
                 rules: vec![rule(predicate.clone(), Visibility::Shown)],
                 ..Filter::default()
             };
-            let verdicts = showing.evaluate(&self.graph, &self.facets);
-            self.graph
-                .nodes
-                .iter()
+            let verdicts = showing.evaluate(&self.graph);
+            let mut matched: Vec<&str> = (self.graph.nodes.iter())
                 .filter(|node| verdicts.get(node.id) == Verdict::Shown)
                 .map(|node| self.names.resolve(node.id))
-                .collect()
+                .collect();
+            matched.sort_unstable();
+            matched
         }
-    }
-
-    fn repos(repos: &[RepoName<&str>]) -> Option<Values<RepoName<String>>> {
-        Values::new(repos.iter().map(|repo| repo.map(str::to_string)))
-    }
-
-    fn values(values: &[&str]) -> Option<Values<String>> {
-        Values::new(values.iter().map(|&value| value.to_string()))
     }
 
     #[test]
@@ -320,119 +234,23 @@ mod tests {
 
     #[test]
     fn a_term_over_values_none_of_which_is_named_constrains_nothing() {
-        assert_eq!(Values::<String>::new([]), None);
         assert_eq!(Values::<Kind>::new([]), None);
     }
 
     #[test]
-    fn each_term_selects_the_nodes_carrying_one_of_its_values() {
+    fn each_term_selects_the_nodes_answering_it() {
         let fixture = Fixture::new();
-        let app = "target://foo:app";
-        let action = "action0";
-        let lib = "target:@@rules_foo+//bar:lib";
-        let cases: Vec<(Predicate, Vec<&str>)> = vec![
-            (
-                Predicate {
-                    kinds: Values::new([Kind::Target]),
-                    ..Predicate::default()
-                },
-                vec![app, lib],
-            ),
-            (
-                Predicate {
-                    repo_categories: Values::new([RepoCategory::Module]),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
-            (
-                Predicate {
-                    repos: repos(&[RepoName::Canonical("rules_foo+")]),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
-            (
-                Predicate {
-                    rule_classes: values(&["cc_test"]),
-                    ..Predicate::default()
-                },
-                vec![app, action],
-            ),
-            (
-                Predicate {
-                    rule_categories: Values::new([RuleCategory::Test]),
-                    ..Predicate::default()
-                },
-                vec![app, action],
-            ),
-            (
-                Predicate {
-                    configs: values(&["ck2"]),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
-            (
-                Predicate {
-                    is_tool: Some(true),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
-            (
-                Predicate {
-                    is_tool: Some(false),
-                    ..Predicate::default()
-                },
-                vec![app, action],
-            ),
-            (
-                Predicate {
-                    mnemonics: values(&["CppCompile"]),
-                    ..Predicate::default()
-                },
-                vec![action],
-            ),
-            (
-                Predicate {
-                    aspects: Some(Aspects::Any),
-                    ..Predicate::default()
-                },
-                vec![app],
-            ),
-            (
-                Predicate {
-                    aspects: Some(Aspects::Named(
-                        values(&["//tools:coverage.bzl%instrument"]).unwrap(),
-                    )),
-                    ..Predicate::default()
-                },
-                vec![app],
-            ),
-            (
-                Predicate {
-                    tags: values(&["flaky", "local"]),
-                    ..Predicate::default()
-                },
-                vec![app],
-            ),
-            (
-                Predicate {
-                    testonly: Some(true),
-                    ..Predicate::default()
-                },
-                vec![app, action],
-            ),
-        ];
+        let targets = Predicate {
+            kinds: Values::new([Kind::Target]),
+            ..Predicate::default()
+        };
+        assert_eq!(fixture.matching(&targets), [LIB, APP]);
 
-        for (predicate, expected) in cases {
-            let mut matched = fixture.matching(&predicate);
-            matched.sort_unstable();
-            let mut expected = expected;
-            expected.sort_unstable();
-            assert_eq!(matched, expected, "{predicate:?}");
-        }
+        let holding = Predicate {
+            holding: true,
+            ..Predicate::default()
+        };
+        assert_eq!(fixture.matching(&holding), [APP]);
     }
 
     /// Every term of a predicate must hold, so two terms no node answers
@@ -441,63 +259,16 @@ mod tests {
     fn a_predicate_holds_only_where_all_of_its_terms_do() {
         let fixture = Fixture::new();
         let both = Predicate {
-            kinds: Values::new([Kind::Action]),
-            rule_classes: values(&["cc_test"]),
-            ..Predicate::default()
+            kinds: Values::new([Kind::Target]),
+            holding: true,
         };
-        assert_eq!(fixture.matching(&both), ["action0"]);
+        assert_eq!(fixture.matching(&both), [APP]);
 
         let neither = Predicate {
             kinds: Values::new([Kind::Source]),
-            rule_classes: values(&["cc_test"]),
-            ..Predicate::default()
+            holding: true,
         };
         assert!(fixture.matching(&neither).is_empty());
-    }
-
-    /// The difference between a rule-class term selecting the rules it names and
-    /// one quietly taking every file node with it.
-    #[test]
-    fn a_node_carrying_no_such_facet_matches_no_term_over_it() {
-        let fixture = Fixture::new();
-        let source = "target://foo:main.c";
-        let terms = [
-            Predicate {
-                rule_classes: values(&["cc_test"]),
-                ..Predicate::default()
-            },
-            Predicate {
-                rule_categories: Values::new([RuleCategory::Other]),
-                ..Predicate::default()
-            },
-            Predicate {
-                configs: values(&["ck1"]),
-                ..Predicate::default()
-            },
-            Predicate {
-                is_tool: Some(false),
-                ..Predicate::default()
-            },
-            Predicate {
-                mnemonics: values(&["CppCompile"]),
-                ..Predicate::default()
-            },
-            Predicate {
-                tags: values(&["manual"]),
-                ..Predicate::default()
-            },
-            Predicate {
-                testonly: Some(false),
-                ..Predicate::default()
-            },
-        ];
-
-        for predicate in terms {
-            assert!(
-                !fixture.matching(&predicate).contains(&source),
-                "{predicate:?}"
-            );
-        }
     }
 
     fn rule(predicate: Predicate, visibility: Visibility) -> Rule {
@@ -517,10 +288,10 @@ mod tests {
         )
     }
 
-    fn fade_tests() -> Rule {
+    fn fade_holders() -> Rule {
         rule(
             Predicate {
-                rule_categories: Values::new([RuleCategory::Test]),
+                holding: true,
                 ..Predicate::default()
             },
             Visibility::Faded,
@@ -530,48 +301,45 @@ mod tests {
     #[test]
     fn a_node_no_rule_matches_takes_the_base_verdict() {
         let fixture = Fixture::new();
-        let source = "target://foo:main.c";
         let mut filter = Filter {
             rules: vec![hide_targets()],
             ..Filter::default()
         };
-        assert_eq!(fixture.verdict(&filter, source), Verdict::Shown);
+        assert_eq!(fixture.verdict(&filter, SOURCE), Verdict::Shown);
 
         filter.base = Base::HideAll;
-        assert_eq!(fixture.verdict(&filter, source), Verdict::Hidden);
+        assert_eq!(fixture.verdict(&filter, SOURCE), Verdict::Hidden);
     }
 
     #[test]
     fn the_last_rule_matching_a_node_decides_it() {
         let fixture = Fixture::new();
-        let app = "target://foo:app";
         let first = Filter {
-            rules: vec![hide_targets(), fade_tests()],
+            rules: vec![hide_targets(), fade_holders()],
             ..Filter::default()
         };
-        assert_eq!(fixture.verdict(&first, app), Verdict::Faded);
+        assert_eq!(fixture.verdict(&first, APP), Verdict::Faded);
 
         let reversed = Filter {
-            rules: vec![fade_tests(), hide_targets()],
+            rules: vec![fade_holders(), hide_targets()],
             ..Filter::default()
         };
-        assert_eq!(fixture.verdict(&reversed, app), Verdict::Hidden);
+        assert_eq!(fixture.verdict(&reversed, APP), Verdict::Hidden);
     }
 
     #[test]
     fn a_pin_decides_the_node_it_names_whatever_the_rules_say() {
         let fixture = Fixture::new();
-        let (app, lib) = ("target://foo:app", "target:@@rules_foo+//bar:lib");
         let filter = Filter {
             base: Base::HideAll,
             scope: None,
             rules: vec![hide_targets()],
-            pins: [(fixture.id(app), Pin::Set(Visibility::Shown))]
+            pins: [(fixture.id(APP), Pin::Set(Visibility::Shown))]
                 .into_iter()
                 .collect(),
         };
 
-        assert_eq!(fixture.verdict(&filter, app), Verdict::Shown);
-        assert_eq!(fixture.verdict(&filter, lib), Verdict::Hidden);
+        assert_eq!(fixture.verdict(&filter, APP), Verdict::Shown);
+        assert_eq!(fixture.verdict(&filter, LIB), Verdict::Hidden);
     }
 }

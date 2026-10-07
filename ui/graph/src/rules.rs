@@ -68,7 +68,6 @@ pub(crate) fn set_hidden(filter: &Filter, class: BoxClass, hidden: bool) -> Filt
             predicate: Predicate {
                 kinds: Some(kinds),
                 holding: true,
-                ..Predicate::default()
             },
             visibility: Visibility::Hidden,
         });
@@ -93,7 +92,6 @@ fn written(rule: &Rule) -> Option<Vec<BoxClass>> {
             == Predicate {
                 kinds: Some(kinds.clone()),
                 holding: true,
-                ..Predicate::default()
             };
     if !hides_kinds_alone {
         return None;
@@ -121,7 +119,6 @@ mod tests {
                 predicate: Predicate {
                     kinds: Values::new([Kind::Target]),
                     holding: true,
-                    ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,
             }]
@@ -149,25 +146,16 @@ mod tests {
         );
     }
 
-    /// A rule the control did not write — one over a term it does not offer,
-    /// one constraining a second term beside the kind, one naming a kind of
-    /// leaf, one reaching the nodes of its kinds that hold nothing, or one that
-    /// shows rather than hides — is neither read as a checkmark nor rewritten
-    /// by a toggle.
+    /// A rule the control did not write — one over every kind, one naming a
+    /// kind of leaf, one reaching the nodes of its kinds that hold nothing, or
+    /// one that shows rather than hides — is neither read as a checkmark nor
+    /// rewritten by a toggle.
     #[test]
     fn a_rule_no_control_wrote_is_left_alone() {
         let untouched = vec![
             Rule {
                 predicate: Predicate {
-                    tags: Values::new(["flaky".to_string()]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Hidden,
-            },
-            Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Action]),
-                    testonly: Some(true),
+                    holding: true,
                     ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,
@@ -176,7 +164,6 @@ mod tests {
                 predicate: Predicate {
                     kinds: Values::new([Kind::Package, Kind::Action]),
                     holding: true,
-                    ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,
             },

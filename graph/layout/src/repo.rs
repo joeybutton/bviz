@@ -69,7 +69,7 @@ pub enum RepoOrigin<'a> {
 }
 
 /// A [`RepoOrigin`] with what it says about the one repository dropped, which
-/// is the grain a filter selects repositories at.
+/// is the grain `repo_category()` selects repositories at.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum RepoCategory {
     Main,
