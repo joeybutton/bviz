@@ -36,10 +36,11 @@ use rustc_hash::FxHashMap;
 use super::ast::Function;
 use super::declared::Attribute;
 use super::universe::Universe;
-use crate::capability::Support;
+use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
 use crate::exec_path::{ExecPath, LeftOutInputs};
 use crate::graph::Kind;
 use crate::intern::Id;
+use crate::repo::{RepoCategory, RepoName};
 
 /// The most patterns a [`Patterns`] cache keeps compiled. A query names few,
 /// but a session of edits to one names many, so the cache empties when full.
@@ -176,9 +177,8 @@ impl Universe {
         })
     }
 
-    /// `pattern` compiled to match a whole string for the aquery filter
-    /// `function`, or the message Bazel's engine fails with for a pattern it
-    /// cannot compile.
+    /// `pattern` compiled to match a whole string for `function`, or the
+    /// message Bazel's engine fails with for a pattern it cannot compile.
     pub(super) fn whole_regex(&self, function: Function, pattern: &str) -> Result<Regex, String> {
         self.patterns.whole(pattern).map_err(|why| {
             let name = function.name();
@@ -212,6 +212,57 @@ impl Universe {
         self.retain(value, |at| {
             (self.declared.kind(at)).is_some_and(|kind| regex.is_match(kind.as_bytes()))
         })
+    }
+
+    /// The members of `value` whose target's repository is of a category whose
+    /// [spelling](RepoCategory::spelling) `regex` matches, or why the graph
+    /// cannot tell them for `function`.
+    ///
+    /// A repository named only by an apparent name that no module evidence
+    /// places is of the unknown category, but may truly be a module's, an
+    /// extension's or the builtin one; a pattern matching one of those and not
+    /// unknown would drop it whatever it is, so it fails instead.
+    pub(super) fn repo_category(
+        &self,
+        function: Function,
+        regex: &Regex,
+        value: &FixedBitSet,
+    ) -> Result<FixedBitSet, String> {
+        let matched: Vec<RepoCategory> = (RepoCategory::ALL.into_iter())
+            .filter(|category| regex.is_match(category.spelling().as_bytes()))
+            .collect();
+        let hideable = [
+            RepoCategory::Module,
+            RepoCategory::ModuleExtension,
+            RepoCategory::Builtin,
+        ];
+        let undecidable = !matched.contains(&RepoCategory::WorkspaceOrUnknown)
+            && hideable.iter().any(|category| matched.contains(category));
+        if let Some(apparent) = self.unplaced_apparent_repo().filter(|_| undecidable) {
+            return Err(format!(
+                "{}() cannot tell where @{apparent} comes from, which the graph's inputs name \
+                 by an apparent name, stating each canonical name only under \
+                 {CONSISTENT_LABELS_FLAG}",
+                function.name()
+            ));
+        }
+        Ok(self.retain(value, |at| {
+            let repo = self.facets.repo(self.labels.entries()[at].0);
+            repo.is_some_and(|repo| matched.contains(&self.facets.repo_category(repo)))
+        }))
+    }
+
+    /// The first by name of the repositories named only by an apparent name
+    /// that no module evidence places.
+    fn unplaced_apparent_repo(&self) -> Option<&str> {
+        let facets = &self.facets;
+        (facets.repos())
+            .filter(|&(repo, _)| facets.repo_category(repo) == RepoCategory::WorkspaceOrUnknown)
+            .filter_map(|(repo, _)| match facets.repo_name(repo) {
+                RepoName::Apparent(name) => Some(name),
+                RepoName::Canonical(_) => None,
+            })
+            .min()
     }
 
     /// The members of `value` whose target's label `regex` matches.

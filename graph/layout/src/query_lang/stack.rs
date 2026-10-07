@@ -668,6 +668,9 @@ impl Stack {
         let expr = (refinements.iter()).fold(start, continued);
         let mut calls = Calls::default();
         calls.gather(&expr);
+        if let Some(&extension) = (calls.functions.iter()).find(|f| f.is_extension()) {
+            return Err(Unportable::Extension(Extension::Function(extension)));
+        }
         if calls.any_exec {
             return Err(Unportable::Extension(Extension::AnyExec));
         }
@@ -862,7 +865,20 @@ impl Command {
             | Function::Siblings => self == Command::Query,
             Function::Config => self == Command::Cquery,
             Function::Mnemonic | Function::Inputs | Function::Outputs => self == Command::Aquery,
-            _ => true,
+            Function::AllPaths
+            | Function::Attr
+            | Function::Deps
+            | Function::Executables
+            | Function::Filter
+            | Function::Kind
+            | Function::Labels
+            | Function::Rdeps
+            | Function::SamePkgDirectRdeps
+            | Function::Some
+            | Function::SomePath
+            | Function::Tests
+            | Function::Visible => true,
+            Function::RepoCategory => false,
         }
     }
 
@@ -890,6 +906,8 @@ pub enum Extension {
     /// No source is enabled, so the first refinement reads every node of the
     /// graph.
     FromEverything,
+    /// The stack calls one of bviz's [`Function::EXTENSIONS`].
+    Function(Function),
     /// `config()` names [`ANY_EXEC`].
     AnyExec,
     /// An aquery filter stands off the chain of calls aquery filters by.
@@ -905,6 +923,13 @@ impl fmt::Display for Unportable {
             Unportable::Invalid => f.write_str("a chip does not parse"),
             Unportable::Extension(Extension::FromEverything) => {
                 f.write_str("no source is enabled, so the first refinement reads every node")
+            }
+            Unportable::Extension(Extension::Function(function)) => {
+                write!(
+                    f,
+                    "{}() is a bviz function, which no Bazel query command has",
+                    function.name()
+                )
             }
             Unportable::Extension(Extension::AnyExec) => {
                 write!(f, "config() names '{ANY_EXEC}'")

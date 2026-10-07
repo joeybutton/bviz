@@ -1513,3 +1513,110 @@ fn a_union_takes_in_no_more_than_its_operands_name() {
         .unwrap();
     assert_eq!(labels(&names, &named), ["//a:gen", "//a:in.c", "ct:gen"]);
 }
+
+/// A query graph of `targets`.
+fn query_graph(targets: &[Target]) -> Fixture {
+    let joint = build_joint(None, None, Some(targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    Fixture {
+        universe,
+        names: joint.names,
+    }
+}
+
+/// A query graph of `//a:app`, depending on `@@m+//m:lib` of a module and on
+/// `@@m++ext+gen//e:lib` of that module's extension.
+fn repositories() -> Fixture {
+    query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@@m++ext+gen//e:lib"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@@m++ext+gen//e:lib", &[], &[]),
+    ])
+}
+
+#[test]
+fn repo_category_matches_the_whole_spelling_of_each_origin() {
+    let fixture = repositories();
+    assert_eq!(
+        fixture.ok("repo_category(main, deps(//a:app))"),
+        ["//a:app"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category('module|extension', deps(//a:app))"),
+        ["@@m++ext+gen//e:lib", "@@m+//m:lib"]
+    );
+    assert!(fixture.ok("repo_category(mod, deps(//a:app))").is_empty());
+    assert_eq!(
+        fixture.error("repo_category('a)(b', //a:app)"),
+        "Illegal 'repo_category' pattern regexp 'a)(b': unopened group"
+    );
+}
+
+#[test]
+fn repo_category_keeps_what_a_matching_target_holds() {
+    let (universe, names) = held();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(
+        query("repo_category(main, deps(//a:app))"),
+        query("deps(//a:app)")
+    );
+    assert!(query("repo_category(module, deps(//a:app))").is_empty());
+}
+
+/// A query graph of `//a:app`, depending on `@@m+//m:lib` of a module, on
+/// `@m//m:api`, whose apparent name that module places, and on `@r//r:lib`,
+/// whose apparent name nothing places.
+fn apparent_repositories() -> Fixture {
+    query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@m//m:api", "@r//r:lib"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@m//m:api", &[], &[]),
+        rule("@r//r:lib", &[], &[]),
+    ])
+}
+
+#[test]
+fn repo_category_fails_where_an_apparent_name_may_hide_a_matched_origin() {
+    let fixture = apparent_repositories();
+    let message = "repo_category() cannot tell where @r comes from, which the graph's inputs \
+                   name by an apparent name, stating each canonical name only under \
+                   --consistent_labels";
+    assert_eq!(
+        fixture.error("repo_category(module, deps(//a:app))"),
+        message
+    );
+    assert_eq!(
+        fixture.error("repo_category('extension|main', deps(//a:app))"),
+        message
+    );
+    assert_eq!(
+        fixture.ok("repo_category(main, deps(//a:app))"),
+        ["//a:app"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category(unknown, deps(//a:app))"),
+        ["@r//r:lib"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category('.*', deps(//a:app))").len(),
+        fixture.ok("deps(//a:app)").len()
+    );
+}
+
+#[test]
+fn repo_category_answers_where_module_evidence_places_every_apparent_name() {
+    let fixture = query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@m//m:api"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@m//m:api", &[], &[]),
+    ]);
+    assert_eq!(
+        fixture.ok("repo_category(module, deps(//a:app))"),
+        ["@@m+//m:lib", "@m//m:api"]
+    );
+}

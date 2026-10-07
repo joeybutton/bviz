@@ -225,7 +225,7 @@ impl<'t, 'a> Parser<'t, 'a> {
 
     fn unknown_function(&self, name_pos: usize) -> SyntaxError {
         let token = &self.tokens[name_pos];
-        let known: Vec<_> = Function::ALL.iter().map(|f| f.name()).collect();
+        let known: Vec<_> = Function::BAZEL.iter().map(|f| f.name()).collect();
         SyntaxError {
             message: format!(
                 "unknown function '{token}' at '{}'; expected one of ['{}']",
@@ -370,8 +370,31 @@ mod tests {
 
     #[test]
     fn functions_are_listed_by_name() {
-        let names: Vec<_> = Function::ALL.iter().map(|f| f.name()).collect();
-        assert!(names.is_sorted(), "{names:?}");
+        for listed in [&Function::BAZEL[..], &Function::EXTENSIONS[..]] {
+            let names: Vec<_> = listed.iter().map(|f| f.name()).collect();
+            assert!(names.is_sorted(), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn each_function_is_listed_once_as_bazels_or_an_extension() {
+        for function in Function::ALL {
+            let listed = (Function::ALL.iter()).filter(|&&listed| listed == function);
+            assert_eq!(listed.count(), 1, "{function:?}");
+            let list = match function.is_extension() {
+                true => &Function::EXTENSIONS[..],
+                false => &Function::BAZEL[..],
+            };
+            assert!(list.contains(&function), "{function:?}");
+        }
+    }
+
+    #[test]
+    fn an_extension_is_named_apart_from_bazels_functions() {
+        for extension in Function::EXTENSIONS {
+            assert!(!Function::BAZEL.contains(&extension), "{extension:?}");
+            assert_eq!(Function::named(extension.name()), Some(extension));
+        }
     }
 
     #[test]

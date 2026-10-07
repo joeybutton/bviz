@@ -235,10 +235,10 @@ fn fails_as_bazel_does() {
     }
 }
 
-/// QueryParserTest's case, its function list being the one bviz accepts.
+/// QueryParserTest's case, its function list being Bazel's.
 #[test]
 fn an_unknown_function_lists_the_known_ones() {
-    let known: Vec<_> = Function::ALL
+    let known: Vec<_> = Function::BAZEL
         .iter()
         .map(|function| format!("'{}'", function.name()))
         .collect();

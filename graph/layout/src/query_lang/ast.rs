@@ -108,7 +108,8 @@ impl Signature {
     }
 }
 
-/// Every function `bazel query`, `cquery` and `aquery` accept between them.
+/// Every function `bazel query`, `cquery` and `aquery` accept between them,
+/// and bviz's extensions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Function {
     AllPaths,
@@ -127,6 +128,7 @@ pub enum Function {
     Outputs,
     RBuildFiles,
     Rdeps,
+    RepoCategory,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -149,6 +151,7 @@ pub(super) enum Evaluable {
     Mnemonic,
     Outputs,
     Rdeps,
+    RepoCategory,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -156,8 +159,8 @@ pub(super) enum Evaluable {
 }
 
 impl Function {
-    /// Every function, sorted by name.
-    pub const ALL: [Function; 22] = [
+    /// Every function Bazel 9.2.0 accepts, sorted by name.
+    pub const BAZEL: [Function; 22] = [
         Function::AllPaths,
         Function::AllRdeps,
         Function::Attr,
@@ -182,6 +185,54 @@ impl Function {
         Function::Visible,
     ];
 
+    /// Every function bviz accepts that Bazel does not, sorted by name.
+    pub const EXTENSIONS: [Function; 1] = [Function::RepoCategory];
+
+    /// Every function bviz accepts: Bazel's, then the extensions.
+    pub const ALL: [Function; Function::BAZEL.len() + Function::EXTENSIONS.len()] = {
+        let mut all = [Function::AllPaths; Function::BAZEL.len() + Function::EXTENSIONS.len()];
+        let mut at = 0;
+        while at < Function::BAZEL.len() {
+            all[at] = Function::BAZEL[at];
+            at += 1;
+        }
+        while at < all.len() {
+            all[at] = Function::EXTENSIONS[at - Function::BAZEL.len()];
+            at += 1;
+        }
+        all
+    };
+
+    /// Whether the function is one of bviz's [`Function::EXTENSIONS`] rather
+    /// than one of [`Function::BAZEL`].
+    pub fn is_extension(self) -> bool {
+        match self {
+            Function::RepoCategory => true,
+            Function::AllPaths
+            | Function::AllRdeps
+            | Function::Attr
+            | Function::BuildFiles
+            | Function::Config
+            | Function::Deps
+            | Function::Executables
+            | Function::Filter
+            | Function::Inputs
+            | Function::Kind
+            | Function::Labels
+            | Function::LoadFiles
+            | Function::Mnemonic
+            | Function::Outputs
+            | Function::RBuildFiles
+            | Function::Rdeps
+            | Function::SamePkgDirectRdeps
+            | Function::Siblings
+            | Function::Some
+            | Function::SomePath
+            | Function::Tests
+            | Function::Visible => false,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Function::AllPaths => "allpaths",
@@ -200,6 +251,7 @@ impl Function {
             Function::Outputs => "outputs",
             Function::RBuildFiles => "rbuildfiles",
             Function::Rdeps => "rdeps",
+            Function::RepoCategory => "repo_category",
             Function::SamePkgDirectRdeps => "same_pkg_direct_rdeps",
             Function::Siblings => "siblings",
             Function::Some => "some",
@@ -236,6 +288,7 @@ impl Function {
             Function::Mnemonic => return Ok(Evaluable::Mnemonic),
             Function::Outputs => return Ok(Evaluable::Outputs),
             Function::Rdeps => return Ok(Evaluable::Rdeps),
+            Function::RepoCategory => return Ok(Evaluable::RepoCategory),
             Function::SamePkgDirectRdeps => return Ok(Evaluable::SamePkgDirectRdeps),
             Function::Siblings => return Ok(Evaluable::Siblings),
             Function::Some => return Ok(Evaluable::Some),
@@ -254,7 +307,7 @@ impl Function {
         ))
     }
 
-    /// The signature Bazel declares for the function.
+    /// The signature Bazel declares for the function, or bviz for an extension.
     pub fn signature(self) -> Signature {
         use ArgType::{Expr as E, Int as I, Word as W};
         let (params, mandatory): (&[ArgType], usize) = match self {
@@ -268,7 +321,9 @@ impl Function {
             | Function::Siblings
             | Function::Tests => (&[E], 1),
             Function::Config => (&[E, W], 2),
-            Function::Filter | Function::Kind | Function::Labels => (&[W, E], 2),
+            Function::Filter | Function::Kind | Function::Labels | Function::RepoCategory => {
+                (&[W, E], 2)
+            }
             // Bazel lets aquery's filters drop the expression for
             // `--skyframe_state`, and rejects that when it evaluates them.
             Function::Inputs | Function::Mnemonic | Function::Outputs => (&[W, E], 1),

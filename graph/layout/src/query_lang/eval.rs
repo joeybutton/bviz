@@ -226,6 +226,12 @@ impl Universe {
                 let (values, _) = arguments()?;
                 Ok(self.attr(attribute, &regex, &values[0]))
             }
+            Evaluable::RepoCategory => {
+                let regex = self.whole_regex(function, words(args)[0]).map_err(fail)?;
+                let (values, _) = arguments()?;
+                self.repo_category(function, &regex, &values[0])
+                    .map_err(fail)
+            }
             Evaluable::Config => {
                 let (values, _) = arguments()?;
                 let written = expressions(args)[0].to_string();

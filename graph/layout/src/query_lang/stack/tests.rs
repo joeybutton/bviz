@@ -89,6 +89,19 @@ fn the_shorthand_writes_out_the_set_a_chip_reads() {
         written("mnemonic(Javac)"),
         continuing("mnemonic(Javac, $_)")
     );
+    assert_eq!(
+        written("repo_category(main)"),
+        continuing("repo_category(main, $_)")
+    );
+}
+
+#[test]
+fn a_chip_calling_an_extension_narrows_the_set_before_it() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.named(&stack(&["//b:all", "repo_category(main)"])),
+        ["//b:app", "//b:test"]
+    );
 }
 
 #[test]
@@ -500,6 +513,14 @@ fn a_stack_using_an_extension_has_no_bazel_query() {
     assert_eq!(
         bazel(&["//a:all", "config($_, anyexec)"]),
         extension(Extension::AnyExec)
+    );
+    assert_eq!(
+        bazel(&["//a:all", "repo_category(main)"]),
+        extension(Extension::Function(Function::RepoCategory))
+    );
+    assert_eq!(
+        Unportable::Extension(Extension::Function(Function::RepoCategory)).to_string(),
+        "repo_category() is a bviz function, which no Bazel query command has"
     );
     assert_eq!(
         bazel(&["//p:all", "mnemonic(Genrule)", "deps()"]),

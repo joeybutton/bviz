@@ -79,6 +79,27 @@ pub enum RepoCategory {
     WorkspaceOrUnknown,
 }
 
+impl RepoCategory {
+    pub const ALL: [RepoCategory; 5] = [
+        RepoCategory::Main,
+        RepoCategory::Module,
+        RepoCategory::ModuleExtension,
+        RepoCategory::Builtin,
+        RepoCategory::WorkspaceOrUnknown,
+    ];
+
+    /// The word a query names the category by.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            RepoCategory::Main => "main",
+            RepoCategory::Module => "module",
+            RepoCategory::ModuleExtension => "extension",
+            RepoCategory::Builtin => "builtin",
+            RepoCategory::WorkspaceOrUnknown => "unknown",
+        }
+    }
+}
+
 /// The modules Bazel gives a bare canonical name, carrying neither separator
 /// nor version.
 const WELL_KNOWN_MODULES: [&str; 2] = ["bazel_tools", "platforms"];

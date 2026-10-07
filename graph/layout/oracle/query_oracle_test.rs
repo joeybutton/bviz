@@ -275,7 +275,7 @@ fn expr(rng: &mut Rng, depth: u32) -> String {
 /// A call, usually with the arguments its function takes, sometimes with one
 /// too few, one too many, or one of the wrong type.
 fn call(rng: &mut Rng, depth: u32) -> String {
-    let function = Function::ALL[rng.usize(..Function::ALL.len())];
+    let function = Function::BAZEL[rng.usize(..Function::BAZEL.len())];
     let name = match rng.u8(..20) {
         0 => UNKNOWN_FUNCTIONS[rng.usize(..UNKNOWN_FUNCTIONS.len())],
         _ => function.name(),
