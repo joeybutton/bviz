@@ -10,6 +10,9 @@ use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
 use crate::model::{Prepared, Shared};
 use bviz_graph_layout::query_lang::{ArgType, Function, Params, Place, word_at, written_word};
 use bviz_graph_layout::{Id, Kind};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
+};
 use bviz_ui_components::{
     ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, key_text_within, list_scrollbar,
     menu_chrome,
@@ -30,6 +33,24 @@ const LIST_WIDTH: Pixels = px(480.);
 /// The most rows the list stands tall, few enough to read at a glance; the
 /// rest of the matches scroll through it.
 const VISIBLE_ROWS: usize = 10;
+
+/// What the list does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum CompletionIntent {
+    Accept,
+}
+
+const GESTURES: Gestures<CompletionIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    PointerPlace::On("a completion"),
+    "Accept completion",
+    CompletionIntent::Accept,
+)]);
+
+/// The gestures the list answers to.
+pub(super) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// What a completion names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -688,8 +709,13 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
             ))
         })
         .w_full()
-        .on_click(move |_: &ClickEvent, window, cx| {
-            entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+        .on_click(move |event: &ClickEvent, window, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                CompletionIntent::Accept => {
+                    entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+                    true
+                }
+            });
         })
         .child(
             div()
@@ -787,6 +813,12 @@ mod tests {
         };
         assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
         assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+    }
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
     }
 
     fn offered(labels: &[&str]) -> Vec<(String, String, Named)> {

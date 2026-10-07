@@ -799,7 +799,7 @@ pub(crate) fn apply_staged(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) 
 
 /// The gestures the bar answers to.
 pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
-    pill::GESTURES.rows()
+    pill::GESTURES.rows().chain(complete::gestures())
 }
 
 /// The bar: the chips, the field, and what applies them.

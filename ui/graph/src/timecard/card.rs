@@ -6,6 +6,9 @@ use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::Id;
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
+};
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
 };
@@ -13,6 +16,24 @@ use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, MouseButton, MouseDownEvent,
     Stateful, div, prelude::*, px, uniform_list,
 };
+
+/// What the card does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum TimecardIntent {
+    JumpTo,
+}
+
+const GESTURES: Gestures<TimecardIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    Place::On("a slow action"),
+    "Jump to node",
+    TimecardIntent::JumpTo,
+)]);
+
+/// The gestures the card answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// What the panel holds of the card saying where the profile's action time
 /// went.
@@ -107,7 +128,14 @@ fn row(
             listed
                 .cursor_pointer()
                 .hover(move |row| row.bg(hover))
-                .on_click(move |_, _, cx| view.update(cx, |view, cx| reveal(view, node, cx)))
+                .on_click(move |event: &ClickEvent, _, cx| {
+                    GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                        TimecardIntent::JumpTo => {
+                            view.update(cx, |view, cx| reveal(view, node, cx));
+                            true
+                        }
+                    });
+                })
         }
         None => listed.text_color(colors.text_muted),
     }
@@ -259,4 +287,15 @@ pub(crate) fn card(
     let rows = timecard.rows();
     let rows = (rows > 0).then(|| listed(view, rows, palette, cx));
     Some(Folding::new(head, rows, palette))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
 }

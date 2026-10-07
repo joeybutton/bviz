@@ -15,6 +15,9 @@ use crate::{GraphPanel, Palette, chips, pins, why};
 use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::{Id, Kind};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
+};
 use bviz_ui_components::text_input::{self, TextEdited};
 use bviz_ui_components::{
     KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TooltipColors,
@@ -64,6 +67,24 @@ pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
     "GraphJump",
     "Jump palette",
 );
+
+/// What the palette does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum JumpIntent {
+    JumpTo,
+}
+
+const GESTURES: Gestures<JumpIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    Place::On("a palette row"),
+    "Jump to match",
+    JumpIntent::JumpTo,
+)]);
+
+/// The gestures the palette answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 const WIDTH: Pixels = px(560.);
 
@@ -703,8 +724,13 @@ fn listed(
     let entity = entity.clone();
     menu_chrome::aimed_row(("jump-row", index).into(), colors, aimed)
         .w_full()
-        .on_click(move |_: &ClickEvent, window, cx| {
-            entity.update(cx, |view, cx| jump_to(view, id, window, cx));
+        .on_click(move |event: &ClickEvent, window, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                JumpIntent::JumpTo => {
+                    entity.update(cx, |view, cx| jump_to(view, id, window, cx));
+                    true
+                }
+            });
         })
         .child(
             div()
@@ -785,6 +811,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
     }
 
     /// A node is added as the target it belongs to, and a package box as
