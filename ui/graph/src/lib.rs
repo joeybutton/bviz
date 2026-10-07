@@ -597,6 +597,16 @@ impl GraphPanel {
         self.canvas.update(cx, |_, cx| cx.notify());
     }
 
+    /// Moves the camera by `step`, repainting only if the camera changed, so a
+    /// gesture the content's bounds hold in place draws no frame.
+    pub(crate) fn steer(&mut self, step: impl FnOnce(&mut Framing), cx: &mut Context<Self>) {
+        let before = self.camera();
+        step(&mut self.framing);
+        if self.camera() != before {
+            self.invalidate_canvas_only(cx);
+        }
+    }
+
     /// Brings this drawing onto a layered layout the graph has landed.
     ///
     /// A morph eases one layered drawing onto its successor, so it says nothing
@@ -941,9 +951,8 @@ impl GraphPanel {
             return;
         };
         let viewport = self.framing.viewport();
-        self.framing
-            .move_to(scale_about(at, self.camera(), factor, viewport, content));
-        self.invalidate_canvas_only(cx);
+        let scaled = scale_about(at, self.camera(), factor, viewport, content);
+        self.steer(|framing| framing.move_to(scaled), cx);
     }
 
     /// Puts away the innermost thing the reader set up: a reveal pending, then
