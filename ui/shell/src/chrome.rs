@@ -5,7 +5,7 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Entity, FocusHandle,
+    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Edges, Entity, FocusHandle,
     HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels, Point, RenderOnce, ResizeEdge, Rgba,
     SharedString, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px,
     transparent_black,
@@ -187,9 +187,14 @@ fn resize_backdrop(this: Stateful<Div>, tiling: Tiling) -> Stateful<Div> {
         // canvas — on each motion, pinning a core while the cursor merely
         // crosses the content. The band is wider than the resize hit zone so the
         // cursor still resets once on the way out.
-        .on_mouse_move(|e, window, _| {
-            let size = window.viewport_size();
-            let inner = Bounds::new(Point::default(), size).inset(SHADOW * 2.0);
+        .on_mouse_move(move |e, window, _| {
+            let band = |tiled: bool| if tiled { px(0.) } else { SHADOW * 2.0 };
+            let inner = Bounds::new(Point::default(), window.viewport_size()).extend(Edges {
+                top: -band(tiling.top),
+                right: -band(tiling.right),
+                bottom: -band(tiling.bottom),
+                left: -band(tiling.left),
+            });
             if !inner.contains(&e.position) {
                 window.refresh();
             }
