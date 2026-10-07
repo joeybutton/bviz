@@ -1085,6 +1085,8 @@ dependencies = [
  "bviz_ui_theme",
  "bviz_ui_workspace",
  "clap",
+ "fastrand 2.5.0",
+ "fixedbitset",
  "gpui",
  "lyon_tessellation",
  "nucleo",

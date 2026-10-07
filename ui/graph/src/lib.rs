@@ -67,6 +67,7 @@ mod rules;
 mod scatter;
 mod scroll;
 mod selection;
+mod spatial;
 mod status;
 mod timecard;
 mod timing;
@@ -92,6 +93,7 @@ use relation::Relation;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
+use spatial::SpatialMemo;
 
 actions!(
     bviz_graph,
@@ -337,6 +339,7 @@ pub struct GraphPanel {
     /// Box under the cursor.
     hovered: Option<Id>,
     hover_marking: MarkingMemo,
+    spatial: SpatialMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
     /// set by a secondary click and offered by the toolbar's relation picker.
     selection: Selection,
@@ -562,6 +565,7 @@ impl GraphPanel {
             _reveal_requested: reveal_requested,
             hovered: None,
             hover_marking: MarkingMemo::default(),
+            spatial: SpatialMemo::default(),
             selection,
             relation_picker,
             _relation_choices: relations,

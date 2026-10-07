@@ -59,7 +59,7 @@ pub(crate) enum ViewKey {
 }
 
 impl ViewKey {
-    fn drawing(self) -> u64 {
+    pub(crate) fn drawing(self) -> u64 {
         match self {
             Self::Layered(drawing) | Self::Map { drawing, .. } => drawing,
         }

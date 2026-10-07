@@ -434,7 +434,7 @@ pub(crate) fn canvas_body(
             let view = entity.read(cx);
             (view.camera(), view.morph_frame())
         };
-        let Some((g, marks)) = entity.update(cx, |view, cx| {
+        let Some((indexed, marks)) = entity.update(cx, |view, cx| {
             derive::derive_view(view, &scene.drawn, camera.zoom, cx);
             let shown = scene.drawn.shown(camera.zoom)?;
             let marks = Marks {
@@ -445,7 +445,7 @@ pub(crate) fn canvas_body(
                 ),
                 selection: view.selection.marking(shown),
             };
-            Some((shown.view(), marks))
+            Some((view.spatial.indexed(shown), marks))
         }) else {
             return;
         };
@@ -456,17 +456,13 @@ pub(crate) fn canvas_body(
         let statuses = loaded.statuses();
         let fills = Fills::of(scene.colouring, loaded.times().ok(), loaded.states());
         let critical = scene.critical_path.then(|| loaded.critical());
-        let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
-            .boxes
-            .iter()
-            .map(|b| {
-                let (rect, alpha) = morph.as_ref().map_or((Rect::of(b), 1.0), |m| m.place(b));
-                Placed {
-                    b,
-                    rect,
-                    alpha,
-                    leaving: false,
-                }
+        let drawn: Vec<(PaintBox, Bounds<Pixels>)> = indexed
+            .boxes_near(&visible, morph.as_ref())
+            .map(|(b, rect, alpha)| Placed {
+                b,
+                rect,
+                alpha,
+                leaving: false,
             })
             .chain(
                 morph
@@ -498,7 +494,7 @@ pub(crate) fn canvas_body(
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
             let mut courses = Courses::default();
-            for c in &g.connectors {
+            for c in indexed.routes_near(&visible) {
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let filtered = scene.edge_strength(c.from, c.to);
