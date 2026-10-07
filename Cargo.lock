@@ -1086,6 +1086,7 @@ dependencies = [
  "bviz_ui_workspace",
  "clap",
  "gpui",
+ "lyon_tessellation",
  "nucleo",
  "rustc-hash 2.1.3",
 ]

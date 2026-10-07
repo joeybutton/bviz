@@ -22,6 +22,7 @@ rust_library(
         "//util/parallel",
         "@crates//:clap",
         "@crates//:gpui",
+        "@crates//:lyon_tessellation",
         "@crates//:nucleo",
         "@crates//:rustc-hash",
     ],
