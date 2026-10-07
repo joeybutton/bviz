@@ -491,7 +491,8 @@ pub(crate) fn controls(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Optio
                     cx.listener(move |view, _: &ClickEvent, _, cx| ask_why(view, node, cx)),
                 )
                 .ghost()
-                .label("why"),
+                .label("why")
+                .tooltip("Show why box is in build"),
             )
             .children(asking.map(|_| {
                 Button::new(
@@ -500,6 +501,7 @@ pub(crate) fn controls(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Optio
                 )
                 .ghost()
                 .label("from here")
+                .tooltip("Show only paths from box")
             })),
     )
 }
@@ -707,6 +709,7 @@ pub(crate) fn card(
                         cx.listener(|view, _: &ClickEvent, _, cx| clear(view, cx)),
                     )
                     .label("clear")
+                    .tooltip("Clear paths")
                     .compact(),
                 ),
         )

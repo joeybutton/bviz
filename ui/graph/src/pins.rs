@@ -193,7 +193,8 @@ pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option
             cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, Visibility::Hidden, cx)),
         )
         .ghost()
-        .label(label(Pin::Set(Visibility::Hidden))),
+        .label(label(Pin::Set(Visibility::Hidden)))
+        .tooltip("Always hide box"),
     )
 }
 

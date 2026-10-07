@@ -73,6 +73,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .label("timing")
+        .tooltip("Toggle action timing")
         .selected(view.timecard.up),
     )
 }
@@ -272,6 +273,7 @@ pub(crate) fn card(
                         cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
                     )
                     .label("close")
+                    .tooltip("Close card")
                     .compact(),
                 ),
         )

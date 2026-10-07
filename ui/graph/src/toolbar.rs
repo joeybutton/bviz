@@ -45,6 +45,7 @@ pub(crate) fn toolbar(
                 cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_critical_path(cx)),
             )
             .label("critical path")
+            .tooltip("Toggle critical path")
             .selected(enabled),
         );
     }

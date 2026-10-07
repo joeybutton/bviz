@@ -106,6 +106,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .label("outcomes")
+        .tooltip("Toggle build outcomes")
         .selected(view.report.is_up(report)),
     )
 }
@@ -235,6 +236,7 @@ fn selected(
                 }),
             )
             .label("paths from its root cause")
+            .tooltip("Show paths from root cause")
             .compact()
         }))
 }
@@ -326,6 +328,7 @@ pub(crate) fn card(
                         cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
                     )
                     .label("close")
+                    .tooltip("Close card")
                     .compact(),
                 ),
         )
