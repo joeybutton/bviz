@@ -443,7 +443,7 @@ pub(crate) fn overlay(
     view: &GraphPanel,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Option<Div> {
     let jump = view.jump.open.as_ref()?;
     let colors = &palette.colors;
@@ -550,7 +550,7 @@ fn rows(
     scroll: &ListScroll,
     row: Pixels,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> impl IntoElement + use<> {
     let entity = cx.entity();
     let listing = *palette;

@@ -1,6 +1,14 @@
 use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood, ToggleReduce};
-use bviz_ui_components::{Button, Toolbar, spinner};
+use bviz_ui_components::{Button, OneRow, Toolbar, spinner};
 use gpui::{ClickEvent, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
+
+/// How many strips [`toolbar`] stacks.
+const STRIPS: usize = 3;
+
+/// The height of [`toolbar`], whatever its strips hold.
+pub(crate) fn height() -> Pixels {
+    OneRow::height() * STRIPS as f32
+}
 
 /// The panel's controls in three strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
@@ -10,7 +18,7 @@ pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
     focus: &FocusHandle,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Div {
     let mut view = Toolbar::new()
         .one_row("graph-view-controls")
@@ -78,17 +86,11 @@ pub(crate) fn toolbar(
         facets = facets.child(checklist);
     }
     let facets = facets.child(controls.preset_filter);
-    div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .child(view)
-        .child(facets)
-        .child(
-            Toolbar::new()
-                .one_row("graph-query-bar")
-                .child(controls.chips),
-        )
+    let query = Toolbar::new()
+        .one_row("graph-query-bar")
+        .child(controls.chips);
+    let strips: [OneRow; STRIPS] = [view, facets, query];
+    div().size_full().flex().flex_col().children(strips)
 }
 
 /// A strip's controls grouped under the word `name`.

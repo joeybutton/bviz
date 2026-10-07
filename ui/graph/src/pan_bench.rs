@@ -227,14 +227,17 @@ pub(crate) enum Phase {
     /// Handling the pointer events that drive the motion.
     InputDispatch,
     PanelRender,
+    /// Rebuilding the chrome a frame does not replay.
+    ChromeRender,
     CanvasPrepaint,
     CanvasPaint,
 }
 
 impl Phase {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::InputDispatch,
         Self::PanelRender,
+        Self::ChromeRender,
         Self::CanvasPrepaint,
         Self::CanvasPaint,
     ];
@@ -243,6 +246,7 @@ impl Phase {
         match self {
             Self::InputDispatch => "input_dispatch_ms",
             Self::PanelRender => "panel_render_ms",
+            Self::ChromeRender => "chrome_render_ms",
             Self::CanvasPrepaint => "canvas_prepaint_ms",
             Self::CanvasPaint => "canvas_paint_ms",
         }

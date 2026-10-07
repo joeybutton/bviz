@@ -474,7 +474,7 @@ pub(crate) fn reset(view: &mut GraphPanel) {
 /// The controls asking about the box a secondary click has selected: why it is
 /// in the build and, while a dependency is asked about, the paths from it down
 /// to that dependency. `None` while no box is selected.
-pub(crate) fn controls(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option<Div> {
+pub(crate) fn controls(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Div> {
     let node = view.selection.node()?;
     let asking = view
         .why
@@ -611,7 +611,7 @@ fn listed(
     view: &GraphPanel,
     links: impl Iterator<Item = Stateful<Div>>,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Div {
     let rows = div()
         .id("why-chain")
@@ -651,7 +651,7 @@ fn listed(
 pub(crate) fn card(
     view: &GraphPanel,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Option<Folding> {
     let Asked { question, answer } = view.why.asked.as_ref()?;
     let (status, shortest): (SharedString, &[Named]) = match answer {

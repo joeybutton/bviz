@@ -807,7 +807,7 @@ pub(crate) fn bar(
     view: &GraphPanel,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> AnyElement {
     let chips = &view.chips;
     let current = chips.current();

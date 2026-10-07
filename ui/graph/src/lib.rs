@@ -21,10 +21,10 @@ use bviz_ui_workspace::{
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription,
-    WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
+    AnyElement, AnyView, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString,
+    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -368,6 +368,9 @@ pub struct GraphPanel {
     /// The layer drawing the graph; notified through
     /// [`GraphPanel::invalidate_canvas`].
     canvas: Entity<GraphCanvas>,
+    toolbar: Entity<ChromeLayer>,
+    overlays: Entity<ChromeLayer>,
+    _chrome_follows: Subscription,
     legend: Legend,
     /// Taken by the first render, which starts it.
     bench: Option<pan_bench::Bench>,
@@ -478,7 +481,21 @@ impl GraphPanel {
             });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
-        let canvas = cx.new(|_| GraphCanvas { parent });
+        let canvas = cx.new(|_| GraphCanvas {
+            parent: parent.clone(),
+        });
+        let toolbar = cx.new(|_| ChromeLayer {
+            parent: parent.clone(),
+            draw: GraphPanel::draw_toolbar,
+        });
+        let overlays = cx.new(|_| ChromeLayer {
+            parent,
+            draw: GraphPanel::draw_overlays,
+        });
+        let chrome_follows = cx.observe_self(|view, cx| {
+            view.toolbar.update(cx, |_, cx| cx.notify());
+            view.overlays.update(cx, |_, cx| cx.notify());
+        });
         let changed = cx.observe(&model, |view, _, cx| {
             colour::sync(view, cx);
             view.invalidate_canvas(cx);
@@ -556,6 +573,9 @@ impl GraphPanel {
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
+            toolbar,
+            overlays,
+            _chrome_follows: chrome_follows,
             legend: Legend::default(),
             bench: pan_bench::Bench::from_env(),
         }
@@ -647,17 +667,8 @@ impl GraphPanel {
                     .children(missing::card(self, &palette, cx))
                     .children(legend),
             )
-            .child(
-                column::Column::new()
-                    .held(reveal::card(self, &palette, cx))
-                    .held(pins::panel(self, &palette, cx))
-                    .folding(report::card(self, &palette, cx))
-                    .folding(timecard::card(self, &palette, cx))
-                    .foot(why::card(self, &palette, cx)),
-            )
-            .children(jump::overlay(self, &palette, window, cx))
+            .child(cached_layer(self.overlays.clone()))
             .children(chips::menu(self, window))
-            .children(chips::notice(self, &palette))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -676,6 +687,59 @@ impl GraphPanel {
             // here from whichever control last took it. Key events bubble from
             // here up through the strip's own bindings to the chrome's.
             .track_focus(&self.focus_handle)
+            .into_any_element()
+    }
+
+    fn draw_toolbar(
+        &self,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let traced = self
+            .model
+            .read(cx)
+            .loaded()
+            .is_some_and(|loaded| loaded.critical().any());
+        let controls = Controls {
+            mode: self.mode,
+            chips: chips::bar(self, palette, window, cx),
+            picker: self.mode_picker.clone(),
+            class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
+            origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
+            preset_filter: self.preset_filter.clone(),
+            relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
+            pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
+            why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
+            colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
+            report_control: report::control(self, cx).map(IntoElement::into_any_element),
+            timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
+            neighborhood_enabled: self.neighborhood_enabled,
+            critical_path: traced.then_some(self.critical_path_enabled),
+            reduced: self.derived.reduced(),
+            relaying: self.derived.deriving(),
+        };
+        toolbar::toolbar(controls, palette, &self.focus_handle, cx).into_any_element()
+    }
+
+    fn draw_overlays(
+        &self,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size_full()
+            .child(
+                column::Column::new()
+                    .held(reveal::card(self, palette, cx))
+                    .held(pins::panel(self, palette, cx))
+                    .folding(report::card(self, palette, cx))
+                    .folding(timecard::card(self, palette, cx))
+                    .foot(why::card(self, palette, cx)),
+            )
+            .children(jump::overlay(self, palette, window, cx))
+            .children(chips::notice(self, palette))
             .into_any_element()
     }
 
@@ -1009,42 +1073,45 @@ impl Render for GraphPanel {
         let placeholder = self.model.read(cx).source().placeholder(&palette.colors);
         match placeholder {
             Some(placeholder) => chrome.child(placeholder),
-            None => {
-                let traced = self
-                    .model
-                    .read(cx)
-                    .loaded()
-                    .is_some_and(|loaded| loaded.critical().any());
-                let controls = Controls {
-                    mode: self.mode,
-                    chips: chips::bar(self, &palette, window, cx),
-                    picker: self.mode_picker.clone(),
-                    class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
-                    origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
-                    preset_filter: self.preset_filter.clone(),
-                    relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
-                    pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
-                    why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
-                    colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
-                    report_control: report::control(self, cx).map(IntoElement::into_any_element),
-                    timecard_control: timecard::control(self, cx)
-                        .map(IntoElement::into_any_element),
-                    neighborhood_enabled: self.neighborhood_enabled,
-                    critical_path: traced.then_some(self.critical_path_enabled),
-                    reduced: self.derived.reduced(),
-                    relaying: self.derived.deriving(),
-                };
-                chrome
-                    .child(toolbar::toolbar(controls, &palette, &self.focus_handle, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .overflow_hidden()
-                            .child(self.viewport(palette, window, cx)),
-                    )
-            }
+            None => chrome
+                .child(
+                    AnyView::from(self.toolbar.clone()).cached(
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(toolbar::height())
+                            .flex_none(),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .overflow_hidden()
+                        .child(self.viewport(palette, window, cx)),
+                ),
         }
+    }
+}
+
+/// A part of the panel's chrome, drawn in a layer of its own so that a frame
+/// drawn for a change only the canvas shows replays it. Every notify of the
+/// panel's own notifies each such layer through an observer, which gpui does
+/// not run for a notify issued while a frame is drawn, so nothing the panel
+/// renders, prepaints or paints may notify it.
+struct ChromeLayer {
+    parent: WeakEntity<GraphPanel>,
+    draw: fn(&GraphPanel, &Palette, &mut Window, &Context<GraphPanel>) -> AnyElement,
+}
+
+impl Render for ChromeLayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = pan_bench::span(pan_bench::Phase::ChromeRender);
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let draw = self.draw;
+        parent.update(cx, |view, cx| draw(view, &palette, window, cx))
     }
 }
 
