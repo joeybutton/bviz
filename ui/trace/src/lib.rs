@@ -588,7 +588,8 @@ pub(crate) fn time_window_chip(
                 })
                 .ghost()
                 .compact()
-                .icon("x"),
+                .icon("x")
+                .keys_for_focused(&ClearTimeSelection),
             ),
     )
 }
