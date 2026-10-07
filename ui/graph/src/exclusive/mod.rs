@@ -2176,6 +2176,11 @@ mod tests {
         assert_eq!(GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
+
     /// A tooltip for a cell with no room below it stands above the cell
     /// rather than over it.
     #[test]

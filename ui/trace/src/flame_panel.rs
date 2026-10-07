@@ -1207,6 +1207,11 @@ mod tests {
         assert_eq!(GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
+
     /// Width of the content column the fixture layouts are placed for, wide
     /// enough that every fixture frame clears [`MIN_SLICE_PX`].
     const VIEW_W: f32 = 800.0;

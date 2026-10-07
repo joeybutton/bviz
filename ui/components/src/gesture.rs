@@ -2,6 +2,7 @@
 //! [`Gestures`] table its pointer handlers dispatch through and help lists.
 
 use crate::keys::{KeyStyle, glyphs, words};
+use crate::keys_help::{GESTURE_MAX_CHARS, LABEL_MAX_CHARS};
 use gpui::{
     ClickEvent, Modifiers, MouseButton, MouseDownEvent, NavigationDirection, PinchEvent, Pixels,
     Point, ScrollWheelEvent, px,
@@ -391,6 +392,21 @@ impl<I: Copy> Gestures<I> {
             .map(|(_, entry)| entry.row)
             .collect()
     }
+
+    /// The rows the keys help could not hold on one line: those whose
+    /// description runs past [`LABEL_MAX_CHARS`], or whose gesture, in either
+    /// style, runs past [`GESTURE_MAX_CHARS`].
+    pub fn overlong(&self) -> Vec<GestureRow> {
+        let too_long = |text: &str, max: usize| text.chars().count() > max;
+        self.rows()
+            .filter(|row| {
+                too_long(row.does, LABEL_MAX_CHARS)
+                    || [KeyStyle::Glyphs, KeyStyle::Words]
+                        .into_iter()
+                        .any(|style| too_long(&row.gesture.text(style), GESTURE_MAX_CHARS))
+            })
+            .collect()
+    }
 }
 
 /// How far `event` scrolls a view, a line counted as [`LINE_SCROLL_PX`].
@@ -647,6 +663,27 @@ mod tests {
         );
         assert_eq!(Gestures::new(&[ZOOM, SCROLL]).unreachable(), []);
         assert_eq!(Gestures::new(&[SCROLL, ZOOM]).unreachable(), [ZOOM.row]);
+    }
+
+    #[test]
+    fn a_row_past_either_limit_is_overlong() {
+        const TERSE: Entry<Act> = Entry::new(Input::HOVER, Place::On("a box"), "Describe it", Act);
+        const WORDY: Entry<Act> = Entry::new(
+            Input::click(Button::Left),
+            Place::On("a box"),
+            "Open the box and every box it holds, then fit them",
+            Act,
+        );
+        const FAR: Entry<Act> = Entry::new(
+            Input::drag(Button::Left).holding(Held::SHIFT.and(Held::SECONDARY)),
+            Place::On("the furthest of the boxes"),
+            "Move it",
+            Act,
+        );
+        assert_eq!(
+            Gestures::new(&[TERSE, WORDY, FAR]).overlong(),
+            [WORDY.row, FAR.row]
+        );
     }
 
     #[test]

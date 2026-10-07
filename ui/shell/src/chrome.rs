@@ -472,6 +472,11 @@ mod tests {
         assert_eq!(TITLE_BAR_GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_title_bar_gesture_fits_the_keys_help() {
+        assert_eq!(TITLE_BAR_GESTURES.overlong(), []);
+    }
+
     /// Dimming the bands is what says the window is no longer the active one, and
     /// once a compositor tiles the window — taking the rounded corners and the
     /// drop shadow with them — it is the only thing saying it. So a dimmed band

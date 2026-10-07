@@ -863,6 +863,7 @@ dependencies = [
  "bviz_alloc",
  "bviz_cli",
  "bviz_invocation",
+ "bviz_ui_components",
  "bviz_ui_console",
  "bviz_ui_execlog",
  "bviz_ui_graph",

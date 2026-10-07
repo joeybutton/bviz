@@ -141,8 +141,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use bviz_ui_components::LABEL_MAX_CHARS;
     use bviz_ui_workspace::{Panel, ViewKind};
     use std::collections::HashMap;
+
+    /// What the namespace of every action bviz declares begins with.
+    const ACTION_NAMESPACE_PREFIX: &str = "bviz_";
+
+    #[test]
+    fn every_action_has_a_help_label_the_keys_help_fits() {
+        let mut declared = 0;
+        let mut unfit = Vec::new();
+        for action in gpui::generate_list_of_all_registered_actions() {
+            if !action.name.starts_with(ACTION_NAMESPACE_PREFIX) {
+                continue;
+            }
+            declared += 1;
+            let label = action.documentation.and_then(|doc| doc.lines().next());
+            if label.is_none_or(|label| label.chars().count() > LABEL_MAX_CHARS) {
+                unfit.push((action.name, label));
+            }
+        }
+        assert_ne!(declared, 0, "no action of bviz's is registered");
+        assert_eq!(unfit, []);
+    }
 
     fn view_kind<T: Panel>() -> (&'static str, ViewKind) {
         (std::any::type_name::<T>(), T::kind().view)

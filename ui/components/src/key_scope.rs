@@ -1,6 +1,7 @@
 //! The key contexts bindings are scoped to, each under the heading the keys
 //! help lists its bindings by.
 
+use crate::keys_help::SCOPE_LABEL_MAX_CHARS;
 use gpui::{App, Global, KeyContext};
 use std::fmt;
 
@@ -38,7 +39,7 @@ impl KeyScope {
     pub const fn new(id: &'static str, label: &'static str) -> Self {
         Self {
             id,
-            label,
+            label: fitting(label),
             within: None,
         }
     }
@@ -53,7 +54,7 @@ impl KeyScope {
     ) -> Self {
         Self {
             id,
-            label,
+            label: fitting(label),
             within: Some(Within {
                 id: parent.id,
                 nesting,
@@ -73,6 +74,28 @@ impl KeyScope {
     pub(crate) fn within_scope(&self) -> Option<Within> {
         self.within
     }
+}
+
+/// `label`, failing the build of a scope whose label runs past
+/// [`SCOPE_LABEL_MAX_CHARS`].
+const fn fitting(label: &'static str) -> &'static str {
+    let bytes = label.as_bytes();
+    let (mut at, mut chars) = (0, 0);
+    while at < bytes.len() {
+        if !is_utf8_continuation(bytes[at]) {
+            chars += 1;
+        }
+        at += 1;
+    }
+    assert!(
+        chars <= SCOPE_LABEL_MAX_CHARS,
+        "a key scope's label runs past the keys help's heading"
+    );
+    label
+}
+
+const fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
 }
 
 impl fmt::Display for KeyScope {

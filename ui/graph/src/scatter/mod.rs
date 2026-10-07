@@ -1835,4 +1835,9 @@ mod tests {
     fn every_gesture_is_reachable() {
         assert_eq!(GESTURES.unreachable(), []);
     }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
 }

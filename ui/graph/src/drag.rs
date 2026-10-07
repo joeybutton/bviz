@@ -210,6 +210,11 @@ mod tests {
         assert_eq!(GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
+
     /// Whether letting go of the `click_count`th press of a run on a box opens
     /// or closes it.
     fn toggles(click_count: usize) -> bool {

@@ -37,6 +37,20 @@ pub(crate) fn bind_keys(cx: &mut App) {
 /// How wide the sheet is drawn, room for a label and the keys beside it.
 const SHEET_WIDTH: Pixels = px(520.);
 
+/// The most characters an action's help label or a gesture's description may
+/// run to: beside a gesture of [`GESTURE_MAX_CHARS`], it still fits one line
+/// of [`SHEET_WIDTH`].
+pub const LABEL_MAX_CHARS: usize = 36;
+
+/// The most characters a gesture may run to, as [`Gesture::text`] spells it.
+///
+/// [`Gesture::text`]: crate::gesture::Gesture::text
+pub const GESTURE_MAX_CHARS: usize = 30;
+
+/// The most characters a key scope's label may run to, which a heading of
+/// the sheet holds on one line behind [`POINTER_HEADING`].
+pub(crate) const SCOPE_LABEL_MAX_CHARS: usize = 24;
+
 /// Room the filter field leaves beside it for the button emptying it.
 const CLEAR_ROOM: Pixels = px(36.);
 

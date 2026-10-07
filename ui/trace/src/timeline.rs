@@ -2293,6 +2293,11 @@ mod tests {
         assert_eq!(TIMELINE_GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(TIMELINE_GESTURES.overlong(), []);
+    }
+
     /// A profile's whole time, long enough for every framing below to zoom in.
     const WHOLE: TimeSpan = TimeSpan {
         start_us: 0,

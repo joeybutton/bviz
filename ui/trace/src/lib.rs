@@ -1821,6 +1821,11 @@ mod tests {
         assert_eq!(DIVIDER_GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_divider_gesture_fits_the_keys_help() {
+        assert_eq!(DIVIDER_GESTURES.overlong(), []);
+    }
+
     /// A session told of a configuration per `(checksum, mnemonic)`.
     pub(crate) fn session_knowing(described: &[(&str, &str)]) -> Session {
         let mut configurations = Configurations::default();

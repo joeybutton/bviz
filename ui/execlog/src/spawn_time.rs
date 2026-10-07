@@ -691,6 +691,11 @@ mod tests {
         assert_eq!(GESTURES.unreachable(), []);
     }
 
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
+
     fn rows(named: &[(&str, usize)]) -> Vec<GroupRow> {
         named
             .iter()

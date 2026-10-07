@@ -37,7 +37,8 @@ pub use find_keys::find_key_bindings;
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{KeyStyle, action_label, binding_text, key_text, key_text_in, keystroke_text};
 pub use keys_help::{
-    GestureGroup, KEYS_HELP_NAME, KeyGroup, KeyRow, KeysHelp, KeysHelpEvent, keys_in_effect,
+    GESTURE_MAX_CHARS, GestureGroup, KEYS_HELP_NAME, KeyGroup, KeyRow, KeysHelp, KeysHelpEvent,
+    LABEL_MAX_CHARS, keys_in_effect,
 };
 pub use layer::{cached_layer, overlay_canvas};
 pub use list_scroll::{ListScroll, list_scrollbar};
