@@ -8,6 +8,14 @@ use gpui::{App, Context, Entity, Pixels, Point, Window};
 /// counts as a drag rather than a click.
 pub(crate) const CLICK_SLOP: f32 = 4.0;
 
+/// Whether a cursor at `at` has travelled past [`CLICK_SLOP`] from a press at
+/// `from`.
+pub(crate) fn past_slop(from: Point<Pixels>, at: Point<Pixels>) -> bool {
+    let travelled =
+        (f32::from(at.x) - f32::from(from.x)).hypot(f32::from(at.y) - f32::from(from.y));
+    travelled > CLICK_SLOP
+}
+
 /// The `click_count` of the press completing a double click.
 pub(crate) const DOUBLE_CLICK: usize = 2;
 
@@ -56,9 +64,7 @@ pub(crate) fn drag_pan(
     let Drag::Pan(mut pan) = view.drag else {
         return;
     };
-    let traveled = (f32::from(position.x) - f32::from(pan.press.x))
-        .hypot(f32::from(position.y) - f32::from(pan.press.y));
-    if traveled > CLICK_SLOP {
+    if past_slop(pan.press, position) {
         pan.moved = true;
     }
     let Camera {

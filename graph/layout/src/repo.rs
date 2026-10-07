@@ -154,7 +154,7 @@ fn leading(name: &str) -> &str {
         .map_or(name, |(leading, _)| leading)
 }
 
-fn strip_sigil(name: &str) -> &str {
+pub(crate) fn strip_sigil(name: &str) -> &str {
     name.strip_prefix("@@")
         .or_else(|| name.strip_prefix('@'))
         .unwrap_or(name)

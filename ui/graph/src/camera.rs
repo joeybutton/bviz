@@ -348,9 +348,17 @@ pub(crate) fn frame_view(
     (zoom, (x, y))
 }
 
-/// The rect enclosing every box `g` draws; `None` for a drawing holding none.
+/// The rect enclosing every box `g` draws that holds none of the others: a
+/// container stands around what it holds, so one drawn as context around a few
+/// boxes would frame the empty space it spans. `None` for a drawing holding
+/// no box.
 pub(crate) fn drawn_rect(g: &LaidOut) -> Option<Rect> {
-    let mut boxes = g.boxes.iter();
+    let innermost = g.boxes.iter().filter(|b| !b.compound);
+    enclosing(innermost).or_else(|| enclosing(g.boxes.iter()))
+}
+
+/// The rect enclosing `boxes`; `None` where there are none.
+fn enclosing<'a>(mut boxes: impl Iterator<Item = &'a bviz_graph_layout::Box>) -> Option<Rect> {
     let first = Rect::of(boxes.next()?);
     let (mut left, mut top) = (first.x, first.y);
     let (mut right, mut bottom) = (first.x + first.w, first.y + first.h);
@@ -547,6 +555,22 @@ mod tests {
         let rect = drawn_rect(&g).expect("a drawing holding boxes");
         assert_eq!((rect.x, rect.y, rect.w, rect.h), (100.0, 20.0, 240.0, 80.0));
         assert!(drawn_rect(&LaidOut::default()).is_none());
+    }
+
+    /// A container drawn around a small box spans space it draws nothing in,
+    /// so the drawn rect is the small box's.
+    #[test]
+    fn the_drawn_rect_leaves_out_the_space_a_container_spans() {
+        let container = bviz_graph_layout::Box {
+            compound: true,
+            ..lbox(0.0, 0.0, 4000.0, 3000.0)
+        };
+        let g = LaidOut {
+            boxes: vec![container, lbox(300.0, 20.0, 40.0, 80.0)],
+            ..Default::default()
+        };
+        let rect = drawn_rect(&g).expect("a drawing holding boxes");
+        assert_eq!((rect.x, rect.y, rect.w, rect.h), (300.0, 20.0, 40.0, 80.0));
     }
 
     #[test]

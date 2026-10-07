@@ -2,19 +2,38 @@ load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
+# The query-language test cases taken from Bazel's own tests.
+filegroup(
+    name = "bazel_goldens_src",
+    srcs = ["src/query_lang/bazel_goldens.rs"],
+    package_metadata = [
+        "//:package_metadata",
+        "//LICENSES:bazel",
+    ],
+)
+
 rust_library(
     name = "layout",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/query_lang/bazel_goldens.rs"],
+    ) + [":bazel_goldens_src"],
     crate_name = "bviz_graph_layout",
-    visibility = ["//ui/graph:__pkg__"],
+    visibility = [
+        "//graph/layout/oracle:__pkg__",
+        "//ui/graph:__pkg__",
+    ],
     deps = [
         "//util/parallel",
         "@bazel_query_proto//:bazel_query_rust_proto",
+        "@crates//:fixedbitset",
         "@crates//:org-eclipse-elk-alg-layered",
         "@crates//:org-eclipse-elk-core",
         "@crates//:org-eclipse-elk-graph",
         "@crates//:prost",
         "@crates//:rayon",
+        "@crates//:regex-automata",
+        "@crates//:regex-syntax",
         "@crates//:rustc-hash",
     ],
 )

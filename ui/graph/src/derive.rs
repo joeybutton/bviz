@@ -755,7 +755,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     };
     view.derived.opened_on(loaded);
     publish_filter(view, cx);
-    crate::search::reset(view, cx);
+    crate::chips::reset(view, cx);
     crate::why::reset(view);
     crate::reveal::reset(view);
     crate::jump::reset(view);
@@ -1066,7 +1066,7 @@ fn restrict(
     expanded: &HashSet<Id>,
     reduced: bool,
 ) -> (Slice, Restricted) {
-    let verdicts = Arc::new(filter.evaluate(&shared.base, &shared.names, &shared.facets));
+    let verdicts = Arc::new(filter.evaluate(&shared.base, &shared.facets));
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();

@@ -4,8 +4,8 @@
 
 use crate::track_drag;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
     InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, PaintQuad,
     Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
     UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
@@ -64,10 +64,19 @@ pub fn bindings() -> Vec<KeyBinding> {
     ]
 }
 
+/// How wide the cursor is drawn.
+const CURSOR_WIDTH: Pixels = px(1.5);
+
 /// What a [`TextInput`] holds changed.
 pub struct TextEdited;
 
 impl EventEmitter<TextEdited> for TextInput {}
+
+/// The cursor of a [`TextInput`] moved, or the selection changed, over the
+/// text it holds.
+pub struct CursorMoved;
+
+impl EventEmitter<CursorMoved> for TextInput {}
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -78,6 +87,8 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// How far the line is scrolled left within the field.
+    scrolled: Pixels,
     is_selecting: bool,
 }
 
@@ -96,6 +107,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scrolled: px(0.),
             is_selecting: false,
         }
     }
@@ -109,6 +121,27 @@ impl TextInput {
         self.hold(content.into(), cx);
         let end = self.content.len();
         self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Where the cursor stands, as a byte offset into what the field holds.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// Moves the cursor to the byte offset `offset` into what the field holds.
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.move_to(offset.min(self.content.len()), cx);
+    }
+
+    /// Replaces the byte range `range` of what the field holds with `text`,
+    /// leaving the cursor just past it.
+    pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        self.splice(&range, text, cx);
+        let cursor = range.start + text.len();
+        self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
@@ -227,6 +260,7 @@ impl TextInput {
         self.is_selecting = false;
         self.selection_reversed = false;
         self.selected_range = range;
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -254,6 +288,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -275,6 +310,7 @@ impl TextInput {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        cx.emit(CursorMoved);
         cx.notify();
     }
 
@@ -292,7 +328,12 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - self.line_left(bounds))
+    }
+
+    /// Where the line starts in the field laid out at `bounds`, scrolled.
+    fn line_left(&self, bounds: &Bounds<Pixels>) -> Pixels {
+        bounds.left() - self.scrolled
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -414,11 +455,7 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.replacement_range(range_utf16);
-        self.splice(&range, new_text, cx);
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.marked_range = None;
-        cx.notify();
+        self.replace(range, new_text, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -453,9 +490,10 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let left = self.line_left(&bounds);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(left + line.x_for_index(range.start), bounds.top()),
+            point(left + line.x_for_index(range.end), bounds.bottom()),
         ))
     }
 
@@ -467,7 +505,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line = self.last_layout.as_ref()?;
         let bounds = self.last_bounds.as_ref()?;
-        let ix = line.closest_index_for_x(point.x - bounds.left());
+        let ix = line.closest_index_for_x(point.x - self.line_left(bounds));
         Some(self.offset_to_utf16(ix))
     }
 }
@@ -495,6 +533,8 @@ impl TextElement {
 
 struct TextPrepaint {
     line: Option<ShapedLine>,
+    /// Where the line is painted from.
+    origin: Point<Pixels>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
 }
@@ -564,7 +604,7 @@ fn cursor_selection_quads(
             Some(fill(
                 Bounds::new(
                     point(bounds.left() + x, bounds.top()),
-                    size(px(1.5), bounds.bottom() - bounds.top()),
+                    size(CURSOR_WIDTH, bounds.bottom() - bounds.top()),
                 ),
                 cursor_color,
             )),
@@ -588,6 +628,19 @@ fn cursor_selection_quads(
             )),
         )
     }
+}
+
+/// How far a line `width` wide scrolls left within a field `visible` wide,
+/// from `scrolled`, so the cursor at `cursor` along the line stays in view:
+/// as little as that takes, and never so far the line's end leaves room
+/// behind it.
+fn scrolled_to_cursor(scrolled: Pixels, cursor: Pixels, width: Pixels, visible: Pixels) -> Pixels {
+    let reach = (width + CURSOR_WIDTH - visible).max(px(0.));
+    let scrolled = scrolled.min(reach);
+    let scrolled = scrolled.min(cursor);
+    scrolled
+        .max(cursor + CURSOR_WIDTH - visible)
+        .clamp(px(0.), reach)
 }
 
 impl Element for TextElement {
@@ -641,16 +694,28 @@ impl Element for TextElement {
             .text_system()
             .shape_line(text, font_size, &runs, None);
 
+        let scrolled = match input.content.is_empty() {
+            true => px(0.),
+            false => scrolled_to_cursor(
+                input.scrolled,
+                line.x_for_index(cursor),
+                line.width,
+                bounds.size.width,
+            ),
+        };
+        self.input.update(cx, |input, _| input.scrolled = scrolled);
+        let origin = point(bounds.left() - scrolled, bounds.top());
         let (cursor_quad, selection_quad) = cursor_selection_quads(
             &line,
             &selected,
             cursor,
-            bounds,
+            Bounds::new(origin, bounds.size),
             colors.text,
             colors.selection,
         );
         TextPrepaint {
             line: Some(line),
+            origin,
             cursor: cursor_quad,
             selection: selection_quad,
         }
@@ -672,24 +737,27 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
         let line = prepaint.line.take().unwrap();
-        line.paint(
-            bounds.origin,
-            window.line_height(),
-            gpui::TextAlign::Left,
-            None,
-            window,
-            cx,
-        )
-        .unwrap();
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+        // The selection and the cursor mark where typing lands, which only a
+        // focused field takes.
+        let focused = focus_handle.is_focused(window);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if focused && let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            line.paint(
+                prepaint.origin,
+                window.line_height(),
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .unwrap();
+            if focused && let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
@@ -734,5 +802,54 @@ impl Render for TextInput {
                 colors.border
             })
             .child(TextElement { input: cx.entity() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VISIBLE: Pixels = px(100.);
+
+    #[test]
+    fn a_line_that_fits_never_scrolls() {
+        assert_eq!(
+            scrolled_to_cursor(px(0.), px(60.), px(60.), VISIBLE),
+            px(0.)
+        );
+        assert_eq!(
+            scrolled_to_cursor(px(30.), px(10.), px(60.), VISIBLE),
+            px(0.)
+        );
+    }
+
+    /// The cursor typed past the field's right edge pulls the line along
+    /// just far enough to show it there.
+    #[test]
+    fn a_cursor_past_the_edge_scrolls_the_line_to_it() {
+        let scrolled = scrolled_to_cursor(px(0.), px(250.), px(250.), VISIBLE);
+        assert_eq!(scrolled, px(250.) + CURSOR_WIDTH - VISIBLE);
+    }
+
+    /// Moving the cursor within what is in view leaves the line where it is;
+    /// moving it before the left edge brings the line back to it.
+    #[test]
+    fn the_line_moves_only_as_far_as_the_cursor_needs() {
+        let width = px(400.);
+        assert_eq!(
+            scrolled_to_cursor(px(120.), px(150.), width, VISIBLE),
+            px(120.)
+        );
+        assert_eq!(
+            scrolled_to_cursor(px(120.), px(40.), width, VISIBLE),
+            px(40.)
+        );
+    }
+
+    /// Text cut from the end leaves no empty room behind the line's end.
+    #[test]
+    fn a_shortened_line_scrolls_back_to_fill_the_field() {
+        let scrolled = scrolled_to_cursor(px(300.), px(120.), px(150.), VISIBLE);
+        assert_eq!(scrolled, px(150.) + CURSOR_WIDTH - VISIBLE);
     }
 }

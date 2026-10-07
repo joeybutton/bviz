@@ -6,13 +6,14 @@ use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
 use crate::rules::{self, Term};
-use crate::search::{self, Act};
 use crate::{GraphPanel, Palette, column, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
 use bviz_ui_components::Button;
 use bviz_ui_workspace::PanelEvent;
-use gpui::{ClickEvent, Context, Div, div, prelude::*};
+use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
+
+actions!(bviz_graph_reveal, [Accept]);
 
 /// What keeps a node out of the drawing, as a reader names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -20,8 +21,8 @@ pub(crate) enum HiddenBy {
     Paths,
     /// The reader's own pin.
     Pin,
-    /// The search's pattern, hiding what it names or every node it does not.
-    Search,
+    /// The query the filter is scoped to, which does not name the node.
+    Query,
     /// The rule a toolbar control writes over its term.
     Control(Term),
     /// A rule no control wrote, at its index among the filter's rules.
@@ -42,7 +43,7 @@ impl HiddenBy {
         match self {
             HiddenBy::Paths => "hidden by the dependency paths drawn",
             HiddenBy::Pin => "hidden by its pin",
-            HiddenBy::Search => "hidden by the search",
+            HiddenBy::Query => "outside the query",
             HiddenBy::Control(Term::Kind) => "hidden by the class filter",
             HiddenBy::Control(Term::RepoCategory | Term::Repo) => "hidden by the repository filter",
             HiddenBy::Control(Term::RuleCategory | Term::Mnemonic | Term::ToolConfiguration) => {
@@ -88,15 +89,11 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
         Hidden::OffPaths => HiddenBy::Paths,
         Hidden::Filtered { filter, hiding } => match hiding {
             Hiding::Pin => HiddenBy::Pin,
+            Hiding::Scope => HiddenBy::Query,
             Hiding::Rule(index) => {
                 let rule = &filter.rules[index as usize];
-                if search::wrote(rule) {
-                    HiddenBy::Search
-                } else {
-                    rules::control(rule).map_or(HiddenBy::Rule(index), HiddenBy::Control)
-                }
+                rules::control(rule).map_or(HiddenBy::Rule(index), HiddenBy::Control)
             }
-            Hiding::Base if search::acting(filter) == Some(Act::Only) => HiddenBy::Search,
             Hiding::Base => HiddenBy::Base,
             Hiding::NothingToFrame => HiddenBy::NothingToFrame,
         },
@@ -267,6 +264,15 @@ pub(crate) fn landed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 
 /// Puts away the offer to reveal a hidden node, and a reveal still waiting on
 /// a restriction; reports whether either was pending.
+/// Takes the card's own action on the node it offers to show, for the key
+/// answering it; a key no card stands for is left to what else binds it.
+pub(crate) fn accept(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    match view.reveal {
+        Reveal::Offered(node, by) if by.revealable() => reveal_anyway(view, node, cx),
+        _ => cx.propagate(),
+    }
+}
+
 pub(crate) fn dismiss(view: &mut GraphPanel) -> bool {
     let pending = view.reveal != Reveal::Idle;
     view.reveal = Reveal::Idle;
@@ -319,8 +325,8 @@ pub(crate) fn card(
                             }),
                         )
                         .label(match by {
-                            HiddenBy::Pin => "unpin",
-                            _ => "reveal anyway",
+                            HiddenBy::Pin => "unpin · enter",
+                            _ => "reveal anyway · enter",
                         })
                         .compact()
                     }))
@@ -332,7 +338,7 @@ pub(crate) fn card(
                                 cx.notify();
                             }),
                         )
-                        .label("close")
+                        .label("close · esc")
                         .compact(),
                     ),
             ),
@@ -344,7 +350,6 @@ mod tests {
     use super::*;
     use crate::rules::Value;
     use bviz_graph_layout::Kind;
-    use bviz_graph_layout::select::pattern::Pattern;
     use bviz_graph_layout::select::{Filter, Predicate, Rule, Visibility};
 
     fn filtered(filter: &Filter, hiding: Hiding) -> HiddenBy {
@@ -356,25 +361,10 @@ mod tests {
     #[test]
     fn a_rule_is_named_by_the_control_that_wrote_it() {
         let classes = rules::set_hidden(&Filter::default(), &Value::Kind(Kind::Action), true);
-        let searched = search::applying(&classes, &Pattern::parse("//foo"), Act::Hide);
-        let class_rule = searched
-            .rules
-            .iter()
-            .position(|rule| rules::control(rule) == Some(Term::Kind))
-            .expect("the class rule") as u32;
-        let search_rule = searched
-            .rules
-            .iter()
-            .position(search::wrote)
-            .expect("the search rule") as u32;
 
         assert_eq!(
-            filtered(&searched, Hiding::Rule(class_rule)),
+            filtered(&classes, Hiding::Rule(0)),
             HiddenBy::Control(Term::Kind)
-        );
-        assert_eq!(
-            filtered(&searched, Hiding::Rule(search_rule)),
-            HiddenBy::Search
         );
     }
 
@@ -395,14 +385,18 @@ mod tests {
         assert_eq!(filtered(&filter, Hiding::Rule(0)), HiddenBy::Rule(0));
     }
 
-    /// Showing only what the search names hides the rest by the base it
-    /// writes, which is the search's doing.
     #[test]
-    fn the_base_a_search_showing_only_its_matches_writes_is_the_search() {
-        let only = search::applying(&Filter::default(), &Pattern::parse("//foo"), Act::Only);
-
-        assert_eq!(filtered(&only, Hiding::Base), HiddenBy::Search);
+    fn the_base_is_named_as_the_filter() {
         assert_eq!(filtered(&Filter::default(), Hiding::Base), HiddenBy::Base);
+    }
+
+    /// A pin outranks the scope, so revealing a node the query leaves out
+    /// draws it.
+    #[test]
+    fn a_node_outside_the_query_is_hidden_by_it_and_revealable() {
+        let by = filtered(&Filter::default(), Hiding::Scope);
+        assert_eq!(by, HiddenBy::Query);
+        assert!(by.revealable());
     }
 
     /// The node a stop names, where it names one.
@@ -449,6 +443,7 @@ mod tests {
             HiddenBy::Paths,
             filtered(&Filter::default(), Hiding::Pin),
             filtered(&Filter::default(), Hiding::Base),
+            filtered(&Filter::default(), Hiding::Scope),
         ] {
             assert!(revealable.revealable());
         }

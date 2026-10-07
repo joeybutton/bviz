@@ -45,6 +45,7 @@ clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 fastrand = "2"
+fixedbitset = "0.5"
 flate2 = { version = "1", features = ["zlib-rs"] }
 hashbrown = { version = "0.16", default-features = false }
 heck = "0.5"
@@ -54,6 +55,8 @@ nucleo = "0.5"
 num_cpus = "1"
 packageurl = "0.7"
 rayon = "1"
+regex-automata = "0.4"
+regex-syntax = "0.8"
 rustc-hash = "2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }

@@ -1,25 +1,28 @@
 //! Which nodes of a graph a filter shows, stated as rules over their facets.
 //!
 //! A node is read by the last [`Rule`] matching it, by the filter's [`Base`]
-//! where no rule does, and by its pin where it carries one; [`Verdict`] names
+//! where no rule does, as hidden where it lies outside the filter's [`Scope`],
+//! and by its pin where it carries one; [`Verdict`] names
 //! what those readings, taken with where the node sits in the containment
-//! forest, leave of it. The set of shown nodes is therefore a result the rules
-//! reach rather than state of its own, and survives a graph being rebuilt, which
-//! the ids in such a set would not.
+//! forest, leave of it. Rules and the base name no node by id, so they hold
+//! of a graph rebuilt from the same inputs; a scope and the pins name nodes by
+//! id, so they hold only of the graph they were made over.
 
 mod eval;
 pub mod labels;
-pub mod pattern;
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+use fixedbitset::FixedBitSet;
 
 use crate::facets::{RuleCategory, Tri};
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
 pub use eval::{Hiding, Verdict, Verdicts};
-use pattern::{PackagePrefix, Pattern};
 
 /// What a filter says is to become of one node.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -78,17 +81,59 @@ pub struct Rule {
 ///
 /// The rules are read in order and the last one matching a node decides it, as
 /// a gitignore file's patterns do, so a rule narrows or widens the ones before
-/// it without either being rewritten. A rule constraining [`Predicate::label`]
-/// and nothing besides stands first, ahead of every rule over a node's other
-/// facets, so that a label pattern selects within what those leave rather than
-/// drawing back what they hide. `pins` decide the nodes they name whatever the
-/// rules say, which is what lets a node shown or hidden on its own outlast a
-/// change to a rule that has nothing to do with it.
+/// it without either being rewritten. The scope hides what lies outside it
+/// ahead of every rule, so no rule draws back a node the scope leaves out. `pins`
+/// decide the nodes they name whatever the scope and the rules say, which is
+/// what lets a node shown or hidden on its own outlast a change to a rule that
+/// has nothing to do with it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Filter {
     pub base: Base,
+    pub scope: Option<Scope>,
     pub rules: Vec<Rule>,
     pub pins: HashMap<Id, Pin>,
+}
+
+/// The nodes a query names, outside which a filter draws nothing but the
+/// frames around what it draws. A frame — a package box, a merge group —
+/// stands for no part of the build, so a scope neither holds nor hides one.
+///
+/// The nodes are ids of the one graph the query was evaluated over, so a scope
+/// does not outlive that graph as the rules do.
+///
+/// A scope is made only by [`Universe::scope`](crate::query_lang::Universe::scope),
+/// over the graph whose ids it holds.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Scope {
+    query: Arc<str>,
+    nodes: Arc<FixedBitSet>,
+}
+
+impl Scope {
+    pub(crate) fn new(query: Arc<str>, nodes: FixedBitSet) -> Self {
+        Scope {
+            query,
+            nodes: Arc::new(nodes),
+        }
+    }
+
+    /// The query naming the nodes, as the scope's maker wrote it.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn holds(&self, node: &crate::graph::Node) -> bool {
+        node.kind.is_frame() || self.nodes.contains(node.id.0 as usize)
+    }
+}
+
+impl fmt::Debug for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Scope")
+            .field("query", &self.query)
+            .field("nodes", &self.nodes.count_ones(..))
+            .finish()
+    }
 }
 
 /// The values one term admits, of which a node's facet must carry one.
@@ -161,12 +206,6 @@ pub struct Predicate {
     /// Tags, of which the node's target must carry one.
     pub tags: Option<Values<String>>,
     pub testonly: Option<bool>,
-    /// A pattern over the canonical label of the target the node belongs to —
-    /// see [`Pattern::covers_package`] for what a node belonging to none
-    /// answers through.
-    pub label: Option<Pattern>,
-    /// A package and everything below it, read against the same label.
-    pub package: Option<PackagePrefix>,
 }
 
 /// The [`Tri`] a node must carry to answer `yes`, an unstated facet answering
@@ -245,7 +284,7 @@ mod tests {
         /// What `filter` makes of the node `name`.
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
             filter
-                .evaluate(&self.graph, &self.names, &self.facets)
+                .evaluate(&self.graph, &self.facets)
                 .get(self.id(name))
         }
 
@@ -256,7 +295,7 @@ mod tests {
                 rules: vec![rule(predicate.clone(), Visibility::Shown)],
                 ..Filter::default()
             };
-            let verdicts = showing.evaluate(&self.graph, &self.names, &self.facets);
+            let verdicts = showing.evaluate(&self.graph, &self.facets);
             self.graph
                 .nodes
                 .iter()
@@ -292,7 +331,6 @@ mod tests {
         let app = "target://foo:app";
         let action = "action0";
         let lib = "target:@@rules_foo+//bar:lib";
-        let source = "target://foo:main.c";
         let cases: Vec<(Predicate, Vec<&str>)> = vec![
             (
                 Predicate {
@@ -387,20 +425,6 @@ mod tests {
                 },
                 vec![app, action],
             ),
-            (
-                Predicate {
-                    label: Some(Pattern::parse("//foo:all")),
-                    ..Predicate::default()
-                },
-                vec![app, action, source],
-            ),
-            (
-                Predicate {
-                    package: PackagePrefix::parse("@rules_foo//bar"),
-                    ..Predicate::default()
-                },
-                vec![lib],
-            ),
         ];
 
         for (predicate, expected) in cases {
@@ -477,27 +501,6 @@ mod tests {
         }
     }
 
-    /// A node belonging to no target answers no term over labels, whichever
-    /// label a node beside it carries.
-    #[test]
-    fn a_node_with_no_label_matches_no_pattern() {
-        let mut fixture = Fixture::new();
-        let group = fixture.names.intern("group:target://foo:app");
-        fixture
-            .graph
-            .add_node(Node::new(group, "2 sources", Kind::Source, None));
-
-        let predicate = Predicate {
-            label: Some(Pattern::parse("//foo/...")),
-            ..Predicate::default()
-        };
-        assert!(
-            !fixture
-                .matching(&predicate)
-                .contains(&"group:target://foo:app")
-        );
-    }
-
     fn rule(predicate: Predicate, visibility: Visibility) -> Rule {
         Rule {
             predicate,
@@ -562,6 +565,7 @@ mod tests {
         let (app, lib) = ("target://foo:app", "target:@@rules_foo+//bar:lib");
         let filter = Filter {
             base: Base::HideAll,
+            scope: None,
             rules: vec![hide_targets()],
             pins: [(fixture.id(app), Pin::Set(Visibility::Shown))]
                 .into_iter()

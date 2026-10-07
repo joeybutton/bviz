@@ -211,7 +211,6 @@ fn predicate(term: Term, values: &[Value]) -> Option<Predicate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::select::pattern::Pattern;
 
     fn values(filter: &Filter, term: Term) -> Vec<Value> {
         hidden(filter, term).into_iter().collect()
@@ -309,7 +308,7 @@ mod tests {
         let untouched = vec![
             Rule {
                 predicate: Predicate {
-                    label: Some(Pattern::parse("//foo/...")),
+                    tags: Values::new(["flaky".to_string()]),
                     ..Predicate::default()
                 },
                 visibility: Visibility::Hidden,

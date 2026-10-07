@@ -14,6 +14,7 @@ use std::num::NonZeroU32;
 use bazel_query_proto::analysis::Configuration;
 
 use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
+use crate::exec_path::{ExecPath, ExecPaths, ExecPathsBuilder, LeftOutInputs};
 use crate::intern::Id;
 use crate::label;
 use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
@@ -388,21 +389,28 @@ impl SparseFacetBuilder {
         self.pairs.push((id, value));
     }
 
-    /// The facet the collected pairs make, sorted into the order it is read
-    /// in. A node carries each of its values once, however many times it was
-    /// given one.
+    /// The facet the collected pairs make, its nodes sorted into the order
+    /// they are looked up in and each one's values kept in the order it was
+    /// given them. A node carries each of its values once, however many times
+    /// it was given one.
     pub fn seal(mut self) -> SparseFacet {
-        self.pairs.sort_unstable();
-        self.pairs.dedup();
+        self.pairs.sort_by_key(|&(id, _)| id);
         let carrying = |a: &(Id, Sym), b: &(Id, Sym)| a.0 == b.0;
         let rows = self.pairs.chunk_by(carrying).count();
         let mut ids = Vec::with_capacity(rows);
         let mut starts = Vec::with_capacity(rows + 1);
-        let mut values = Vec::with_capacity(self.pairs.len());
+        let mut values: Vec<Sym> = Vec::with_capacity(self.pairs.len());
         starts.push(0);
         for row in self.pairs.chunk_by(carrying) {
             ids.push(row[0].0);
-            values.extend(row.iter().map(|&(_, value)| value));
+            let start = values.len();
+            for &(_, value) in row {
+                // A row holds the few values one node states, which a scan
+                // checks faster than a set would.
+                if !values[start..].contains(&value) {
+                    values.push(value);
+                }
+            }
             starts.push(u32::try_from(values.len()).expect("more than u32::MAX facet values"));
         }
         SparseFacet {
@@ -441,6 +449,8 @@ pub struct Facets {
     primary_output: Vec<Option<NodeRef>>,
     tags: SparseFacet,
     aspects: SparseFacet,
+    exec_paths: ExecPaths,
+    left_out_inputs: LeftOutInputs,
     repos: Vec<RepoEntry>,
     /// The repository each name identifies, which is how a repository already
     /// named is found again.
@@ -563,6 +573,17 @@ impl Facets {
 
     pub fn set_aspects(&mut self, aspects: SparseFacet) {
         self.aspects = aspects;
+    }
+
+    /// The path below the execution root of the file the node stands for,
+    /// where an aquery states one.
+    pub fn exec_path(&self, id: Id) -> Option<ExecPath<'_>> {
+        self.exec_paths.get(id)
+    }
+
+    /// The files the actions read that the graph holds no node for.
+    pub fn left_out_inputs(&self) -> &LeftOutInputs {
+        &self.left_out_inputs
     }
 
     /// The strings every handle these facets carry resolves through.
@@ -778,6 +799,8 @@ impl Facets {
         self.primary_output = permuted_nodes(&self.primary_output, remap);
         self.tags.renumber(remap);
         self.aspects.renumber(remap);
+        self.exec_paths.renumber(remap);
+        self.left_out_inputs.renumber(remap);
     }
 
     fn origin(&mut self, canonical: &str) -> Origin {
@@ -898,6 +921,7 @@ pub struct FacetsBuilder {
     facets: Facets,
     tags: SparseFill,
     aspects: SparseFill,
+    exec_paths: ExecPathsBuilder,
     capabilities: CapabilitiesBuilder,
 }
 
@@ -944,6 +968,19 @@ impl FacetsBuilder {
         self.aspects.fill(&mut self.facets.strings, id, aspects);
     }
 
+    pub fn set_exec_path(&mut self, id: Id, path: &str) {
+        self.exec_paths.push(id, path);
+    }
+
+    /// Makes room for the exec paths of `files` more files.
+    pub fn reserve_exec_paths(&mut self, files: usize) {
+        self.exec_paths.reserve(files);
+    }
+
+    pub fn set_left_out_inputs(&mut self, inputs: LeftOutInputs) {
+        self.facets.left_out_inputs = inputs;
+    }
+
     pub fn observe(&mut self, axis: Axis, carried: bool) {
         self.capabilities.observe(axis, carried);
     }
@@ -951,6 +988,7 @@ impl FacetsBuilder {
     pub fn seal(mut self) -> (Facets, Capabilities) {
         self.facets.set_tags(self.tags.values.seal());
         self.facets.set_aspects(self.aspects.values.seal());
+        self.facets.exec_paths = self.exec_paths.seal();
         (self.facets, self.capabilities.seal())
     }
 }
@@ -1157,14 +1195,13 @@ mod tests {
         builder.set_tags(Id(1), ["local"]);
 
         let (facets, _) = builder.seal();
-        let mut tags: Vec<&str> = facets
+        let tags: Vec<&str> = facets
             .tags()
             .values(Id(1))
             .iter()
             .map(|&tag| facets.strings().resolve(tag))
             .collect();
-        tags.sort_unstable();
-        assert_eq!(tags, ["flaky", "manual"]);
+        assert_eq!(tags, ["manual", "flaky"]);
     }
 
     /// Ids past the first 64 exercise the word a node's fill bit sits in.
@@ -1541,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn sealing_puts_the_nodes_carrying_a_value_in_ascending_order() {
+    fn sealing_sorts_the_nodes_and_keeps_each_ones_values_in_the_order_given() {
         let (facet, strings) = sparse();
 
         let read: Vec<(Id, Vec<&str>)> = facet
@@ -1555,7 +1592,7 @@ mod tests {
             .collect();
         assert_eq!(
             read,
-            [(Id(0), vec!["manual"]), (Id(2), vec!["flaky", "local"])]
+            [(Id(0), vec!["manual"]), (Id(2), vec!["local", "flaky"])]
         );
     }
 
@@ -1586,7 +1623,24 @@ mod tests {
             .rows()
             .map(|(id, values)| (id, values.to_vec()))
             .collect();
-        assert_eq!(read, [(Id(1), vec![flaky, local]), (Id(2), vec![manual])]);
+        assert_eq!(read, [(Id(1), vec![local, flaky]), (Id(2), vec![manual])]);
+    }
+
+    #[test]
+    fn an_exec_path_moves_with_its_node_and_the_first_stated_stays() {
+        let mut builder = FacetsBuilder::default();
+        builder.set_exec_path(Id(2), "b/two");
+        builder.set_exec_path(Id(1), "a/one");
+        builder.set_exec_path(Id(2), "b/again");
+        let (mut facets, _) = builder.seal();
+        let path = |facets: &Facets, id| facets.exec_path(Id(id)).map(|path| path.to_string());
+        assert_eq!(path(&facets, 1).as_deref(), Some("a/one"));
+        assert_eq!(path(&facets, 2).as_deref(), Some("b/two"));
+        assert_eq!(path(&facets, 0), None);
+        facets.renumber(&rotated());
+        assert_eq!(path(&facets, 0).as_deref(), Some("a/one"));
+        assert_eq!(path(&facets, 1).as_deref(), Some("b/two"));
+        assert_eq!(path(&facets, 2), None);
     }
 
     #[test]

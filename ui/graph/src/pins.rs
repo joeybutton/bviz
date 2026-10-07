@@ -25,10 +25,6 @@ const PANEL_WIDTH: Pixels = px(320.);
 /// the canvas's foot and every row it lists can be reached.
 const MAX_HEIGHT_SHARE: f32 = 0.6;
 
-/// Side of the mark a pinned row carries, and of the space a row without one
-/// leaves so the labels line up.
-const MARK: Pixels = px(12.);
-
 /// How a reader is offered the override `pin`, and how it is listed.
 fn label(pin: Pin) -> &'static str {
     match pin {
@@ -55,13 +51,22 @@ pub(crate) fn toggle(filter: &Filter, node: Id, visibility: Visibility) -> Filte
     }
 }
 
-/// `filter` with `node` revealed in place of any node revealed before it, which
-/// keeps one view's request to be shown a node from piling up behind the next.
-/// A pin the reader set on `node` stands, and decides it.
+/// `filter` with `node` revealed beside every node revealed before it, each
+/// standing until it is withdrawn from the pins card. A pin the reader set on
+/// `node` stands, and decides it.
 pub(crate) fn revealing(filter: &Filter, node: Id) -> Filter {
     let mut pins = filter.pins.clone();
-    pins.retain(|_, pin| *pin != Pin::Revealed);
     pins.entry(node).or_insert(Pin::Revealed);
+    Filter {
+        pins,
+        ..filter.clone()
+    }
+}
+
+/// `filter` without the nodes it reveals, its reader's own pins standing.
+fn unrevealed(filter: &Filter) -> Filter {
+    let mut pins = filter.pins.clone();
+    pins.retain(|_, pin| *pin != Pin::Revealed);
     Filter {
         pins,
         ..filter.clone()
@@ -76,11 +81,6 @@ fn unpinned(filter: &Filter, node: Id) -> Filter {
         pins,
         ..filter.clone()
     }
-}
-
-/// The override `filter` holds for `node`.
-pub(crate) fn pinned(filter: &Filter, node: Id) -> Option<Pin> {
-    filter.pins.get(&node).copied()
 }
 
 /// The name `node` is listed under: the canonical label of the target it
@@ -156,20 +156,14 @@ fn clear_all(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     checklist::set_filter(view, filter, cx);
 }
 
-/// The mark a row carries while it is pinned, and the space it leaves where it
-/// is not, so the labels of a list line up either way.
-pub(crate) fn mark(pinned: bool, palette: &Palette) -> Div {
-    div().size(MARK).flex_none().children(pinned.then(|| {
-        bviz_ui_assets::icon("check")
-            .size(MARK)
-            .text_color(palette.label)
-    }))
+fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let filter = unrevealed(view.derived.filter());
+    checklist::set_filter(view, filter, cx);
 }
 
 /// The override offered on the box a secondary click has selected: dropping it
 /// from the drawing, which is what a reader reaches for on a box in front of
-/// them. Its opposite is offered where it can be aimed at a box the drawing does
-/// not hold, on a search result. `None` while no box is selected.
+/// them. `None` while no box is selected.
 pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option<Button> {
     let node = view.selection.node()?;
     Some(
@@ -198,6 +192,7 @@ pub(crate) fn panel(
     if held.is_empty() {
         return None;
     }
+    let reveals = held.iter().any(|held| held.pin == Pin::Revealed);
     Some(
         div()
             .w(PANEL_WIDTH)
@@ -231,12 +226,27 @@ pub(crate) fn panel(
                             .child(format!("{} pinned", held.len())),
                     )
                     .child(
-                        Button::new(
-                            "pins-clear",
-                            cx.listener(|view, _: &ClickEvent, _, cx| clear_all(view, cx)),
-                        )
-                        .label("clear")
-                        .compact(),
+                        div()
+                            .flex()
+                            .gap_1()
+                            .children(reveals.then(|| {
+                                Button::new(
+                                    "pins-clear-revealed",
+                                    cx.listener(|view, _: &ClickEvent, _, cx| {
+                                        clear_revealed(view, cx)
+                                    }),
+                                )
+                                .label("clear revealed")
+                                .compact()
+                            }))
+                            .child(
+                                Button::new(
+                                    "pins-clear",
+                                    cx.listener(|view, _: &ClickEvent, _, cx| clear_all(view, cx)),
+                                )
+                                .label("clear")
+                                .compact(),
+                            ),
                     ),
             )
             .child(listed(view, held, palette, cx)),
@@ -302,6 +312,11 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The override `filter` holds for `node`.
+    fn pinned(filter: &Filter, node: Id) -> Option<Pin> {
+        filter.pins.get(&node).copied()
+    }
     use bviz_graph_layout::Kind;
     use bviz_graph_layout::facets::FacetsBuilder;
     use bviz_graph_layout::graph::{Graph, Node};
@@ -342,7 +357,7 @@ mod tests {
 
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
             filter
-                .evaluate(&self.graph, &self.names, &self.facets)
+                .evaluate(&self.graph, &self.facets)
                 .get(self.id(name))
         }
     }
@@ -471,10 +486,10 @@ mod tests {
     }
 
     /// A node revealed shows whatever the rules say, and is told from a pin
-    /// the reader set, which revealing another node leaves alone while the
-    /// earlier reveal is withdrawn.
+    /// the reader set; revealing another node keeps both, and withdrawing the
+    /// reveals leaves the reader's pins alone.
     #[test]
-    fn revealing_a_node_withdraws_the_one_revealed_before_and_keeps_the_readers_pins() {
+    fn reveals_accumulate_beside_the_readers_pins() {
         let fixture = Fixture::new();
         let first = fixture.id("//app:main#compile");
         let second = fixture.id("//lib:main#compile");
@@ -486,13 +501,18 @@ mod tests {
         assert_eq!(fixture.verdict(&once, "//app:main#compile"), Verdict::Shown);
 
         let twice = revealing(&once, second);
-        assert_eq!(pinned(&twice, first), None);
+        assert_eq!(pinned(&twice, first), Some(Pin::Revealed));
         assert_eq!(pinned(&twice, second), Some(Pin::Revealed));
         assert_eq!(pinned(&twice, kept), Some(Pin::Set(Visibility::Faded)));
         assert_eq!(
             fixture.verdict(&twice, "//app:main#compile"),
-            Verdict::Hidden
+            Verdict::Shown
         );
+
+        let withdrawn = unrevealed(&twice);
+        assert_eq!(pinned(&withdrawn, first), None);
+        assert_eq!(pinned(&withdrawn, second), None);
+        assert_eq!(pinned(&withdrawn, kept), Some(Pin::Set(Visibility::Faded)));
     }
 
     /// Revealing a node the reader pinned leaves their pin deciding it, and

@@ -1,7 +1,9 @@
 //! Builds a compound graph from `bazel query --output=streamed_proto` output:
 //! one leaf node per target, grouped under its package container, with edges
-//! from each rule's inputs to the rule. An input naming a target absent from the
-//! stream is left unwired rather than synthesizing a phantom node.
+//! from each rule's inputs to the rule and from each generating rule to the
+//! files it generates, the dependencies `deps` follows
+//! (`LabelVisitationUtils.visitTarget`). A label naming a target absent from
+//! the stream is left unwired, with no phantom node made up for it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -95,18 +97,20 @@ pub(crate) fn build_with_packages(
         node_by_label.insert(label.into_owned(), node_id);
     }
 
-    // Pass 2: edges from each rule's inputs (dependency -> dependent).
+    // Pass 2: edges from each target's dependencies (dependency -> dependent).
+    let node = |label: &str| node_by_label.get(repos.canonicalize_label(label).as_ref());
     let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
     for target in targets {
-        let Some(rule) = target.rule.as_ref() else {
+        let (name, dependencies): (&str, &[String]) = match (&target.rule, &target.generated_file) {
+            (Some(rule), _) => (&rule.name, &rule.rule_input),
+            (None, Some(file)) => (&file.name, std::slice::from_ref(&file.generating_rule)),
+            (None, None) => continue,
+        };
+        let Some(&to) = node(name) else {
             continue;
         };
-        let Some(&to) = node_by_label.get(repos.canonicalize_label(&rule.name).as_ref()) else {
-            continue;
-        };
-        for input_label in &rule.rule_input {
-            let Some(&from) = node_by_label.get(repos.canonicalize_label(input_label).as_ref())
-            else {
+        for dependency in dependencies {
+            let Some(&from) = node(dependency) else {
                 continue;
             };
             if seen_edge.insert((from, to)) {
@@ -244,16 +248,10 @@ mod tests {
         }
     }
 
-    /// The tags `facets` records for `node`, in a stable order.
+    /// The tags `facets` records for `node`.
     fn tags_of(facets: &Facets, node: Id) -> Vec<&str> {
-        let mut tags: Vec<&str> = facets
-            .tags()
-            .values(node)
-            .iter()
-            .map(|&tag| facets.strings().resolve(tag))
-            .collect();
-        tags.sort_unstable();
-        tags
+        let tags = facets.tags().values(node).iter();
+        tags.map(|&tag| facets.strings().resolve(tag)).collect()
     }
 
     fn source(name: &str) -> Target {
@@ -268,10 +266,15 @@ mod tests {
     }
 
     fn generated(name: &str) -> Target {
+        generated_by(name, "")
+    }
+
+    fn generated_by(name: &str, rule: &str) -> Target {
         Target {
             r#type: Discriminator::GeneratedFile as i32,
             generated_file: Some(GeneratedFile {
                 name: name.to_string(),
+                generating_rule: rule.to_string(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -313,6 +316,25 @@ mod tests {
     }
 
     #[test]
+    fn a_generated_file_depends_on_the_rule_generating_it() {
+        let (graph, names, _) = build(&[
+            rule("//foo:gen", &["//foo:in.c"]),
+            source("//foo:in.c"),
+            generated_by("//foo:out.o", "//foo:gen"),
+            rule("//foo:app", &["//foo:out.o"]),
+        ]);
+
+        assert_eq!(
+            edges(&graph, &names),
+            HashSet::from([
+                ("target://foo:gen", "target://foo:out.o"),
+                ("target://foo:in.c", "target://foo:gen"),
+                ("target://foo:out.o", "target://foo:app"),
+            ])
+        );
+    }
+
+    #[test]
     fn rule_input_to_absent_label_is_dropped() {
         let (graph, names, _) = build(&[rule("//foo:app", &["//bar:missing"])]);
 
@@ -340,7 +362,7 @@ mod tests {
         let rule_class = facets.rule_class(node).unwrap();
         assert_eq!(facets.strings().resolve(rule_class.sym()), "cc_test");
         assert_eq!(facets.rule_category(rule_class), Some(RuleCategory::Test));
-        assert_eq!(tags_of(&facets, node), ["flaky", "manual"]);
+        assert_eq!(tags_of(&facets, node), ["manual", "flaky"]);
         assert_eq!(facets.testonly(node), Tri::Yes);
         assert_eq!(facets.package(node), names.get("pkg:foo"));
         assert_eq!(facets.label(node), Some(node));
@@ -512,7 +534,7 @@ mod tests {
             ..Filter::default()
         };
 
-        let verdicts = filter.evaluate(&graph, &names, &facets);
+        let verdicts = filter.evaluate(&graph, &facets);
         let drawn: BTreeSet<&str> = graph
             .nodes
             .iter()
@@ -529,7 +551,7 @@ mod tests {
         names: &'a Names,
         facets: &Facets,
     ) -> BTreeSet<&'a str> {
-        let verdicts = filter.evaluate(graph, names, facets);
+        let verdicts = filter.evaluate(graph, facets);
         graph
             .nodes
             .iter()
@@ -538,28 +560,32 @@ mod tests {
             .collect()
     }
 
-    /// A filter whose one rule acts on everything `text` names.
-    fn searching(text: &str, visibility: Visibility) -> Filter {
-        use crate::select::{Base, Predicate, Rule, pattern::Pattern};
+    /// A filter scoped to everything `text` names where `keep`, and to every
+    /// node but those otherwise.
+    fn scoped(graph: &Graph, names: &Names, facets: &Facets, text: &str, keep: bool) -> Filter {
+        use crate::capability::CapabilitiesBuilder;
+        use crate::query_lang::{Prefixes, Stack, Universe};
+        use std::sync::Arc;
+
+        let facets = Arc::new(facets.clone());
+        let capabilities = CapabilitiesBuilder::default().seal();
+        let universe = Universe::new(graph, names, &facets, &capabilities);
+        let mut stack = Stack::default();
+        let chip = stack.push(text);
+        if !keep {
+            stack.toggle_negated(chip);
+        }
+        let named = stack.evaluate(&universe, &Prefixes::default()).value;
+        let named = named.expect("a pattern naming targets");
         Filter {
-            base: match visibility {
-                Visibility::Shown => Base::HideAll,
-                _ => Base::ShowAll,
-            },
-            rules: vec![Rule {
-                predicate: Predicate {
-                    label: Some(Pattern::parse(text)),
-                    ..Predicate::default()
-                },
-                visibility,
-            }],
+            scope: Some(universe.scope(text, &named)),
             ..Filter::default()
         }
     }
 
-    /// A box stands for a package, so a pattern covering every package of a
-    /// repository takes its boxes along with the targets in them — and hiding a
-    /// container unwraps it, so nothing of those packages is left drawn.
+    /// A box stands for a package, so a scope leaving out every target of a
+    /// repository's packages leaves their boxes framing nothing, and none is
+    /// drawn.
     #[test]
     fn a_pattern_over_a_whole_repository_hides_its_package_boxes() {
         let (graph, names, facets) = build(&[
@@ -570,7 +596,7 @@ mod tests {
 
         assert_eq!(
             drawn(
-                &searching("//...", Visibility::Hidden),
+                &scoped(&graph, &names, &facets, "//...", false),
                 &graph,
                 &names,
                 &facets
@@ -582,8 +608,8 @@ mod tests {
     }
 
     /// A pattern and a package path are split at a component boundary, so a
-    /// directory pattern reaches the boxes below it and not the box whose name
-    /// merely starts with the same letters.
+    /// directory pattern reaches the packages below it and not the package
+    /// whose name merely starts with the same letters.
     #[test]
     fn a_directory_pattern_covers_the_boxes_below_it_alone() {
         let (graph, names, facets) =
@@ -591,7 +617,7 @@ mod tests {
 
         assert_eq!(
             drawn(
-                &searching("//foo/...", Visibility::Hidden),
+                &scoped(&graph, &names, &facets, "//foo/...", false),
                 &graph,
                 &names,
                 &facets
@@ -601,16 +627,15 @@ mod tests {
     }
 
     /// ':all' names the targets of one package, so the box standing for that
-    /// package goes on framing the packages below it — which the pattern names
-    /// nothing of, and which would stand at the root of the drawing were their
-    /// frame unwrapped.
+    /// package goes on framing the packages below it, which the pattern names
+    /// nothing of.
     #[test]
     fn an_all_pattern_leaves_the_box_above_a_package_it_does_not_name() {
         let (graph, names, facets) = build(&[rule("//foo:app", &[]), rule("//foo/bar:lib", &[])]);
 
         assert_eq!(
             drawn(
-                &searching("//foo:all", Visibility::Hidden),
+                &scoped(&graph, &names, &facets, "//foo:all", false),
                 &graph,
                 &names,
                 &facets
@@ -621,43 +646,15 @@ mod tests {
         );
     }
 
-    /// A directory holding packages without being one itself is drawn as a box
-    /// all the same, so that the packages under it are framed together. Bazel
-    /// rejects ':all' over such a directory, and the box is left framing the
-    /// packages below it whichever way the pattern is read.
-    #[test]
-    fn an_all_pattern_leaves_the_box_of_a_directory_that_is_no_package() {
-        let (graph, names, facets) = build(&[rule("//a/b:x", &[]), rule("//a/c:y", &[])]);
-
-        assert_eq!(
-            drawn(
-                &searching("//a:all", Visibility::Hidden),
-                &graph,
-                &names,
-                &facets
-            ),
-            [
-                "pkg:a",
-                "pkg:a/b",
-                "pkg:a/c",
-                "target://a/b:x",
-                "target://a/c:y"
-            ]
-            .into_iter()
-            .collect()
-        );
-    }
-
     /// A trailing '...' reaches a directory and everything under it, so it
-    /// covers a box together with every box below that one and unwraps the
-    /// whole nest.
+    /// leaves every box of the nest framing nothing.
     #[test]
     fn a_directory_pattern_covers_a_box_and_the_boxes_below_it() {
         let (graph, names, facets) = build(&[rule("//foo:app", &[]), rule("//foo/bar:lib", &[])]);
 
         assert!(
             drawn(
-                &searching("//foo/...", Visibility::Hidden),
+                &scoped(&graph, &names, &facets, "//foo/...", false),
                 &graph,
                 &names,
                 &facets
@@ -674,7 +671,7 @@ mod tests {
 
         assert_eq!(
             drawn(
-                &searching("//foo:app", Visibility::Hidden),
+                &scoped(&graph, &names, &facets, "//foo:app", false),
                 &graph,
                 &names,
                 &facets
@@ -684,38 +681,33 @@ mod tests {
     }
 
     /// A pattern discriminating on a target name covers no package, so what it
-    /// takes out of a package is taken out while the box stands — and a box
+    /// takes out of a package is taken out while the box stands, and a box
     /// left holding nothing is a box around empty space.
     #[test]
     fn a_pattern_emptying_a_package_leaves_no_box_around_it() {
         let (graph, names, facets) = build(&[rule("//foo:lib", &[]), rule("//bar:app", &[])]);
 
-        // The text is one a reader half way through typing `//foo:lib` has
-        // entered, which is read as a substring and names the same target.
-        for text in ["//foo:lib", "lib"] {
-            assert_eq!(
-                drawn(
-                    &searching(text, Visibility::Hidden),
-                    &graph,
-                    &names,
-                    &facets
-                ),
-                ["pkg:bar", "target://bar:app"].into_iter().collect(),
-                "hiding {text}",
-            );
-        }
+        assert_eq!(
+            drawn(
+                &scoped(&graph, &names, &facets, "//foo:lib", false),
+                &graph,
+                &names,
+                &facets
+            ),
+            ["pkg:bar", "target://bar:app"].into_iter().collect(),
+        );
     }
 
-    /// Drawing the matches alone keeps the boxes of the packages the pattern
-    /// covers, which is what leaves each match stating the package it sits in,
-    /// and leaves out every package it covers nothing of.
+    /// Drawing the matches alone keeps the boxes of the packages holding them,
+    /// which is what leaves each match stating the package it sits in, and
+    /// leaves out every package holding none.
     #[test]
     fn showing_only_a_patterns_matches_keeps_the_boxes_around_them() {
         let (graph, names, facets) = build(&[rule("//foo/bar:app", &[]), rule("//baz:lib", &[])]);
 
         assert_eq!(
             drawn(
-                &searching("//foo/...", Visibility::Shown),
+                &scoped(&graph, &names, &facets, "//foo/...", true),
                 &graph,
                 &names,
                 &facets
