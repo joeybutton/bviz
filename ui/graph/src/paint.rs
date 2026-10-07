@@ -447,7 +447,7 @@ pub(crate) fn canvas_body(
         let marks = Marks {
             hover: compute_neighborhood(g, scene.hovered, Relation::Direct(Direction::Both)),
             selection: entity.update(cx, |view, _| {
-                view.selection.marking(g, scene.drawn.view_key(camera.zoom))
+                view.selection.marking(&scene.drawn, camera.zoom)
             }),
         };
         let Some(loaded) = entity.read(cx).model.read(cx).loaded() else {

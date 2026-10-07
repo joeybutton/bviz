@@ -1,6 +1,8 @@
+use crate::derive::{Drawn, ViewKey};
 use crate::relation::{Direction, Relation};
 use bviz_graph_layout::{Id, LaidOut};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 /// What a marking picks out of the graph, empty where nothing is marked.
 pub(crate) struct Neighborhood {
@@ -17,6 +19,48 @@ impl Neighborhood {
             boxes: HashSet::new(),
             edges: HashSet::new(),
         }
+    }
+}
+
+/// The marking a holder last asked for, so a view redrawn frame after frame
+/// under an unchanged mark walks the graph once.
+#[derive(Default)]
+pub(crate) struct MarkingMemo(Option<Memoised>);
+
+/// A marking together with everything it was derived from, so it is recomputed
+/// exactly when one of those moves.
+struct Memoised {
+    view: ViewKey,
+    of: Id,
+    relation: Relation,
+    neighborhood: Rc<Neighborhood>,
+}
+
+impl MarkingMemo {
+    /// What marking `of` under `relation` picks out of the view `drawn` shows at
+    /// `zoom`; empty where `of` is `None` or that view is yet to be derived.
+    pub(crate) fn marking(
+        &mut self,
+        drawn: &Drawn,
+        zoom: f32,
+        of: Option<Id>,
+        relation: Relation,
+    ) -> Rc<Neighborhood> {
+        let (Some(of), Some(g)) = (of, drawn.view(zoom)) else {
+            self.0 = None;
+            return Rc::new(Neighborhood::none());
+        };
+        let view = drawn.view_key(zoom);
+        let memoised = match self.0.take() {
+            Some(m) if m.view == view && m.of == of && m.relation == relation => m,
+            _ => Memoised {
+                view,
+                of,
+                relation,
+                neighborhood: Rc::new(compute_neighborhood(g, Some(of), relation)),
+            },
+        };
+        Rc::clone(&self.0.insert(memoised).neighborhood)
     }
 }
 
@@ -238,6 +282,7 @@ mod tests {
     use super::*;
     use crate::camera::Rect;
     use bviz_graph_layout::{Box, Connector, EdgeKind, Kind};
+    use std::sync::Arc;
 
     const LEAF_WIDTH: f64 = 100.0;
     const LEAF_HEIGHT: f64 = 40.0;
@@ -515,5 +560,36 @@ mod tests {
         let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
         assert_eq!(n.boxes, ids(&[0, 1, 2, 4]));
         assert_eq!(n.edges, pairs(&[(1, 2), (2, 4)]));
+    }
+
+    #[test]
+    fn a_memoised_marking_is_reused_until_what_it_was_derived_from_moves() {
+        /// Any zoom: a layered drawing shows the one view at every zoom.
+        const ZOOM: f32 = 1.0;
+        let shown = |number| Drawn::Layered {
+            view: Arc::new(drawing(vec![leaf(0), leaf(1)], &[(0, 1)], &[(0, 1)])),
+            drawing: number,
+        };
+        let (first, next) = (shown(0), shown(1));
+        let direct = Relation::Direct(Direction::Both);
+        let mut memo = MarkingMemo::default();
+        let marked = memo.marking(&first, ZOOM, Some(Id(0)), direct);
+        assert!(Rc::ptr_eq(
+            &marked,
+            &memo.marking(&first, ZOOM, Some(Id(0)), direct)
+        ));
+        let moved = [
+            (&next, Id(0), direct),
+            (&first, Id(1), direct),
+            (&first, Id(0), Relation::None),
+        ];
+        for (drawn, of, relation) in moved {
+            let marked = memo.marking(&first, ZOOM, Some(Id(0)), direct);
+            assert!(!Rc::ptr_eq(
+                &marked,
+                &memo.marking(drawn, ZOOM, Some(of), relation)
+            ));
+        }
+        assert!(memo.marking(&first, ZOOM, None, direct).boxes.is_empty());
     }
 }
