@@ -105,7 +105,8 @@ pub(super) fn pill(
             )
             .ghost()
             .compact()
-            .icon("dots-three-vertical"),
+            .icon("dots-three-vertical")
+            .tooltip("Chip menu"),
         )
         .tooltip(TextTooltip::builder(
             explained,

@@ -237,6 +237,7 @@ pub(crate) fn panel(
                                     }),
                                 )
                                 .label("clear revealed")
+                                .tooltip("Unpin revealed nodes")
                                 .compact()
                             }))
                             .child(
@@ -245,6 +246,7 @@ pub(crate) fn panel(
                                     cx.listener(|view, _: &ClickEvent, _, cx| clear_all(view, cx)),
                                 )
                                 .label("clear")
+                                .tooltip("Unpin all nodes")
                                 .compact(),
                             ),
                     ),

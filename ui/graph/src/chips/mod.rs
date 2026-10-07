@@ -958,6 +958,7 @@ pub(crate) fn bar(
                     cx.listener(|view, _: &ClickEvent, _, cx| commit(view, cx)),
                 )
                 .label("apply")
+                .keys_for(&Apply, &chips.focus_handle)
                 .compact()
                 .disabled(!staged),
             ),
@@ -971,7 +972,8 @@ pub(crate) fn bar(
                     }),
                 )
                 .ghost()
-                .icon("dots-three-vertical"),
+                .icon("dots-three-vertical")
+                .tooltip("Query menu"),
             )
         }))
         .into_any_element()
