@@ -123,14 +123,44 @@ struct Restriction {
 }
 
 impl Restriction {
+    fn keeps(&self, id: Id) -> bool {
+        self.kept.get(id.0 as usize).copied().unwrap_or(false)
+    }
+
     fn placed(&self, id: Id, drawing: &Drawing) -> Option<Placed> {
-        if !self.kept.get(id.0 as usize).copied().unwrap_or(false) {
+        if !self.keeps(id) {
             return None;
         }
         self.emptied
             .get(&id)
             .copied()
             .or_else(|| drawing.placed(id))
+    }
+
+    /// Takes out of `visible`, a level opening `open`, every node whose
+    /// outermost placed container left closed is one this restriction drops,
+    /// and the edges meeting them.
+    fn sight(
+        &self,
+        visible: &mut Graph,
+        containment: &Containment,
+        open: &HashSet<Id>,
+        expandable: &HashSet<Id>,
+    ) {
+        let closed = |id: &Id| expandable.contains(id) && !open.contains(id);
+        let mut unseen = vec![false; id_span(visible)];
+        visible.nodes.retain(|node| {
+            let folded_into =
+                std::iter::successors(containment.parent(node.id), |&at| containment.parent(at))
+                    .filter(closed)
+                    .last();
+            let seen = folded_into.is_none_or(|container| self.keeps(container));
+            unseen[node.id.0 as usize] = !seen;
+            seen
+        });
+        visible
+            .edges
+            .retain(|edge| !unseen[edge.from.0 as usize] && !unseen[edge.to.0 as usize]);
     }
 }
 
@@ -181,7 +211,10 @@ impl MapLayout {
     /// ids; `reduced` must be its transitive reduction, and `transitions` those
     /// `base`'s edges cross. Which containers a level
     /// opens is the placement's to say, so it is carried over unchanged and a
-    /// container `base` drops simply goes undrawn.
+    /// container `base` drops simply goes undrawn. What such a container held
+    /// is drawn only from the levels that open it, where the whole map draws it
+    /// too, so unwrapping containers crowds no level with boxes too small to
+    /// read.
     pub fn restricted(
         &self,
         base: Arc<Graph>,
@@ -257,7 +290,10 @@ impl MapLayout {
     /// The view of `base` with `open` opened, drawn at its nodes' global
     /// positions.
     fn view_of(&self, open: &HashSet<Id>) -> LaidOut {
-        let (visible, folding) = lod::collapse_folded(&self.base, open);
+        let (mut visible, folding) = lod::collapse_folded(&self.base, open);
+        if let Some(restriction) = &self.restriction {
+            restriction.sight(&mut visible, &self.containment, open, &self.expandable);
+        }
         let mut connected: FxHashSet<(Id, Id)> =
             FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
         connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
@@ -1226,6 +1262,44 @@ mod tests {
                 "level {i} ends the connector off the drawn box at {end:?}",
             );
         }
+    }
+
+    /// Each level draws exactly what the whole map's level draws of what a
+    /// dropped container held, and no connector to the rest of it.
+    #[test]
+    fn what_a_dropped_container_held_is_drawn_from_the_levels_that_open_it() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let sliced = restrict(&map, &base, &names, &["wide"]);
+        assert!(
+            opens_at(&map, &names, "wide.0") > 0,
+            "the fixture opens the dropped container on the coarsest level",
+        );
+
+        let held = |view: &LaidOut| -> BTreeSet<&str> {
+            view.boxes
+                .iter()
+                .map(|b| names.resolve(b.id))
+                .filter(|name| name.starts_with("wide."))
+                .collect()
+        };
+        for i in 0..map.level_count() {
+            let view = sliced.level(i);
+            assert_eq!(held(view), held(map.level(i)), "level {i}");
+            let drawn: HashSet<Id> = view.boxes.iter().map(|b| b.id).collect();
+            assert!(
+                view.connectors
+                    .iter()
+                    .all(|c| drawn.contains(&c.from) && drawn.contains(&c.to)),
+                "level {i} draws a connector to a box it leaves out",
+            );
+        }
+        let finest = sliced.level(sliced.level_count() - 1);
+        assert!(
+            box_of(finest, &names, "wide.5").is_some()
+                && drawn_pairs(finest, &names).contains(&("wide.5", "narrow.0")),
+            "the finest level leaves out what the dropped container held",
+        );
     }
 
     #[test]
