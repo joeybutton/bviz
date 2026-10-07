@@ -17,8 +17,8 @@ use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::text_input::TextEdited;
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TooltipColors, list_scrollbar,
-    menu_chrome, overlay_canvas,
+    KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TooltipColors,
+    list_scrollbar, menu_chrome, overlay_canvas,
 };
 use gpui::{
     Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, MouseButton, MouseDownEvent, Pixels,
@@ -57,7 +57,12 @@ actions!(
 
 /// The key context the palette carries, scoping the keys that move through
 /// and act on its rows.
-pub(crate) const KEY_CONTEXT: &str = "GraphJump";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
+    &crate::KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphJump",
+    "Jump palette",
+);
 
 const WIDTH: Pixels = px(560.);
 

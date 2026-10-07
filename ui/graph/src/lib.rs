@@ -122,6 +122,11 @@ pub fn register_keys(cx: &mut App) {
             exclusive::ROOTS_KEY_CONTEXT,
             scatter::KEY_CONTEXT,
             scatter::PICKING,
+            jump::KEY_CONTEXT,
+            chips::KEY_CONTEXT,
+            chips::FIELD_KEY_CONTEXT,
+            chips::COMPLETION_KEY_CONTEXT,
+            chips::AIMED_KEY_CONTEXT,
         ],
     );
     cx.bind_keys(bindings());
@@ -130,7 +135,7 @@ pub fn register_keys(cx: &mut App) {
 fn bindings() -> Vec<KeyBinding> {
     let unless_typing = text_input::unless_typing(KEY_CONTEXT);
     let unless_typing = Some(unless_typing.as_str());
-    let jumping = Some(jump::KEY_CONTEXT);
+    let jumping = Some(jump::KEY_CONTEXT.id());
     let scatter_canvas = text_input::unless_typing(scatter::KEY_CONTEXT);
     let scatter_canvas = Some(scatter_canvas.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
@@ -1321,7 +1326,7 @@ mod tests {
     const IN_FIELD: &[&str] = &[KEY_CONTEXT.id(), text_input::KEY_CONTEXT.id()];
     const IN_PALETTE: &[&str] = &[
         KEY_CONTEXT.id(),
-        jump::KEY_CONTEXT,
+        jump::KEY_CONTEXT.id(),
         text_input::KEY_CONTEXT.id(),
     ];
 
@@ -1406,27 +1411,26 @@ mod tests {
         assert!(dispatched("/", IN_ROOTS).is_none());
     }
 
-    const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT];
+    const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT.id()];
     const IN_CHIP_FIELD: &[&str] = &[
         KEY_CONTEXT.id(),
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
+        chips::KEY_CONTEXT.id(),
+        chips::FIELD_KEY_CONTEXT.id(),
         text_input::KEY_CONTEXT.id(),
     ];
 
     const IN_CHIP_COMPLETION: &[&str] = &[
         KEY_CONTEXT.id(),
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
-        chips::COMPLETION_KEY_CONTEXT,
+        chips::KEY_CONTEXT.id(),
+        chips::FIELD_KEY_CONTEXT.id(),
+        chips::COMPLETION_KEY_CONTEXT.id(),
         text_input::KEY_CONTEXT.id(),
     ];
     const IN_AIMED_COMPLETION: &[&str] = &[
         KEY_CONTEXT.id(),
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
-        chips::COMPLETION_KEY_CONTEXT,
-        chips::AIMED_KEY_CONTEXT,
+        chips::KEY_CONTEXT.id(),
+        chips::FIELD_KEY_CONTEXT.id(),
+        "GraphChipCompletion GraphChipCompletionAimed",
         text_input::KEY_CONTEXT.id(),
     ];
 

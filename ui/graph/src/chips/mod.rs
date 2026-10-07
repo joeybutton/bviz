@@ -19,12 +19,13 @@ use bviz_graph_layout::query_lang::{
 };
 use bviz_graph_layout::select::{Filter, Scope};
 use bviz_ui_components::{
-    Button, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, load_in_background, text_input,
+    Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
+    load_in_background, text_input,
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window, actions,
-    div, prelude::*, px,
+    KeyBinding, KeyContext, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*, px,
 };
 use std::sync::Arc;
 
@@ -75,18 +76,38 @@ actions!(
 );
 
 /// The key context the bar carries, scoping the keys that act on its chips.
-pub(crate) const KEY_CONTEXT: &str = "GraphChips";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
+    &crate::KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChips",
+    "Query bar",
+);
 
-/// The key context the bar's field carries, inside the bar's.
-pub(crate) const FIELD_KEY_CONTEXT: &str = "GraphChipField";
+/// The key context the bar's field carries.
+pub(crate) const FIELD_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChipField",
+    "Query field",
+);
 
-/// The key context the field carries inside its own while the list
-/// completing its word stands open, scoping the keys acting on the list.
-pub(crate) const COMPLETION_KEY_CONTEXT: &str = "GraphChipCompletion";
+/// The key context the field carries while the list completing its word
+/// stands open, scoping the keys acting on the list.
+pub(crate) const COMPLETION_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &FIELD_KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChipCompletion",
+    "Query completions",
+);
 
-/// The key context the field carries inside the completion's while the
-/// arrow keys have moved onto a row, which Enter then accepts.
-pub(crate) const AIMED_KEY_CONTEXT: &str = "GraphChipCompletionAimed";
+/// The state of the completion's list while the arrow keys have moved onto a
+/// row, which Enter then accepts.
+pub(crate) const AIMED_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &COMPLETION_KEY_CONTEXT,
+    Nesting::State,
+    "GraphChipCompletionAimed",
+    "Aimed completion",
+);
 
 /// Width the field is drawn at, wide enough for a call over a package.
 const FIELD_WIDTH: Pixels = px(200.);
@@ -98,11 +119,11 @@ const PLACEHOLDER: &str = "query: //foo/... or deps()";
 
 /// The bar's keys; `unless_typing` scopes those reaching it from the panel.
 pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
-    let field = Some(FIELD_KEY_CONTEXT);
+    let field = Some(FIELD_KEY_CONTEXT.id());
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
-    let completing = Some(COMPLETION_KEY_CONTEXT);
-    let aimed = Some(AIMED_KEY_CONTEXT);
+    let completing = Some(COMPLETION_KEY_CONTEXT.id());
+    let aimed = Some(AIMED_KEY_CONTEXT.id());
     vec![
         KeyBinding::new("up", CompletePrevious, completing),
         KeyBinding::new("down", CompleteNext, completing),
@@ -111,7 +132,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("escape", CloseCompletion, completing),
         KeyBinding::new("q", Focus, unless_typing),
         KeyBinding::new("secondary-enter", Apply, unless_typing),
-        KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT.id())),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),
         KeyBinding::new("left", SelectPrevious, on_chips),
@@ -126,9 +147,13 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
         KeyBinding::new("secondary-shift-c", CopyStack, unless_typing),
-        KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-backspace", ClearQuery, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT.id())),
+        KeyBinding::new(
+            "secondary-shift-backspace",
+            ClearQuery,
+            Some(KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT.id())),
     ]
 }
 
@@ -892,7 +917,7 @@ pub(crate) fn bar(
                 .child(
                     div()
                         .when(completing, |field| {
-                            field.key_context(COMPLETION_KEY_CONTEXT)
+                            field.key_context(completion_context(aimed))
                         })
                         .on_action(cx.listener(|view, _: &CompletePrevious, _, cx| {
                             complete::aim(view, -1, cx)
@@ -908,11 +933,7 @@ pub(crate) fn bar(
                                 complete::close(view, cx)
                             }),
                         )
-                        .child(
-                            div()
-                                .when(aimed, |field| field.key_context(AIMED_KEY_CONTEXT))
-                                .child(chips.field.clone()),
-                        ),
+                        .child(chips.field.clone()),
                 )
                 .children(completions),
         )
@@ -952,6 +973,15 @@ pub(crate) fn bar(
             )
         }))
         .into_any_element()
+}
+
+/// The key context of the field while its completion's list stands open.
+fn completion_context(aimed: bool) -> KeyContext {
+    let mut context = KeyContext::from(COMPLETION_KEY_CONTEXT);
+    if aimed {
+        context.add(AIMED_KEY_CONTEXT.id());
+    }
+    context
 }
 
 /// What the bar last has to say, standing over the drawing's top-left corner
