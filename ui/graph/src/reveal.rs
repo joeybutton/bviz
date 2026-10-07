@@ -33,8 +33,6 @@ pub(crate) enum HiddenBy {
     Boxes,
     /// A rule no control wrote, at its index among the filter's rules.
     Rule(u32),
-    /// The filter's base, which hides every node no rule shows.
-    Base,
     /// The node frames others and none of them is drawn.
     NothingToFrame,
 }
@@ -52,7 +50,6 @@ impl HiddenBy {
             HiddenBy::Query => "outside the query",
             HiddenBy::Boxes => "unwrapped by the boxes menu",
             HiddenBy::Rule(_) => "hidden by a filter rule",
-            HiddenBy::Base => "hidden by the filter",
             HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
         }
     }
@@ -99,7 +96,6 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
                 true => HiddenBy::Boxes,
                 false => HiddenBy::Rule(index),
             },
-            Hiding::Base => HiddenBy::Base,
             Hiding::NothingToFrame => HiddenBy::NothingToFrame,
         },
     }
@@ -395,11 +391,6 @@ mod tests {
         assert_eq!(filtered(&filter, Hiding::Rule(0)), HiddenBy::Rule(0));
     }
 
-    #[test]
-    fn the_base_is_named_as_the_filter() {
-        assert_eq!(filtered(&Filter::default(), Hiding::Base), HiddenBy::Base);
-    }
-
     /// A pin outranks the scope, so revealing a node the query leaves out
     /// draws it.
     #[test]
@@ -452,7 +443,6 @@ mod tests {
         for revealable in [
             HiddenBy::Paths,
             filtered(&Filter::default(), Hiding::Pin),
-            filtered(&Filter::default(), Hiding::Base),
             filtered(&Filter::default(), Hiding::Scope),
         ] {
             assert!(revealable.revealable());

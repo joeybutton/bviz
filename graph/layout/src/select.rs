@@ -1,9 +1,9 @@
 //! Which nodes of a graph a filter shows, stated as rules over their kinds and
 //! whether they hold another node.
 //!
-//! Rules and the base name no node by id, so they hold of a graph rebuilt from
-//! the same inputs; a scope and the pins name nodes by id, so they hold only of
-//! the graph they were made over.
+//! Rules name no node by id, so they hold of a graph rebuilt from the same
+//! inputs; a scope and the pins name nodes by id, so they hold only of the
+//! graph they were made over.
 
 mod eval;
 pub mod labels;
@@ -47,23 +47,6 @@ impl Pin {
     }
 }
 
-/// The verdict a filter reaches for a node no rule of it matches.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Base {
-    #[default]
-    ShowAll,
-    HideAll,
-}
-
-impl Base {
-    pub fn visibility(self) -> Visibility {
-        match self {
-            Base::ShowAll => Visibility::Shown,
-            Base::HideAll => Visibility::Hidden,
-        }
-    }
-}
-
 /// The visibility a [`Predicate`] gives the nodes it matches.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Rule {
@@ -75,15 +58,15 @@ pub struct Rule {
 ///
 /// The rules are read in order and the last one matching a node decides it, as
 /// a gitignore file's patterns do, so a rule narrows or widens the ones before
-/// it without either being rewritten. The scope hides what lies outside it
-/// ahead of every rule, so no rule draws back a node the scope leaves out; a box
-/// it leaves out around a node drawn is drawn as its frame, unless a rule hides
-/// the box, which unwraps it. `pins` decide the nodes they name whatever the
-/// scope and the rules say, which is what lets a node shown or hidden on its
-/// own outlast a change to a rule that has nothing to do with it.
+/// it without either being rewritten; a node no rule matches is shown. The
+/// scope hides what lies outside it ahead of every rule, so no rule draws back
+/// a node the scope leaves out; a box it leaves out around a node drawn is
+/// drawn as its frame, unless a rule hides the box, which unwraps it. `pins`
+/// decide the nodes they name whatever the scope and the rules say, which is
+/// what lets a node shown or hidden on its own outlast a change to a rule that
+/// has nothing to do with it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Filter {
-    pub base: Base,
     pub scope: Option<Scope>,
     pub rules: Vec<Rule>,
     pub pins: HashMap<Id, Pin>,
@@ -209,16 +192,15 @@ mod tests {
             filter.evaluate(&self.graph).get(self.id(name))
         }
 
-        /// The nodes a filter showing `predicate` alone draws as selected.
+        /// The nodes `predicate` matches, as a rule fading them alone reads.
         fn matching(&self, predicate: &Predicate) -> Vec<&str> {
-            let showing = Filter {
-                base: Base::HideAll,
-                rules: vec![rule(predicate.clone(), Visibility::Shown)],
+            let fading = Filter {
+                rules: vec![rule(predicate.clone(), Visibility::Faded)],
                 ..Filter::default()
             };
-            let verdicts = showing.evaluate(&self.graph);
+            let verdicts = fading.evaluate(&self.graph);
             let mut matched: Vec<&str> = (self.graph.nodes.iter())
-                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
+                .filter(|node| verdicts.get(node.id) == Verdict::Faded)
                 .map(|node| self.names.resolve(node.id))
                 .collect();
             matched.sort_unstable();
@@ -299,16 +281,13 @@ mod tests {
     }
 
     #[test]
-    fn a_node_no_rule_matches_takes_the_base_verdict() {
+    fn a_node_no_rule_matches_is_shown() {
         let fixture = Fixture::new();
-        let mut filter = Filter {
+        let filter = Filter {
             rules: vec![hide_targets()],
             ..Filter::default()
         };
         assert_eq!(fixture.verdict(&filter, SOURCE), Verdict::Shown);
-
-        filter.base = Base::HideAll;
-        assert_eq!(fixture.verdict(&filter, SOURCE), Verdict::Hidden);
     }
 
     #[test]
@@ -331,7 +310,6 @@ mod tests {
     fn a_pin_decides_the_node_it_names_whatever_the_rules_say() {
         let fixture = Fixture::new();
         let filter = Filter {
-            base: Base::HideAll,
             scope: None,
             rules: vec![hide_targets()],
             pins: [(fixture.id(APP), Pin::Set(Visibility::Shown))]
