@@ -20,7 +20,9 @@
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
 
+use super::ast::Function;
 use super::universe::Universe;
+use crate::capability::Support;
 use crate::facets::{Facets, Tri};
 use crate::graph::{Graph, Kind, Node, configured_holders, first_by_id};
 use crate::intern::Id;
@@ -196,6 +198,30 @@ impl Universe {
             ));
         }
         Ok(named)
+    }
+
+    /// The members of `value` built in a tool configuration, or why the graph
+    /// cannot tell them for `function`.
+    pub(super) fn tool_configured(
+        &self,
+        function: Function,
+        value: &FixedBitSet,
+    ) -> Result<FixedBitSet, String> {
+        if self.configured != Support::Available {
+            return Err(format!(
+                "{}() needs the configuration each configured target is built in, which the \
+                 graph's inputs do not state for every one",
+                function.name()
+            ));
+        }
+        let facets = &self.facets;
+        let mut kept = self.empty();
+        kept.extend(value.ones().filter(|&id| {
+            let config = facets.config(Id(id as u32));
+            let entry = config.and_then(|config| facets.config_entry(config));
+            entry.is_some_and(|entry| entry.is_tool == Tri::Yes)
+        }));
+        Ok(kept)
     }
 
     /// The configuration `config` names, or the message Bazel rejects it with

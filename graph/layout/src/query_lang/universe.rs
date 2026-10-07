@@ -32,6 +32,9 @@ pub struct Universe {
     pub(super) facets: Arc<Facets>,
     pub(super) declared: Declared,
     pub(super) configurations: Configurations,
+    /// How far the inputs state the configuration each configured target is
+    /// built in.
+    pub(super) configured: Support,
     /// How far the inputs state each rule's tags.
     pub(super) tags: Support,
     /// How far the inputs state whether each rule is `testonly`.
@@ -99,6 +102,7 @@ impl Universe {
             targets,
             owner,
             members,
+            configured: capabilities.support(Axis::Configuration),
             tags: capabilities.support(Axis::Tags),
             testonly: capabilities.support(Axis::Testonly),
             artifacts: capabilities.support(Axis::Artifacts),

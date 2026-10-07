@@ -136,6 +136,7 @@ pub enum Function {
     Some,
     SomePath,
     Tests,
+    ToolConfigured,
     Visible,
 }
 
@@ -160,6 +161,7 @@ pub(super) enum Evaluable {
     Siblings,
     Some,
     SomePath,
+    ToolConfigured,
 }
 
 impl Function {
@@ -190,10 +192,11 @@ impl Function {
     ];
 
     /// Every function bviz accepts that Bazel does not, sorted by name.
-    pub const EXTENSIONS: [Function; 3] = [
+    pub const EXTENSIONS: [Function; 4] = [
         Function::RepoCategory,
         Function::RuleCategory,
         Function::RunfilesPlumbing,
+        Function::ToolConfigured,
     ];
 
     /// Every function bviz accepts: Bazel's, then the extensions.
@@ -215,7 +218,10 @@ impl Function {
     /// than one of [`Function::BAZEL`].
     pub fn is_extension(self) -> bool {
         match self {
-            Function::RepoCategory | Function::RuleCategory | Function::RunfilesPlumbing => true,
+            Function::RepoCategory
+            | Function::RuleCategory
+            | Function::RunfilesPlumbing
+            | Function::ToolConfigured => true,
             Function::AllPaths
             | Function::AllRdeps
             | Function::Attr
@@ -267,6 +273,7 @@ impl Function {
             Function::Some => "some",
             Function::SomePath => "somepath",
             Function::Tests => "tests",
+            Function::ToolConfigured => "tool_configured",
             Function::Visible => "visible",
         }
     }
@@ -305,6 +312,7 @@ impl Function {
             Function::Siblings => return Ok(Evaluable::Siblings),
             Function::Some => return Ok(Evaluable::Some),
             Function::SomePath => return Ok(Evaluable::SomePath),
+            Function::ToolConfigured => return Ok(Evaluable::ToolConfigured),
             Function::Labels => "the labels each rule's attributes name",
             Function::Visible => "each target's visibility",
             Function::Tests => "the tests each test suite names",
@@ -332,7 +340,8 @@ impl Function {
             | Function::RunfilesPlumbing
             | Function::SamePkgDirectRdeps
             | Function::Siblings
-            | Function::Tests => (&[E], 1),
+            | Function::Tests
+            | Function::ToolConfigured => (&[E], 1),
             Function::Config => (&[E, W], 2),
             Function::Filter
             | Function::Kind

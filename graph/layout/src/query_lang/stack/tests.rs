@@ -97,6 +97,10 @@ fn the_shorthand_writes_out_the_set_a_chip_reads() {
         written("runfiles_plumbing()"),
         continuing("runfiles_plumbing($_)")
     );
+    assert_eq!(
+        written("except tool_configured()"),
+        continuing("$_ except tool_configured($_)")
+    );
 }
 
 #[test]
@@ -144,6 +148,23 @@ fn a_span_past_both_insertions_maps_back_onto_the_chip_as_typed() {
     assert_eq!(in_text(15..16), 12..13, "the word as typed");
     assert_eq!(in_text(18..20), 13..13, "the continued `$_`");
     assert_eq!(in_text(10..21), 7..14, "the call as typed");
+}
+
+#[test]
+fn a_leading_operator_applies_to_an_extension_call_reading_the_set_before_it() {
+    let fixture = Fixture::new();
+    let named = |chips: &[&str]| fixture.named(&stack(chips));
+    let all = named(&["//b:all"]);
+    assert_eq!(
+        named(&["//b:all", "except rule_category(test)"]),
+        ["//b:app"]
+    );
+    assert_eq!(named(&["//b:all", "except rule_category(plumbing)"]), all);
+    assert_eq!(named(&["//b:all", "except repo_category(extension)"]), all);
+    assert_eq!(
+        named(&["//a:*", "except kind('generated file')"]),
+        ["//a:gen", "//a:lib", "//a:lib.cc"]
+    );
 }
 
 #[test]
@@ -533,6 +554,10 @@ fn a_stack_using_an_extension_has_no_bazel_query() {
     assert_eq!(
         bazel(&["//p:all", "runfiles_plumbing()"]),
         extension(Extension::Function(Function::RunfilesPlumbing))
+    );
+    assert_eq!(
+        bazel(&["//a:all", "except tool_configured()"]),
+        extension(Extension::Function(Function::ToolConfigured))
     );
     assert_eq!(
         Unportable::Extension(Extension::Function(Function::RepoCategory)).to_string(),

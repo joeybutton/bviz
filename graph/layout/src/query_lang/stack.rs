@@ -878,7 +878,10 @@ impl Command {
             | Function::SomePath
             | Function::Tests
             | Function::Visible => true,
-            Function::RepoCategory | Function::RuleCategory | Function::RunfilesPlumbing => false,
+            Function::RepoCategory
+            | Function::RuleCategory
+            | Function::RunfilesPlumbing
+            | Function::ToolConfigured => false,
         }
     }
 

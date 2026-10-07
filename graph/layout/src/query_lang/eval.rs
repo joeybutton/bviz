@@ -242,6 +242,10 @@ impl Universe {
                 let (values, _) = arguments()?;
                 Ok(self.runfiles_plumbing(&values[0]))
             }
+            Evaluable::ToolConfigured => {
+                let (values, _) = arguments()?;
+                self.tool_configured(function, &values[0]).map_err(fail)
+            }
             Evaluable::Config => {
                 let (values, _) = arguments()?;
                 let written = expressions(args)[0].to_string();

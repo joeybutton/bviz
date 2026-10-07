@@ -5,7 +5,8 @@ use fixedbitset::FixedBitSet;
 
 use super::super::parse;
 use super::*;
-use crate::facets::FacetsBuilder;
+use crate::capability::Axis;
+use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
@@ -1558,6 +1559,18 @@ fn repo_category_matches_the_whole_spelling_of_each_origin() {
 }
 
 #[test]
+fn a_repository_is_dropped_by_its_pattern_under_either_name() {
+    assert_eq!(
+        repositories().ok("deps(//a:app) except @@m+//...:*"),
+        ["//a:app", "@@m++ext+gen//e:lib"]
+    );
+    assert_eq!(
+        apparent_repositories().ok("deps(//a:app) except @r//...:*"),
+        ["//a:app", "@@m+//m:lib", "@m//m:api"]
+    );
+}
+
+#[test]
 fn repo_category_keeps_what_a_matching_target_holds() {
     let (universe, names) = held();
     let query = |expr| configured_query(&universe, &names, expr).unwrap();
@@ -1710,5 +1723,86 @@ fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
         Fixture::new().error("runfiles_plumbing(//a:lib)"),
         "runfiles_plumbing() needs the actions of an aquery, which the graph's inputs do not \
          include"
+    );
+}
+
+/// `//t:gen`, configured as `ct:target` in a target configuration and as
+/// `ct:exec` in a tool one, each running an action that writes a file; with
+/// `stated` false, an input left the tool configuration unstated.
+fn tools(stated: bool) -> (Universe, Names) {
+    let mut graph = Graph::new();
+    let mut names = Names::default();
+    let mut builder = FacetsBuilder::default();
+    let package = names.intern("pkg:t");
+    graph.add_node(Node::new(package, "//t", Kind::Package, None));
+    let mut node = |name: &str, kind, parent: Id| {
+        let id = names.intern(name);
+        graph.add_node(Node::new(id, name, kind, Some(parent)));
+        id
+    };
+    let target = node("target://t:gen", Kind::Target, package);
+    let held = [
+        ("ct:target", "act:target", "out:target", false),
+        ("ct:exec", "act:exec", "out:exec", true),
+    ];
+    builder.describe_label(target, Some(package), "//t:gen");
+    let mut writes = Vec::with_capacity(held.len());
+    for (configured, action, output, tool) in held {
+        let configured = node(configured, Kind::ConfiguredTarget, target);
+        let action = node(action, Kind::Action, configured);
+        let output = node(output, Kind::Artifact, configured);
+        builder.facets().inherit(configured, target);
+        let is_tool = if tool { Tri::Yes } else { Tri::No };
+        let checksum = if tool { "exec" } else { "target" };
+        let config = builder.facets().intern_config(checksum, None, is_tool);
+        let config = Some(config).filter(|_| stated || !tool);
+        builder.facets().set_config(configured, config);
+        builder.observe(Axis::Configuration, config.is_some());
+        for child in [action, output] {
+            builder.facets().inherit(child, configured);
+        }
+        writes.push((action, output));
+    }
+    for (action, output) in writes {
+        graph.add_edge(action, output, EdgeKind::Aquery);
+    }
+    let (facets, capabilities) = builder.seal();
+    (
+        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        names,
+    )
+}
+
+#[test]
+fn tool_configured_keeps_what_a_tool_configuration_builds() {
+    let (universe, names) = tools(true);
+    let mut everything = universe.empty();
+    everything.insert_range(..);
+    let kept = universe
+        .tool_configured(Function::ToolConfigured, &everything)
+        .unwrap();
+    assert_eq!(labels(&names, &kept), ["act:exec", "ct:exec", "out:exec"]);
+    assert_eq!(
+        configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap(),
+        ["ct:exec"]
+    );
+    assert_eq!(
+        configured_query(&universe, &names, "//t:gen except tool_configured(//t:gen)").unwrap(),
+        ["//t:gen", "ct:target"]
+    );
+}
+
+#[test]
+fn tool_configured_keeps_nothing_of_a_graph_without_configurations() {
+    assert!(Fixture::new().ok("tool_configured(//...)").is_empty());
+}
+
+#[test]
+fn tool_configured_needs_every_configured_targets_configuration() {
+    let (universe, names) = tools(false);
+    assert_eq!(
+        configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap_err(),
+        "tool_configured() needs the configuration each configured target is built in, which \
+         the graph's inputs do not state for every one"
     );
 }
