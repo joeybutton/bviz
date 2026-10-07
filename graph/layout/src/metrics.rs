@@ -4,7 +4,7 @@
 use rayon::prelude::*;
 
 use crate::facets::Facets;
-use crate::graph::{Edge, Graph, Kind, Node, id_span};
+use crate::graph::{Edge, Graph, Kind, Node, configured_holders, first_by_id};
 use crate::intern::{Id, Names, stable_hash};
 use crate::provenance::{Input, InputSet, Provenance};
 pub use crate::reduce::Count;
@@ -369,14 +369,7 @@ fn targets(graph: &Graph, facets: &Facets, provenance: &Provenance, scope: Scope
 /// Every configured target, each edge between two nodes standing for one
 /// between the configured targets holding them.
 fn configured_targets(graph: &Graph, provenance: &Provenance, scope: Scope) -> UnitGraph {
-    let node_of = first_by_id(graph);
-    let is_configured =
-        |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::ConfiguredTarget);
-    let holder = |id: Id| {
-        std::iter::successors(Some(id), |&at| node_of[at.0 as usize]?.parent)
-            .find(|&at| is_configured(at))
-    };
-    let held_by: Vec<Option<Id>> = (0..node_of.len() as u32).map(|id| holder(Id(id))).collect();
+    let held_by = configured_holders(&first_by_id(graph));
     let points = Points::new(
         graph
             .nodes
@@ -457,15 +450,6 @@ fn actions(graph: &Graph, provenance: &Provenance, scope: Scope) -> UnitGraph {
     }
     let actions = points.owned_actions(graph, |id| points.of(id));
     points.graph(pairs, actions)
-}
-
-/// By id, the first node of `graph` holding it.
-fn first_by_id(graph: &Graph) -> Vec<Option<&Node>> {
-    let mut first: Vec<Option<&Node>> = vec![None; id_span(graph)];
-    for node in &graph.nodes {
-        first[node.id.0 as usize].get_or_insert(node);
-    }
-    first
 }
 
 /// The distinct `pairs`, which run from a dependency to its dependent over the

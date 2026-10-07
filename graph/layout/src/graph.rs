@@ -139,6 +139,27 @@ pub fn id_span(graph: &Graph) -> usize {
     mentioned.map(|id| id.0 as usize + 1).max().unwrap_or(0)
 }
 
+/// By id, the first node of `graph` holding it.
+pub(crate) fn first_by_id(graph: &Graph) -> Vec<Option<&Node>> {
+    let mut first: Vec<Option<&Node>> = vec![None; id_span(graph)];
+    for node in &graph.nodes {
+        first[node.id.0 as usize].get_or_insert(node);
+    }
+    first
+}
+
+/// By id, the innermost configured target containing that id's node, a
+/// configured target containing itself. `node_of` is [`first_by_id`]'s lookup.
+pub(crate) fn configured_holders(node_of: &[Option<&Node>]) -> Vec<Option<Id>> {
+    let is_configured =
+        |id: Id| node_of[id.0 as usize].is_some_and(|node| node.kind == Kind::ConfiguredTarget);
+    let holder = |id: Id| {
+        std::iter::successors(Some(id), |&at| node_of[at.0 as usize]?.parent)
+            .find(|&at| is_configured(at))
+    };
+    (0..node_of.len() as u32).map(|id| holder(Id(id))).collect()
+}
+
 /// A graph's containment forest, indexed by node id: every id in its id space
 /// carries a parent and a depth, an id the graph never names standing as a root.
 /// Containment must be acyclic, since every query walks towards the roots.
