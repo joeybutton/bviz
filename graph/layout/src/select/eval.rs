@@ -4,6 +4,8 @@
 //! scanned, so that a term over strings becomes a set of handles or a column
 //! read by id and testing one node costs a few integer lookups.
 
+use fixedbitset::FixedBitSet;
+
 use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri};
 use crate::graph::{Graph, Kind, Node};
 use crate::intern::Id;
@@ -23,12 +25,18 @@ impl Filter {
             .map(|(index, rule)| Resolved::of(index, rule, facets, ids))
             .collect();
 
+        let parents = Parents::of(graph, ids);
+        let holders = match rules.iter().any(|rule| rule.holding) {
+            true => parents.holders(),
+            false => FixedBitSet::new(),
+        };
+
         let mut stated: Vec<Option<Stated>> = vec![None; ids];
         let mut unscoped: Vec<Option<Unscoped>> = vec![None; ids];
         for node in &graph.nodes {
             let id = node.id.0 as usize;
             let in_scope = self.scope.as_ref().is_none_or(|scope| scope.holds(node));
-            let rule = rules.iter().rev().find(|rule| rule.matches(node, facets));
+            let rule = (rules.iter().rev()).find(|rule| rule.matches(node, facets, &holders));
             if in_scope {
                 stated[id] = rule.map(|rule| Stated::Rule {
                     index: rule.index,
@@ -57,7 +65,6 @@ impl Filter {
                 None => unmatched,
             })
             .collect();
-        let parents = Parents::of(graph, ids);
         hide_empty_frames(graph, &parents, &mut by_id);
         frame_drawn_nodes(graph, &parents, &stated, &unscoped, &mut by_id);
         Verdicts { by_id, unmatched }
@@ -212,6 +219,17 @@ impl Parents {
         Parents(parent)
     }
 
+    /// The ids of the nodes holding another.
+    fn holders(&self) -> FixedBitSet {
+        let mut holders = FixedBitSet::with_capacity(self.0.len());
+        for parent in self.0.iter().flatten() {
+            if (parent.0 as usize) < self.0.len() {
+                holders.insert(parent.0 as usize);
+            }
+        }
+        holders
+    }
+
     /// Where the node at `id` sits, `None` for a root and for a node whose
     /// parent the graph holds no node of, which leaves nothing above it to
     /// reach.
@@ -323,6 +341,7 @@ impl Verdicts {
 /// handles passing both are settled here rather than per node.
 struct Resolved<'a> {
     kinds: Option<&'a Values<Kind>>,
+    holding: bool,
     testonly: Option<Tri>,
     repos: Option<Admits<RepoRef>>,
     rule_classes: Option<Admits<Sym>>,
@@ -340,6 +359,7 @@ impl<'a> Resolved<'a> {
         let predicate = &rule.predicate;
         Resolved {
             kinds: predicate.kinds.as_ref(),
+            holding: predicate.holding,
             testonly: predicate.testonly.map(stating),
             repos: repos(predicate, facets),
             rule_classes: rule_classes(predicate, facets),
@@ -363,9 +383,12 @@ impl<'a> Resolved<'a> {
         }
     }
 
-    fn matches(&self, node: &Node, facets: &Facets) -> bool {
+    /// Whether the rule matches `node`; `holders` holds every node holding
+    /// another wherever a rule of the filter asks for that.
+    fn matches(&self, node: &Node, facets: &Facets, holders: &FixedBitSet) -> bool {
         let id = node.id;
         self.kinds.is_none_or(|kinds| kinds.contains(&node.kind))
+            && (!self.holding || holders.contains(id.0 as usize))
             && self
                 .testonly
                 .is_none_or(|testonly| facets.testonly(id) == testonly)
@@ -530,7 +553,6 @@ mod tests {
     use crate::intern::Names;
     use crate::repo::{RepoCategory, RepoName};
     use crate::select::{Base, Pin, Scope};
-    use fixedbitset::FixedBitSet;
 
     /// A graph holding, in the main repository, a `cc_test` target with the
     /// configured target, action, and output artifact it owns, all of which
@@ -770,6 +792,24 @@ mod tests {
             fixture.nodes(&tests, Verdict::Shown),
             named([APP, CONFIGURED, ACTION, OUTPUT])
         );
+    }
+
+    #[test]
+    fn a_holding_term_matches_only_the_nodes_holding_another() {
+        let fixture = Fixture::new();
+        let filter = Filter {
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target]),
+                    holding: true,
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
+            }],
+            ..Filter::default()
+        };
+
+        assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([APP]));
     }
 
     /// The quotient pass mints group ids above every id the inputs described, so

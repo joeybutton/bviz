@@ -188,6 +188,8 @@ pub enum Aspects {
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Predicate {
     pub kinds: Option<Values<Kind>>,
+    /// Whether the node must hold another node of the graph.
+    pub holding: bool,
     pub repo_categories: Option<Values<RepoCategory>>,
     /// Repositories, each by the name identifying it.
     pub repos: Option<Values<RepoName<String>>>,
