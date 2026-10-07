@@ -55,6 +55,7 @@ mod model;
 mod morph;
 mod neighborhood;
 mod paint;
+mod pan_bench;
 mod pins;
 mod playback;
 mod point;
@@ -368,6 +369,8 @@ pub struct GraphPanel {
     /// [`GraphPanel::invalidate_canvas`].
     canvas: Entity<GraphCanvas>,
     legend: Legend,
+    /// Taken by the first render, which starts it.
+    bench: Option<pan_bench::Bench>,
 }
 
 impl GraphPanel {
@@ -554,6 +557,7 @@ impl GraphPanel {
             titles: Vec::new(),
             canvas,
             legend: Legend::default(),
+            bench: pan_bench::Bench::from_env(),
         }
     }
 
@@ -961,6 +965,10 @@ impl Panel for GraphPanel {
 
 impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = pan_bench::span(pan_bench::Phase::PanelRender);
+        if let Some(bench) = self.bench.take() {
+            bench.start(cx.entity(), window);
+        }
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let chrome = div()
             .key_context(Self::kind().key_context)

@@ -4,6 +4,7 @@ use crate::critical::CriticalNodes;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
 use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::pan_bench::{self, Phase, Tally};
 use crate::playback::{NodeState, NodeStates, Running, Stage};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
@@ -15,8 +16,8 @@ use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use bviz_invocation::{Done, EpochMicros, Runner, Venue};
 use gpui::{
-    App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
-    point, px, quad, size,
+    App, Background, BorderStyle, Bounds, Entity, Hsla, Path, PathBuilder, Pixels, Point, Rgba,
+    TextAlign, Window, point, px, quad, size,
 };
 use rustc_hash::FxHashMap;
 use std::cmp::Reverse;
@@ -423,6 +424,7 @@ pub(crate) fn canvas_body(
     entity: Entity<GraphPanel>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
+        let _span = pan_bench::span(Phase::CanvasPaint);
         let (camera, morph) = {
             let view = entity.read(cx);
             (view.camera(), view.morph_frame())
@@ -480,7 +482,9 @@ pub(crate) fn canvas_body(
                 (b, rect)
             })
             .collect();
+        pan_bench::tally(Tally::Boxes, drawn.len());
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
+        let mut connectors = 0;
         // Painted over the labels, which a badge at a route's middle can fall
         // under where the route crosses a container's title band.
         let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
@@ -492,12 +496,14 @@ pub(crate) fn canvas_body(
                     let filtered = scene.edge_strength(c.from, c.to);
                     let alpha = marks.connector_alpha(marked, filtered, edges, camera.zoom);
                     paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
+                    connectors += 1;
                     if let Some(transition) = c.transition {
                         badges.push((c, transition, marks.badge_alpha(marked, filtered, edges)));
                     }
                 }
             }
         }
+        pan_bench::tally(Tally::Connectors, connectors);
         for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
             paint_critical_halo(b, *rect, camera.zoom, &scene.palette, window);
         }
@@ -1052,7 +1058,7 @@ pub(crate) fn paint_diamond(center: Point<Pixels>, half: f32, color: Rgba, windo
     let mut diamond = PathBuilder::fill();
     diamond.add_polygon(&corners, true);
     if let Ok(path) = diamond.build() {
-        window.paint_path(path, color);
+        paint_path(path, color, window);
     }
 }
 
@@ -1345,7 +1351,7 @@ fn paint_rimmed<const N: usize>(
         let mut shape = PathBuilder::fill();
         shape.add_polygon(&corners, true);
         if let Ok(path) = shape.build() {
-            window.paint_path(path, color);
+            paint_path(path, color, window);
         }
     }
 }
@@ -1656,6 +1662,7 @@ fn paint_box_label(
     let label_color = faded(bviz_ui_theme::label_on(b.fill).into(), b.alpha);
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
+    pan_bench::tally(Tally::ShapedLabels, 1);
     let line = bviz_ui_components::shape_truncated(
         b.label,
         placement.avail,
@@ -1710,6 +1717,11 @@ fn paint_box_label(
     })
 }
 
+fn paint_path(path: Path<Pixels>, color: impl Into<Background>, window: &mut Window) {
+    pan_bench::tally(Tally::PaintPaths, 1);
+    window.paint_path(path, color);
+}
+
 /// Paints a small filled-triangle disclosure caret inside the reserved
 /// `footprint` whose left edge is `at.x`, centered vertically at `at.y`. The
 /// triangle width fills the footprint less a trailing gap before the label; its
@@ -1747,7 +1759,7 @@ fn paint_caret(
         );
     }
     if let Ok(path) = tri.build() {
-        window.paint_path(path, color);
+        paint_path(path, color, window);
     }
 }
 
@@ -1839,7 +1851,7 @@ fn paint_connector(
     }
     line.line_to(line_end);
     if let Ok(path) = line.build() {
-        window.paint_path(path, color);
+        paint_path(path, color, window);
     }
     paint_arrowhead(tip, dir, zoom, color, window);
 }
@@ -1896,7 +1908,7 @@ fn paint_arrowhead(
     let mut head = PathBuilder::fill();
     head.add_polygon(&arrowhead(tip, dir, zoom), true);
     if let Ok(path) = head.build() {
-        window.paint_path(path, color);
+        paint_path(path, color, window);
     }
 }
 

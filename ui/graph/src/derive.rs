@@ -99,7 +99,7 @@ impl Drawn {
 
     /// Identifies the view a frame at `zoom` calls for, where that is a map's
     /// level yet to be derived.
-    fn underived(&self, zoom: f32) -> Option<ViewKey> {
+    pub(crate) fn underived(&self, zoom: f32) -> Option<ViewKey> {
         match self {
             Self::Layered { .. } => None,
             Self::Map { map, drawing } => {
@@ -826,6 +826,21 @@ pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<G
         view.derived.expanded.insert(id);
     }
     request(view, cx);
+}
+
+/// Expands every one of `ids`, laying the graph out once for all of them.
+pub(crate) fn expand(
+    view: &mut GraphPanel,
+    ids: impl IntoIterator<Item = Id>,
+    cx: &mut Context<GraphPanel>,
+) {
+    view.derived.expanded.extend(ids);
+    request(view, cx);
+}
+
+/// Whether the layered layout last requested draws `id` expanded.
+pub(crate) fn is_expanded(view: &GraphPanel, id: Id) -> bool {
+    view.derived.expanded.contains(&id)
 }
 
 /// Opens the layered layout onto `id`: every container holding it, and the
