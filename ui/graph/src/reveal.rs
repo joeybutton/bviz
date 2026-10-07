@@ -5,7 +5,7 @@ use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
-use crate::rules::{self, Term};
+use crate::rules;
 use crate::{GraphPanel, Palette, column, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
@@ -29,8 +29,8 @@ pub(crate) enum HiddenBy {
     Pin,
     /// The query the filter is scoped to, which does not name the node.
     Query,
-    /// The rule a toolbar control writes over its term.
-    Control(Term),
+    /// The rule the class checklist writes.
+    Classes,
     /// A rule no control wrote, at its index among the filter's rules.
     Rule(u32),
     /// The filter's base, which hides every node no rule shows.
@@ -50,8 +50,7 @@ impl HiddenBy {
             HiddenBy::Paths => "hidden by the dependency paths drawn",
             HiddenBy::Pin => "hidden by its pin",
             HiddenBy::Query => "outside the query",
-            HiddenBy::Control(Term::Kind) => "hidden by the class filter",
-            HiddenBy::Control(Term::RepoCategory | Term::Repo) => "hidden by the repository filter",
+            HiddenBy::Classes => "hidden by the class filter",
             HiddenBy::Rule(_) => "hidden by a filter rule",
             HiddenBy::Base => "hidden by the filter",
             HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
@@ -96,10 +95,10 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
         Hidden::Filtered { filter, hiding } => match hiding {
             Hiding::Pin => HiddenBy::Pin,
             Hiding::Scope => HiddenBy::Query,
-            Hiding::Rule(index) => {
-                let rule = &filter.rules[index as usize];
-                rules::control(rule).map_or(HiddenBy::Rule(index), HiddenBy::Control)
-            }
+            Hiding::Rule(index) => match rules::by_control(&filter.rules[index as usize]) {
+                true => HiddenBy::Classes,
+                false => HiddenBy::Rule(index),
+            },
             Hiding::Base => HiddenBy::Base,
             Hiding::NothingToFrame => HiddenBy::NothingToFrame,
         },
@@ -363,7 +362,6 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::Value;
     use bviz_graph_layout::Kind;
     use bviz_graph_layout::select::{Filter, Predicate, Rule, Visibility};
 
@@ -375,12 +373,9 @@ mod tests {
     /// which control to turn back.
     #[test]
     fn a_rule_is_named_by_the_control_that_wrote_it() {
-        let classes = rules::set_hidden(&Filter::default(), &Value::Kind(Kind::Action), true);
+        let classes = rules::set_hidden(&Filter::default(), Kind::Action, true);
 
-        assert_eq!(
-            filtered(&classes, Hiding::Rule(0)),
-            HiddenBy::Control(Term::Kind)
-        );
+        assert_eq!(filtered(&classes, Hiding::Rule(0)), HiddenBy::Classes);
     }
 
     #[test]

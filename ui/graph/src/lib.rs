@@ -75,7 +75,6 @@ mod unit_picker;
 mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, scale_about};
-use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{CanvasIntent, Drag, GESTURES, end_drag, pan_by, start_pan, track_gesture};
@@ -304,12 +303,6 @@ pub struct GraphPanel {
     class_filter: Entity<MultiSelect>,
     /// Carries a toggled class row into the panel's filter.
     _class_choices: Subscription,
-    /// The repository origins and repositories the loaded graph names, in the
-    /// order the repository checklist's rows stand.
-    origins: Vec<OriginRow>,
-    origin_filter: Entity<MultiSelect>,
-    /// Carries a toggled repository row into the panel's filter.
-    _origin_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
     jump: jump::Finder,
@@ -462,12 +455,6 @@ impl GraphPanel {
         let class_choices = cx.subscribe(&class_filter, |view, _, event: &MultiSelectEvent, cx| {
             checklist::choose_classes(view, event, cx);
         });
-        let origin_filter =
-            cx.new(|cx| MultiSelect::new("graph-origins", "repositories", Vec::new(), cx));
-        let origin_choices =
-            cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::choose_origins(view, event, cx);
-            });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
@@ -532,9 +519,6 @@ impl GraphPanel {
             classes: Vec::new(),
             class_filter,
             _class_choices: class_choices,
-            origins: Vec::new(),
-            origin_filter,
-            _origin_choices: origin_choices,
             chips,
             jump: jump::Finder::default(),
             matchers: fuzzy::Pool::default(),
@@ -711,7 +695,6 @@ impl GraphPanel {
             chips: chips::bar(self, palette, window, cx),
             picker: self.mode_picker.clone(),
             class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
-            origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
             why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
@@ -1171,10 +1154,8 @@ struct Controls {
     /// The query bar.
     chips: AnyElement,
     picker: Entity<Dropdown>,
-    /// The checklists over the facets the loaded graph carries, each offered
-    /// only where that graph carries a value on its axis.
+    /// The class checklist, offered only where the loaded graph carries a class.
     class_filter: Option<Entity<MultiSelect>>,
-    origin_filter: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,

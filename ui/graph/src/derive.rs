@@ -515,11 +515,9 @@ impl Derived {
     /// Draws `loaded`'s graph whole, at the expansion its read sized, through no
     /// filter.
     ///
-    /// A filter selects within one graph — its rules over that graph's
-    /// repositories, classes and labels, its pins over that graph's node ids —
-    /// so it does not carry to the graph that takes its place. Every drawing of
-    /// the graph left behind goes with it, and so does the derivation that was
-    /// producing one.
+    /// A filter's scope and pins name nodes of one graph by id, so it does not
+    /// carry to the graph that takes its place. Every drawing of the graph left
+    /// behind goes with it, and so does the derivation that was producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
         self.filter = Filter::default();
         self.paths = None;

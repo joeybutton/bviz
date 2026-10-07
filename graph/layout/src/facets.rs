@@ -744,8 +744,7 @@ impl Facets {
         &self.repos[repo.index()]
     }
 
-    /// Where `repo` comes from, at the grain a checklist groups repositories
-    /// by and a filter selects them at.
+    /// Where `repo` comes from.
     ///
     /// A canonical name states its origin outright. An apparent name states
     /// none, so it is placed with the repositories of a module some canonical
@@ -911,7 +910,7 @@ impl WrittenRepos {
     }
 
     /// The canonical label `label` as a reader writes it, which is by the
-    /// repository name the same graph's boxes and checklists read.
+    /// repository name the same graph's boxes read.
     pub fn written_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
         let Some((repo, rest)) = label.split_once("//") else {
             return Cow::Borrowed(label);

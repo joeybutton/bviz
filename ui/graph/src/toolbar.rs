@@ -12,8 +12,7 @@ pub(crate) fn height() -> Pixels {
 
 /// The panel's controls in three strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
-/// how the graph is drawn, then the checklists over its facets, then the
-/// query bar.
+/// how the graph is drawn, then the class checklist, then the query bar.
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
@@ -79,11 +78,8 @@ pub(crate) fn toolbar(
         view.trailing(busy("relaying-spinner", "laying out…", palette))
     });
     let mut facets = Toolbar::new().one_row("graph-facet-controls");
-    for checklist in [controls.class_filter, controls.origin_filter]
-        .into_iter()
-        .flatten()
-    {
-        facets = facets.child(checklist);
+    if let Some(classes) = controls.class_filter {
+        facets = facets.child(classes);
     }
     let query = Toolbar::new()
         .one_row("graph-query-bar")
