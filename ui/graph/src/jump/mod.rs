@@ -15,15 +15,16 @@ use crate::{GraphPanel, Palette, chips, pins, why};
 use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::{Id, Kind};
-use bviz_ui_components::text_input::TextEdited;
+use bviz_ui_components::text_input::{self, TextEdited};
 use bviz_ui_components::{
     KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TooltipColors,
-    list_scrollbar, menu_chrome, overlay_canvas,
+    key_text_within, list_scrollbar, menu_chrome, overlay_canvas,
 };
 use gpui::{
-    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, MouseButton, MouseDownEvent, Pixels,
-    Rems, ScrollStrategy, SharedString, Stateful, Subscription, TextStyleRefinement, Window,
-    actions, div, prelude::*, px, relative, rems, uniform_list,
+    Action, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, KeyContext,
+    MouseButton, MouseDownEvent, Pixels, Rems, ScrollStrategy, SharedString, Stateful,
+    Subscription, TextStyleRefinement, Window, actions, div, prelude::*, px, relative, rems,
+    uniform_list,
 };
 use index::{Candidate, Scope};
 pub(crate) use index::{Candidates, labelled, package_of};
@@ -509,7 +510,7 @@ pub(crate) fn overlay(
                         (!jump.matching.rows().is_empty())
                             .then(|| rows(jump, &view.jump.scroll, row, palette, cx)),
                     )
-                    .child(footer(jump, colors.text_muted))
+                    .child(footer(jump, colors.text_muted, cx))
                     .child(overlay_canvas(move |bounds, _, cx| {
                         entity.update(cx, |view, _| {
                             if let Some(jump) = view.jump.open.as_mut() {
@@ -573,8 +574,8 @@ fn rows(
         ))
 }
 
-/// The line under the rows: how many nodes the query matches, and the keys.
-fn footer(jump: &Jump, muted: Hsla) -> Div {
+/// The lines under the rows: how many nodes the query matches, and the keys.
+fn footer(jump: &Jump, muted: Hsla, cx: &App) -> Div {
     let matching = &jump.matching;
     let listed = matching.rows().len();
     let tally = match (matching.query().is_empty(), matching.matched()) {
@@ -587,46 +588,96 @@ fn footer(jump: &Jump, muted: Hsla) -> Div {
         }
         (false, matched) => format!("{matched} matches"),
     };
-    let last = KEY_HINTS.len() - 1;
-    let hints = KEY_HINTS
-        .iter()
-        .enumerate()
-        .map(move |(at, hint)| match at == last {
-            true => SharedString::from(*hint),
-            false => format!("{hint} ·").into(),
+    // Read within the stack the field is drawn in, which a palette just
+    // opened has drawn in no frame yet.
+    let field = field_stack();
+    let line = |hints: &[Hint]| {
+        let hints = hints.iter().filter_map(|(actions, does)| {
+            let keys: Option<Vec<_>> = actions
+                .iter()
+                .map(|action| key_text_within(*action, &field, cx))
+                .collect();
+            Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(format!("{} {does}", keys?.join("/")))
+                    .child(
+                        div()
+                            .w(HINT_SEPARATOR_WIDTH)
+                            .flex()
+                            .justify_center()
+                            .child("·"),
+                    ),
+            )
         });
+        // The hints wrap between one another, and each line of them ends past
+        // the clipped edge by one separator, so no line shows a trailing one.
+        div().min_w_0().overflow_hidden().flex().flex_col().child(
+            div()
+                .mr(-HINT_SEPARATOR_WIDTH)
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .children(hints),
+        )
+    };
+    let [first, second] = KEY_HINTS.map(line);
     div()
         .flex()
-        .justify_between()
-        .gap_2()
+        .flex_col()
         .px(menu_chrome::ROW_INSET)
         .pt_1()
         .text_xs()
         .text_color(muted)
-        .child(div().flex_none().child(tally))
         .child(
-            // The hints wrap between one another, so none runs past the
-            // palette's edge.
             div()
-                .flex_1()
-                .min_w_0()
                 .flex()
-                .flex_wrap()
-                .justify_end()
-                .gap_x_1()
-                .children(hints),
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(tally),
+                )
+                .child(first),
         )
+        .child(second)
 }
 
-/// The keys the palette answers to, as its footer lists them.
-const KEY_HINTS: &[&str] = &[
-    "↑↓ preview",
-    "enter jump",
-    "shift-enter always show",
-    "ctrl-enter why",
-    "alt-enter add chip",
-    "tab scope",
-    "esc back",
+/// The width a separator between two of the footer's hints takes.
+const HINT_SEPARATOR_WIDTH: Rems = rems(0.75);
+
+/// The key contexts from the panel's in to the palette field's text.
+fn field_stack() -> [KeyContext; 3] {
+    [
+        crate::KEY_CONTEXT.into(),
+        KEY_CONTEXT.into(),
+        text_input::KEY_CONTEXT.into(),
+    ]
+}
+
+/// A hint of the palette's footer: the keys it names, ahead of a word for what
+/// they do.
+type Hint = (&'static [&'static dyn Action], &'static str);
+
+/// The keys the palette's footer names, a line of hints each.
+const KEY_HINTS: [&[Hint]; 2] = [
+    &[
+        (&[&Previous, &Next], "preview"),
+        (&[&NextScope], "scope"),
+        (&[&Close], "back"),
+    ],
+    &[
+        (&[&Go], "jump"),
+        (&[&AlwaysShow], "always show"),
+        (&[&AskWhy], "why"),
+        (&[&AddChip], "add chip"),
+    ],
 ];
 
 /// One row: the node's text with the characters the query matched picked
@@ -716,6 +767,25 @@ fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_ui_components::binding_within;
+    use gpui::Keymap;
+
+    /// Every key the footer names is bound where the palette's field stands,
+    /// so no hint drops out of it.
+    #[test]
+    fn every_footer_hint_names_keys() {
+        let mut bindings = crate::bindings();
+        bindings.extend(text_input::bindings());
+        let keymap = Keymap::new(bindings);
+        for (actions, does) in KEY_HINTS.into_iter().flatten() {
+            for action in *actions {
+                assert!(
+                    binding_within(&keymap, *action, &field_stack()).is_some(),
+                    "{does}"
+                );
+            }
+        }
+    }
 
     /// A node is added as the target it belongs to, and a package box as
     /// every target of its package.

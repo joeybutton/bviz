@@ -35,7 +35,10 @@ pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use find_keys::find_key_bindings;
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
-pub use keys::{KeyStyle, action_label, binding_text, key_text, key_text_in, keystroke_text};
+pub use keys::{
+    KeyStyle, action_label, binding_text, binding_within, key_text, key_text_in, key_text_within,
+    keystroke_text,
+};
 pub use keys_help::{
     GESTURE_MAX_CHARS, GestureGroup, KEYS_HELP_NAME, KeyGroup, KeyRow, KeysHelp, KeysHelpEvent,
     LABEL_MAX_CHARS, keys_in_effect,

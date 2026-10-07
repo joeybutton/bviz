@@ -4,7 +4,7 @@
 
 use crate::gesture::GestureRow;
 use crate::key_scope::{KeyScope, Nesting, UNSCOPED_LABEL};
-use crate::keys::{KeyStyle, binding_text};
+use crate::keys::{KeyStyle, binding_text, dispatched_first};
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome::{self, ROW_INSET};
 use crate::scrollbar::{SCROLLBAR_THICKNESS, ScrollbarColors};
@@ -279,15 +279,6 @@ fn identifiers(predicate: &KeyBindingContextPredicate, into: &mut Vec<SharedStri
             identifiers(right, into);
         }
     }
-}
-
-/// Whether `keymap` dispatches `binding` for its keystrokes within `stack`
-/// ahead of every other binding of them.
-fn dispatched_first(keymap: &Keymap, binding: &KeyBinding, stack: &[KeyContext]) -> bool {
-    let (matched, _) = keymap.bindings_for_input(binding.keystrokes(), stack);
-    matched.first().is_some_and(|first| {
-        first.action().partial_eq(binding.action()) && first.predicate() == binding.predicate()
-    })
 }
 
 /// Gestures a scope answers to, headed by that scope's label.

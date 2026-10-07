@@ -1,7 +1,8 @@
 //! How the keymap's bindings read where the interface names them.
 
 use gpui::{
-    Action, App, FocusHandle, KeyBinding, KeybindingKeystroke, Modifiers, SharedString, Window,
+    Action, App, FocusHandle, KeyBinding, KeyContext, KeybindingKeystroke, Keymap, Modifiers,
+    SharedString, Window,
 };
 
 /// How a keystroke is spelled out for display.
@@ -75,6 +76,46 @@ pub fn key_text_in(
 pub fn key_text(action: &dyn Action, window: &Window) -> Option<SharedString> {
     let binding = window.highest_precedence_binding_for_action(action)?;
     Some(binding_text(&binding, KeyStyle::NATIVE).into())
+}
+
+/// The keys that run `action` within `stack`, a context stack from the
+/// outermost context in, chosen as [`key_text_in`] chooses them for a focus
+/// handle: for a control naming keys that depend on a context the frame being
+/// drawn adds, which the last frame drawn does not carry.
+pub fn key_text_within(
+    action: &dyn Action,
+    stack: &[KeyContext],
+    cx: &App,
+) -> Option<SharedString> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let binding = binding_within(&keymap, action, stack)?;
+    Some(binding_text(binding, KeyStyle::NATIVE).into())
+}
+
+/// The binding of `keymap` [`key_text_within`] names the keys of.
+pub fn binding_within<'a>(
+    keymap: &'a Keymap,
+    action: &'a dyn Action,
+    stack: &[KeyContext],
+) -> Option<&'a KeyBinding> {
+    keymap
+        .bindings_for_action(action)
+        .rev()
+        .find(|binding| dispatched_first(keymap, binding, stack))
+}
+
+/// Whether `keymap` dispatches `binding` for its keystrokes within `stack`
+/// ahead of every other binding of them.
+pub(crate) fn dispatched_first(
+    keymap: &Keymap,
+    binding: &KeyBinding,
+    stack: &[KeyContext],
+) -> bool {
+    let (matched, _) = keymap.bindings_for_input(binding.keystrokes(), stack);
+    matched.first().is_some_and(|first| {
+        first.action().partial_eq(binding.action()) && first.predicate() == binding.predicate()
+    })
 }
 
 /// The help label of `action`: the first line of its documentation.
