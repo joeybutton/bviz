@@ -1411,13 +1411,38 @@ mod tests {
         );
     }
 
+    /// The document, and the slice hiding its actions leaves of it.
+    fn actions_hidden() -> (Loaded, Slice) {
+        let loaded = document();
+        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        (loaded, slice)
+    }
+
+    #[test]
+    fn a_target_whose_children_a_filter_hides_shrinks_in_place() {
+        let (loaded, slice) = actions_hidden();
+        let target = id(&loaded, "//a:t");
+
+        let whole = finest(loaded.shared.map.placed())
+            .boxes
+            .iter()
+            .find(|b| b.id == target)
+            .expect("the document draws the target");
+        let shrunk = finest(slice.map())
+            .boxes
+            .iter()
+            .find(|b| b.id == target)
+            .expect("the filter keeps the target");
+        assert_eq!((shrunk.x, shrunk.y), (whole.x, whole.y));
+        assert!(shrunk.width < whole.width && shrunk.height < whole.height);
+    }
+
     /// A restriction places what survives where the whole graph places it, so a
     /// filter change leaves the view looking at the same place rather than at a
     /// graph redrawn under it.
     #[test]
     fn a_restricted_map_draws_a_survivor_where_the_document_draws_it() {
-        let loaded = document();
-        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        let (loaded, slice) = actions_hidden();
 
         let whole = finest(loaded.shared.map.placed());
         for b in &finest(slice.map()).boxes {
