@@ -365,8 +365,8 @@ pub struct GraphPanel {
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
-    /// The layer drawing the graph; notified through
-    /// [`GraphPanel::invalidate_canvas`].
+    /// The layer drawing the graph; notified only through `invalidate_canvas`
+    /// and `invalidate_canvas_only`.
     canvas: Entity<GraphCanvas>,
     toolbar: Entity<ChromeLayer>,
     overlays: Entity<ChromeLayer>,
@@ -503,7 +503,7 @@ impl GraphPanel {
         let clock_moved = model.read(cx).clock().cloned().map(|clock| {
             cx.observe(&clock, |view, _, cx| {
                 if view.colouring == Colouring::Playback {
-                    view.canvas.update(cx, |_, cx| cx.notify());
+                    view.invalidate_canvas_only(cx);
                 }
             })
         });
@@ -581,12 +581,20 @@ impl GraphPanel {
         }
     }
 
-    /// Rebuilds the graph scene along with the frame around it; every change to
-    /// what the canvas draws routes through here, and a change that leaves the
-    /// drawing alone notifies alone, so the scene replays from its cache.
+    /// Rebuilds the graph scene along with the chrome around it; every change to
+    /// what the canvas draws routes through here or
+    /// [`invalidate_canvas_only`](Self::invalidate_canvas_only), and a change
+    /// that leaves the drawing alone notifies alone, so the scene replays from
+    /// its cache.
     pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
         self.canvas.update(cx, |_, cx| cx.notify());
         cx.notify();
+    }
+
+    /// Rebuilds the graph scene alone, for a change nothing a [`ChromeLayer`]
+    /// draws depends on.
+    pub(crate) fn invalidate_canvas_only(&self, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |_, cx| cx.notify());
     }
 
     /// Brings this drawing onto a layered layout the graph has landed.
@@ -803,7 +811,7 @@ impl GraphPanel {
     /// Eases the view onto the whole of what the panel draws.
     fn show_whole(&mut self, cx: &mut Context<Self>) {
         self.framing.request_frame(framing::Frame::Drawing);
-        self.invalidate_canvas(cx);
+        self.invalidate_canvas_only(cx);
     }
 
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -883,7 +891,7 @@ impl GraphPanel {
         let hit = self.box_id_at(position);
         if hit != self.hovered {
             self.hovered = hit;
-            self.invalidate_canvas(cx);
+            self.invalidate_canvas_only(cx);
         }
     }
 
@@ -894,7 +902,7 @@ impl GraphPanel {
     /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
-            self.invalidate_canvas(cx);
+            self.invalidate_canvas_only(cx);
         }
     }
 
@@ -935,7 +943,7 @@ impl GraphPanel {
         let viewport = self.framing.viewport();
         self.framing
             .move_to(scale_about(at, self.camera(), factor, viewport, content));
-        self.invalidate_canvas(cx);
+        self.invalidate_canvas_only(cx);
     }
 
     /// Puts away the innermost thing the reader set up: a reveal pending, then

@@ -173,7 +173,7 @@ pub(crate) fn pan_by(view: &mut GraphPanel, (dx, dy): (f32, f32), cx: &mut Conte
         None => panned,
     };
     view.framing.pan_to(panned);
-    view.invalidate_canvas(cx);
+    view.invalidate_canvas_only(cx);
 }
 
 /// End whatever gesture is in progress. A pan release that never travelled past

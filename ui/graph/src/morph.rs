@@ -344,11 +344,11 @@ pub(crate) fn begin(
             let done = this.update(cx, |this, cx| match this.morph.tick(generation) {
                 Step::Superseded => true,
                 Step::Travelling => {
-                    this.invalidate_canvas(cx);
+                    this.invalidate_canvas_only(cx);
                     false
                 }
                 Step::Landed => {
-                    this.invalidate_canvas(cx);
+                    this.invalidate_canvas_only(cx);
                     true
                 }
             });
