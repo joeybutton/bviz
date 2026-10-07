@@ -747,7 +747,7 @@ impl Workspace {
     /// `max_height` tall. Its keys are those in effect in the context stack the
     /// last frame drew from the window's root to `panel`, read along the path
     /// to the focused element; where that path does not pass through `panel`,
-    /// the window's own context stands in for what lies around it.
+    /// [`stack_around`] stands in for it.
     fn keys_help(
         &self,
         panel: &AnyPanel,
@@ -762,7 +762,7 @@ impl Workspace {
             .rposition(|context| context.contains(scope.id()))
         {
             Some(at) => stack.truncate(at + 1),
-            None => stack = vec![self.key_context(cx), scope.into()],
+            None => stack = stack_around(self.key_context(cx), scope),
         }
         let keys = {
             let keymap = cx.key_bindings();
@@ -2223,6 +2223,12 @@ fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &
     window.set_window_title(&window_title(app_name, panel, cx));
 }
 
+/// The context stack from the window's root to a panel scoped to `scope`,
+/// where the root carries `workspace`.
+fn stack_around(workspace: KeyContext, scope: KeyScope) -> Vec<KeyContext> {
+    vec![workspace, bviz_ui_shell::KEY_CONTEXT.into(), scope.into()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2765,5 +2771,32 @@ mod tests {
         let second = window_name(2, "build.profile.gz");
         assert_ne!(first, second);
         assert!(first.contains("build.profile.gz"), "{first}");
+    }
+
+    /// The keys help of a panel the last frame's path to focus left out still
+    /// lists the keys the window's frame binds.
+    #[test]
+    fn the_stack_around_a_panel_reaches_the_window_frames_keys() {
+        const PANEL: KeyScope = KeyScope::new("Panel", "Panel");
+        let keymap = gpui::Keymap::new(bviz_ui_shell::bindings());
+        let groups = keys_in_effect(
+            &keymap,
+            &[KEY_CONTEXT, bviz_ui_shell::KEY_CONTEXT, PANEL],
+            &stack_around(KEY_CONTEXT.into(), PANEL),
+            PANEL,
+            |action| action.name().into(),
+            KeyStyle::Words,
+        );
+        let listed: Vec<SharedString> = groups
+            .into_iter()
+            .flat_map(|group| group.rows)
+            .map(|row| row.label)
+            .collect();
+        for action in [&bviz_ui_shell::Tab as &dyn Action, &bviz_ui_shell::TabPrev] {
+            assert!(
+                listed.iter().any(|label| label == action.name()),
+                "{listed:?}"
+            );
+        }
     }
 }

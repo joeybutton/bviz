@@ -11,7 +11,16 @@ use std::fmt;
 pub struct KeyScope {
     id: &'static str,
     label: &'static str,
-    within: Option<Within>,
+    standing: Standing,
+}
+
+/// Where a scope stands among the others.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Standing {
+    Alone,
+    Within(Within),
+    /// Around everything a window draws.
+    Frame,
 }
 
 /// How a scope narrows the scope it belongs to.
@@ -40,7 +49,19 @@ impl KeyScope {
         Self {
             id,
             label: fitting(label),
-            within: None,
+            standing: Standing::Alone,
+        }
+    }
+
+    /// The scope of a window's frame, around everything the window draws. A
+    /// binding is scoped to it only to rank below every binding of its keys
+    /// scoped inside the window, so it reaches wherever focus stands in the
+    /// window, and the keys help lists it with the bindings scoped to none.
+    pub const fn frame(id: &'static str) -> Self {
+        Self {
+            id,
+            label: UNSCOPED_LABEL,
+            standing: Standing::Frame,
         }
     }
 
@@ -55,7 +76,7 @@ impl KeyScope {
         Self {
             id,
             label: fitting(label),
-            within: Some(Within {
+            standing: Standing::Within(Within {
                 id: parent.id,
                 nesting,
             }),
@@ -72,7 +93,14 @@ impl KeyScope {
     }
 
     pub(crate) fn within_scope(&self) -> Option<Within> {
-        self.within
+        match self.standing {
+            Standing::Within(within) => Some(within),
+            Standing::Alone | Standing::Frame => None,
+        }
+    }
+
+    pub(crate) fn is_frame(&self) -> bool {
+        self.standing == Standing::Frame
     }
 }
 

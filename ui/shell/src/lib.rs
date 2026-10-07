@@ -4,6 +4,7 @@
 mod chrome;
 pub use chrome::{Chrome, title_bar_gestures};
 
+use bviz_ui_components::{KeyScope, declare_scopes};
 use gpui::{
     App, Application, Bounds, Entity, KeyBinding, Pixels, Render, Result, Size, TitlebarOptions,
     Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, actions, px,
@@ -23,11 +24,11 @@ actions!(
     ]
 );
 
-/// The key context of the window frame, the outermost of every context in the
-/// window. gpui prefers the binding whose context matches deepest, and a
+/// The key context of the window frame [`Chrome`] draws around a window's
+/// content. gpui prefers the binding whose context matches deepest, and a
 /// binding scoped to none matches at the focused element itself, so tab is
-/// scoped here for any context inside the window to take it.
-const KEY_CONTEXT: &str = "Window";
+/// scoped here for any context inside the frame to take it.
+pub const KEY_CONTEXT: KeyScope = KeyScope::frame("Window");
 
 /// The smallest the window may be resized to, so its chrome and content can't be
 /// crushed to nothing. Smaller than every app's opening size.
@@ -64,6 +65,7 @@ fn exit_without_wayland() {
 pub fn setup(cx: &mut App) {
     bviz_ui_assets::load_fonts(cx);
     bviz_ui_theme::init(cx).expect("the built-in themes load");
+    declare_scopes(cx, [KEY_CONTEXT]);
     cx.bind_keys(bindings());
     bviz_ui_components::register_keys(cx);
     cx.on_window_closed(|cx, _| {
@@ -74,8 +76,8 @@ pub fn setup(cx: &mut App) {
     .detach();
 }
 
-fn bindings() -> Vec<KeyBinding> {
-    let window = Some(KEY_CONTEXT);
+pub fn bindings() -> Vec<KeyBinding> {
+    let window = Some(KEY_CONTEXT.id());
     vec![
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-shift-w", CloseWindow, None),
@@ -156,16 +158,19 @@ mod tests {
     /// yields to a context that does, however deep the focus sits below it.
     #[test]
     fn a_context_inside_the_window_takes_tab_from_focus_cycling() {
-        assert!(is(dispatched("tab", &[KEY_CONTEXT]), Tab));
+        assert!(is(dispatched("tab", &[KEY_CONTEXT.id()]), Tab));
         assert!(is(
-            dispatched("shift-tab", &[KEY_CONTEXT, "Field"]),
+            dispatched("shift-tab", &[KEY_CONTEXT.id(), "Field"]),
             TabPrev
         ));
-        assert!(is(dispatched("tab", &[KEY_CONTEXT, "Panel", "Field"]), Tab));
         assert!(is(
-            dispatched("tab", &[KEY_CONTEXT, "Panel", "Inner", "Field"]),
+            dispatched("tab", &[KEY_CONTEXT.id(), "Panel", "Field"]),
+            Tab
+        ));
+        assert!(is(
+            dispatched("tab", &[KEY_CONTEXT.id(), "Panel", "Inner", "Field"]),
             Inner
         ));
-        assert!(is(dispatched("tab", &[KEY_CONTEXT, "Inner"]), Inner));
+        assert!(is(dispatched("tab", &[KEY_CONTEXT.id(), "Inner"]), Inner));
     }
 }

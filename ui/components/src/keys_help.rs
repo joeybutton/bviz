@@ -81,24 +81,40 @@ pub struct KeyRow {
 /// in effect.
 struct Slot {
     label: &'static str,
-    /// The identifier a predicate names the scope by; `None` for the bindings
-    /// scoped to no key context.
-    id: Option<&'static str>,
+    holds: Holds,
     /// How deep the scope stands in `stack`, by which a binding naming several
     /// scopes is filed under the innermost.
     depth: usize,
     stack: Vec<KeyContext>,
 }
 
+/// Which bindings a [`Slot`] files.
+enum Holds {
+    /// Those naming the scope a predicate names by this identifier.
+    Scope(&'static str),
+    /// Those scoped to no key context, or to the frames of these identifiers.
+    Unscoped(Vec<&'static str>),
+}
+
+impl Holds {
+    fn named_by(&self, named: &[SharedString]) -> bool {
+        let names = |id: &str| named.iter().any(|name| name == id);
+        match self {
+            Holds::Scope(id) => names(id),
+            Holds::Unscoped(frames) => frames.iter().any(|frame| names(frame)),
+        }
+    }
+}
+
 /// The bindings of `keymap` in effect for the panel scoped to `panel`, grouped
 /// by the scope each binding's predicate names: the panel's own, then each
 /// scope declared within it, then each enclosing scope `stack` holds from the
-/// innermost out, then the bindings scoped to none. `stack` runs from the
-/// window's root to the panel's own context. A binding is in effect where the
-/// keymap dispatches it ahead of every other binding of its keystrokes, a
-/// scope within the panel counting as entered, so that the keys of a field or
-/// a state are listed while it is not in effect. `label` names an action's
-/// row.
+/// innermost out, then the bindings scoped to none or to a window's frame.
+/// `stack` runs from the window's root to the panel's own context. A binding is
+/// in effect where the keymap dispatches it ahead of every other binding of its
+/// keystrokes, a scope within the panel counting as entered, so that the keys
+/// of a field or a state are listed while it is not in effect. `label` names an
+/// action's row.
 pub fn keys_in_effect(
     keymap: &Keymap,
     scopes: &[KeyScope],
@@ -154,7 +170,7 @@ fn slots(scopes: &[KeyScope], stack: &[KeyContext], panel: KeyScope) -> Vec<Slot
     let panel_depth = stack.len().saturating_sub(1);
     let mut slots = vec![Slot {
         label: panel.label(),
-        id: Some(panel.id()),
+        holds: Holds::Scope(panel.id()),
         depth: panel_depth,
         stack: stack.to_vec(),
     }];
@@ -170,27 +186,33 @@ fn slots(scopes: &[KeyScope], stack: &[KeyContext], panel: KeyScope) -> Vec<Slot
             }
             slots.push(Slot {
                 label: scope.label(),
-                id: Some(scope.id()),
+                holds: Holds::Scope(scope.id()),
                 depth: panel_depth + chain.len(),
                 stack: entered,
             });
         }
     }
+    let mut frames = Vec::new();
     for depth in (0..panel_depth).rev() {
-        for scope in scopes {
-            if stack[depth].contains(scope.id()) {
-                slots.push(Slot {
-                    label: scope.label(),
-                    id: Some(scope.id()),
-                    depth,
-                    stack: stack.to_vec(),
-                });
+        for scope in scopes
+            .iter()
+            .filter(|scope| stack[depth].contains(scope.id()))
+        {
+            if scope.is_frame() {
+                frames.push(scope.id());
+                continue;
             }
+            slots.push(Slot {
+                label: scope.label(),
+                holds: Holds::Scope(scope.id()),
+                depth,
+                stack: stack.to_vec(),
+            });
         }
     }
     slots.push(Slot {
         label: UNSCOPED_LABEL,
-        id: None,
+        holds: Holds::Unscoped(frames),
         depth: 0,
         stack: stack.to_vec(),
     });
@@ -217,24 +239,27 @@ fn chain_within<'a>(
 }
 
 /// The slot `binding` is filed under: the innermost scope its predicate names,
-/// or the bindings scoped to none for a predicate naming no scope. `None` for a
-/// binding naming only scopes that are neither the panel's nor around it.
+/// or the bindings scoped to none for a predicate naming no scope or only a
+/// window's frame. `None` for a binding naming only scopes that are neither the
+/// panel's nor around it.
 fn slot_of(binding: &KeyBinding, slots: &[Slot]) -> Option<usize> {
+    let unscoped = || {
+        slots
+            .iter()
+            .position(|slot| matches!(slot.holds, Holds::Unscoped(_)))
+    };
     let Some(predicate) = binding.predicate() else {
-        return slots.iter().position(|slot| slot.id.is_none());
+        return unscoped();
     };
     let mut named = Vec::new();
     identifiers(&predicate, &mut named);
     if named.is_empty() {
-        return slots.iter().position(|slot| slot.id.is_none());
+        return unscoped();
     }
     slots
         .iter()
         .enumerate()
-        .filter(|(_, slot)| {
-            slot.id
-                .is_some_and(|id| named.iter().any(|name| name == id))
-        })
+        .filter(|(_, slot)| slot.holds.named_by(&named))
         .max_by_key(|(_, slot)| slot.depth)
         .map(|(at, _)| at)
 }
@@ -659,6 +684,44 @@ mod tests {
             KeyBinding::new("r", gpui::NoAction, Some("Graph")),
         ]);
         assert_eq!(read, []);
+    }
+
+    /// A frame's bindings reach wherever focus stands in the window, so they
+    /// are listed with the bindings scoped to none, after every scope around
+    /// the panel however deep the frame stands among them.
+    #[test]
+    fn a_frames_bindings_are_listed_with_those_scoped_to_none() {
+        const FRAME: KeyScope = KeyScope::frame("Window");
+        let keymap = Keymap::new(vec![
+            KeyBinding::new("tab", StepBack, Some("Window")),
+            KeyBinding::new("secondary-k m", ToggleMaximize, Some("Workspace")),
+            KeyBinding::new("secondary-q", Quit, None),
+        ]);
+        let stack = [WORKSPACE.into(), FRAME.into(), GRAPH.into()];
+        let groups = keys_in_effect(
+            &keymap,
+            &[WORKSPACE, FRAME, GRAPH],
+            &stack,
+            GRAPH,
+            |action| action.name().rsplit("::").next().unwrap_or_default().into(),
+            KeyStyle::Words,
+        );
+        let read: Vec<(&str, Vec<SharedString>)> = groups
+            .into_iter()
+            .map(|group| {
+                (
+                    group.label,
+                    group.rows.into_iter().map(|row| row.label).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            [
+                ("Panes & windows", vec!["ToggleMaximize".into()]),
+                (UNSCOPED_LABEL, vec!["StepBack".into(), "Quit".into()]),
+            ]
+        );
     }
 
     /// A field's keys stand down for the panel's own while the field is not
