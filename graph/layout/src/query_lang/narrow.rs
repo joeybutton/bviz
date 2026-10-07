@@ -34,7 +34,7 @@ use regex_syntax::hir::{Hir, Look};
 use rustc_hash::FxHashMap;
 
 use super::ast::Function;
-use super::declared::Attribute;
+use super::declared::{Attribute, FILE_KINDS, file_kind};
 use super::universe::Universe;
 use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
 use crate::exec_path::{ExecPath, LeftOutInputs};
@@ -228,10 +228,28 @@ impl Universe {
         }
     }
 
-    /// The members of `value` whose target's kind `regex` matches.
+    /// The members of `value`, and the files its configured targets hold,
+    /// whose kind `regex` matches: a file's own, as Bazel names a file target,
+    /// and the target's of any other node.
     pub(super) fn kind(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
-        self.retain(value, |at| {
-            (self.declared.kind(at)).is_some_and(|kind| regex.is_match(kind.as_bytes()))
+        let matches = |kind: &str| regex.is_match(kind.as_bytes());
+        let files = FILE_KINDS.map(|(file, name)| (file, matches(name)));
+        let own = |id: Id| {
+            let kind = self.index.kind(id)?;
+            (files.iter()).find_map(|&(file, kept)| (file == kind).then_some(kept))
+        };
+        let mut considered = value.clone();
+        for id in value.ones().map(|id| Id(id as u32)) {
+            if self.index.kind(id) == Some(Kind::ConfiguredTarget) {
+                let held = self
+                    .index
+                    .children(id)
+                    .filter(|&child| own(child).is_some());
+                considered.extend(held.map(|file| file.0 as usize));
+            }
+        }
+        self.retain_unless_own(&considered, own, |at| {
+            self.declared.kind(at).is_some_and(matches)
         })
     }
 
@@ -287,12 +305,14 @@ impl Universe {
     }
 
     /// The members of `value` whose target is a rule of a class in a category
-    /// whose [spelling](RuleCategory::spelling) `regex` matches.
+    /// whose [spelling](RuleCategory::spelling) `regex` matches. A file, being
+    /// no rule, is in no category.
     pub(super) fn rule_category(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
         let matched: Vec<RuleCategory> = (RuleCategory::ALL.into_iter())
             .filter(|category| regex.is_match(category.spelling().as_bytes()))
             .collect();
-        self.retain(value, |at| {
+        let own = |id: Id| file_kind(self.index.kind(id)?).map(|_| false);
+        self.retain_unless_own(value, own, |at| {
             let class = self.facets.rule_class(self.labels.entries()[at].0);
             let category = class.and_then(|class| self.facets.rule_category(class));
             category.is_some_and(|category| matched.contains(&category))
@@ -420,13 +440,28 @@ impl Universe {
     /// The members of `value` belonging to a target `keeps`, by its position
     /// among the labels, asked once for each target.
     fn retain(&self, value: &FixedBitSet, keeps: impl Fn(usize) -> bool) -> FixedBitSet {
+        self.retain_unless_own(value, |_| None, keeps)
+    }
+
+    /// [`Self::retain`], but a member `own` gives a verdict of its own is kept
+    /// by that verdict.
+    fn retain_unless_own(
+        &self,
+        value: &FixedBitSet,
+        own: impl Fn(Id) -> Option<bool>,
+        keeps: impl Fn(usize) -> bool,
+    ) -> FixedBitSet {
         let mut verdicts: FxHashMap<usize, bool> = FxHashMap::default();
         let mut kept = self.empty();
         for id in value.ones() {
-            let Some(at) = self.position(Id(id as u32)) else {
-                continue;
+            let verdict = match own(Id(id as u32)) {
+                Some(verdict) => verdict,
+                None => match self.position(Id(id as u32)) {
+                    Some(at) => *verdicts.entry(at).or_insert_with(|| keeps(at)),
+                    None => false,
+                },
             };
-            if *verdicts.entry(at).or_insert_with(|| keeps(at)) {
+            if verdict {
                 kept.insert(id);
             }
         }

@@ -1956,3 +1956,97 @@ fn a_chip_taking_out_every_mnemonic_leaves_no_action_drawn() {
     assert!(!drawn.iter().any(|n| n.starts_with("action:")), "{drawn:?}");
     assert!(drawn.iter().any(|n| n.starts_with("artifact")), "{drawn:?}");
 }
+
+/// `//p:bin`, a `cc_binary` compiling the source `//p:main.cc` to `main.o`
+/// and linking that into `bin`, as query and aquery describe it.
+fn linked() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let (object, binary) = (out("main.o"), out("bin"));
+    let targets = [
+        crate::test_support::rule("//p:bin", "cc_binary", &["//p:main.cc"], Vec::new()),
+        source("//p:main.cc"),
+    ];
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppCompile",
+            inputs: &["p/main.cc"],
+            outputs: &[&object],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &[&object],
+            outputs: &[&binary],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+/// Whether `name` is the name of an output with no label of its own.
+fn unlabeled_output(name: &str) -> bool {
+    name.starts_with("artifact")
+}
+
+#[test]
+fn kind_matches_a_file_by_its_own_class() {
+    let (universe, names) = linked();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    let outputs = query("kind('generated file', //p:bin)");
+    assert_eq!(outputs.len(), 2, "{outputs:?}");
+    assert!(
+        outputs.iter().all(|name| unlabeled_output(name)),
+        "{outputs:?}"
+    );
+    assert_eq!(query("kind('source file', deps(//p:bin))"), ["//p:main.cc"]);
+    let rule = query("kind('cc_binary rule', deps(//p:bin))");
+    assert!(!rule.iter().any(|name| unlabeled_output(name)), "{rule:?}");
+    assert_eq!(query("rule_category(other, deps(//p:bin))"), rule);
+}
+
+#[test]
+fn a_scope_over_a_rule_draws_the_files_it_writes() {
+    let (universe, names) = linked();
+    let value = universe
+        .evaluate(&parse("kind('cc_binary rule', //p:bin)").unwrap())
+        .unwrap();
+    let drawn = labels(&names, &undenied_scope(&universe, value));
+    assert_eq!(
+        drawn.iter().filter(|&name| unlabeled_output(name)).count(),
+        2
+    );
+}
+
+#[test]
+fn a_chip_taking_out_a_file_class_leaves_its_files_undrawn() {
+    let linked = linked();
+    let drawn = scoped(
+        &linked,
+        &["//...", "except kind('generated file')"],
+        &[],
+        &[],
+    );
+    assert!(
+        !drawn.iter().any(|name| unlabeled_output(name)),
+        "{drawn:?}"
+    );
+    assert!(drawn.contains(&"//p:bin".to_string()));
+    let drawn = scoped(
+        &linked,
+        &["//...:*", "except kind('source file')"],
+        &[],
+        &[],
+    );
+    assert!(!drawn.contains(&"//p:main.cc".to_string()), "{drawn:?}");
+    assert_eq!(
+        drawn.iter().filter(|&name| unlabeled_output(name)).count(),
+        2
+    );
+}
