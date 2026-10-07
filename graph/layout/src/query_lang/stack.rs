@@ -878,7 +878,7 @@ impl Command {
             | Function::SomePath
             | Function::Tests
             | Function::Visible => true,
-            Function::RepoCategory => false,
+            Function::RepoCategory | Function::RuleCategory => false,
         }
     }
 

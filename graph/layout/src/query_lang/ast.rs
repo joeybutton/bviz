@@ -129,6 +129,7 @@ pub enum Function {
     RBuildFiles,
     Rdeps,
     RepoCategory,
+    RuleCategory,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -152,6 +153,7 @@ pub(super) enum Evaluable {
     Outputs,
     Rdeps,
     RepoCategory,
+    RuleCategory,
     SamePkgDirectRdeps,
     Siblings,
     Some,
@@ -186,7 +188,7 @@ impl Function {
     ];
 
     /// Every function bviz accepts that Bazel does not, sorted by name.
-    pub const EXTENSIONS: [Function; 1] = [Function::RepoCategory];
+    pub const EXTENSIONS: [Function; 2] = [Function::RepoCategory, Function::RuleCategory];
 
     /// Every function bviz accepts: Bazel's, then the extensions.
     pub const ALL: [Function; Function::BAZEL.len() + Function::EXTENSIONS.len()] = {
@@ -207,7 +209,7 @@ impl Function {
     /// than one of [`Function::BAZEL`].
     pub fn is_extension(self) -> bool {
         match self {
-            Function::RepoCategory => true,
+            Function::RepoCategory | Function::RuleCategory => true,
             Function::AllPaths
             | Function::AllRdeps
             | Function::Attr
@@ -252,6 +254,7 @@ impl Function {
             Function::RBuildFiles => "rbuildfiles",
             Function::Rdeps => "rdeps",
             Function::RepoCategory => "repo_category",
+            Function::RuleCategory => "rule_category",
             Function::SamePkgDirectRdeps => "same_pkg_direct_rdeps",
             Function::Siblings => "siblings",
             Function::Some => "some",
@@ -289,6 +292,7 @@ impl Function {
             Function::Outputs => return Ok(Evaluable::Outputs),
             Function::Rdeps => return Ok(Evaluable::Rdeps),
             Function::RepoCategory => return Ok(Evaluable::RepoCategory),
+            Function::RuleCategory => return Ok(Evaluable::RuleCategory),
             Function::SamePkgDirectRdeps => return Ok(Evaluable::SamePkgDirectRdeps),
             Function::Siblings => return Ok(Evaluable::Siblings),
             Function::Some => return Ok(Evaluable::Some),
@@ -321,9 +325,11 @@ impl Function {
             | Function::Siblings
             | Function::Tests => (&[E], 1),
             Function::Config => (&[E, W], 2),
-            Function::Filter | Function::Kind | Function::Labels | Function::RepoCategory => {
-                (&[W, E], 2)
-            }
+            Function::Filter
+            | Function::Kind
+            | Function::Labels
+            | Function::RepoCategory
+            | Function::RuleCategory => (&[W, E], 2),
             // Bazel lets aquery's filters drop the expression for
             // `--skyframe_state`, and rejects that when it evaluates them.
             Function::Inputs | Function::Mnemonic | Function::Outputs => (&[W, E], 1),

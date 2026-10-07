@@ -102,6 +102,10 @@ fn a_chip_calling_an_extension_narrows_the_set_before_it() {
         fixture.named(&stack(&["//b:all", "repo_category(main)"])),
         ["//b:app", "//b:test"]
     );
+    assert_eq!(
+        fixture.named(&stack(&["//b:all", "rule_category(test)"])),
+        ["//b:test"]
+    );
 }
 
 #[test]
@@ -517,6 +521,10 @@ fn a_stack_using_an_extension_has_no_bazel_query() {
     assert_eq!(
         bazel(&["//a:all", "repo_category(main)"]),
         extension(Extension::Function(Function::RepoCategory))
+    );
+    assert_eq!(
+        bazel(&["//a:all", "rule_category(test)"]),
+        extension(Extension::Function(Function::RuleCategory))
     );
     assert_eq!(
         Unportable::Extension(Extension::Function(Function::RepoCategory)).to_string(),

@@ -298,6 +298,25 @@ const PLUMBING_RULES: [&str; 6] = [
 const TEST_SUFFIX: &str = "_test";
 
 impl RuleCategory {
+    pub const ALL: [RuleCategory; 5] = [
+        RuleCategory::Test,
+        RuleCategory::Alias,
+        RuleCategory::Filegroup,
+        RuleCategory::Plumbing,
+        RuleCategory::Other,
+    ];
+
+    /// The word a query names the category by.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            RuleCategory::Test => "test",
+            RuleCategory::Alias => "alias",
+            RuleCategory::Filegroup => "filegroup",
+            RuleCategory::Plumbing => "plumbing",
+            RuleCategory::Other => "other",
+        }
+    }
+
     /// The category the rule class `name` falls in. A rule class bviz knows no
     /// role for is [`RuleCategory::Other`], so a Starlark rule and an unfamiliar
     /// native one land there rather than being mistaken for a category.

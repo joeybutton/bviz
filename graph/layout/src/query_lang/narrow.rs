@@ -38,6 +38,7 @@ use super::declared::Attribute;
 use super::universe::Universe;
 use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
 use crate::exec_path::{ExecPath, LeftOutInputs};
+use crate::facets::RuleCategory;
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
@@ -263,6 +264,19 @@ impl Universe {
                 RepoName::Canonical(_) => None,
             })
             .min()
+    }
+
+    /// The members of `value` whose target is a rule of a class in a category
+    /// whose [spelling](RuleCategory::spelling) `regex` matches.
+    pub(super) fn rule_category(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
+        let matched: Vec<RuleCategory> = (RuleCategory::ALL.into_iter())
+            .filter(|category| regex.is_match(category.spelling().as_bytes()))
+            .collect();
+        self.retain(value, |at| {
+            let class = self.facets.rule_class(self.labels.entries()[at].0);
+            let category = class.and_then(|class| self.facets.rule_category(class));
+            category.is_some_and(|category| matched.contains(&category))
+        })
     }
 
     /// The members of `value` whose target's label `regex` matches.

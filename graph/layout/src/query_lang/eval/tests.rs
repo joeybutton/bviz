@@ -1620,3 +1620,44 @@ fn repo_category_answers_where_module_evidence_places_every_apparent_name() {
         ["@@m+//m:lib", "@m//m:api"]
     );
 }
+
+#[test]
+fn rule_category_matches_the_whole_spelling_of_a_rules_category() {
+    use crate::test_support::rule;
+    let targets = [
+        rule("//r:test", "cc_test", &[], Vec::new()),
+        rule("//r:alias", "alias", &[], Vec::new()),
+        rule("//r:files", "filegroup", &[], Vec::new()),
+        rule("//r:setting", "config_setting", &[], Vec::new()),
+        rule("//r:lib", "cc_library", &["//r:lib.cc"], Vec::new()),
+        source("//r:lib.cc"),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    assert_eq!(query("rule_category(test, //r:*)"), ["//r:test"]);
+    assert_eq!(
+        query("rule_category('alias|filegroup', //r:*)"),
+        ["//r:alias", "//r:files"]
+    );
+    assert_eq!(query("rule_category(plumbing, //r:*)"), ["//r:setting"]);
+    assert_eq!(
+        query("rule_category(other, //r:*)"),
+        ["//r:lib"],
+        "a file is no rule"
+    );
+    assert!(query("rule_category(tes, //r:*)").is_empty());
+}
+
+#[test]
+fn rule_category_keeps_what_a_matching_rule_holds() {
+    let (universe, names) = configured(true);
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("rule_category(other, //c:lib)"), query("//c:lib"));
+    assert!(query("rule_category(test, //c:lib)").is_empty());
+}
