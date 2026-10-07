@@ -2,7 +2,7 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::{Id, Kind};
+use bviz_graph_layout::Id;
 use bviz_invocation::Session;
 use bviz_ui_components::gesture::{
     GestureRow, Pointer, pinch_factor, scroll_pixels, wheel_zoom_factor,
@@ -88,6 +88,7 @@ use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
+use rules::BoxClass;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
@@ -297,12 +298,12 @@ pub struct GraphPanel {
     colour_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`colour::set`].
     _colour_choices: Subscription,
-    /// The node classes the loaded graph holds boxes for, in the order the class
-    /// checklist's rows stand.
-    classes: Vec<Kind>,
-    class_filter: Entity<MultiSelect>,
-    /// Carries a toggled class row into the panel's filter.
-    _class_choices: Subscription,
+    /// The box classes the loaded graph carries, in the order the boxes menu's
+    /// rows stand.
+    box_classes: Vec<BoxClass>,
+    boxes: Entity<MultiSelect>,
+    /// Carries a toggled boxes-menu row into the panel's filter.
+    _box_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
     jump: jump::Finder,
@@ -450,10 +451,9 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
-        let class_filter =
-            cx.new(|cx| MultiSelect::new("graph-classes", "classes", Vec::new(), cx));
-        let class_choices = cx.subscribe(&class_filter, |view, _, event: &MultiSelectEvent, cx| {
-            checklist::choose_classes(view, event, cx);
+        let boxes = cx.new(|cx| MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx));
+        let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
+            checklist::choose_boxes(view, event, cx);
         });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
@@ -516,9 +516,9 @@ impl GraphPanel {
             colouring,
             colour_picker,
             _colour_choices: colour_choices,
-            classes: Vec::new(),
-            class_filter,
-            _class_choices: class_choices,
+            box_classes: Vec::new(),
+            boxes,
+            _box_choices: box_choices,
             chips,
             jump: jump::Finder::default(),
             matchers: fuzzy::Pool::default(),
@@ -694,7 +694,7 @@ impl GraphPanel {
             mode: self.mode,
             chips: chips::bar(self, palette, window, cx),
             picker: self.mode_picker.clone(),
-            class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
+            boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
             why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
@@ -1154,8 +1154,8 @@ struct Controls {
     /// The query bar.
     chips: AnyElement,
     picker: Entity<Dropdown>,
-    /// The class checklist, offered only where the loaded graph carries a class.
-    class_filter: Option<Entity<MultiSelect>>,
+    /// The boxes menu, offered only where the loaded graph carries a box class.
+    boxes: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,
@@ -1381,6 +1381,7 @@ mod tests {
     };
     use crate::paint::lane_polyline;
     use bviz_graph_layout::Box;
+    use bviz_graph_layout::Kind;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
     use bviz_ui_components::keymap_probe::{self, is};
     use gpui::{Bounds, Size, point};

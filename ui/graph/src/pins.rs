@@ -395,8 +395,7 @@ mod tests {
         }
     }
 
-    /// A filter hiding every action, which is the sort of reduction a checklist
-    /// writes and a pin has to stand against.
+    /// A filter hiding every action, which a pin has to stand against.
     fn hiding_actions() -> Filter {
         Filter {
             rules: vec![Rule {

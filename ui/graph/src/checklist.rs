@@ -1,73 +1,73 @@
-//! The toolbar's class checklist: the node classes a loaded graph carries, and
-//! the options the control draws for them.
+//! The toolbar's boxes menu: the box classes a loaded graph carries, and the
+//! options the control draws for them.
 //!
-//! What the checklist holds is what the graph carries, in the order its rows
+//! What the menu holds is what the graph carries, in the order its rows
 //! stand. Every checkmark is derived from the panel's filter each time the
 //! options are stated, so nothing here records what is drawn — see
 //! [`crate::rules`].
 
-use crate::{GraphPanel, derive, rules};
+use crate::rules::{self, BoxClass};
+use crate::{GraphPanel, derive};
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::graph::{Graph, id_span};
 use bviz_graph_layout::select::Filter;
 use bviz_ui_components::{MultiOption, MultiSelectEvent};
 use gpui::Context;
 
-/// The node classes `graph` holds boxes for, in the order the kinds are
-/// declared, which runs from the outermost box a drawing nests to the leaves
-/// inside it.
-pub(crate) fn carried_classes(graph: &Graph) -> Vec<Kind> {
-    let mut classes: Vec<Kind> = graph.nodes.iter().map(|node| node.kind).collect();
+/// The box classes of the nodes holding another in `graph`, outermost first.
+pub(crate) fn carried_boxes(graph: &Graph) -> Vec<BoxClass> {
+    let mut kinds: Vec<Option<Kind>> = vec![None; id_span(graph)];
+    for node in &graph.nodes {
+        kinds[node.id.0 as usize] = Some(node.kind);
+    }
+    let mut classes: Vec<BoxClass> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| kinds.get(node.parent?.0 as usize).copied().flatten())
+        .filter_map(BoxClass::of)
+        .collect();
     classes.sort_unstable();
     classes.dedup();
     classes
 }
 
-/// How a reader names the class `kind`.
-///
-/// A container's row names the box the drawing puts round what it holds, since
-/// hiding it unwraps that box: its contents lift to the nearest box still drawn
-/// rather than leaving the graph.
-fn class_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Package => "package boxes",
-        Kind::Target => "target boxes",
-        Kind::ConfiguredTarget => "configured-target boxes",
-        Kind::Action => "actions",
-        Kind::Artifact => "generated files",
-        Kind::Source => "source files",
-        Kind::TargetGroup => "package and environment groups",
-        Kind::MergeGroup => "merged file groups",
+/// How the boxes menu names `class`.
+fn box_label(class: BoxClass) -> &'static str {
+    match class {
+        BoxClass::Package => "packages",
+        BoxClass::Target => "targets",
+        BoxClass::LabeledOutput => "labeled outputs",
+        BoxClass::ConfiguredTarget => "configured targets",
     }
 }
 
-/// The options a class checklist draws for `classes` under `filter`.
-pub(crate) fn class_options(filter: &Filter, classes: &[Kind]) -> Vec<MultiOption> {
+/// The options the boxes menu draws for `classes` under `filter`.
+pub(crate) fn box_options(filter: &Filter, classes: &[BoxClass]) -> Vec<MultiOption> {
     let hidden = rules::hidden(filter);
     classes
         .iter()
-        .map(|&kind| MultiOption::new(class_label(kind), !hidden.contains(&kind)))
+        .map(|&class| MultiOption::new(box_label(class), !hidden.contains(&class)))
         .collect()
 }
 
-/// Takes up the classes a freshly read graph carries and states the checklist
+/// Takes up the box classes a freshly read graph carries and states the menu
 /// over them.
 pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let Some(loaded) = view.model.read(cx).loaded() else {
         return;
     };
-    view.classes = carried_classes(&loaded.shared.base);
+    view.box_classes = carried_boxes(&loaded.shared.base);
     restate(view, cx);
 }
 
-/// States the checklist's rows afresh from the filter the panel draws through.
+/// States the menu's rows afresh from the filter the panel draws through.
 pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let classes = class_options(view.derived.filter(), &view.classes);
-    view.class_filter
-        .update(cx, |control, cx| control.set_options(classes, cx));
+    let options = box_options(view.derived.filter(), &view.box_classes);
+    view.boxes
+        .update(cx, |control, cx| control.set_options(options, cx));
 }
 
-/// Draws the graph through `filter` from here on and restates the checklist
+/// Draws the graph through `filter` from here on and restates the boxes menu
 /// over it, so a rule and the checkmark reading it move together.
 pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
     derive::set_filter(view, filter, cx);
@@ -85,16 +85,16 @@ pub(crate) fn set_filter_framed(
     restate(view, cx);
 }
 
-/// `filter` with the node classes the class checklist's `event` names drawn, or
-/// left out.
+/// `filter` with the box classes the boxes menu's `event` names drawn, or
+/// unwrapped.
 ///
 /// A click over a range writes every row it covers as a single click on that
 /// row would, so it leaves the rules the run of single clicks would have left —
 /// including the rules the control did not write, which each of those writes
 /// carries through untouched.
-pub(crate) fn classes_chosen(
+pub(crate) fn boxes_chosen(
     filter: &Filter,
-    classes: &[Kind],
+    classes: &[BoxClass],
     event: &MultiSelectEvent,
 ) -> Filter {
     let (rows, checked) = match event {
@@ -103,18 +103,18 @@ pub(crate) fn classes_chosen(
     };
     rows.iter()
         .filter_map(|&index| classes.get(index))
-        .fold(filter.clone(), |filter, &kind| {
-            rules::set_hidden(&filter, kind, !checked)
+        .fold(filter.clone(), |filter, &class| {
+            rules::set_hidden(&filter, class, !checked)
         })
 }
 
-/// Draws the graph as the class checklist's click leaves it.
-pub(crate) fn choose_classes(
+/// Draws the graph as the boxes menu's click leaves it.
+pub(crate) fn choose_boxes(
     view: &mut GraphPanel,
     event: &MultiSelectEvent,
     cx: &mut Context<GraphPanel>,
 ) {
-    let filter = classes_chosen(view.derived.filter(), &view.classes, event);
+    let filter = boxes_chosen(view.derived.filter(), &view.box_classes, event);
     set_filter(view, filter, cx);
 }
 
@@ -125,12 +125,30 @@ mod tests {
     use bviz_graph_layout::intern::Id;
     use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
 
-    /// A graph of one package holding one target, with a source file beside it.
+    /// A graph of one package holding a target, a labeled output, a package
+    /// group and a source file, the target and the output each holding a
+    /// configured target, the target's holding an action writing a file.
     fn graph() -> Graph {
         let mut graph = Graph::new();
         graph.add_node(Node::new(Id(0), "//foo", Kind::Package, None));
         graph.add_node(Node::new(Id(1), ":app", Kind::Target, Some(Id(0))));
         graph.add_node(Node::new(Id(2), ":main.c", Kind::Source, Some(Id(0))));
+        graph.add_node(Node::new(
+            Id(3),
+            ":app",
+            Kind::ConfiguredTarget,
+            Some(Id(1)),
+        ));
+        graph.add_node(Node::new(Id(4), "CppLink", Kind::Action, Some(Id(3))));
+        graph.add_node(Node::new(Id(5), "app", Kind::Artifact, Some(Id(3))));
+        graph.add_node(Node::new(Id(6), ":gen.h", Kind::Artifact, Some(Id(0))));
+        graph.add_node(Node::new(
+            Id(7),
+            ":gen.h",
+            Kind::ConfiguredTarget,
+            Some(Id(6)),
+        ));
+        graph.add_node(Node::new(Id(8), ":all", Kind::TargetGroup, Some(Id(0))));
         graph
     }
 
@@ -149,42 +167,82 @@ mod tests {
         }
     }
 
-    /// A class no node carries is nothing to offer, so the checklist lists the
-    /// classes the graph holds boxes for and no others.
+    /// The menu offers the box classes the graph carries, outermost first, and
+    /// no class of leaf, whatever the graph holds of them.
     #[test]
-    fn only_the_classes_the_graph_carries_are_offered() {
+    fn only_the_box_classes_the_graph_carries_are_offered() {
+        let classes = carried_boxes(&graph());
+
         assert_eq!(
-            carried_classes(&graph()),
-            [Kind::Package, Kind::Target, Kind::Source]
+            classes,
+            [
+                BoxClass::Package,
+                BoxClass::Target,
+                BoxClass::LabeledOutput,
+                BoxClass::ConfiguredTarget
+            ]
         );
+        assert_eq!(
+            labels(&box_options(&Filter::default(), &classes)),
+            [
+                "packages",
+                "targets",
+                "labeled outputs",
+                "configured targets"
+            ]
+        );
+    }
+
+    /// A kind is a box class only where a node of it holds another, so a
+    /// graph whose targets and files hold nothing offers its packages alone.
+    #[test]
+    fn a_class_whose_nodes_hold_nothing_is_not_offered() {
+        let mut graph = Graph::new();
+        graph.add_node(Node::new(Id(0), "//foo", Kind::Package, None));
+        graph.add_node(Node::new(Id(1), ":app", Kind::Target, Some(Id(0))));
+        graph.add_node(Node::new(Id(2), ":gen.h", Kind::Artifact, Some(Id(0))));
+
+        assert_eq!(carried_boxes(&graph), [BoxClass::Package]);
     }
 
     /// The checkmarks are read out of the rules, so a filter built without the
     /// control renders exactly as that filter says.
     #[test]
-    fn a_class_row_is_checked_by_the_rules_alone() {
-        let classes = carried_classes(&graph());
-        let hiding = rules::set_hidden(&Filter::default(), Kind::Target, true);
+    fn a_row_is_checked_by_the_rules_alone() {
+        let classes = carried_boxes(&graph());
+        let hiding = rules::set_hidden(&Filter::default(), BoxClass::Target, true);
 
         assert_eq!(
-            checked(&class_options(&Filter::default(), &classes)),
-            [true; 3]
+            checked(&box_options(&Filter::default(), &classes)),
+            [true; 4]
         );
         assert_eq!(
-            checked(&class_options(&hiding, &classes)),
-            [true, false, true]
+            checked(&box_options(&hiding, &classes)),
+            [true, false, true, true]
         );
     }
 
-    /// A container's row names the box it draws, since hiding it lifts what it
-    /// holds to the nearest box still drawn.
+    /// Each row's click reads back as its own checkmark and nothing else's, and
+    /// checking it again returns to the filter it started from.
     #[test]
-    fn a_container_class_is_named_by_the_box_it_draws() {
-        let classes = carried_classes(&graph());
-        assert_eq!(
-            labels(&class_options(&Filter::default(), &classes)),
-            ["package boxes", "target boxes", "source files"]
-        );
+    fn each_row_round_trips_through_the_rule_it_writes() {
+        let classes = carried_boxes(&graph());
+        for (index, class) in classes.iter().enumerate() {
+            let toggle = |checked| MultiSelectEvent::Toggled { index, checked };
+            let unwrapped = boxes_chosen(&Filter::default(), &classes, &toggle(false));
+
+            let expected: Vec<bool> = (0..classes.len()).map(|row| row != index).collect();
+            assert_eq!(
+                checked(&box_options(&unwrapped, &classes)),
+                expected,
+                "{class:?}"
+            );
+            assert_eq!(
+                boxes_chosen(&unwrapped, &classes, &toggle(true)),
+                Filter::default(),
+                "{class:?}"
+            );
+        }
     }
 
     /// A rule the control did not write is none of its business, so a click
@@ -195,7 +253,7 @@ mod tests {
     fn checking_and_clearing_every_row_leaves_a_rule_the_control_did_not_write_standing() {
         let untouched = Rule {
             predicate: Predicate {
-                tags: Values::new(["flaky".to_string()]),
+                kinds: Values::new([Kind::Action]),
                 ..Predicate::default()
             },
             visibility: Visibility::Hidden,
@@ -204,13 +262,13 @@ mod tests {
             rules: vec![untouched.clone()],
             ..Filter::default()
         };
-        let classes = carried_classes(&graph());
+        let classes = carried_boxes(&graph());
 
-        let cleared = classes_chosen(&filter, &classes, &set_all(0..classes.len(), false));
+        let cleared = boxes_chosen(&filter, &classes, &set_all(0..classes.len(), false));
         assert!(cleared.rules.contains(&untouched));
-        assert_eq!(checked(&class_options(&cleared, &classes)), [false; 3]);
+        assert_eq!(checked(&box_options(&cleared, &classes)), [false; 4]);
 
-        let restored = classes_chosen(&cleared, &classes, &set_all(0..classes.len(), true));
+        let restored = boxes_chosen(&cleared, &classes, &set_all(0..classes.len(), true));
         assert_eq!(restored, filter);
     }
 }

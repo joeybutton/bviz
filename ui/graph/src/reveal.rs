@@ -29,8 +29,8 @@ pub(crate) enum HiddenBy {
     Pin,
     /// The query the filter is scoped to, which does not name the node.
     Query,
-    /// The rule the class checklist writes.
-    Classes,
+    /// The rule the boxes menu writes.
+    Boxes,
     /// A rule no control wrote, at its index among the filter's rules.
     Rule(u32),
     /// The filter's base, which hides every node no rule shows.
@@ -50,7 +50,7 @@ impl HiddenBy {
             HiddenBy::Paths => "hidden by the dependency paths drawn",
             HiddenBy::Pin => "hidden by its pin",
             HiddenBy::Query => "outside the query",
-            HiddenBy::Classes => "hidden by the class filter",
+            HiddenBy::Boxes => "unwrapped by the boxes menu",
             HiddenBy::Rule(_) => "hidden by a filter rule",
             HiddenBy::Base => "hidden by the filter",
             HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
@@ -96,7 +96,7 @@ fn named(hidden: Hidden<'_>) -> HiddenBy {
             Hiding::Pin => HiddenBy::Pin,
             Hiding::Scope => HiddenBy::Query,
             Hiding::Rule(index) => match rules::by_control(&filter.rules[index as usize]) {
-                true => HiddenBy::Classes,
+                true => HiddenBy::Boxes,
                 false => HiddenBy::Rule(index),
             },
             Hiding::Base => HiddenBy::Base,
@@ -362,6 +362,7 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::BoxClass;
     use bviz_graph_layout::Kind;
     use bviz_graph_layout::select::{Filter, Predicate, Rule, Visibility};
 
@@ -373,9 +374,9 @@ mod tests {
     /// which control to turn back.
     #[test]
     fn a_rule_is_named_by_the_control_that_wrote_it() {
-        let classes = rules::set_hidden(&Filter::default(), Kind::Action, true);
+        let boxes = rules::set_hidden(&Filter::default(), BoxClass::Target, true);
 
-        assert_eq!(filtered(&classes, Hiding::Rule(0)), HiddenBy::Classes);
+        assert_eq!(filtered(&boxes, Hiding::Rule(0)), HiddenBy::Boxes);
     }
 
     #[test]

@@ -167,6 +167,51 @@ fn a_leading_operator_applies_to_an_extension_call_reading_the_set_before_it() {
     );
 }
 
+/// bviz reads a package group and an environment group as one kind of
+/// target, so one chip takes both out.
+#[test]
+fn a_leading_except_takes_out_package_and_environment_groups_by_kind() {
+    use bazel_query_proto::blaze_query::{EnvironmentGroup, PackageGroup, target::Discriminator};
+    let targets = [
+        rule("//a:lib", "cc_library", &[]),
+        Target {
+            r#type: Discriminator::PackageGroup as i32,
+            package_group: Some(PackageGroup {
+                name: "//a:visible".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Target {
+            r#type: Discriminator::EnvironmentGroup as i32,
+            environment_group: Some(EnvironmentGroup {
+                name: "//a:platforms".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let fixture = Fixture {
+        universe: Universe::new(
+            &joint.graph,
+            &joint.names,
+            &Arc::new(joint.facets),
+            &joint.capabilities,
+        ),
+        names: joint.names,
+    };
+
+    assert_eq!(
+        fixture.named(&stack(&["//a:*"])),
+        ["//a:lib", "//a:platforms", "//a:visible"]
+    );
+    assert_eq!(
+        fixture.named(&stack(&["//a:*", "except kind('package group')"])),
+        ["//a:lib"]
+    );
+}
+
 #[test]
 fn a_chip_naming_every_argument_is_read_as_written() {
     for text in [
