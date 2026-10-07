@@ -6,7 +6,9 @@
 //! (`+ //foo` is `$_ + //foo`); a call short only of its last expression
 //! argument takes `$_` there (`kind(cc_.*)` is `kind(cc_.*, $_)`); and an
 //! empty call whose first argument is an expression takes `$_` as it
-//! (`deps()` is `deps($_)`). A chip reading no `$_` is a source, unless it is
+//! (`deps()` is `deps($_)`). The call shorthands apply as well to a call
+//! that is all of what a leading operator applies to (`except kind(test)` is
+//! `$_ except kind(test, $_)`). A chip reading no `$_` is a source, unless it is
 //! negated: a negated chip is a refinement taking what it names out of the set
 //! before it. The stack holds its sources ahead of its refinements and is the
 //! expression `let _ = (s1 + … + sm) in let _ = r1 in … rn` over its enabled
@@ -84,13 +86,15 @@ impl ChipExpr {
 #[derive(Clone, Debug)]
 struct Written {
     source: String,
-    inserted: Option<Range<usize>>,
+    /// Each insertion as the position in the chip's text it was made at and
+    /// the length it inserted, by increasing position.
+    insertions: Vec<(usize, usize)>,
 }
 
 impl Written {
     fn of(text: &str) -> Self {
         let Ok(tokens) = lex::scan(text) else {
-            return Written::verbatim(text);
+            return Written::inserting(text, &[]);
         };
         let opens_with_operator = matches!(
             tokens[0].kind,
@@ -101,40 +105,50 @@ impl Written {
                 | TokenKind::Except
                 | TokenKind::Union
         );
-        if opens_with_operator {
-            return Written::inserting(text, 0, "$_ ");
-        }
-        match continued_argument(&tokens) {
-            Some((at, insert)) => Written::inserting(text, at, insert),
-            None => Written::verbatim(text),
-        }
+        let (leading, call) = match opens_with_operator {
+            true => (Some((0, "$_ ")), &tokens[1..]),
+            false => (None, &tokens[..]),
+        };
+        let inserts: Vec<(usize, &str)> = leading
+            .into_iter()
+            .chain(continued_argument(call))
+            .collect();
+        Written::inserting(text, &inserts)
     }
 
-    fn verbatim(text: &str) -> Self {
-        Written {
-            source: text.to_string(),
-            inserted: None,
+    /// `text` with each of `inserts`, by increasing position, inserted at its
+    /// position.
+    fn inserting(text: &str, inserts: &[(usize, &str)]) -> Self {
+        let added: usize = inserts.iter().map(|(_, insert)| insert.len()).sum();
+        let mut source = String::with_capacity(text.len() + added);
+        let mut insertions = Vec::with_capacity(inserts.len());
+        let mut copied = 0;
+        for &(at, insert) in inserts {
+            source.push_str(&text[copied..at]);
+            source.push_str(insert);
+            insertions.push((at, insert.len()));
+            copied = at;
         }
-    }
-
-    fn inserting(text: &str, at: usize, insert: &str) -> Self {
-        let mut source = String::with_capacity(text.len() + insert.len());
-        source.push_str(&text[..at]);
-        source.push_str(insert);
-        source.push_str(&text[at..]);
-        Written {
-            source,
-            inserted: Some(at..at + insert.len()),
-        }
+        source.push_str(&text[copied..]);
+        Written { source, insertions }
     }
 
     /// The span of the chip's text that `span` of the source covers; a span
-    /// within the inserted text covers the point it was inserted at.
+    /// within an inserted text covers the point it was inserted at.
     fn span_in_text(&self, span: &Range<usize>) -> Range<usize> {
-        let at = |position: usize| match &self.inserted {
-            Some(inserted) if position >= inserted.end => position - inserted.len(),
-            Some(inserted) if position > inserted.start => inserted.start,
-            _ => position,
+        let at = |position: usize| {
+            let mut inserted_before = 0;
+            for &(at, len) in &self.insertions {
+                let start = at + inserted_before;
+                if position >= start + len {
+                    inserted_before += len;
+                } else if position > start {
+                    return at;
+                } else {
+                    break;
+                }
+            }
+            position - inserted_before
         };
         at(span.start)..at(span.end)
     }

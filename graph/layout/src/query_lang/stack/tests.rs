@@ -92,6 +92,40 @@ fn the_shorthand_writes_out_the_set_a_chip_reads() {
 }
 
 #[test]
+fn the_call_a_leading_operator_applies_to_reads_the_set_before_it() {
+    let continuing = |text: &str| (text.to_string(), true);
+    assert_eq!(
+        written("except kind('source file')"),
+        continuing("$_ except kind('source file', $_)")
+    );
+    assert_eq!(written("- deps()"), continuing("$_ - deps($_)"));
+    assert_eq!(
+        written("except mnemonic(Javac)"),
+        continuing("$_ except mnemonic(Javac, $_)")
+    );
+    assert_eq!(
+        written("except kind(rule, //a:all)"),
+        continuing("$_ except kind(rule, //a:all)")
+    );
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.named(&stack(&["//a:*", "except kind('source file')"])),
+        ["//a:gen", "//a:gen.out", "//a:lib"]
+    );
+}
+
+#[test]
+fn a_span_past_both_insertions_maps_back_onto_the_chip_as_typed() {
+    let written = Written::of("except kind(x)");
+    assert_eq!(written.source, "$_ except kind(x, $_)");
+    let in_text = |span: Range<usize>| written.span_in_text(&span);
+    assert_eq!(in_text(0..2), 0..0, "the leading `$_`");
+    assert_eq!(in_text(15..16), 12..13, "the word as typed");
+    assert_eq!(in_text(18..20), 13..13, "the continued `$_`");
+    assert_eq!(in_text(10..21), 7..14, "the call as typed");
+}
+
+#[test]
 fn a_chip_naming_every_argument_is_read_as_written() {
     for text in [
         "deps(//a:lib)",
