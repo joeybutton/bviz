@@ -600,14 +600,14 @@ fn footer(jump: &Jump, muted: Hsla, cx: &App) -> Div {
     let matching = &jump.matching;
     let listed = matching.rows().len();
     let tally = match (matching.query().is_empty(), matching.matched()) {
-        (true, _) => "type to find a node".to_owned(),
-        (false, 0) if matching.streaming() => "matching…".to_owned(),
-        (false, 0) => "no matches".to_owned(),
-        (false, 1) => "1 match".to_owned(),
+        (true, _) => None,
+        (false, 0) if matching.streaming() => Some("matching…".to_owned()),
+        (false, 0) => Some("no matches".to_owned()),
+        (false, 1) => Some("1 match".to_owned()),
         (false, matched) if (listed as u32) < matched => {
-            format!("{matched} matches, best {listed} listed")
+            Some(format!("{matched} matches, best {listed} listed"))
         }
-        (false, matched) => format!("{matched} matches"),
+        (false, matched) => Some(format!("{matched} matches")),
     };
     // Read within the stack the field is drawn in, which a palette just
     // opened has drawn in no frame yet.
@@ -663,7 +663,7 @@ fn footer(jump: &Jump, muted: Hsla, cx: &App) -> Div {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(tally),
+                        .children(tally),
                 )
                 .child(first),
         )
