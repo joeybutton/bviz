@@ -324,17 +324,18 @@ pub(crate) fn card(
                     .justify_end()
                     .gap_1()
                     .children(by.revealable().then(|| {
-                        Button::new(
+                        let reveal = Button::new(
                             "reveal-anyway",
                             cx.listener(move |view, _: &ClickEvent, _, cx| {
                                 reveal_anyway(view, node, cx)
                             }),
                         )
-                        .label(match by {
-                            HiddenBy::Pin => "unpin · enter",
-                            _ => "reveal anyway · enter",
-                        })
-                        .compact()
+                        .keys_for(&Accept, &view.focus_handle)
+                        .compact();
+                        match by {
+                            HiddenBy::Pin => reveal.label("unpin").tooltip("Unpin node"),
+                            _ => reveal.label("reveal anyway"),
+                        }
                     }))
                     .child(
                         Button::new(
@@ -344,7 +345,9 @@ pub(crate) fn card(
                                 cx.notify();
                             }),
                         )
-                        .label("close · esc")
+                        .label("close")
+                        .tooltip("Close card")
+                        .keys_for(&crate::Dismiss, &view.focus_handle)
                         .compact(),
                     ),
             ),
