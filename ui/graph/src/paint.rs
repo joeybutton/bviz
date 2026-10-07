@@ -521,6 +521,7 @@ pub(crate) fn canvas_body(
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
+        let mut carets: Vec<Caret> = Vec::with_capacity(drawn.len());
         // Painted once every label is, so that no plate lands on a badge.
         let mut statuses: Vec<StatusBadge> = Vec::with_capacity(drawn.len());
         let mut bare: Vec<BareBadge> = Vec::with_capacity(drawn.len());
@@ -537,6 +538,7 @@ pub(crate) fn canvas_body(
             match label {
                 Some(label) => {
                     titles.extend(label.title);
+                    carets.extend(label.caret);
                     statuses.extend(label.badge);
                 }
                 None => bare.extend(b.bare_badge(*rect, camera.zoom)),
@@ -544,10 +546,20 @@ pub(crate) fn canvas_body(
         }
         place_bare(bare, &floated, &mut statuses);
         entity.update(cx, |view, _| view.titles = titles);
+        // The marks over the labels: those drawn as paths in one fenced run,
+        // then the statuses drawn in quads, which would split the run's batch.
+        order_fence(bounds, window);
+        for caret in carets {
+            caret.paint(window);
+        }
         for (c, transition, alpha) in badges {
             paint_badge(c, transition, alpha, bounds, camera, &scene.palette, window);
         }
-        for badge in statuses {
+        for badge in statuses.iter().filter(|b| b.traced()) {
+            badge.paint(&scene.palette, window);
+        }
+        order_fence(bounds, window);
+        for badge in statuses.iter().filter(|b| !b.traced()) {
             badge.paint(&scene.palette, window);
         }
         paint_scrollbars(
@@ -1122,6 +1134,14 @@ impl Glyph {
             Status::RootCause => Glyph::Cross,
         }
     }
+
+    /// Whether [`paint_status`] draws the glyph as paths rather than quads.
+    fn traced(self) -> bool {
+        match self {
+            Glyph::TriangleUp | Glyph::TriangleDown | Glyph::Cross => true,
+            Glyph::Disc | Glyph::Bar | Glyph::Ring | Glyph::Square => false,
+        }
+    }
 }
 
 /// The corners of a triangle standing on its base, about its middle, for a
@@ -1197,6 +1217,10 @@ impl StatusBadge {
             point(self.center.x - reach, self.center.y - reach),
             size(reach * 2., reach * 2.),
         )
+    }
+
+    fn traced(&self) -> bool {
+        Glyph::of(self.status).traced()
     }
 
     fn paint(&self, palette: &Palette, window: &mut Window) {
@@ -1669,13 +1693,14 @@ pub(crate) fn title_at(titles: &[TitleTarget], pos: Point<Pixels>) -> Option<Id>
 /// What a painted label leaves for the passes after it.
 struct PaintedLabel {
     title: Option<TitleTarget>,
+    caret: Option<Caret>,
     badge: Option<StatusBadge>,
 }
 
-/// Paints a box's label, truncated to the width there is room for, with a
-/// disclosure caret for an expandable box, and reports the title a click on it
-/// toggles and the status badge the label holds room for; `None` where no
-/// label is painted. The font is the window's inherited UI text style so the
+/// Paints a box's label, truncated to the width there is room for, and reports
+/// the title a click on it toggles, the disclosure caret of an expandable box,
+/// and the status badge the label holds room for; `None` where no label is
+/// painted. The font is the window's inherited UI text style so the
 /// views stay visually coherent, and a container's title is bold.
 ///
 /// `floated` collects what the floating titles have taken, and a label that
@@ -1733,20 +1758,15 @@ fn paint_box_label(
         cx,
     );
 
-    if let Some(caret) = placement.caret {
-        // Phosphor icons render as `svg()` elements, which cannot be painted
-        // inside this canvas, so the caret is a small filled triangle.
-        paint_caret(
-            placement.caret_at(plate),
-            px(caret),
-            px(fs),
-            b.compound,
-            label_color,
-            window,
-        );
-    }
     Some(PaintedLabel {
         title: placement.title(plate, b.id),
+        caret: placement.caret.map(|footprint| Caret {
+            at: placement.caret_at(plate),
+            footprint: px(footprint),
+            fs: px(fs),
+            down: b.compound,
+            color: label_color,
+        }),
         badge: placement.badge(plate, b.alpha),
     })
 }
@@ -1756,44 +1776,57 @@ fn paint_path(path: Path<Pixels>, color: impl Into<Background>, window: &mut Win
     window.paint_path(path, color);
 }
 
-/// Paints a small filled-triangle disclosure caret inside the reserved
-/// `footprint` whose left edge is `at.x`, centered vertically at `at.y`. The
-/// triangle width fills the footprint less a trailing gap before the label; its
-/// height scales with the font size `fs`. `down` points it downward (expanded),
-/// otherwise rightward (collapsed).
-fn paint_caret(
+/// The disclosure caret a label holds room for, a small filled triangle.
+/// Phosphor icons render as `svg()` elements, which cannot be painted inside
+/// this canvas, so the caret is a path.
+struct Caret {
+    /// The left edge of the footprint, at the caret's vertical centre.
     at: Point<Pixels>,
+    /// The width held for the caret, which the triangle fills less a trailing
+    /// gap before the label.
     footprint: Pixels,
+    /// The label's font size, which the triangle's height scales with.
     fs: Pixels,
+    /// Points the caret downward, for an expanded box; otherwise rightward.
     down: bool,
     color: Rgba,
-    window: &mut Window,
-) {
-    let s = f32::from(footprint) * 0.6; // triangle width within the footprint
-    let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
-    let left = at.x;
-    let right = left + px(s);
-    let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
-    let mut tri = PathBuilder::fill();
-    if down {
-        // Apex down, base along the top.
-        tri.add_polygon(
-            &[
-                point(left, top),
-                point(right, top),
-                point(left + px(s / 2.), bottom),
-            ],
-            true,
-        );
-    } else {
-        // Apex right, base along the left.
-        tri.add_polygon(
-            &[point(left, top), point(right, at.y), point(left, bottom)],
-            true,
-        );
-    }
-    if let Ok(path) = tri.build() {
-        paint_path(path, color, window);
+}
+
+impl Caret {
+    fn paint(self, window: &mut Window) {
+        let Caret {
+            at,
+            footprint,
+            fs,
+            down,
+            color,
+        } = self;
+        let s = f32::from(footprint) * 0.6; // triangle width within the footprint
+        let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
+        let left = at.x;
+        let right = left + px(s);
+        let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
+        let mut tri = PathBuilder::fill();
+        if down {
+            // Apex down, base along the top.
+            tri.add_polygon(
+                &[
+                    point(left, top),
+                    point(right, top),
+                    point(left + px(s / 2.), bottom),
+                ],
+                true,
+            );
+        } else {
+            // Apex right, base along the left.
+            tri.add_polygon(
+                &[point(left, top), point(right, at.y), point(left, bottom)],
+                true,
+            );
+        }
+        if let Ok(path) = tri.build() {
+            paint_path(path, color, window);
+        }
     }
 }
 
