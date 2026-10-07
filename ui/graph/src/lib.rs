@@ -59,7 +59,6 @@ mod pan_bench;
 mod pins;
 mod playback;
 mod point;
-mod preset;
 mod relation;
 mod report;
 mod reveal;
@@ -311,12 +310,6 @@ pub struct GraphPanel {
     origin_filter: Entity<MultiSelect>,
     /// Carries a toggled repository row into the panel's filter.
     _origin_choices: Subscription,
-    /// The reductions the loaded inputs can answer, in the order the preset
-    /// checklist's rows stand.
-    presets: Vec<preset::Offer>,
-    preset_filter: Entity<MultiSelect>,
-    /// Carries a toggled preset row into the panel's filter.
-    _preset_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
     jump: jump::Finder,
@@ -475,12 +468,6 @@ impl GraphPanel {
             cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
                 checklist::choose_origins(view, event, cx);
             });
-        let preset_filter =
-            cx.new(|cx| MultiSelect::new("graph-presets", "presets", Vec::new(), cx));
-        let preset_choices =
-            cx.subscribe(&preset_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::choose_presets(view, event, cx);
-            });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
@@ -548,9 +535,6 @@ impl GraphPanel {
             origins: Vec::new(),
             origin_filter,
             _origin_choices: origin_choices,
-            presets: Vec::new(),
-            preset_filter,
-            _preset_choices: preset_choices,
             chips,
             jump: jump::Finder::default(),
             matchers: fuzzy::Pool::default(),
@@ -728,7 +712,6 @@ impl GraphPanel {
             picker: self.mode_picker.clone(),
             class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
             origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
-            preset_filter: self.preset_filter.clone(),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
             why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
@@ -1192,9 +1175,6 @@ struct Controls {
     /// only where that graph carries a value on its axis.
     class_filter: Option<Entity<MultiSelect>>,
     origin_filter: Option<Entity<MultiSelect>>,
-    /// The reductions offered as one click, listed whether or not the loaded
-    /// inputs can answer each, so that one they cannot says why.
-    preset_filter: Entity<MultiSelect>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,

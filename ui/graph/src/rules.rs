@@ -10,7 +10,6 @@
 //! in, so one control's rule can never widen what another's hides.
 
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::facets::RuleCategory;
 use bviz_graph_layout::repo::{RepoCategory, RepoName};
 use bviz_graph_layout::select::{Filter, Predicate, Rule, Values, Visibility};
 use std::collections::BTreeSet;
@@ -21,20 +20,10 @@ pub(crate) enum Term {
     Kind,
     RepoCategory,
     Repo,
-    RuleCategory,
-    Mnemonic,
-    ToolConfiguration,
 }
 
 impl Term {
-    const ALL: [Term; 6] = [
-        Term::Kind,
-        Term::RepoCategory,
-        Term::Repo,
-        Term::RuleCategory,
-        Term::Mnemonic,
-        Term::ToolConfiguration,
-    ];
+    const ALL: [Term; 3] = [Term::Kind, Term::RepoCategory, Term::Repo];
 }
 
 /// One value of a [`Term`], as a control offers it.
@@ -44,12 +33,6 @@ pub(crate) enum Value {
     RepoCategory(RepoCategory),
     /// A repository by the name identifying it.
     Repo(RepoName<String>),
-    RuleCategory(RuleCategory),
-    /// An action by its mnemonic.
-    Mnemonic(String),
-    /// Every configuration built for a tool the build runs rather than for an
-    /// artifact it produces.
-    ToolConfiguration,
 }
 
 impl Value {
@@ -58,9 +41,6 @@ impl Value {
             Value::Kind(_) => Term::Kind,
             Value::RepoCategory(_) => Term::RepoCategory,
             Value::Repo(_) => Term::Repo,
-            Value::RuleCategory(_) => Term::RuleCategory,
-            Value::Mnemonic(_) => Term::Mnemonic,
-            Value::ToolConfiguration => Term::ToolConfiguration,
         }
     }
 }
@@ -74,11 +54,6 @@ pub(crate) fn hidden(filter: &Filter, term: Term) -> BTreeSet<Value> {
         .filter(|(written, _)| *written == term)
         .flat_map(|(_, values)| values)
         .collect()
-}
-
-/// Whether `filter` hides `value`.
-pub(crate) fn hides(filter: &Filter, value: &Value) -> bool {
-    hidden(filter, value.term()).contains(value)
 }
 
 /// `filter` with `value` hidden, or shown where `hidden` is false.
@@ -147,14 +122,6 @@ fn named(predicate: &Predicate, term: Term) -> Option<Vec<Value>> {
         Term::Kind => listed(predicate.kinds.as_ref()?, Value::Kind),
         Term::RepoCategory => listed(predicate.repo_categories.as_ref()?, Value::RepoCategory),
         Term::Repo => listed(predicate.repos.as_ref()?, Value::Repo),
-        Term::RuleCategory => listed(predicate.rule_categories.as_ref()?, Value::RuleCategory),
-        Term::Mnemonic => listed(predicate.mnemonics.as_ref()?, Value::Mnemonic),
-        // A term over the configurations that are not a tool's names none of
-        // the values a control offers.
-        Term::ToolConfiguration => match predicate.is_tool? {
-            true => vec![Value::ToolConfiguration],
-            false => return None,
-        },
     })
 }
 
@@ -186,24 +153,6 @@ fn predicate(term: Term, values: &[Value]) -> Option<Predicate> {
             }),
             ..Predicate::default()
         },
-        Term::RuleCategory => Predicate {
-            rule_categories: listed(values, |value| match value {
-                Value::RuleCategory(category) => Some(*category),
-                _ => None,
-            }),
-            ..Predicate::default()
-        },
-        Term::Mnemonic => Predicate {
-            mnemonics: listed(values, |value| match value {
-                Value::Mnemonic(name) => Some(name.clone()),
-                _ => None,
-            }),
-            ..Predicate::default()
-        },
-        Term::ToolConfiguration => Predicate {
-            is_tool: values.contains(&Value::ToolConfiguration).then_some(true),
-            ..Predicate::default()
-        },
     };
     (predicate != Predicate::default()).then_some(predicate)
 }
@@ -233,7 +182,7 @@ mod tests {
                 visibility: Visibility::Hidden,
             }]
         );
-        assert!(hides(&hiding, &action));
+        assert!(hidden(&hiding, Term::Kind).contains(&action));
         assert_eq!(set_hidden(&hiding, &action, false), Filter::default());
     }
 
@@ -280,9 +229,6 @@ mod tests {
             Value::Kind(Kind::Package),
             Value::RepoCategory(RepoCategory::Module),
             Value::Repo(RepoName::Canonical("rules_foo+".into())),
-            Value::RuleCategory(RuleCategory::Plumbing),
-            Value::Mnemonic("SymlinkTree".into()),
-            Value::ToolConfiguration,
         ];
 
         for value in cases {

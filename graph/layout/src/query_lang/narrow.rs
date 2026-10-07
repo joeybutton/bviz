@@ -50,7 +50,7 @@ use crate::repo::{RepoCategory, RepoName};
 /// Bazel 9 names the runfiles-tree action `RunfilesTree` where Bazel 8 and
 /// earlier name it `Middleman`, and bviz reads a dump from either, so both stand
 /// here.
-pub const RUNFILES_MNEMONICS: [&str; 10] = [
+const RUNFILES_MNEMONICS: [&str; 10] = [
     "SymlinkTree",
     "SourceSymlinkManifest",
     "PackagingSourcesManifest",

@@ -85,7 +85,6 @@ pub(crate) fn toolbar(
     {
         facets = facets.child(checklist);
     }
-    let facets = facets.child(controls.preset_filter);
     let query = Toolbar::new()
         .one_row("graph-query-bar")
         .child(controls.chips);

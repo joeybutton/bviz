@@ -27,7 +27,6 @@ pub use ast::{
 pub use config::ANY_EXEC;
 pub use cursor::{Place, TypedWord, word_at, written_word};
 pub use eval::EvalError;
-pub use narrow::RUNFILES_MNEMONICS;
 pub use parse::parse;
 pub use stack::{
     BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,

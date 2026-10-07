@@ -5,8 +5,7 @@
 //! can be absent because a flag was not passed. [`Capabilities`] tells that from
 //! an axis the inputs state and the build carries no values on, and only the
 //! former is something a reader can act on: it is named here with the flag to
-//! pass when the dump is regenerated. Nothing fails over the gap — the controls
-//! over such an axis stand greyed, and this says why.
+//! pass when the dump is regenerated.
 
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::{Axis, Capabilities, Support};

@@ -7,7 +7,7 @@
 //! [`crate::rules`].
 
 use crate::rules::{self, Term, Value};
-use crate::{GraphPanel, derive, preset};
+use crate::{GraphPanel, derive};
 use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::repo::{RepoCategory, RepoName};
@@ -243,11 +243,6 @@ pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     };
     view.classes = carried_classes(&loaded.shared.base);
     view.origins = carried_origins(&loaded.shared.facets);
-    view.presets = preset::offers(
-        &loaded.shared.base,
-        &loaded.shared.facets,
-        &loaded.shared.capabilities,
-    );
     restate(view, cx);
 }
 
@@ -255,13 +250,10 @@ pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let classes = class_options(view.derived.filter(), &view.classes);
     let origins = origin_options(view.derived.filter(), &view.origins);
-    let presets = preset::options(view.derived.filter(), &view.presets);
     view.class_filter
         .update(cx, |control, cx| control.set_options(classes, cx));
     view.origin_filter
         .update(cx, |control, cx| control.set_options(origins, cx));
-    view.preset_filter
-        .update(cx, |control, cx| control.set_options(presets, cx));
 }
 
 /// Draws the graph through `filter` from here on and restates the checklists
@@ -338,24 +330,6 @@ pub(crate) fn origins_chosen(
     hiding.written(filter)
 }
 
-/// `filter` with the reductions the preset checklist's `event` names applied, or
-/// taken back off. A preset the loaded inputs cannot answer is left alone, so a
-/// click over every row reaches exactly the rows that report one.
-pub(crate) fn presets_chosen(
-    filter: &Filter,
-    offers: &[preset::Offer],
-    event: &MultiSelectEvent,
-) -> Filter {
-    chosen(
-        filter,
-        event,
-        |filter, index, applied| match preset::offered(offers, index) {
-            Some(preset) => preset::set_applied(filter, preset, applied),
-            None => filter.clone(),
-        },
-    )
-}
-
 /// Draws the graph as the class checklist's click leaves it.
 pub(crate) fn choose_classes(
     view: &mut GraphPanel,
@@ -373,16 +347,6 @@ pub(crate) fn choose_origins(
     cx: &mut Context<GraphPanel>,
 ) {
     let filter = origins_chosen(view.derived.filter(), &view.origins, event);
-    set_filter(view, filter, cx);
-}
-
-/// Draws the graph as the preset checklist's click leaves it.
-pub(crate) fn choose_presets(
-    view: &mut GraphPanel,
-    event: &MultiSelectEvent,
-    cx: &mut Context<GraphPanel>,
-) {
-    let filter = presets_chosen(view.derived.filter(), &view.presets, event);
     set_filter(view, filter, cx);
 }
 
@@ -603,24 +567,6 @@ mod tests {
         }
     }
 
-    /// The capabilities of inputs stating every axis a preset reads.
-    fn stating_every_axis() -> bviz_graph_layout::Capabilities {
-        let mut capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default();
-        for axis in bviz_graph_layout::Axis::ALL {
-            capabilities.observe(axis, true);
-        }
-        capabilities.seal()
-    }
-
-    /// The presets offered over the fixtures, which carry repositories and one
-    /// rule class but no configuration and no action — so the presets over the
-    /// first two axes are on offer and the other two are withheld.
-    fn offered_presets() -> Vec<preset::Offer> {
-        let mut facets = facets();
-        facets.intern_rule_class("cc_library");
-        preset::offers(&graph(), &facets, &stating_every_axis())
-    }
-
     /// Clearing the menu leaves nothing drawn, and checking one repository after
     /// it brings back that repository alone — which is how a graph naming
     /// hundreds is narrowed to the one being looked at.
@@ -643,47 +589,6 @@ mod tests {
             checked(&origin_options(&one, &rows)),
             [false, false, false, true, false, false]
         );
-    }
-
-    /// The preset naming the main repository draws it however the checklist was
-    /// left, so clearing every repository and then asking for that repository
-    /// alone leaves it drawn and the checklist reading it. Taking the preset
-    /// back off lifts the restriction it stated rather than half of it.
-    #[test]
-    fn clearing_every_repository_and_applying_the_main_repository_preset_draws_it() {
-        let rows = carried_origins(&facets());
-        let cleared = origins_chosen(&Filter::default(), &rows, &set_all(0..rows.len(), false));
-
-        let only_main = preset::set_applied(&cleared, preset::Preset::MainRepositoryOnly, true);
-
-        assert_eq!(
-            checked(&origin_options(&only_main, &rows)),
-            [true, false, false, false, false, false]
-        );
-        assert_eq!(
-            checked(&origin_options(
-                &preset::set_applied(&only_main, preset::Preset::MainRepositoryOnly, false),
-                &rows
-            )),
-            [true; 6]
-        );
-    }
-
-    /// The checklist acts on whatever the preset left, so clearing every row
-    /// after the preset leaves nothing drawn and the preset no longer applied.
-    #[test]
-    fn clearing_every_repository_after_the_main_repository_preset_leaves_nothing_drawn() {
-        let rows = carried_origins(&facets());
-        let only_main =
-            preset::set_applied(&Filter::default(), preset::Preset::MainRepositoryOnly, true);
-
-        let cleared = origins_chosen(&only_main, &rows, &set_all(0..rows.len(), false));
-
-        assert_eq!(checked(&origin_options(&cleared, &rows)), [false; 6]);
-        assert!(!preset::applied(
-            &cleared,
-            preset::Preset::MainRepositoryOnly
-        ));
     }
 
     /// A group's own actions reach the repositories under it and no others, so
@@ -729,59 +634,6 @@ mod tests {
             let acted = origins_chosen(&filter, &rows, &set_all(0..rows.len(), checked));
             assert!(acted.rules.contains(&untouched), "checked: {checked}");
         }
-    }
-
-    /// The preset checklist's rows are reductions rather than values, so its
-    /// menu-wide actions apply and take back off every reduction the loaded
-    /// inputs can answer, and leave the rest alone.
-    #[test]
-    fn applying_every_preset_reaches_the_ones_the_inputs_can_answer() {
-        let offers = offered_presets();
-        let all = set_all(0..offers.len(), true);
-
-        let applied = presets_chosen(&Filter::default(), &offers, &all);
-
-        assert_eq!(
-            checked(&preset::options(&applied, &offers)),
-            [true, true, false, false]
-        );
-        assert_eq!(
-            presets_chosen(&applied, &offers, &set_all(0..offers.len(), false)),
-            Filter::default()
-        );
-    }
-
-    /// A menu-wide clear over the presets takes off the presets standing and
-    /// nothing else. A preset the reader never applied owns none of the rules
-    /// over the terms it would state, so the repositories the repository
-    /// checklist left out stay out through it.
-    #[test]
-    fn clearing_every_preset_leaves_what_the_repository_checklist_hid() {
-        let rows = carried_origins(&facets());
-        let extensions = rows
-            .iter()
-            .position(|row| *row == OriginRow::Origin(RepoCategory::ModuleExtension))
-            .expect("the fixture carries module-extension repositories");
-        let hiding = origins_chosen(
-            &Filter::default(),
-            &rows,
-            &MultiSelectEvent::Toggled {
-                index: extensions,
-                checked: false,
-            },
-        );
-        let offers = offered_presets();
-        assert!(!preset::applied(
-            &hiding,
-            preset::Preset::MainRepositoryOnly
-        ));
-
-        let cleared = presets_chosen(&hiding, &offers, &set_all(0..offers.len(), false));
-
-        assert_eq!(
-            checked(&origin_options(&cleared, &rows)),
-            [true, true, true, true, false, false]
-        );
     }
 
     /// Hiding every repository the graph carries and showing them again leaves

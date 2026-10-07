@@ -52,9 +52,6 @@ impl HiddenBy {
             HiddenBy::Query => "outside the query",
             HiddenBy::Control(Term::Kind) => "hidden by the class filter",
             HiddenBy::Control(Term::RepoCategory | Term::Repo) => "hidden by the repository filter",
-            HiddenBy::Control(Term::RuleCategory | Term::Mnemonic | Term::ToolConfiguration) => {
-                "hidden by a preset"
-            }
             HiddenBy::Rule(_) => "hidden by a filter rule",
             HiddenBy::Base => "hidden by the filter",
             HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
