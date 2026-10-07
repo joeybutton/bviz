@@ -42,6 +42,9 @@ behaves consistently:
 - `bviz_ui_components::{QueryField, QueryFieldEvent}` — a text field with a button that
   empties it, which emits one event per edit and another once typing settles.
 - `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
+- `bviz_ui_components::{KeyScope, declare_scopes, zoom_key_bindings, find_key_bindings, gesture}`
+  — labelled key scopes, the shared key bindings, and the gesture tables pointer handlers
+  dispatch through.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
 - `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,
   text metrics, single-run line shaping, Phosphor icons.
@@ -310,6 +313,10 @@ ctrl elsewhere; the optional context scopes the binding to a `key_context`), and
 with `.on_action(|_: &CloseWindow, window, cx| …)` on an element in the focus path. Actions
 dispatch up from the focused element, so a view needs `.track_focus(&handle)` (with
 `focus_handle: FocusHandle` created via `cx.focus_handle()`) to receive them.
+
+Every panel follows the keys and gestures convention in `references/keys-and-gestures.md`,
+which keeps the Keys & Gestures sheet complete and key text out of string literals. Read it
+before adding an action, a key binding, a key context or a pointer handler.
 
 Focus and tab order: configure a handle with `.tab_index(n).tab_stop(true)`, bind `tab` /
 `shift-tab` to actions that call `window.focus_next(cx)` / `window.focus_prev(cx)`, and style
