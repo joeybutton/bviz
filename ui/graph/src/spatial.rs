@@ -1,10 +1,12 @@
+use crate::GraphPanel;
 use crate::camera::Rect;
-use crate::derive::{Shown, ViewKey};
+use crate::derive::{Drawn, Shown, ViewKey};
 use crate::morph::Frame;
 use bviz_graph_layout::{Box, Connector, LaidOut};
 use fixedbitset::FixedBitSet;
+use gpui::{Context, Task};
 use std::ops::Range;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// How many items a [`Grid`]'s finest level lays one cell per.
 const ITEMS_PER_CELL: f64 = 1.0;
@@ -43,10 +45,10 @@ impl Spatial {
 }
 
 /// A drawing paired with its [`Spatial`] index, so a query's answers index the
-/// drawing they were bucketed from.
+/// drawing they were bucketed from. Absent an index, every item is a candidate.
 pub(crate) struct Indexed<'a> {
     g: &'a LaidOut,
-    spatial: Rc<Spatial>,
+    spatial: Option<Arc<Spatial>>,
 }
 
 impl<'a> Indexed<'a> {
@@ -54,8 +56,13 @@ impl<'a> Indexed<'a> {
     pub(crate) fn of(g: &'a LaidOut) -> Self {
         Self {
             g,
-            spatial: Rc::new(Spatial::of(g)),
+            spatial: Some(Arc::new(Spatial::of(g))),
         }
+    }
+
+    #[cfg(test)]
+    fn unbuilt(g: &'a LaidOut) -> Self {
+        Self { g, spatial: None }
     }
 
     /// The boxes of the drawing that may be drawn over `r` this frame, in the
@@ -68,9 +75,9 @@ impl<'a> Indexed<'a> {
         r: &Rect,
         morph: Option<&'m Frame>,
     ) -> impl Iterator<Item = (&'a Box, Rect, f32)> + use<'a, 'm> {
-        let candidates = match morph {
-            Some(_) => Candidates::Every(0..self.g.boxes.len()),
-            None => Candidates::Near(self.spatial.boxes.near(r, 0).into_ones()),
+        let candidates = match (&self.spatial, morph) {
+            (Some(spatial), None) => Candidates::Near(spatial.boxes.near(r, 0).into_ones()),
+            _ => Candidates::Every(0..self.g.boxes.len()),
         };
         let boxes = &self.g.boxes;
         candidates.map(move |i| {
@@ -84,11 +91,11 @@ impl<'a> Indexed<'a> {
     /// one that does, and some that pass near it.
     pub(crate) fn routes_near(&self, r: &Rect) -> impl Iterator<Item = &'a Connector> + use<'a> {
         let connectors = &self.g.connectors;
-        self.spatial
-            .routes
-            .near(r, ROUTE_MARGIN)
-            .into_ones()
-            .map(move |i| &connectors[i])
+        let candidates = match &self.spatial {
+            Some(spatial) => Candidates::Near(spatial.routes.near(r, ROUTE_MARGIN).into_ones()),
+            None => Candidates::Every(0..connectors.len()),
+        };
+        candidates.map(move |i| &connectors[i])
     }
 }
 
@@ -110,24 +117,73 @@ impl Iterator for Candidates {
 }
 
 /// The index of every view of the drawing a panel draws that a frame has
-/// asked for, so each is bucketed once however many frames draw it.
+/// asked for, so each is bucketed once however many frames draw it. A large
+/// view takes a frame or more to bucket, so that runs off the UI thread.
 #[derive(Default)]
-pub(crate) struct SpatialMemo(Vec<(ViewKey, Rc<Spatial>)>);
+pub(crate) struct SpatialMemo(Vec<(ViewKey, Built)>);
+
+enum Built {
+    /// The build is held so that it is not cancelled; it redraws the canvas
+    /// once it lands.
+    Pending {
+        _build: Task<()>,
+    },
+    Ready(Arc<Spatial>),
+}
 
 impl SpatialMemo {
-    pub(crate) fn indexed<'a>(&mut self, shown: Shown<'a>) -> Indexed<'a> {
-        let (key, g) = (shown.key(), shown.view());
+    /// The view `drawn` shows at `zoom`, paired with its index where that has
+    /// been built; `None` where that view is yet to be derived.
+    pub(crate) fn indexed<'a>(
+        &mut self,
+        drawn: &'a Drawn,
+        zoom: f32,
+        cx: &mut Context<GraphPanel>,
+    ) -> Option<(Shown<'a>, Indexed<'a>)> {
+        let shown = drawn.shown(zoom)?;
+        let key = shown.key();
         self.0.retain(|(held, _)| held.drawing() == key.drawing());
         let spatial = match self.0.iter().find(|(held, _)| *held == key) {
-            Some((_, spatial)) => Rc::clone(spatial),
+            Some((_, Built::Ready(spatial))) => Some(Arc::clone(spatial)),
+            Some((_, Built::Pending { .. })) => None,
             None => {
-                let spatial = Rc::new(Spatial::of(g));
-                self.0.push((key, Rc::clone(&spatial)));
-                spatial
+                let build = build(drawn.clone(), zoom, key, cx);
+                self.0.push((key, Built::Pending { _build: build }));
+                None
             }
         };
-        Indexed { g, spatial }
+        let g = shown.view();
+        Some((shown, Indexed { g, spatial }))
     }
+
+    /// Takes up the index a build asked for `asked` produced, held under the key
+    /// of the view it was built of: a level the background derives between the
+    /// ask and the build can move which view the same zoom shows.
+    fn land(&mut self, asked: ViewKey, built: Option<(ViewKey, Arc<Spatial>)>) {
+        self.0.retain(|(held, _)| *held != asked);
+        if let Some((key, spatial)) = built {
+            self.0.retain(|(held, _)| *held != key);
+            self.0.push((key, Built::Ready(spatial)));
+        }
+    }
+}
+
+/// Indexes the view `drawn` shows at `zoom` on the background executor, landing
+/// it in the panel's [`SpatialMemo`] as built for `asked`.
+fn build(drawn: Drawn, zoom: f32, asked: ViewKey, cx: &mut Context<GraphPanel>) -> Task<()> {
+    cx.spawn(async move |panel, cx| {
+        let built = cx
+            .background_executor()
+            .spawn(async move {
+                let shown = drawn.shown(zoom)?;
+                Some((shown.key(), Arc::new(Spatial::of(shown.view()))))
+            })
+            .await;
+        let _ = panel.update(cx, |panel, cx| {
+            panel.spatial.land(asked, built);
+            panel.invalidate_canvas_only(cx);
+        });
+    })
 }
 
 /// A closed axis-aligned extent in layout space.
@@ -511,6 +567,35 @@ mod tests {
                     .collect();
                 assert_eq!(crossing, scanned);
             }
+        }
+    }
+
+    #[test]
+    fn an_unbuilt_index_answers_every_query_as_the_built_one_does() {
+        let mut rng = fastrand::Rng::with_seed(13);
+        let g = random_drawing(&mut rng, 400, 800);
+        let (built, unbuilt) = (Indexed::of(&g), Indexed::unbuilt(&g));
+        let boxes_over = |indexed: &Indexed, view: &Rect| -> Vec<Id> {
+            indexed
+                .boxes_near(view, None)
+                .filter(|(_, rect, _)| view.overlaps(rect))
+                .map(|(b, ..)| b.id)
+                .collect()
+        };
+        let routes_crossing = |indexed: &Indexed, view: &Rect| -> Vec<*const Connector> {
+            indexed
+                .routes_near(view)
+                .filter(|c| view.crossed_by(&c.points))
+                .map(std::ptr::from_ref)
+                .collect()
+        };
+        for _ in 0..200 {
+            let view = random_view(&mut rng);
+            assert_eq!(boxes_over(&built, &view), boxes_over(&unbuilt, &view));
+            assert_eq!(
+                routes_crossing(&built, &view),
+                routes_crossing(&unbuilt, &view)
+            );
         }
     }
 

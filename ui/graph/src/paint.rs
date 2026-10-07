@@ -436,7 +436,7 @@ pub(crate) fn canvas_body(
         };
         let Some((indexed, marks)) = entity.update(cx, |view, cx| {
             derive::derive_view(view, &scene.drawn, camera.zoom, cx);
-            let shown = scene.drawn.shown(camera.zoom)?;
+            let (shown, indexed) = view.spatial.indexed(&scene.drawn, camera.zoom, cx)?;
             let marks = Marks {
                 hover: view.hover_marking.marking(
                     shown,
@@ -445,7 +445,7 @@ pub(crate) fn canvas_body(
                 ),
                 selection: view.selection.marking(shown),
             };
-            Some((view.spatial.indexed(shown), marks))
+            Some((indexed, marks))
         }) else {
             return;
         };

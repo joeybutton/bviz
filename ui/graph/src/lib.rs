@@ -804,7 +804,7 @@ impl GraphPanel {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
         jump::dismiss(self, cx);
-        let clear = self.box_id_at(e.position).is_none();
+        let clear = self.box_id_at(e.position, cx).is_none();
         let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
@@ -890,15 +890,14 @@ impl GraphPanel {
     }
 
     /// The box drawn under the window-space `position`, if any.
-    fn box_id_at(&mut self, position: Point<Pixels>) -> Option<Id> {
+    fn box_id_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> Option<Id> {
         let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        drawn
-            .shown(camera.zoom)
-            .map(|shown| self.spatial.indexed(shown))
-            .and_then(|g| box_at(&self.titles, &g, morph.as_ref(), vp, camera, position))
+        self.spatial
+            .indexed(&drawn, camera.zoom, cx)
+            .and_then(|(_, g)| box_at(&self.titles, &g, morph.as_ref(), vp, camera, position))
             .map(|b| b.id)
     }
 
@@ -906,7 +905,7 @@ impl GraphPanel {
         if self.drawn().is_none() {
             return;
         }
-        let hit = self.box_id_at(position);
+        let hit = self.box_id_at(position, cx);
         if hit != self.hovered {
             self.hovered = hit;
             self.invalidate_canvas_only(cx);
@@ -1266,10 +1265,9 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     let Some(drawn) = view.drawn() else {
         return;
     };
-    let Some(shown) = drawn.shown(camera.zoom) else {
+    let Some((_, g)) = view.spatial.indexed(&drawn, camera.zoom, cx) else {
         return;
     };
-    let g = view.spatial.indexed(shown);
     let morph = view.morph_frame();
     let expandable = view.expandable();
     let hit =
@@ -1296,7 +1294,7 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         .drawn()
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
-            let g = view.spatial.indexed(drawn.shown(camera.zoom)?);
+            let (_, g) = view.spatial.indexed(&drawn, camera.zoom, cx)?;
             box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
         });
     match hit {
