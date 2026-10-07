@@ -496,6 +496,91 @@ fn inputs_matches_a_file_the_graph_left_out() {
 }
 
 #[test]
+fn nested_inputs_patterns_match_one_file_left_out_or_not() {
+    let (universe, names) = actions();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert!(query("inputs('.*x\\.h', inputs('.*out\\.c', //p:all))").is_empty());
+    assert_eq!(
+        query("inputs('external/.*', inputs('.*\\.h', //p:all))"),
+        ["action:bazel-out/k8-fastbuild/bin/p/lib.o"]
+    );
+}
+
+/// An aquery of `//p:a`, whose Genrule reads `p/a.java` and `p/foo.txt` and
+/// writes `a.class` and `foo.log`, and of `//p:b`, whose Genrule reads
+/// `p/foo.java` and writes `foo.class`.
+fn java() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let out = |name: &str| format!("bazel-out/k8-fastbuild/bin/p/{name}");
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:a",
+            mnemonic: "Genrule",
+            inputs: &["p/a.java", "p/foo.txt"],
+            outputs: &[&out("a.class"), &out("foo.log")],
+        },
+        ActionSpec {
+            label: "//p:b",
+            mnemonic: "Genrule",
+            inputs: &["p/foo.java"],
+            outputs: &[&out("foo.class")],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+/// Bazel's aquery gathers the filter calls nested in one another into one
+/// filter (`AqueryUtils.matchesAqueryFilters`), which one file read must
+/// match in full, and one file written.
+#[test]
+fn nested_file_filters_match_one_file_as_aquery_does() {
+    let (universe, names) = java();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    let b = ["action:bazel-out/k8-fastbuild/bin/p/foo.class"];
+    assert_eq!(query("inputs('.*java', inputs('.*foo.*', //p:all))"), b);
+    assert_eq!(
+        query("inputs('.*java', mnemonic(Genrule, inputs('.*foo.*', //p:all)))"),
+        b
+    );
+    assert_eq!(query("outputs('.*class', outputs('.*foo.*', //p:all))"), b);
+    assert_eq!(
+        query("let v = inputs('.*foo.*', //p:all) in inputs('.*java', $v)"),
+        b,
+        "a run reading a variable bound to another run joins it"
+    );
+}
+
+#[test]
+fn a_variable_holding_a_filter_run_names_its_filtered_set() {
+    let (universe, names) = java();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(
+        query("let v = inputs('.*foo\\.java', //p:all) in $v + //p:a"),
+        query("inputs('.*foo\\.java', //p:all) + //p:a")
+    );
+}
+
+/// Bazel rejects a filter call below a call of another function, so a run
+/// broken by one filters apart: a bviz extension.
+#[test]
+fn a_filter_run_broken_by_another_function_filters_apart() {
+    let (universe, names) = java();
+    let found = configured_query(
+        &universe,
+        &names,
+        "inputs('.*java', deps(inputs('.*foo.*', //p:all)))",
+    );
+    assert!((found.unwrap()).contains(&"action:bazel-out/k8-fastbuild/bin/p/a.class".to_string()));
+}
+
+#[test]
 fn a_verbose_pattern_matches_whole_strings_with_its_comment_left_out() {
     let (universe, names) = actions();
     assert_eq!(
