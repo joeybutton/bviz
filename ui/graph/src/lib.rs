@@ -153,7 +153,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", jump::Previous, jumping),
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
-        KeyBinding::new("ctrl-enter", jump::AskWhy, jumping),
+        KeyBinding::new("secondary-enter", jump::AskWhy, jumping),
         KeyBinding::new("shift-enter", jump::AlwaysShow, jumping),
         KeyBinding::new("alt-enter", jump::AddChip, jumping),
         KeyBinding::new("escape", jump::Close, jumping),
@@ -1364,7 +1364,7 @@ mod tests {
         assert!(is(dispatched("enter", IN_CHIPS), chips::Edit));
         assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
         assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
-        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
+        assert!(is(dispatched("secondary-enter", IN_PALETTE), jump::AskWhy));
         assert!(is(dispatched("shift-enter", IN_PALETTE), jump::AlwaysShow));
         assert!(is(dispatched("alt-enter", IN_PALETTE), jump::AddChip));
         assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
@@ -1534,7 +1534,7 @@ mod tests {
     #[test]
     fn ctrl_enter_applies_the_stack_outside_the_palette() {
         assert!(is(dispatched("ctrl-enter", IN_PANEL), chips::Apply));
-        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
+        assert!(is(dispatched("secondary-enter", IN_PALETTE), jump::AskWhy));
         assert!(dispatched("ctrl-enter", IN_FIELD).is_none());
     }
 
