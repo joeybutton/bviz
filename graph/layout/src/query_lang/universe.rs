@@ -57,6 +57,9 @@ pub struct Readable {
     configured: Support,
     /// How far the inputs state the files each action reads and writes.
     artifacts: Support,
+    /// How far the inputs state every attribute of each rule; `None` where
+    /// neither of those describing rules, a query and a cquery, is read.
+    rule_attributes: Option<Support>,
 }
 
 impl Readable {
@@ -79,6 +82,9 @@ impl Readable {
             holds_actions: holds_actions && capabilities.inputs().contains(Input::Aquery),
             configured: capabilities.support(Axis::Configuration),
             artifacts: capabilities.support(Axis::Artifacts),
+            rule_attributes: ([Input::Query, Input::Cquery].into_iter())
+                .any(|input| capabilities.inputs().contains(input))
+                .then(|| capabilities.support(Axis::Attributes)),
         }
     }
 
@@ -103,6 +109,13 @@ impl Readable {
             Function::ToolConfigured if self.configured != Support::Available => Err(format!(
                 "{name}() requires every configured target's configuration"
             )),
+            Function::Labels => match self.rule_attributes {
+                None => Err(format!("{name}() requires a query or a cquery")),
+                Some(Support::Unavailable { flag }) => {
+                    Err(format!("{name}() requires a query or a cquery with {flag}"))
+                }
+                Some(Support::Available | Support::Partial { .. }) => Ok(()),
+            },
             _ => Ok(()),
         }
     }

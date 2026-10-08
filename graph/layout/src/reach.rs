@@ -325,6 +325,15 @@ impl Index {
         edges.map(|&edge| Id(self.ends[edge as usize][0]))
     }
 
+    /// The nodes `id` depends on by an edge of its own that a walk from `id`
+    /// follows, keeping to the side of the tool boundary it starts on.
+    pub(crate) fn followed_dependencies(&self, id: Id) -> impl Iterator<Item = Id> + '_ {
+        let side = self.own_side(id.0 as usize).unwrap_or(0);
+        let entered =
+            move |dependency: &Id| self.side_at(dependency.0 as usize, side) == Some(side);
+        self.dependencies(id).filter(entered)
+    }
+
     /// The dependency and the dependent the edge at `edge` of the walk's edge
     /// list joins.
     pub(crate) fn ends(&self, edge: u32) -> [Id; 2] {

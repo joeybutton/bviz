@@ -379,3 +379,45 @@ fn an_attribute_table_is_shared_across_threads() {
     fn shared<T: Send + Sync>() {}
     shared::<Attributes>();
 }
+
+/// Every label the attribute `name` of `node` names, as `labels` reads them.
+fn named_labels(table: &Attributes, node: Id, name: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    if let Stated::Row(row) = table.stated(node, table.name(name)) {
+        let mut visit = |label: Sym| labels.push(table.resolve(label).to_string());
+        table.row(row).value.for_each_label(&mut visit);
+    }
+    labels
+}
+
+#[test]
+fn a_value_names_the_labels_of_every_branch_and_no_condition() {
+    let select = selector_list(
+        "srcs",
+        &label_list("", &[]),
+        &[&[
+            ("@@//c:x", Some(label_list("", &["//a:x", "@@//a:y"]))),
+            ("//conditions:default", None),
+        ]],
+    );
+    let dict = Attribute {
+        name: "deps_by_key".to_string(),
+        r#type: AttributeType::LabelListDict as i32,
+        string_list_dict_value: vec![StringListDictEntry {
+            key: "K".to_string(),
+            value: vec!["//a:z".to_string()],
+        }],
+        ..Default::default()
+    };
+    let table = table(&[vec![
+        dict,
+        license("licenses", &["NOTICE"], &["//a:e"]),
+        select,
+        string_list("tags", &["//a:t"]),
+    ]]);
+
+    assert_eq!(named_labels(&table, Id(0), "srcs"), ["//a:x", "//a:y"]);
+    assert_eq!(named_labels(&table, Id(0), "deps_by_key"), ["//a:z"]);
+    assert!(named_labels(&table, Id(0), "tags").is_empty());
+    assert!(named_labels(&table, Id(0), "licenses").is_empty());
+}

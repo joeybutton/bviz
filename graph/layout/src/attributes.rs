@@ -300,6 +300,39 @@ impl Attributes {
     }
 }
 
+impl Value {
+    /// Calls `visit` with each label the value names as Bazel's types visit
+    /// them (`Type.visitLabels`): those of every `select` branch, but no
+    /// condition, and none of a license.
+    pub fn for_each_label(&self, visit: &mut impl FnMut(Sym)) {
+        match self {
+            Value::Label(label) => visit(*label),
+            Value::Labels(labels) => labels.iter().copied().for_each(visit),
+            Value::LabelDict(entries) => entries.iter().for_each(|&(_, label)| visit(label)),
+            Value::LabelKeyedStringDict(entries) => {
+                entries.iter().for_each(|&(label, _)| visit(label))
+            }
+            Value::LabelListDict(entries) => (entries.iter())
+                .flat_map(|(_, labels)| labels.iter().copied())
+                .for_each(visit),
+            Value::Select(selectors) => (selectors.iter())
+                .flat_map(|selector| selector.0.iter())
+                .for_each(|(_, value)| value.for_each_label(visit)),
+            Value::Null
+            | Value::Integer(_)
+            | Value::Boolean(_)
+            | Value::Tristate(_)
+            | Value::String(_)
+            | Value::Strings(_)
+            | Value::StringSet(_)
+            | Value::Integers(_)
+            | Value::StringDict(_)
+            | Value::StringListDict(_)
+            | Value::License(_) => {}
+        }
+    }
+}
+
 /// The elements of a list value, `None` for a value that is no list.
 fn list_items(value: &Value) -> Option<Box<dyn Iterator<Item = Item<'_>> + '_>> {
     match value {

@@ -12,6 +12,7 @@ mod functions;
 mod lex;
 mod narrow;
 mod parse;
+mod prerequisites;
 mod stack;
 mod universe;
 

@@ -948,9 +948,12 @@ impl Command {
     /// `PostAnalysisQueryEnvironment` rejects (`buildfiles`, `loadfiles`,
     /// `siblings`); query adds `SkyQueryEnvironment`'s `allrdeps` and
     /// `rbuildfiles`, read under `--universe_scope`; cquery adds
-    /// `CQUERY_FUNCTIONS` and aquery `AQUERY_FUNCTIONS`.
+    /// `CQUERY_FUNCTIONS` and aquery `AQUERY_FUNCTIONS`. aquery's target
+    /// accessor reads no rule's prerequisites, failing `labels`
+    /// (`ConfiguredTargetValueAccessor.getPrerequisites`).
     pub fn reads(self, function: Function) -> bool {
         match function {
+            Function::Labels => self != Command::Aquery,
             Function::AllRdeps
             | Function::RBuildFiles
             | Function::BuildFiles
@@ -964,7 +967,6 @@ impl Command {
             | Function::Executables
             | Function::Filter
             | Function::Kind
-            | Function::Labels
             | Function::Rdeps
             | Function::SamePkgDirectRdeps
             | Function::Some

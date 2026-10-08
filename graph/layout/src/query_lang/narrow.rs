@@ -332,12 +332,7 @@ impl Universe {
                     attributes.any_printed(value, |printed| regex.is_match(printed.as_bytes()))
                 }),
                 Stated::Absent | Stated::Undescribed => false,
-                Stated::LeftOut => {
-                    return Err(format!(
-                        "attr() needs each rule's '{name}' attribute, which the graph's inputs \
-                         state only under {ALL_ATTRIBUTES_FLAGS}"
-                    ));
-                }
+                Stated::LeftOut => return Err(left_out(Function::Attr, name)),
             };
             if matches {
                 kept.insert(id);
@@ -356,7 +351,7 @@ impl Universe {
     /// (`ConfiguredTargetAccessor.getAttrAsString`). A configured target whose
     /// target no query described reads its own, and so a public or private
     /// rule's as `[]`.
-    fn attribute_of(&self, id: Id, name: Option<Sym>) -> Stated {
+    pub(super) fn attribute_of(&self, id: Id, name: Option<Sym>) -> Stated {
         let target = (self.position(id).map(|at| self.labels.entries()[at].0))
             .filter(|_| self.inputs.contains(Input::Query));
         let configured = (self.index.kind(id) == Some(Kind::ConfiguredTarget))
@@ -485,6 +480,16 @@ impl Universe {
         }
         kept
     }
+}
+
+/// Why `function` cannot read the attribute `name` of some rule: the
+/// graph's inputs leave it out.
+pub(super) fn left_out(function: Function, name: &str) -> String {
+    let function = function.name();
+    format!(
+        "{function}() needs each rule's '{name}' attribute, which the graph's inputs state only \
+         under {ALL_ATTRIBUTES_FLAGS}"
+    )
 }
 
 /// Matches exec paths against every one of some patterns, joining each into

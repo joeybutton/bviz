@@ -195,6 +195,7 @@ pub(super) enum Evaluable {
     Filter,
     Inputs,
     Kind,
+    Labels,
     Mnemonic,
     Outputs,
     Rdeps,
@@ -346,6 +347,7 @@ impl Function {
             Function::Filter => return Ok(Evaluable::Filter),
             Function::Inputs => return Ok(Evaluable::Inputs),
             Function::Kind => return Ok(Evaluable::Kind),
+            Function::Labels => return Ok(Evaluable::Labels),
             Function::Mnemonic => return Ok(Evaluable::Mnemonic),
             Function::Outputs => return Ok(Evaluable::Outputs),
             Function::Rdeps => return Ok(Evaluable::Rdeps),
@@ -357,7 +359,6 @@ impl Function {
             Function::Some => return Ok(Evaluable::Some),
             Function::SomePath => return Ok(Evaluable::SomePath),
             Function::ToolConfigured => return Ok(Evaluable::ToolConfigured),
-            Function::Labels => "the labels each rule's attributes name",
             Function::Visible => "each target's visibility",
             Function::Tests => "the tests each test suite names",
             Function::BuildFiles | Function::LoadFiles | Function::RBuildFiles => {
