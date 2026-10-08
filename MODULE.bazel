@@ -203,6 +203,7 @@ crate.annotation(
         "//patches/gpui_linux:gpui_linux-embedded-fonts-only.patch",
         "//patches/gpui_linux:gpui_linux-platform-drag.patch",
         "//patches/gpui_linux:gpui_linux-keymap-no-default-includes.patch",
+        "//patches/gpui_linux:gpui_linux-initial-appearance.patch",
     ],
 )
 crate.annotation(

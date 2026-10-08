@@ -1,0 +1,96 @@
+Read the portal color scheme before the first window opens
+
+gpui starts every Linux client with a Light appearance and learns the
+desktop's color scheme only once an asynchronous xdg-desktop-portal reply
+reaches the event loop. The app's launch closure runs before that loop, so
+on a dark desktop the first window is drawn light and then repainted dark: a
+visible light flash at startup. Reading the setting once, synchronously and
+bounded by a short timeout, seeds the appearance the first frame uses; an
+absent or slow portal leaves the Light default, and the asynchronous
+subscription still follows later changes.
+
+diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
+--- a/crates/gpui_linux/src/linux/wayland/client.rs
++++ b/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -94,7 +94,7 @@ use crate::linux::{
+         to_shape,
+         window::WaylandWindow,
+     },
+-    xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
++    xdg_desktop_portal::{Event as XDPEvent, XDPEventSource, initial_window_appearance},
+ };
+ use gpui::{
+     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, DragIcon,
+@@ -762,7 +762,10 @@ impl WaylandClient {
+ 
+         let event_loop = EventLoop::<WaylandClientStatePtr>::try_new().unwrap();
+ 
+-        let (common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
++        let (mut common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
++        if let Some(appearance) = initial_window_appearance() {
++            common.appearance = appearance;
++        }
+ 
+         let handle = event_loop.handle();
+         handle
+diff --git a/crates/gpui_linux/src/linux/x11/client.rs b/crates/gpui_linux/src/linux/x11/client.rs
+--- a/crates/gpui_linux/src/linux/x11/client.rs
++++ b/crates/gpui_linux/src/linux/x11/client.rs
+@@ -54,7 +54,7 @@ use crate::linux::{
+     keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, open_uri_internal,
+     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
+     reveal_path_internal,
+-    xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
++    xdg_desktop_portal::{Event as XDPEvent, XDPEventSource, initial_window_appearance},
+ };
+ use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info};
+ 
+@@ -309,7 +309,10 @@ impl X11Client {
+     pub(crate) fn new() -> anyhow::Result<Self> {
+         let event_loop = EventLoop::try_new()?;
+ 
+-        let (common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
++        let (mut common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
++        if let Some(appearance) = initial_window_appearance() {
++            common.appearance = appearance;
++        }
+ 
+         let handle = event_loop.handle();
+ 
+diff --git a/crates/gpui_linux/src/linux/xdg_desktop_portal.rs b/crates/gpui_linux/src/linux/xdg_desktop_portal.rs
+--- a/crates/gpui_linux/src/linux/xdg_desktop_portal.rs
++++ b/crates/gpui_linux/src/linux/xdg_desktop_portal.rs
+@@ -6,6 +6,7 @@ use ashpd::desktop::settings::{ColorScheme, Settings};
+ use calloop::channel::Channel;
+ use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
+ use smol::stream::StreamExt;
++use std::time::Duration;
+ 
+ use gpui::{BackgroundExecutor, WindowAppearance};
+ 
+@@ -18,6 +19,25 @@ pub enum Event {
+     ButtonLayout(String),
+ }
+ 
++/// How long startup waits on the portal before the first window is drawn with
++/// the default appearance.
++const INITIAL_APPEARANCE_TIMEOUT: Duration = Duration::from_millis(250);
++
++/// The portal's color scheme, read synchronously so the first frame is drawn in
++/// it; `None` when the portal is absent or does not answer in time.
++pub fn initial_window_appearance() -> Option<WindowAppearance> {
++    smol::block_on(smol::future::or(
++        async {
++            let scheme = Settings::new().await.ok()?.color_scheme().await.ok()?;
++            Some(window_appearance_from_color_scheme(scheme))
++        },
++        async {
++            smol::Timer::after(INITIAL_APPEARANCE_TIMEOUT).await;
++            None
++        },
++    ))
++}
++
+ pub struct XDPEventSource {
+     channel: Channel<Event>,
+ }
