@@ -75,7 +75,7 @@ impl Axis {
             // instead, which is no longer cquery output at all.
             Axis::Configuration => None,
             Axis::ExecConfiguration => Some(TRANSITIONS_FLAG),
-            Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
+            Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs=all"),
             Axis::Artifacts => Some("--include_artifacts"),
         }
     }
@@ -231,7 +231,7 @@ mod tests {
             Support::Partial {
                 covered: 2,
                 relevant: 5,
-                flag: Some("--proto:output_rule_attrs")
+                flag: Some("--proto:output_rule_attrs=all")
             }
         );
     }

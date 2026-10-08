@@ -315,7 +315,7 @@ fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
     assert_eq!(
         error.message,
         "attr() needs each rule's tags, which the graph's inputs state only under \
-         --proto:output_rule_attrs"
+         --proto:output_rule_attrs=all"
     );
 }
 

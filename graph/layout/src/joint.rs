@@ -980,7 +980,7 @@ mod tests {
         let Joint { capabilities, .. } = build_joint(None, None, Some(&query_targets), false);
 
         let missing = Support::Unavailable {
-            flag: "--proto:output_rule_attrs",
+            flag: "--proto:output_rule_attrs=all",
         };
         assert_eq!(capabilities.support(Axis::Tags), missing);
         assert_eq!(capabilities.support(Axis::Testonly), missing);
@@ -1000,7 +1000,7 @@ mod tests {
         assert_eq!(
             capabilities.support(Axis::Testonly),
             Support::Unavailable {
-                flag: "--proto:output_rule_attrs"
+                flag: "--proto:output_rule_attrs=all"
             }
         );
     }
@@ -1019,7 +1019,7 @@ mod tests {
             Support::Partial {
                 covered: 1,
                 relevant: 2,
-                flag: Some("--proto:output_rule_attrs"),
+                flag: Some("--proto:output_rule_attrs=all"),
             }
         );
     }

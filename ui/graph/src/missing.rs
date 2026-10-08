@@ -188,7 +188,7 @@ mod tests {
             [
                 "repository origins — run the query with --consistent_labels",
                 "per-dependency configurations — run the query with --transitions=lite",
-                "target tags, testonly targets — run the query with --proto:output_rule_attrs",
+                "target tags, testonly targets — run the query with --proto:output_rule_attrs=all",
                 "action inputs and outputs — run the query with --include_artifacts",
             ]
         );
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(
             gaps(&observed(false, 1))
                 .into_iter()
-                .find(|gap| gap.flag == "--proto:output_rule_attrs")
+                .find(|gap| gap.flag == "--proto:output_rule_attrs=all")
                 .map(|gap| gap.axes),
             Some(vec![Axis::Tags, Axis::Testonly])
         );
