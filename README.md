@@ -67,7 +67,7 @@ bviz opens every file named on its command line, and needs at least one.
 ### Dependency graph
 
 ```sh
-bazel query --output=streamed_proto --consistent_labels //... > /tmp/query.pb
+bazel query --output=streamed_proto --consistent_labels --noproto:flatten_selects //... > /tmp/query.pb
 bazel cquery --output=streamed_proto --consistent_labels --transitions=lite //... > /tmp/cquery.pb
 bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
 bviz --query /tmp/query.pb --cquery /tmp/cquery.pb --aquery /tmp/aquery.pb
@@ -77,7 +77,9 @@ Any one of the three is enough. bviz merges them into a single graph, so each
 flag takes one file. bviz reads the most from files written with these flags,
 some of which Bazel sets by default:
 
-- query: `--consistent_labels`, `--proto:output_rule_attrs` (default `all`)
+- query: `--consistent_labels`, `--proto:output_rule_attrs` (default `all`),
+  `--noproto:flatten_selects`, without which a `select` is written merged
+  into one value and `attr()` cannot match its branches as Bazel does
 - cquery: `--consistent_labels`, `--transitions=lite` (or `full`),
   `--proto:output_rule_attrs` (default `all`)
 - aquery: `--include_artifacts` (default on)
