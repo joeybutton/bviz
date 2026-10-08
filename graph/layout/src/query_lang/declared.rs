@@ -1,32 +1,14 @@
-//! What each target of a graph declares that `kind` and `attr` match, read
-//! once per target and spelled as Bazel's query engine spells it.
+//! What each target of a graph declares that `kind` and `attr` match of it
+//! beyond the attributes it states, read once per target and spelled as
+//! Bazel's query engine spells it.
 
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
 
-use crate::facets::{Facets, Tri};
+use crate::facets::Facets;
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::reach::Index;
-
-/// An attribute `attr` reads, of the few bviz loads into its graph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Attribute {
-    Name,
-    Tags,
-    Testonly,
-}
-
-impl Attribute {
-    pub(super) fn named(name: &str) -> Option<Self> {
-        match name {
-            "name" => Some(Attribute::Name),
-            "tags" => Some(Attribute::Tags),
-            "testonly" => Some(Attribute::Testonly),
-            _ => None,
-        }
-    }
-}
 
 /// The node kinds of a file, each with the kind Bazel names a file target of
 /// it by.
@@ -47,11 +29,6 @@ pub(super) fn file_kind(kind: Kind) -> Option<&'static str> {
 /// labels.
 pub(super) struct Declared {
     kinds: Column,
-    /// Each rule's tags as Bazel prints a list attribute's value, `[a, b]`,
-    /// but for a tag a rule repeats, which the tags facet holds once and so
-    /// prints once.
-    tags: Column,
-    testonly: Vec<Tri>,
     rules: FixedBitSet,
 }
 
@@ -61,14 +38,11 @@ impl Declared {
     pub(super) fn new(targets: &[(Id, String)], index: &Index, facets: &Facets) -> Self {
         let strings = facets.strings();
         let mut kind_column = ColumnBuilder::with_capacity(targets.len());
-        let mut tags = ColumnBuilder::with_capacity(targets.len());
-        let mut testonly: Vec<Tri> = Vec::with_capacity(targets.len());
         let mut rules = FixedBitSet::with_capacity(targets.len());
         let mut kind = String::new();
-        let mut printed = String::new();
         for (at, &(id, _)) in targets.iter().enumerate() {
             let node_kind = index.kind(id);
-            let rule = node_kind == Some(Kind::Target);
+            rules.set(at, node_kind == Some(Kind::Target));
             kind.clear();
             match node_kind {
                 Some(Kind::Target) => {
@@ -86,30 +60,10 @@ impl Declared {
                 }
                 None => {}
             }
-            if rule {
-                printed.clear();
-                printed.push('[');
-                for (index, &tag) in facets.tags().values(id).iter().enumerate() {
-                    if index > 0 {
-                        printed.push_str(", ");
-                    }
-                    printed.push_str(strings.resolve(tag));
-                }
-                printed.push(']');
-                rules.insert(at);
-            }
             kind_column.push((!kind.is_empty()).then_some(kind.as_str()));
-            tags.push(rule.then_some(printed.as_str()));
-            testonly.push(if rule {
-                facets.testonly(id)
-            } else {
-                Tri::Unknown
-            });
         }
         Declared {
             kinds: kind_column.column,
-            tags: tags.column,
-            testonly,
             rules,
         }
     }
@@ -120,28 +74,13 @@ impl Declared {
         self.kinds.get(at)
     }
 
-    /// The value of `attribute` the rule at `at` carries, as Bazel's `attr`
-    /// prints it, `None` for a target that is no rule or a value the graph
-    /// does not know. The target's own name is the part of its `label`
-    /// after the colon.
-    pub(super) fn attribute<'a>(
-        &'a self,
-        attribute: Attribute,
-        at: usize,
-        label: &'a str,
-    ) -> Option<&'a str> {
+    /// The `name` attribute of the rule at `at`, the part of its `label`
+    /// after the colon; `None` for a target that is no rule.
+    pub(super) fn name<'a>(&self, at: usize, label: &'a str) -> Option<&'a str> {
         if !self.rules.contains(at) {
             return None;
         }
-        match attribute {
-            Attribute::Name => label.split_once(':').map(|(_, name)| name),
-            Attribute::Tags => self.tags.get(at),
-            Attribute::Testonly => match self.testonly[at] {
-                Tri::Yes => Some("1"),
-                Tri::No => Some("0"),
-                Tri::Unknown => None,
-            },
-        }
+        label.split_once(':').map(|(_, name)| name)
     }
 }
 

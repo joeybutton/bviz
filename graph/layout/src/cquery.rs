@@ -250,7 +250,8 @@ impl Nodes<'_, '_> {
         }
         let container = self.index.target_box[label.as_ref()];
         if let Some(configured) = self.add_configured(written, container, config_id) {
-            self.b.attributes.describe(configured, rule, self.b.repos);
+            let complete = self.b.attributes.describe(configured, rule, self.b.repos);
+            self.b.facets.observe(Axis::Attributes, complete);
         }
     }
 

@@ -34,9 +34,10 @@ use regex_syntax::hir::{Hir, Look};
 use rustc_hash::FxHashMap;
 
 use super::ast::Function;
-use super::declared::{Attribute, FILE_KINDS, file_kind};
+use super::declared::{FILE_KINDS, file_kind};
 use super::universe::Universe;
-use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
+use crate::attributes::Stated;
+use crate::capability::{ALL_ATTRIBUTES_FLAGS, CONSISTENT_LABELS_FLAG};
 use crate::exec_path::{ExecPath, LeftOutInputs};
 use crate::facets::{RuleCategory, Sym};
 use crate::graph::Kind;
@@ -207,27 +208,6 @@ impl Universe {
         })
     }
 
-    /// The attribute `attr` reads by `name`, or why the graph cannot answer it.
-    pub(super) fn attribute(&self, name: &str) -> Result<Attribute, String> {
-        let unstated = |what: &str, support: Support| match support {
-            Support::Unavailable { flag } => Err(format!(
-                "attr() needs each rule's {what}, which the graph's inputs state only under {flag}"
-            )),
-            Support::Available | Support::Partial { .. } => Ok(()),
-        };
-        match Attribute::named(name) {
-            Some(Attribute::Tags) => unstated("tags", self.tags).map(|()| Attribute::Tags),
-            Some(Attribute::Testonly) => {
-                unstated("testonly", self.testonly).map(|()| Attribute::Testonly)
-            }
-            Some(attribute) => Ok(attribute),
-            None => Err(format!(
-                "attr() needs each rule's '{name}' attribute, which bviz does not load into its \
-                 graph"
-            )),
-        }
-    }
-
     /// The members of `value`, and the files its configured targets hold,
     /// whose kind `regex` matches: a file's own, as Bazel names a file target,
     /// and the target's of any other node.
@@ -324,19 +304,73 @@ impl Universe {
         })
     }
 
-    /// The members of `value` whose target is a rule carrying a value of
-    /// `attribute` that `regex` matches.
+    /// The members of `value` whose target is a rule carrying a value of its
+    /// attribute `name` that `regex` matches, or why the graph cannot tell for
+    /// one of them.
     pub(super) fn attr(
         &self,
-        attribute: Attribute,
+        name: &str,
         regex: &Regex,
         value: &FixedBitSet,
-    ) -> FixedBitSet {
-        self.retain(value, |at| {
-            let label = &self.labels.entries()[at].1;
-            let carried = self.declared.attribute(attribute, at, label);
-            carried.is_some_and(|carried| regex.is_match(carried.as_bytes()))
-        })
+    ) -> Result<FixedBitSet, String> {
+        if name == "name" {
+            return Ok(self.retain(value, |at| {
+                let name = self.declared.name(at, &self.labels.entries()[at].1);
+                name.is_some_and(|name| regex.is_match(name.as_bytes()))
+            }));
+        }
+        let handle = self.attributes.name(name);
+        let attributes = &self.attributes;
+        // Each distinct row is printed and matched once, by its index.
+        let mut verdicts: Vec<Option<bool>> = vec![None; attributes.row_count()];
+        let mut kept = self.empty();
+        for id in value.ones() {
+            let matches = match self.attribute_of(Id(id as u32), handle) {
+                Stated::Row(row) => *verdicts[row.index()].get_or_insert_with(|| {
+                    let value = &attributes.row(row).value;
+                    attributes.any_printed(value, |printed| regex.is_match(printed.as_bytes()))
+                }),
+                Stated::Absent | Stated::Undescribed => false,
+                Stated::LeftOut => {
+                    return Err(format!(
+                        "attr() needs each rule's '{name}' attribute, which the graph's inputs \
+                         state only under {ALL_ATTRIBUTES_FLAGS}"
+                    ));
+                }
+            };
+            if matches {
+                kept.insert(id);
+            }
+        }
+        Ok(kept)
+    }
+
+    /// What the attribute `name` of `id` reads as. A configured target reads
+    /// its own description, as cquery resolved it in its configuration, and
+    /// where that does not state the attribute, its target's.
+    ///
+    /// `visibility` is read from the target first: cquery states it as a rule
+    /// holds it once loaded, emptied for a public or private one, where its
+    /// `attr` reads the labels the rule declares
+    /// (`ConfiguredTargetAccessor.getAttrAsString`). A configured target whose
+    /// target no query described reads its own, and so a public or private
+    /// rule's as `[]`.
+    fn attribute_of(&self, id: Id, name: Option<Sym>) -> Stated {
+        let target = self.position(id).map(|at| self.labels.entries()[at].0);
+        let configured = (self.index.kind(id) == Some(Kind::ConfiguredTarget)).then_some(id);
+        let order = match name.is_some() && name == self.visibility {
+            true => [target, configured],
+            false => [configured, target],
+        };
+        let mut stated = Stated::Undescribed;
+        for node in order.into_iter().flatten() {
+            match self.attributes.stated(node, name) {
+                Stated::Undescribed => {}
+                Stated::LeftOut => stated = Stated::LeftOut,
+                found @ (Stated::Row(_) | Stated::Absent) => return found,
+            }
+        }
+        stated
     }
 
     /// The actions of `value`, and those its configured targets hold, that

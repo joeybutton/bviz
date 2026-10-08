@@ -27,16 +27,8 @@ impl Fixture {
             rule("//b:test", "cc_test", &["//b:app"]),
         ];
         let joint = build_joint(None, None, Some(&targets), false);
-        let universe = Universe::new(
-            &joint.graph,
-            &joint.names,
-            &Arc::new(joint.facets),
-            &joint.capabilities,
-        );
-        Fixture {
-            universe,
-            names: joint.names,
-        }
+        let (universe, names) = Universe::of_joint(joint);
+        Fixture { universe, names }
     }
 
     /// The labels the whole of `stack` names, sorted.
@@ -192,15 +184,8 @@ fn a_leading_except_takes_out_package_and_environment_groups_by_kind() {
         },
     ];
     let joint = build_joint(None, None, Some(&targets), false);
-    let fixture = Fixture {
-        universe: Universe::new(
-            &joint.graph,
-            &joint.names,
-            &Arc::new(joint.facets),
-            &joint.capabilities,
-        ),
-        names: joint.names,
-    };
+    let (universe, names) = Universe::of_joint(joint);
+    let fixture = Fixture { universe, names };
 
     assert_eq!(
         fixture.named(&stack(&["//a:*"])),
@@ -426,15 +411,8 @@ fn java() -> Fixture {
         },
     ])];
     let joint = build_joint(Some(&aquery), None, None, false);
-    Fixture {
-        universe: Universe::new(
-            &joint.graph,
-            &joint.names,
-            &Arc::new(joint.facets),
-            &joint.capabilities,
-        ),
-        names: joint.names,
-    }
+    let (universe, names) = Universe::of_joint(joint);
+    Fixture { universe, names }
 }
 
 /// Chips reading each set once write out nested aquery filter calls, which

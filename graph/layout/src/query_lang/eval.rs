@@ -222,9 +222,8 @@ impl Universe {
             Evaluable::Attr => {
                 let words = words(args);
                 let regex = self.regex(function, words[1]).map_err(fail)?;
-                let attribute = self.attribute(words[0]).map_err(fail)?;
                 let (values, _) = arguments()?;
-                Ok(self.attr(attribute, &regex, &values[0]))
+                self.attr(words[0], &regex, &values[0]).map_err(fail)
             }
             Evaluable::RepoCategory => {
                 let regex = self.whole_regex(function, words(args)[0]).map_err(fail)?;

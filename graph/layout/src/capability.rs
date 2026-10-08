@@ -17,6 +17,10 @@ pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
 /// canonical name.
 pub const CONSISTENT_LABELS_FLAG: &str = "--consistent_labels";
 
+/// The query and cquery flags under which each rule states every attribute,
+/// both defaults as of Bazel 9.2.0.
+pub const ALL_ATTRIBUTES_FLAGS: &str = "--proto:output_rule_attrs=all --proto:default_values";
+
 /// A property a query selects nodes by.
 ///
 /// The discriminants index [`Axis::ALL`], which lists them in that same order.
@@ -38,12 +42,14 @@ pub enum Axis {
     Aspect,
     Tags,
     Testonly,
+    /// Every attribute of a rule, whether written in its BUILD file or not.
+    Attributes,
     /// The files an action reads and writes.
     Artifacts,
 }
 
 impl Axis {
-    pub const ALL: [Axis; 12] = [
+    pub const ALL: [Axis; 13] = [
         Axis::Repo,
         Axis::Package,
         Axis::Label,
@@ -55,6 +61,7 @@ impl Axis {
         Axis::Aspect,
         Axis::Tags,
         Axis::Testonly,
+        Axis::Attributes,
         Axis::Artifacts,
     ];
 
@@ -76,6 +83,7 @@ impl Axis {
             Axis::Configuration => None,
             Axis::ExecConfiguration => Some(TRANSITIONS_FLAG),
             Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
+            Axis::Attributes => Some(ALL_ATTRIBUTES_FLAGS),
             Axis::Artifacts => Some("--include_artifacts"),
         }
     }

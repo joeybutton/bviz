@@ -11,6 +11,7 @@ use crate::report::Report;
 use crate::status::{Landings, Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
+use bviz_graph_layout::attributes::Attributes;
 use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
@@ -50,6 +51,9 @@ pub(crate) struct Shared {
     /// The facets of the base graph's nodes, keyed by the same ids, which a
     /// panel's filter selects on.
     pub(crate) facets: Arc<Facets>,
+    /// The attributes the base graph's rule nodes state, keyed by the same
+    /// ids, which a query's `attr` reads.
+    pub(crate) attributes: Arc<Attributes>,
     /// The canonical labels those nodes belong to, gathered once for every
     /// index over them.
     pub(crate) labels: Arc<LabelIndex>,
@@ -162,7 +166,13 @@ impl Loaded {
         let indexed = targets.clone();
         let universe = Prepared::new(&shared, move |shared| {
             let targets = Arc::clone(indexed.get());
-            Universe::with_targets(&shared.base, targets, &shared.facets, &shared.capabilities)
+            Universe::with_targets(
+                &shared.base,
+                targets,
+                &shared.facets,
+                &shared.attributes,
+                &shared.capabilities,
+            )
         });
         Self {
             targets,
@@ -441,7 +451,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
             graph,
             names,
             facets,
-            attributes: _,
+            attributes,
             capabilities,
             provenance,
         },
@@ -477,6 +487,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
                 map,
                 names: Arc::new(names),
                 facets: Arc::new(facets),
+                attributes: Arc::new(attributes),
                 labels,
                 containers,
                 capabilities,
@@ -1033,6 +1044,7 @@ mod tests {
                 map: Placement::pending().0,
                 names: Arc::new(names),
                 facets: Arc::clone(&facets),
+                attributes: Arc::default(),
                 labels,
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),

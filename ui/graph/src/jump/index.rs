@@ -326,6 +326,7 @@ pub(crate) mod tests {
             config_names: Arc::new(ConfigNames::of(&facets)),
             names: Arc::new(names),
             facets: Arc::new(facets),
+            attributes: Arc::default(),
             labels,
             containers,
             capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),

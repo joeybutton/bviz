@@ -107,7 +107,8 @@ pub(crate) fn build_with_packages(
         ));
         describe_target(facets, target, node_id, parent, &label);
         if let Some(rule) = &target.rule {
-            attributes.describe(node_id, rule, repos);
+            let complete = attributes.describe(node_id, rule, repos);
+            facets.observe(Axis::Attributes, complete);
         }
         node_by_label.insert(label.into_owned(), node_id);
     }
@@ -546,7 +547,7 @@ mod tests {
 
         let facets = Arc::new(facets.clone());
         let capabilities = CapabilitiesBuilder::default().seal();
-        let universe = Universe::new(graph, names, &facets, &capabilities);
+        let universe = Universe::new(graph, names, &facets, &Arc::default(), &capabilities);
         let mut stack = Stack::default();
         let chip = stack.push(text);
         if !keep {

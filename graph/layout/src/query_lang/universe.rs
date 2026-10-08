@@ -11,10 +11,12 @@ use super::config::Configurations;
 use super::declared::Declared;
 use super::narrow::Patterns;
 use super::stack::Value;
+use crate::attributes::Attributes;
 use crate::capability::{Axis, Capabilities, Support};
-use crate::facets::Facets;
+use crate::facets::{Facets, Sym};
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
+use crate::joint::Joint;
 use crate::reach::{Index, Level};
 use crate::select::Scope;
 use crate::select::labels::LabelIndex;
@@ -32,13 +34,12 @@ pub struct Universe {
     /// The nodes a value may hold: every node but the frames.
     members: FixedBitSet,
     pub(super) facets: Arc<Facets>,
+    pub(super) attributes: Arc<Attributes>,
+    /// The name of the `visibility` attribute, where some rule states it.
+    pub(super) visibility: Option<Sym>,
     pub(super) declared: Declared,
     pub(super) configurations: Configurations,
     pub(super) readable: Readable,
-    /// How far the inputs state each rule's tags.
-    pub(super) tags: Support,
-    /// How far the inputs state whether each rule is `testonly`.
-    pub(super) testonly: Support,
     pub(super) patterns: Patterns,
 }
 
@@ -107,11 +108,25 @@ impl Universe {
         graph: &Graph,
         names: &Names,
         facets: &Arc<Facets>,
+        attributes: &Arc<Attributes>,
         capabilities: &Capabilities,
     ) -> Self {
         let labels = Arc::new(LabelIndex::of(graph, names, facets));
         let targets = Arc::new(TargetIndex::of(labels, graph, facets, capabilities));
-        Universe::with_targets(graph, targets, facets, capabilities)
+        Universe::with_targets(graph, targets, facets, attributes, capabilities)
+    }
+
+    /// The universe of `joint`'s graph, with the names its node ids resolve
+    /// through.
+    pub fn of_joint(joint: Joint) -> (Self, Names) {
+        let universe = Universe::new(
+            &joint.graph,
+            &joint.names,
+            &Arc::new(joint.facets),
+            &Arc::new(joint.attributes),
+            &joint.capabilities,
+        );
+        (universe, joint.names)
     }
 
     /// The universe of `graph`, whose targets `targets` indexes.
@@ -119,6 +134,7 @@ impl Universe {
         graph: &Graph,
         targets: Arc<TargetIndex>,
         facets: &Arc<Facets>,
+        attributes: &Arc<Attributes>,
         capabilities: &Capabilities,
     ) -> Self {
         let labels = Arc::clone(targets.labels());
@@ -139,14 +155,14 @@ impl Universe {
             declared: Declared::new(labels.entries(), &index, facets),
             configurations: Configurations::new(graph, facets),
             facets: Arc::clone(facets),
+            visibility: attributes.name("visibility"),
+            attributes: Arc::clone(attributes),
             index,
             labels,
             targets,
             owner,
             members,
             readable: Readable::of(graph, capabilities),
-            tags: capabilities.support(Axis::Tags),
-            testonly: capabilities.support(Axis::Testonly),
             patterns: Patterns::default(),
         }
     }

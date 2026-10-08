@@ -8,8 +8,8 @@
 //! no edges, so the graphs drawn state neither, and the two engines walk the
 //! same edges.
 //!
-//! `attr` is drawn for the attributes bviz loads, which the graphs drawn state
-//! as `--proto:output_rule_attrs` writes them: every rule its tags, some rules
+//! `attr` is drawn for tags and `testonly`, which the graphs drawn state as
+//! Bazel writes them by default: every rule its name and tags, some rules
 //! `testonly`.
 //!
 //! `somepath` and `some` may each answer any of several sets. Drawn only at
@@ -30,7 +30,6 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use bazel_query_proto::blaze_query::{
     Attribute, GeneratedFile, PackageGroup, Rule, SourceFile, Target,
@@ -108,12 +107,7 @@ fn evaluates_as_bazel_does() {
         let path = graph.write(seed);
         let targets = read_query_targets(&std::fs::read(&path).unwrap()).unwrap();
         let joint = build_joint(None, None, Some(&targets), false);
-        let universe = Universe::new(
-            &joint.graph,
-            &joint.names,
-            &Arc::new(joint.facets),
-            &joint.capabilities,
-        );
+        let (universe, _) = Universe::of_joint(joint);
         let ours = Ours {
             universe: &universe,
             graph: &graph,
@@ -225,7 +219,17 @@ impl Graph {
             inputs.sort();
             inputs.dedup();
             let class = RULE_CLASSES[rng.usize(..RULE_CLASSES.len())];
-            let mut attributes = vec![string_list("tags", tags)];
+            let (_, short) = name.split_once(':').unwrap();
+            let mut attributes = vec![
+                Attribute {
+                    name: "name".to_string(),
+                    r#type: AttributeType::String as i32,
+                    string_value: Some(short.to_string()),
+                    explicitly_specified: Some(true),
+                    ..Default::default()
+                },
+                string_list("tags", tags),
+            ];
             if rng.u8(..3) == 0 {
                 attributes.push(boolean("testonly", rng.bool()));
             }

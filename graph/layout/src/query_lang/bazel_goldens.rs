@@ -317,12 +317,7 @@ fn abstract_query_test_packages() -> Universe {
         targets.push(test_support::rule(name, "cc_library", &inputs, attributes));
     }
     let joint = build_joint(None, None, Some(&targets), false);
-    Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    )
+    Universe::of_joint(joint).0
 }
 
 /// Each expression AbstractQueryTest evaluates over [`abstract_query_test_packages`],
@@ -465,13 +460,7 @@ fn configured_target_query_semantics_test_build() -> (Universe, Names) {
         configurations,
     }];
     let joint = build_joint(None, Some(&cquery), None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 /// The configured targets among `value`, by their names in the graph.
@@ -702,7 +691,13 @@ fn filters_actions_as_aquery_does() {
         let aquery = [test_support::action_graph(&specs)];
         let joint = build_joint(Some(&aquery), None, None, false);
         let facets = Arc::new(joint.facets);
-        let universe = Universe::new(&joint.graph, &joint.names, &facets, &joint.capabilities);
+        let universe = Universe::new(
+            &joint.graph,
+            &joint.names,
+            &facets,
+            &Arc::new(joint.attributes),
+            &joint.capabilities,
+        );
 
         let query = query.replace("$pkg", pkg);
         let value = universe.evaluate(&parse(&query).unwrap()).unwrap();

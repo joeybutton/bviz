@@ -173,6 +173,12 @@ pub(crate) fn license(name: &str, types: &[&str], exceptions: &[&str]) -> Attrib
     }
 }
 
+/// The `name` attribute of the rule `label`, as its BUILD file writes it.
+pub(crate) fn name_attribute(label: &str) -> Attribute {
+    let (_, name) = label.split_once(':').expect("a label");
+    explicit(string("name", name))
+}
+
 /// `attribute` as one written in the BUILD file.
 pub(crate) fn explicit(attribute: Attribute) -> Attribute {
     Attribute {

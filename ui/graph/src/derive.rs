@@ -1359,6 +1359,7 @@ mod tests {
                 map: placement,
                 names: Arc::new(names),
                 facets,
+                attributes: Arc::default(),
                 labels,
                 containers,
                 capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),

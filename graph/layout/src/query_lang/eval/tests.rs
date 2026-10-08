@@ -11,7 +11,11 @@ use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
-use crate::test_support::{generated, source, string_list};
+use crate::test_support::{
+    explicit, generated, int, label_list, name_attribute, nodep_label_list, selector_list, source,
+    string_dict, string_list,
+};
+use bazel_query_proto::blaze_query::Attribute;
 
 fn rule(name: &str, inputs: &[&str], tags: &[&str]) -> Target {
     crate::test_support::rule(name, "genrule", inputs, vec![string_list("tags", tags)])
@@ -35,16 +39,8 @@ impl Fixture {
             rule("//b:test", &["//b:app"], &[]),
         ];
         let joint = build_joint(None, None, Some(&targets), false);
-        let universe = Universe::new(
-            &joint.graph,
-            &joint.names,
-            &Arc::new(joint.facets),
-            &joint.capabilities,
-        );
-        Fixture {
-            universe,
-            names: joint.names,
-        }
+        let (universe, names) = Universe::of_joint(joint);
+        Fixture { universe, names }
     }
 
     /// The labels of what `expr` names, sorted, or the message it fails with.
@@ -220,13 +216,8 @@ fn attr_reads_tags_as_bazel_prints_a_list() {
 /// What `kind(rust_library, ...)` and `kind(alias, ...)` name of the
 /// dependencies of the alias `@crates//:x-1.0` in `joint`.
 fn kinds_behind_an_alias(joint: crate::joint::Joint) -> [Vec<String>; 2] {
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    let (universe, names) = Universe::of_joint(joint);
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
     [
         query("kind(rust_library, deps(@crates//:x-1.0))"),
         query("kind(alias, deps(@crates//:x-1.0))"),
@@ -290,11 +281,12 @@ fn a_pattern_matches_ascii_word_characters_alone() {
 }
 
 #[test]
-fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
+fn attr_names_an_attribute_the_inputs_left_out() {
     let fixture = Fixture::new();
     assert_eq!(
         fixture.error("attr(srcs, x, //a:lib)"),
-        "attr() needs each rule's 'srcs' attribute, which bviz does not load into its graph"
+        "attr() needs each rule's 'srcs' attribute, which the graph's inputs state only under \
+         --proto:output_rule_attrs=all --proto:default_values"
     );
     let bare = [crate::test_support::rule(
         "//a:lib",
@@ -303,19 +295,221 @@ fn attr_names_an_attribute_bviz_does_not_load_or_the_inputs_left_out() {
         Vec::new(),
     )];
     let joint = build_joint(None, None, Some(&bare), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
+    let (universe, _) = Universe::of_joint(joint);
     let error = universe
         .evaluate(&parse("attr(tags, manual, //a:lib)").unwrap())
         .unwrap_err();
     assert_eq!(
         error.message,
-        "attr() needs each rule's tags, which the graph's inputs state only under \
-         --proto:output_rule_attrs"
+        "attr() needs each rule's 'tags' attribute, which the graph's inputs state only under \
+         --proto:output_rule_attrs=all --proto:default_values"
+    );
+}
+
+/// `name` with the attributes a rule leaves to their defaults, which Bazel
+/// writes unless asked not to, and `attributes`.
+fn stating_every_attribute(name: &str, mut attributes: Vec<Attribute>) -> Vec<Attribute> {
+    attributes.push(name_attribute(name));
+    attributes.push(string_list("tags", &[]));
+    attributes
+}
+
+/// A query of `//a:lib`, `//a:bin` and `//a:in.txt`, each rule stating every
+/// attribute.
+fn fully_stated() -> Fixture {
+    let lib = stating_every_attribute(
+        "//a:lib",
+        vec![
+            explicit(label_list("srcs", &["//a:in.txt"])),
+            explicit(string_dict("env", &[("MODE", "opt")])),
+            explicit(selector_list(
+                "copts",
+                &string_list("", &[]),
+                &[&[
+                    ("//c:x", Some(string_list("", &["-x"]))),
+                    ("//conditions:default", None),
+                ]],
+            )),
+        ],
+    );
+    let bin = stating_every_attribute("//a:bin", vec![explicit(label_list("deps", &["//a:lib"]))]);
+    let targets = [
+        crate::test_support::rule("//a:lib", "cc_library", &["//a:in.txt"], lib),
+        crate::test_support::rule("//a:bin", "cc_binary", &["//a:lib"], bin),
+        source("//a:in.txt"),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let (universe, names) = Universe::of_joint(joint);
+    Fixture { universe, names }
+}
+
+#[test]
+fn attr_reads_every_attribute_a_rule_states_as_bazel_prints_it() {
+    let fixture = fully_stated();
+    assert_eq!(
+        fixture.ok("attr(srcs, '^\\[//a:in.txt\\]$', //...)"),
+        ["//a:lib"]
+    );
+    assert_eq!(
+        fixture.ok("attr(env, '^\\{MODE=opt\\}$', //...)"),
+        ["//a:lib"]
+    );
+    assert_eq!(fixture.ok("attr(deps, 'lib', //...)"), ["//a:bin"]);
+    assert_eq!(
+        fixture.ok("attr(copts, '^\\[\\]$', //...)"),
+        ["//a:lib"],
+        "a select matches by any of its branches"
+    );
+    assert_eq!(fixture.ok("attr(copts, '-x', //...)"), ["//a:lib"]);
+}
+
+#[test]
+fn attr_matches_nothing_by_an_attribute_no_rule_states() {
+    let fixture = fully_stated();
+    assert_eq!(
+        fixture.ok("attr(no_such_attribute, '', //...)"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        fixture.ok("attr(srcs, '', //...)"),
+        ["//a:lib"],
+        "a rule not stating an attribute others state does not have it"
+    );
+}
+
+/// A fixture of `//a:lib` and `//a:bin`, whose rules state `lib` and `bin`.
+fn stating(lib: Vec<Attribute>, bin: Vec<Attribute>) -> Fixture {
+    let targets = [
+        crate::test_support::rule("//a:lib", "cc_library", &[], lib),
+        crate::test_support::rule("//a:bin", "cc_binary", &["//a:lib"], bin),
+    ];
+    let (universe, names) = Universe::of_joint(build_joint(None, None, Some(&targets), false));
+    Fixture { universe, names }
+}
+
+const LEFT_OUT: &str = "attr() needs each rule's 'deps' attribute, which the graph's inputs \
+                        state only under --proto:output_rule_attrs=all --proto:default_values";
+
+#[test]
+fn attr_fails_by_an_attribute_a_rule_written_without_defaults_may_hold() {
+    // As `--noproto:default_values` writes them: what the BUILD file writes.
+    let fixture = stating(
+        vec![name_attribute("//a:lib")],
+        vec![
+            name_attribute("//a:bin"),
+            explicit(label_list("deps", &["//a:lib"])),
+        ],
+    );
+
+    assert_eq!(fixture.ok("attr(deps, lib, //a:bin)"), ["//a:bin"]);
+    assert_eq!(fixture.error("attr(deps, lib, //a:all)"), LEFT_OUT);
+}
+
+#[test]
+fn attr_fails_by_an_attribute_a_restricted_dump_leaves_out_of_some_rule() {
+    // As `--proto:output_rule_attrs=tags,deps` writes them.
+    let fixture = stating(
+        vec![string_list("tags", &["x"])],
+        vec![
+            explicit(label_list("deps", &["//a:lib"])),
+            string_list("tags", &[]),
+        ],
+    );
+
+    assert_eq!(fixture.ok("attr(tags, x, //a:all)"), ["//a:lib"]);
+    assert_eq!(fixture.error("attr(deps, lib, //a:all)"), LEFT_OUT);
+    assert!(fixture.error("attr(srcs, x, //a:all)").contains("'srcs'"));
+}
+
+#[test]
+fn attr_reads_a_configured_targets_own_visibility_where_no_query_states_its_targets() {
+    use crate::test_support::{configuration, configured};
+    let attributes = stating_every_attribute(
+        "//a:lib",
+        vec![explicit(nodep_label_list("visibility", &["//b:__pkg__"]))],
+    );
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![configured(
+            crate::test_support::rule("//a:lib", "cc_library", &[], attributes),
+            1,
+        )],
+        configurations: vec![configuration(1, "aa11", "k8-fastbuild", false)],
+    }];
+    let (universe, names) = Universe::of_joint(build_joint(None, Some(&cquery), None, false));
+
+    assert_eq!(
+        configured_query(&universe, &names, "attr(visibility, '//b:', //a:lib)").unwrap(),
+        ["ct://a:lib#aa11"]
+    );
+}
+
+/// A cquery and a query of `//a:lib`, whose `copts` select the query states
+/// and the cquery resolves to one branch, and which declares its visibility
+/// public; and of `//a:bin`, whose configured target states no attributes.
+#[test]
+fn attr_reads_a_configured_target_as_cquery_resolved_it() {
+    use crate::test_support::{configuration, configured};
+    let copts = |value: Attribute| {
+        stating_every_attribute(
+            "//a:lib",
+            vec![
+                explicit(value),
+                nodep_label_list("visibility", &["//visibility:public"]),
+            ],
+        )
+    };
+    let unconfigured = copts(selector_list(
+        "copts",
+        &string_list("", &[]),
+        &[&[
+            ("//c:x", Some(string_list("copts", &["-x"]))),
+            ("//conditions:default", Some(string_list("copts", &["-y"]))),
+        ]],
+    ));
+    let mut resolved = copts(string_list("copts", &["-y"]));
+    // cquery writes `visibility` as the rule holds it once loaded.
+    resolved.retain(|attribute| attribute.name != "visibility");
+    resolved.push(nodep_label_list("visibility", &[]));
+    let query = [
+        crate::test_support::rule("//a:lib", "cc_library", &[], unconfigured),
+        crate::test_support::rule(
+            "//a:bin",
+            "cc_binary",
+            &[],
+            stating_every_attribute("//a:bin", vec![explicit(int("stamp", 1))]),
+        ),
+    ];
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(
+                crate::test_support::rule("//a:lib", "cc_library", &[], resolved),
+                1,
+            ),
+            configured(
+                crate::test_support::rule("//a:bin", "cc_binary", &[], Vec::new()),
+                1,
+            ),
+        ],
+        configurations: vec![configuration(1, "aa11", "k8-fastbuild", false)],
+    }];
+    let joint = build_joint(None, Some(&cquery), Some(&query), false);
+    let (universe, names) = Universe::of_joint(joint);
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+
+    assert_eq!(query("attr(copts, '-x', //a:lib)"), ["//a:lib"]);
+    assert_eq!(
+        query("attr(copts, '-y', //a:lib)"),
+        ["//a:lib", "ct://a:lib#aa11"]
+    );
+    assert_eq!(
+        query("attr(visibility, public, //a:lib)"),
+        ["//a:lib", "ct://a:lib#aa11"],
+        "a configured target's visibility is the one its rule declares"
+    );
+    assert_eq!(
+        query("attr(stamp, 1, //a:bin)"),
+        ["//a:bin", "ct://a:bin#aa11"],
+        "a configured target stating no attributes reads its target's"
     );
 }
 
@@ -341,13 +535,7 @@ fn configured(tools: bool) -> (Universe, Names) {
         configurations,
     }];
     let joint = build_joint(None, Some(&cquery), None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 fn configured_query(universe: &Universe, names: &Names, expr: &str) -> Result<Vec<String>, String> {
@@ -405,14 +593,9 @@ fn config_target_leaves_out_a_configuration_only_a_dependency_is_built_in() {
         ],
     }];
     let joint = build_joint(None, Some(&cquery), None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
+    let (universe, names) = Universe::of_joint(joint);
     assert_eq!(
-        configured_query(&universe, &joint.names, "config(//c:lib, target)").unwrap(),
+        configured_query(&universe, &names, "config(//c:lib, target)").unwrap(),
         ["ct://c:lib#aa11"]
     );
 }
@@ -449,13 +632,7 @@ fn two_top_level_configurations() -> (Universe, Names) {
         ],
     }];
     let joint = build_joint(None, Some(&cquery), None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 #[test]
@@ -513,13 +690,7 @@ fn actions() -> (Universe, Names) {
         },
     ])];
     let joint = build_joint(Some(&aquery), None, None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 #[test]
@@ -551,14 +722,9 @@ fn config_target_leaves_out_a_configuration_an_aquery_builds_only_dependencies_i
     aquery.actions[0].configuration_id = other.id;
     aquery.configuration.push(other);
     let joint = build_joint(Some(&[aquery]), None, None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
+    let (universe, names) = Universe::of_joint(joint);
     assert_eq!(
-        configured_query(&universe, &joint.names, "config(//p:lib, target)").unwrap(),
+        configured_query(&universe, &names, "config(//p:lib, target)").unwrap(),
         ["ct://p:lib#c0ffee"]
     );
 }
@@ -579,13 +745,7 @@ fn labeled_outputs(
     }
     aquery.configuration.push(other);
     let joint = build_joint(Some(&[aquery]), None, Some(targets), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 #[test]
@@ -695,14 +855,9 @@ fn config_target_takes_a_top_level_rule_generating_a_file_in_its_own_configurati
         ],
     }];
     let joint = build_joint(None, Some(&cquery), None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
+    let (universe, names) = Universe::of_joint(joint);
     assert_eq!(
-        configured_query(&universe, &joint.names, "config(//p:t, target)").unwrap(),
+        configured_query(&universe, &names, "config(//p:t, target)").unwrap(),
         ["ct://p:t#bb22"]
     );
 }
@@ -829,13 +984,7 @@ fn java() -> (Universe, Names) {
         },
     ])];
     let joint = build_joint(Some(&aquery), None, None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 /// Bazel's aquery gathers the filter calls nested in one another into one
@@ -927,13 +1076,8 @@ fn an_aquery_filter_names_the_data_a_graph_lacks() {
         ..Default::default()
     }];
     let joint = build_joint(Some(&aquery), None, None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    let query = |expr| configured_query(&universe, &joint.names, expr);
+    let (universe, names) = Universe::of_joint(joint);
+    let query = |expr| configured_query(&universe, &names, expr);
     assert_eq!(query("mnemonic(Genrule, //p:all)").unwrap().len(), 1);
     assert_eq!(
         query("outputs('.*', //p:all)").unwrap_err(),
@@ -976,7 +1120,13 @@ fn levels() -> (Universe, Names) {
     }
     let (facets, capabilities) = builder.seal();
     (
-        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        Universe::new(
+            &graph,
+            &names,
+            &Arc::new(facets),
+            &Arc::default(),
+            &capabilities,
+        ),
         names,
     )
 }
@@ -1220,7 +1370,13 @@ fn joint(rng: &mut fastrand::Rng) -> (Universe, Names) {
     }
     let (facets, capabilities) = builder.seal();
     (
-        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        Universe::new(
+            &graph,
+            &names,
+            &Arc::new(facets),
+            &Arc::default(),
+            &capabilities,
+        ),
         names,
     )
 }
@@ -1309,7 +1465,13 @@ fn deps_reach_the_target_whose_action_writes_a_file_read() {
         builder.describe_label(target, Some(package), label);
     }
     let (facets, capabilities) = builder.seal();
-    let universe = Universe::new(&graph, &names, &Arc::new(facets), &capabilities);
+    let universe = Universe::new(
+        &graph,
+        &names,
+        &Arc::new(facets),
+        &Arc::default(),
+        &capabilities,
+    );
 
     let deps = universe.evaluate(&parse("deps(//a:app)").unwrap()).unwrap();
     assert!(deps.contains(r.0 as usize) && deps.contains(r_ct.0 as usize));
@@ -1396,16 +1558,8 @@ fn a_canonical_name_with_plus_names_its_repository_bare_or_quoted() {
         rule("@@rules_rs++crate+crates__elk//:other", &[], &[]),
     ];
     let joint = build_joint(None, None, Some(&targets), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    let fixture = Fixture {
-        universe,
-        names: joint.names,
-    };
+    let (universe, names) = Universe::of_joint(joint);
+    let fixture = Fixture { universe, names };
     let named = [
         format!("{repo}//:root"),
         format!("{repo}//plugins/core:core"),
@@ -1475,7 +1629,13 @@ fn held() -> (Universe, Names) {
     }
     let (facets, capabilities) = builder.seal();
     (
-        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        Universe::new(
+            &graph,
+            &names,
+            &Arc::new(facets),
+            &Arc::default(),
+            &capabilities,
+        ),
         names,
     )
 }
@@ -1526,16 +1686,8 @@ fn a_union_takes_in_no_more_than_its_operands_name() {
 /// A query graph of `targets`.
 fn query_graph(targets: &[Target]) -> Fixture {
     let joint = build_joint(None, None, Some(targets), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    Fixture {
-        universe,
-        names: joint.names,
-    }
+    let (universe, names) = Universe::of_joint(joint);
+    Fixture { universe, names }
 }
 
 /// A query graph of `//a:app`, depending on `@@m+//m:lib` of a module and on
@@ -1652,13 +1804,8 @@ fn rule_category_matches_the_whole_spelling_of_a_rules_category() {
         source("//r:lib.cc"),
     ];
     let joint = build_joint(None, None, Some(&targets), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    let (universe, names) = Universe::of_joint(joint);
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
     assert_eq!(query("rule_category(test, //r:*)"), ["//r:test"]);
     assert_eq!(
         query("rule_category('alias|filegroup', //r:*)"),
@@ -1716,13 +1863,7 @@ fn runfiles() -> (Universe, Names) {
         },
     ])];
     let joint = build_joint(Some(&aquery), None, None, false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 #[test]
@@ -1785,7 +1926,13 @@ fn tools(stated: bool) -> (Universe, Names) {
     }
     let (facets, capabilities) = builder.seal();
     (
-        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        Universe::new(
+            &graph,
+            &names,
+            &Arc::new(facets),
+            &Arc::default(),
+            &capabilities,
+        ),
         names,
     )
 }
@@ -1974,13 +2121,7 @@ fn linked() -> (Universe, Names) {
         },
     ])];
     let joint = build_joint(Some(&aquery), None, Some(&targets), false);
-    let universe = Universe::new(
-        &joint.graph,
-        &joint.names,
-        &Arc::new(joint.facets),
-        &joint.capabilities,
-    );
-    (universe, joint.names)
+    Universe::of_joint(joint)
 }
 
 /// Whether `name` is the name of an output with no label of its own.
