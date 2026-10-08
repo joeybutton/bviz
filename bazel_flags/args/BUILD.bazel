@@ -4,7 +4,10 @@ rust_library(
     name = "args",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_bazel_flags_args",
-    visibility = ["//cli:__pkg__"],
+    visibility = [
+        "//bazel_flags:__pkg__",
+        "//cli:__pkg__",
+    ],
     deps = [
         "//bazel_flags",
         "//ui/console/args",

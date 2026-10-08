@@ -1,3 +1,4 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
@@ -16,4 +17,14 @@ rust_test(
     name = "bazel_flags_test",
     size = "small",
     crate = ":bazel_flags",
+)
+
+rust_binary(
+    name = "bazelrc",
+    srcs = ["bin/bazelrc.rs"],
+    crate_name = "bviz_bazelrc",
+    deps = [
+        "//bazel_flags/args",
+        "@crates//:clap",
+    ],
 )
