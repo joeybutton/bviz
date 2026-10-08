@@ -13,8 +13,9 @@ use super::{Function, Universe, parse};
 use crate::graph::Kind;
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
+use crate::sources::{Deps, Sources};
 use crate::test_support::{
-    self, boolean, explicit, label_list, selector_list, string, string_list,
+    self, boolean, explicit, label_list, selector_list, string, string_list, through,
 };
 use bazel_query_proto::blaze_query::Attribute;
 use bazel_query_proto::blaze_query::attribute::Discriminator as AttributeType;
@@ -926,4 +927,267 @@ fn filters_actions_as_aquery_does() {
         let foo = format!("//{pkg}:foo");
         assert_eq!(named, [(foo.as_str(), mnemonic)], "{query}");
     }
+}
+
+/// A rule `name` of `class` as `bazel query --output=proto` writes it: its
+/// inputs, the attributes its BUILD file sets, and those it does not.
+fn declared_rule(
+    name: &str,
+    class: &str,
+    inputs: &[&str],
+    mut attributes: Vec<Attribute>,
+) -> bazel_query_proto::blaze_query::Target {
+    attributes.push(test_support::name_attribute(name));
+    test_support::rule(name, class, inputs, attributes)
+}
+
+/// AbstractQueryTest's `testNoImplicitDeps`, over its package `x` as `bazel
+/// query --output=proto` writes it with the Bazel tools it depends on
+/// implicitly:
+///
+/// ```text
+/// cc_binary(name='x', srcs=['x.cc'])
+/// ```
+///
+/// The cases leaving tool dependencies out are run by a query, which tells
+/// none, and C++ toolchain resolution states no edge in a dump.
+#[test]
+fn leaves_implicit_dependencies_out_as_bazel_does() {
+    use test_support::{label, source};
+    let tools = |name: &str| format!("@@bazel_tools//tools/{name}");
+    let (malloc, extra, extra_cc) = (
+        tools("cpp:malloc"),
+        tools("cpp:link_extra_lib"),
+        tools("cpp:linkextra.cc"),
+    );
+    let (def_parser, def_parser_exe) = (
+        tools("def_parser:def_parser"),
+        tools("def_parser:def_parser.exe"),
+    );
+    let targets = [
+        declared_rule(
+            "//x:x",
+            "cc_binary",
+            &["//x:x.cc", &malloc, &extra, &def_parser],
+            vec![
+                explicit(label_list("srcs", &["//x:x.cc"])),
+                label("malloc", &malloc),
+                label("link_extra_lib", &extra),
+                label("$def_parser", &def_parser),
+            ],
+        ),
+        source("//x:x.cc"),
+        declared_rule(&malloc, "cc_library", &[], Vec::new()),
+        declared_rule(
+            &extra,
+            "cc_library",
+            &[&extra_cc],
+            vec![explicit(label_list("srcs", &[&extra_cc]))],
+        ),
+        source(&extra_cc),
+        declared_rule(
+            &def_parser,
+            "filegroup",
+            &[&def_parser_exe],
+            vec![explicit(label_list("srcs", &[&def_parser_exe]))],
+        ),
+        source(&def_parser_exe),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let every = Sources::reading(&joint.capabilities);
+    let explicit = every.with_deps(Deps::Implicit, false).unwrap();
+
+    let host = [malloc.as_str(), &extra, &extra_cc];
+    let implicit = [def_parser.as_str(), &def_parser_exe];
+    let mut expected: Vec<&str> = ["//x:x", "//x:x.cc"].into_iter().chain(host).collect();
+    expected.extend(implicit);
+    expected.sort();
+    assert_eq!(
+        eval_to_string(&through(&joint, every), "deps(//x)"),
+        expected.join(" ")
+    );
+    assert_eq!(
+        eval_to_string(&through(&joint, explicit), "deps(//x)"),
+        "//x:x //x:x.cc"
+    );
+}
+
+/// AbstractQueryTest's `testDefaultVisibilityReturnedInDeps` and
+/// `testDefaultVisibilityReturnedInDepsForInputFiles`, over their packages as
+/// `bazel query --output=proto` writes them, the rule and the file stating
+/// the visibility their package gives them by default:
+///
+/// ```text
+/// # kiwi/BUILD, which the second test declares `kiwi` in with srcs=['kiwi.sh']
+/// package(default_visibility=['//mango:mango'])
+/// foo_library(name='kiwi')
+/// # mango/BUILD
+/// package_group(name='mango', packages=[])
+/// ```
+#[test]
+fn follows_a_package_default_visibility_as_bazel_does() {
+    let mut script = test_support::source("//kiwi:kiwi.sh");
+    let file = script.source_file.as_mut().unwrap();
+    file.package_group.push("//mango:mango".to_string());
+    file.visibility_label.push("//mango:mango".to_string());
+    let targets = [
+        declared_rule(
+            "//kiwi:kiwi",
+            "foo_library",
+            &[],
+            vec![test_support::nodep_label_list(
+                "visibility",
+                &["//mango:mango"],
+            )],
+        ),
+        script,
+        test_support::package_group("//mango:mango", &[]),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = through(&joint, Sources::reading(&joint.capabilities));
+
+    assert_eq!(
+        eval_to_string(&universe, "deps(//kiwi:kiwi)"),
+        "//kiwi:kiwi //mango:mango"
+    );
+    assert_eq!(
+        eval_to_string(&universe, "deps(//kiwi:kiwi.sh)"),
+        "//kiwi:kiwi.sh //mango:mango"
+    );
+}
+
+/// AbstractQueryTest's `testIncludesReturnedInDeps` and
+/// `testNodepDeps_defaultIsTrue`, over their packages as `bazel query
+/// --output=proto` writes them:
+///
+/// ```text
+/// # peach/BUILD
+/// package_group(name='peach', includes=[':seed'])
+/// package_group(name='seed', includes=[':cyanide'])
+/// package_group(name='cyanide', packages=['//hydrogen', '//nitrogen', '//carbon'])
+/// foo_library(name='dessert', visibility=[':peach'])
+/// # foo/BUILD
+/// foo_library(name = 't1', deps = [':t2'], visibility = [':pg'])
+/// foo_library(name = 't2')
+/// package_group(name = 'pg')
+/// ```
+///
+/// `testNodepDeps_false` runs under `--nonodep_deps`, which bviz offers no
+/// counterpart of.
+#[test]
+fn follows_visibility_and_package_group_includes_as_bazel_does() {
+    use test_support::nodep_label_list;
+    let targets = [
+        test_support::package_group("//peach:peach", &["//peach:seed"]),
+        test_support::package_group("//peach:seed", &["//peach:cyanide"]),
+        test_support::package_group("//peach:cyanide", &[]),
+        declared_rule(
+            "//peach:dessert",
+            "foo_library",
+            &[],
+            vec![explicit(nodep_label_list("visibility", &["//peach:peach"]))],
+        ),
+        declared_rule(
+            "//foo:t1",
+            "foo_library",
+            &["//foo:t2"],
+            vec![
+                explicit(label_list("deps", &["//foo:t2"])),
+                explicit(nodep_label_list("visibility", &["//foo:pg"])),
+            ],
+        ),
+        declared_rule("//foo:t2", "foo_library", &[], Vec::new()),
+        test_support::package_group("//foo:pg", &[]),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = through(&joint, Sources::reading(&joint.capabilities));
+
+    assert_eq!(
+        eval_to_string(&universe, "deps(//peach:dessert)"),
+        "//peach:cyanide //peach:dessert //peach:peach //peach:seed"
+    );
+    assert!(eval_to_string(&universe, "deps(//foo:t1)").contains("//foo:pg"));
+}
+
+/// ConfiguredTargetQuerySemanticsTest's
+/// `testExecTransitionNotFilteredByNoToolDeps`, over the package of its
+/// `createConfigRulesAndBuild` as a cquery under `--transitions` writes it,
+/// built in the top-level configuration (1) and the exec configuration (2)
+/// `my_rule`'s `exec` attribute transitions to:
+///
+/// ```text
+/// my_rule(name = "my_rule", exec = ":exec_dep", target = ":target_dep", deps = [":dep"])
+/// simple_rule(name = "target_dep", dep = ":dep")
+/// simple_rule(name = "exec_dep", dep = ":dep")
+/// simple_rule(name = "dep")
+/// ```
+#[test]
+fn leaves_tool_dependencies_out_as_cquery_does() {
+    use test_support::{configuration, configured, configured_inputs, label};
+    let with_inputs = |name: &str, class, config: u32, deps: &[(&str, u32)], set| {
+        let labels: Vec<&str> = deps.iter().map(|&(label, _)| label).collect();
+        let mut target = declared_rule(name, class, &labels, set);
+        let configured_deps: Vec<(&str, Option<u32>)> = deps
+            .iter()
+            .map(|&(label, config)| (label, Some(config)))
+            .collect();
+        target.rule.as_mut().expect("a rule").configured_rule_input =
+            configured_inputs(&configured_deps);
+        configured(target, config)
+    };
+    let my_rule = vec![
+        explicit(label("exec", "//test:exec_dep")),
+        explicit(label("target", "//test:target_dep")),
+        explicit(label_list("deps", &["//test:dep"])),
+    ];
+    let simple = || vec![explicit(label("dep", "//test:dep"))];
+    let cquery = [CqueryResult {
+        results: vec![
+            with_inputs(
+                "//test:my_rule",
+                "my_rule",
+                1,
+                &[
+                    ("//test:exec_dep", 2),
+                    ("//test:target_dep", 1),
+                    ("//test:dep", 1),
+                ],
+                my_rule,
+            ),
+            with_inputs(
+                "//test:target_dep",
+                "simple_rule",
+                1,
+                &[("//test:dep", 1)],
+                simple(),
+            ),
+            with_inputs(
+                "//test:exec_dep",
+                "simple_rule",
+                2,
+                &[("//test:dep", 2)],
+                simple(),
+            ),
+            with_inputs("//test:dep", "simple_rule", 1, &[], Vec::new()),
+            with_inputs("//test:dep", "simple_rule", 2, &[], Vec::new()),
+        ],
+        configurations: vec![
+            configuration(1, "0a1b2c3d4e5f", "k8-fastbuild", false),
+            configuration(2, "9f8e7d6c5b4a", "k8-opt-exec-ST-d57f47055a04", true),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let every = Sources::reading(&joint.capabilities);
+    let filtered = (every.with_deps(Deps::Tool, false))
+        .and_then(|sources| sources.with_deps(Deps::Implicit, false))
+        .unwrap();
+
+    assert_eq!(
+        eval_to_string(&through(&joint, filtered), "deps(//test:my_rule)"),
+        "//test:dep //test:my_rule //test:target_dep"
+    );
+    assert_eq!(
+        eval_to_string(&through(&joint, every), "deps(//test:my_rule)"),
+        "//test:dep //test:exec_dep //test:my_rule //test:target_dep"
+    );
 }
