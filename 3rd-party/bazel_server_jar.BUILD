@@ -24,5 +24,8 @@ java_import(
     name = "server",
     testonly = True,
     jars = ["A-server.jar"],
-    visibility = ["@//graph/layout/oracle:__pkg__"],
+    visibility = [
+        "@//bazel_flags/oracle:__pkg__",
+        "@//graph/layout/oracle:__pkg__",
+    ],
 )

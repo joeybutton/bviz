@@ -8,6 +8,7 @@ rust_library(
     crate_name = "bviz_bazel_flags",
     visibility = [
         "//bazel_flags/args:__pkg__",
+        "//bazel_flags/oracle:__pkg__",
         "//graph/layout:__pkg__",
         "//ui/graph:__pkg__",
     ],

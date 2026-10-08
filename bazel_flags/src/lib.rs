@@ -49,6 +49,7 @@ const NO_BUILD_EVENT_FILE: Flag = Flag("--build_event_binary_file=");
 
 /// The earliest Bazel that knows every flag here: 8.0.0 is the first with
 /// `--experimental_profile_include_target_configuration`.
+/// `bazelrc_oracle_test` checks the flags against the pinned Bazel only.
 const MIN_BAZEL: &str = "8.0";
 
 /// A Bazel command a bazelrc section applies to.
