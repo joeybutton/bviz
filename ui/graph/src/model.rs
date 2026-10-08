@@ -13,23 +13,26 @@ use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::attributes::Attributes;
 use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
-use bviz_graph_layout::graph::Graph;
+use bviz_graph_layout::graph::{Graph, id_span};
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::query_lang::Universe;
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
-use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
+use bviz_graph_layout::{
+    Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance, Sources,
+};
 use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
+use fixedbitset::FixedBitSet;
 use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock, Weak};
 
 /// The graph a document holds, as it was read: whole, unfiltered, and shared by
 /// every panel drawing it. Cheap to clone into a panel's background derivation,
@@ -109,6 +112,127 @@ pub(crate) struct Opening {
     pub(crate) over_budget: Option<Overflow>,
 }
 
+/// The document's graph as one setting of its [`Sources`] leaves it, which a
+/// panel reading through that setting draws and walks.
+#[derive(Clone)]
+pub(crate) struct Sourced {
+    pub(crate) sources: Sources,
+    pub(crate) base: Arc<Graph>,
+    /// The base with its transitively-redundant edges removed.
+    pub(crate) reduced: Arc<Graph>,
+    /// The multi-child containers of the base.
+    pub(crate) containers: Arc<HashSet<Id>>,
+    /// The document's nodes the sources leave out, by id; `None` for the
+    /// whole graph.
+    left_out: Option<Arc<FixedBitSet>>,
+}
+
+impl Sourced {
+    /// The document's graph whole, with every input read.
+    pub(crate) fn whole(shared: &Shared) -> Self {
+        Sourced {
+            sources: Sources::reading(shared.inputs),
+            base: Arc::clone(&shared.base),
+            reduced: Arc::clone(&shared.reduced_base),
+            containers: Arc::clone(&shared.containers),
+            left_out: None,
+        }
+    }
+
+    fn of(shared: &Shared, sources: Sources) -> Self {
+        if sources.whole() {
+            return Sourced::whole(shared);
+        }
+        let base = sources.mask(&shared.base, &shared.provenance);
+        let span = id_span(&shared.base);
+        let mut left_out = FixedBitSet::with_capacity(span);
+        left_out.insert_range(..);
+        for node in &base.nodes {
+            left_out.set(node.id.0 as usize, false);
+        }
+        let reduced = bviz_graph_layout::reduce::transitive_reduction(&base);
+        let containers = bviz_graph_layout::lod::expandable_containers(&base);
+        Sourced {
+            sources,
+            base: Arc::new(base),
+            reduced: Arc::new(reduced),
+            containers: Arc::new(containers),
+            left_out: Some(Arc::new(left_out)),
+        }
+    }
+
+    /// Whether the sources leave the document's node `id` out.
+    pub(crate) fn leaves_out(&self, id: Id) -> bool {
+        (self.left_out.as_ref()).is_some_and(|left_out| left_out.contains(id.0 as usize))
+    }
+}
+
+/// What a loaded graph prepares for the panels reading it through one setting
+/// of its [`Sources`]. The document keeps the whole graph's for as long as it
+/// holds the graph, and another setting's only while a panel holds it.
+#[derive(Clone)]
+pub(crate) struct Sourcing(Arc<Prepares>);
+
+struct Prepares {
+    sources: Sources,
+    graph: Prepared<Sourced>,
+    /// The graph as a query reads it.
+    universe: Prepared<Universe>,
+}
+
+impl Sourcing {
+    /// What `shared` prepares for `sources`, whose universe, where they read
+    /// the whole graph, resolves patterns through `targets`.
+    fn of(shared: &Shared, sources: Sources, targets: &Prepared<Arc<TargetIndex>>) -> Self {
+        let graph = Prepared::new(shared, move |shared| Sourced::of(shared, sources));
+        let universe = match sources.whole() {
+            true => {
+                let indexed = targets.clone();
+                Prepared::new(shared, move |shared| {
+                    let targets = Arc::clone(indexed.get());
+                    Universe::with_targets(
+                        &shared.base,
+                        targets,
+                        &shared.facets,
+                        &shared.attributes,
+                        &shared.capabilities,
+                    )
+                })
+            }
+            false => {
+                let sourced = graph.clone();
+                let capabilities = shared.capabilities.reading(sources.inputs());
+                Prepared::new(shared, move |shared| {
+                    Universe::new(
+                        &sourced.get().base,
+                        &shared.names,
+                        &shared.facets,
+                        &shared.attributes,
+                        &capabilities,
+                    )
+                })
+            }
+        };
+        Sourcing(Arc::new(Prepares {
+            sources,
+            graph,
+            universe,
+        }))
+    }
+
+    pub(crate) fn sources(&self) -> Sources {
+        self.0.sources
+    }
+
+    pub(crate) fn graph(&self) -> &Prepared<Sourced> {
+        &self.0.graph
+    }
+
+    pub(crate) fn universe(&self) -> &Prepared<Universe> {
+        &self.0.universe
+    }
+}
+
 /// A graph that finished loading, in the form every panel's derivation starts
 /// from.
 pub(crate) struct Loaded {
@@ -145,8 +269,10 @@ pub(crate) struct Loaded {
     candidates: Prepared<Candidates>,
     /// What the query field offers to complete a word with.
     completions: Prepared<Completions>,
-    /// The graph as a query reads it.
-    universe: Prepared<Universe>,
+    /// What the graph prepares for reading every input.
+    whole: Sourcing,
+    /// What each other setting of the sources prepares, by the setting.
+    sourcings: HashMap<Sources, Weak<Prepares>>,
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
@@ -163,22 +289,13 @@ impl Loaded {
         let candidates = Prepared::new(&shared, Candidates::of);
         let offered = candidates.clone();
         let completions = Prepared::new(&shared, move |_| Completions::of(offered));
-        let indexed = targets.clone();
-        let universe = Prepared::new(&shared, move |shared| {
-            let targets = Arc::clone(indexed.get());
-            Universe::with_targets(
-                &shared.base,
-                targets,
-                &shared.facets,
-                &shared.attributes,
-                &shared.capabilities,
-            )
-        });
+        let whole = Sourcing::of(&shared, Sources::reading(shared.inputs), &targets);
         Self {
             targets,
             candidates,
             completions,
-            universe,
+            whole,
+            sourcings: HashMap::new(),
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -196,6 +313,38 @@ impl Loaded {
             states: None,
             attempted: Revision::default(),
         }
+    }
+
+    /// What the graph prepares for reading every input.
+    #[cfg(test)]
+    pub(crate) fn whole(&self) -> &Sourcing {
+        &self.whole
+    }
+
+    /// What the graph prepares for reading it through `sources`; absent where
+    /// they name the inputs of another graph.
+    pub(crate) fn sourcing(&mut self, sources: Sources) -> Option<Sourcing> {
+        if sources.loaded() != self.shared.inputs {
+            return None;
+        }
+        if sources.whole() {
+            return Some(self.whole.clone());
+        }
+        self.sourcings.retain(|_, held| held.strong_count() > 0);
+        if let Some(held) = self.sourcings.get(&sources).and_then(Weak::upgrade) {
+            return Some(Sourcing(held));
+        }
+        let sourcing = Sourcing::of(&self.shared, sources, &self.targets);
+        self.sourcings.insert(sources, Arc::downgrade(&sourcing.0));
+        Some(sourcing)
+    }
+
+    /// How many settings other than the whole graph's some panel holds.
+    #[cfg(test)]
+    pub(crate) fn settings_held(&self) -> usize {
+        (self.sourcings.values())
+            .filter(|held| held.strong_count() > 0)
+            .count()
     }
 
     pub(crate) fn statuses(&self) -> &Statuses {
@@ -446,17 +595,21 @@ pub(crate) struct Read {
 /// Reads `source` and builds the graph, and starts placing its map.
 pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
     let inputs = loaded_inputs(&source);
-    let (
-        Joint {
-            graph,
-            names,
-            facets,
-            attributes,
-            capabilities,
-            provenance,
-        },
-        reduced_base,
-    ) = build_graph(&source.inputs())?;
+    let (joint, reduced_base) = build_graph(&source.inputs())?;
+    Ok(read(joint, reduced_base, inputs))
+}
+
+/// The read of `joint`, which `inputs` were merged into and whose transitive
+/// reduction is `reduced_base`, starting to place its map.
+fn read(joint: Joint, reduced_base: Graph, inputs: InputSet) -> Read {
+    let Joint {
+        graph,
+        names,
+        facets,
+        attributes,
+        capabilities,
+        provenance,
+    } = joint;
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
     let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
@@ -479,7 +632,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
     let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&base));
     let labels = Arc::new(LabelIndex::of(&base, &names, &facets));
     let config_names = Arc::new(ConfigNames::of(&facets));
-    Ok(Read {
+    Read {
         loaded: Loaded::new(
             Shared {
                 base,
@@ -502,7 +655,20 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
         ),
         placing,
         landing,
-    })
+    }
+}
+
+/// The read of `joint`, which `inputs` were merged into, landed with its map.
+#[cfg(test)]
+pub(crate) fn landed(joint: Joint, inputs: InputSet) -> Loaded {
+    let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&joint.graph);
+    let Read {
+        loaded,
+        placing,
+        landing,
+    } = read(joint, reduced_base, inputs);
+    landing.land(placing.join().expect("the map places"));
+    loaded
 }
 
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
@@ -915,10 +1081,14 @@ impl GraphModel {
         Some(self.loaded()?.completions.clone())
     }
 
-    /// The loaded graph as a query reads it; absent while the graph is still
-    /// being read.
-    pub(crate) fn universe(&self) -> Option<Prepared<Universe>> {
-        Some(self.loaded()?.universe.clone())
+    /// What the loaded graph prepares for reading it through `sources`;
+    /// absent while the graph is still being read, or where `sources` name
+    /// the inputs of another graph.
+    pub(crate) fn sourcing(&mut self, sources: Sources) -> Option<Sourcing> {
+        match &mut self.source {
+            Source::Loaded(loaded) => loaded.sourcing(sources),
+            _ => None,
+        }
     }
 
     /// Runs the work `pass` makes of the loaded graph off the UI thread for

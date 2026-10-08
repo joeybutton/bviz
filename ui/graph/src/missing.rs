@@ -100,15 +100,16 @@ fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     cx.notify();
 }
 
-/// What the loaded inputs cannot be filtered on, as a card the reader unfolds;
-/// `None` where they support every axis, which is nothing to say.
+/// What the inputs the panel reads cannot be filtered on, as a card the reader
+/// unfolds; `None` where they support every axis, which is nothing to say.
 pub(crate) fn card(
     view: &GraphPanel,
     palette: &Palette,
     cx: &mut Context<GraphPanel>,
 ) -> Option<Stateful<Div>> {
     let loaded = view.model.read(cx).loaded()?;
-    let gaps = gaps(&loaded.shared.capabilities);
+    let read = view.derived.sources()?.inputs();
+    let gaps = gaps(&loaded.shared.capabilities.reading(read));
     if gaps.is_empty() {
         return None;
     }

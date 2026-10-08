@@ -350,7 +350,7 @@ fn evaluate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         landed(view, nothing, cx);
         return;
     }
-    let Some(universe) = view.model.read(cx).universe() else {
+    let Some(universe) = view.derived.sourcing().map(|s| s.universe().clone()) else {
         return;
     };
     let prefixes = Arc::clone(&view.chips.prefixes);
@@ -407,7 +407,7 @@ fn apply(view: &mut GraphPanel, stack: Stack, cx: &mut Context<GraphPanel>) {
         scope_landed(view, stack, Ok(None), cx);
         return;
     }
-    let Some(universe) = view.model.read(cx).universe() else {
+    let Some(universe) = view.derived.sourcing().map(|s| s.universe().clone()) else {
         return;
     };
     let prefixes = Arc::clone(&view.chips.prefixes);

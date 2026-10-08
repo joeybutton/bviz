@@ -363,13 +363,19 @@ pub(crate) fn asking_between(view: &GraphPanel, dependency: Id, dependent: Id) -
 }
 
 fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Context<GraphPanel>) {
-    let Some(shared) = view.model.read(cx).loaded().map(|l| &l.shared) else {
+    if view.model.read(cx).loaded().is_none() {
+        return;
+    }
+    let Some(sourced) = view
+        .derived
+        .sourcing()
+        .map(|sourcing| sourcing.graph().clone())
+    else {
         return;
     };
-    let (base, names, facets) = (
-        Arc::clone(&shared.base),
-        Arc::clone(&shared.names),
-        Arc::clone(&shared.facets),
+    let (names, facets) = (
+        Arc::clone(&sourced.shared().names),
+        Arc::clone(&sourced.shared().facets),
     );
     let question = Question {
         dependency: name(&names, &facets, dependency),
@@ -385,12 +391,14 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
         cx,
         move || match dependent {
             None => {
-                let paths = paths::dependents(&base, dependency);
+                let base = &sourced.get().base;
+                let paths = paths::dependents(base, dependency);
                 let nodes = paths.nodes.len();
                 Some((paths, Answer::Dependents { nodes }))
             }
             Some(dependent) => {
-                let between = paths::between(&base, dependency, dependent)?;
+                let base = &sourced.get().base;
+                let between = paths::between(base, dependency, dependent)?;
                 let shortest = between
                     .shortest
                     .iter()
@@ -670,12 +678,13 @@ pub(crate) fn card(
         answer,
         Answering::Answered(Answer::Dependents { .. } | Answer::Between { .. })
     );
+    let read = view.derived.sources()?.inputs();
     let unmarked = found
         .then(|| {
             let configured = [Input::Cquery, Input::Aquery]
                 .into_iter()
-                .any(|input| shared.inputs.contains(input));
-            unmarked_transitions(&shared.capabilities, configured)
+                .any(|input| read.contains(input));
+            unmarked_transitions(&shared.capabilities.reading(read), configured)
         })
         .flatten();
     let links = links(

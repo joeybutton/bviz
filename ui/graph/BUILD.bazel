@@ -40,5 +40,8 @@ rust_test(
     name = "graph_test",
     size = "small",
     crate = ":graph_lib",
-    deps = ["@crates//:fastrand"],
+    deps = [
+        "@bazel_query_proto//:bazel_query_rust_proto",
+        "@crates//:fastrand",
+    ],
 )

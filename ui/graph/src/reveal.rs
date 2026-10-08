@@ -24,6 +24,8 @@ actions!(
 /// What keeps a node out of the drawing, as a reader names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HiddenBy {
+    /// The sources the panel reads.
+    Sources,
     Paths,
     /// The reader's own pin.
     Pin,
@@ -40,11 +42,12 @@ pub(crate) enum HiddenBy {
 impl HiddenBy {
     /// Whether a reveal can bring the node into the drawing.
     pub(crate) fn revealable(self) -> bool {
-        self != HiddenBy::NothingToFrame
+        !matches!(self, HiddenBy::NothingToFrame | HiddenBy::Sources)
     }
 
     pub(crate) fn describe(self) -> &'static str {
         match self {
+            HiddenBy::Sources => "left out of the inputs read",
             HiddenBy::Paths => "hidden by the dependency paths drawn",
             HiddenBy::Pin => "hidden by its pin",
             HiddenBy::Query => "outside the query",
@@ -88,6 +91,7 @@ pub(crate) fn hidden_by(view: &GraphPanel, id: Id) -> Option<HiddenBy> {
 /// What `hidden` names, as a reader names it.
 fn named(hidden: Hidden<'_>) -> HiddenBy {
     match hidden {
+        Hidden::LeftOut => HiddenBy::Sources,
         Hidden::OffPaths => HiddenBy::Paths,
         Hidden::Filtered { filter, hiding } => match hiding {
             Hiding::Pin => HiddenBy::Pin,
