@@ -1411,7 +1411,7 @@ mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::labels::LabelIndex;
     use bviz_graph_layout::select::{Pin, Predicate, Rule, Values, Visibility};
-    use bviz_graph_layout::{EdgeKind, Facets, Input, InputSet, Kind};
+    use bviz_graph_layout::{EdgeKind, Facets, Input, Kind};
 
     /// [`document_placing`] with its map landed.
     fn document() -> Loaded {
@@ -1483,36 +1483,8 @@ mod tests {
     /// A query and a cquery of `//a:app` depending on `//a:lib`, read the
     /// way a document reads them.
     fn joint_document() -> Loaded {
-        use bazel_query_proto::analysis::{Configuration, ConfiguredTarget, CqueryResult};
-        use bazel_query_proto::blaze_query::{Rule, Target, target::Discriminator};
-        let rule = |name: &str, deps: &[&str]| Target {
-            r#type: Discriminator::Rule as i32,
-            rule: Some(Rule {
-                name: name.to_owned(),
-                rule_class: "cc_library".to_owned(),
-                rule_input: deps.iter().map(|dep| dep.to_string()).collect(),
-                ..Rule::default()
-            }),
-            ..Target::default()
-        };
-        let query = [rule("//a:app", &["//a:lib"]), rule("//a:lib", &[])];
-        let configured = |target| ConfiguredTarget {
-            target: Some(target),
-            configuration_id: 1,
-            ..ConfiguredTarget::default()
-        };
-        let cquery = [CqueryResult {
-            results: query.iter().cloned().map(configured).collect(),
-            configurations: vec![Configuration {
-                id: 1,
-                checksum: "aa11".to_owned(),
-                mnemonic: "k8-fastbuild".to_owned(),
-                ..Configuration::default()
-            }],
-        }];
-        let joint = bviz_graph_layout::build_joint(None, Some(&cquery), Some(&query), false);
-        let inputs = InputSet::of([Input::Query, Input::Cquery]).expect("two inputs");
-        crate::model::landed(joint, inputs)
+        let rules: &[(&str, &[&str])] = &[("//a:app", &["//a:lib"]), ("//a:lib", &[])];
+        crate::model::joint_document(rules, rules)
     }
 
     /// The names of the nodes `graph` holds of `kind`.

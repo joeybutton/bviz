@@ -8,11 +8,11 @@ use super::{AcceptCompletion, GraphPanel, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
-use crate::model::Prepared;
+use crate::model::{Prepared, Sourced};
 use bviz_graph_layout::query_lang::{
     ArgType, Command, Function, Params, Place, Readable, Vocabulary, word_at, written_word,
 };
-use bviz_graph_layout::{Id, Kind};
+use bviz_graph_layout::{Capabilities, Id, InputSet, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
@@ -193,6 +193,18 @@ fn function_note(
     (kind, note)
 }
 
+/// What the functions are noted by over a graph whose data `readable` and
+/// `capabilities` state with every input read, where only `read` is: the
+/// commands whose output that is, and the data it states.
+fn reading(
+    read: InputSet,
+    readable: Readable,
+    capabilities: &Capabilities,
+) -> (Vec<Command>, Readable) {
+    let commands = read.inputs().map(command).collect();
+    (commands, readable.reading(&capabilities.reading(read)))
+}
+
 /// One pattern, function or word of a vocabulary the field offers to complete
 /// a word with.
 struct Completion<'a> {
@@ -216,37 +228,47 @@ struct Pattern {
     weight: u32,
 }
 
-/// Every pattern the field offers over one graph, indexed targets first:
-/// the palette's candidates that are targets, read through it, then the
-/// packages and repositories they sit in.
+/// Every pattern the field offers over one graph as a setting of its sources
+/// leaves it, indexed targets first: the palette's candidates that are
+/// targets the setting keeps, read through it, then the packages and
+/// repositories they sit in.
 pub(crate) struct Completions {
     candidates: Prepared<Candidates>,
     /// The targets, as their indices among `candidates`.
     targets: Vec<u32>,
     patterns: Vec<Pattern>,
+    /// The commands whose output the setting reads.
+    commands: Vec<Command>,
     readable: Readable,
 }
 
 impl Completions {
-    pub(crate) fn of(candidates: Prepared<Candidates>) -> Self {
+    /// What the field offers of `candidates` over `sourced`.
+    pub(crate) fn of(candidates: Prepared<Candidates>, sourced: &Sourced) -> Self {
         let (held, shared) = (candidates.get(), candidates.shared());
         let targets: Vec<u32> = (0..held.len())
             .filter(|&index| {
                 let candidate = held.get(index);
-                match candidate.kind {
+                let offered = match candidate.kind {
                     Kind::Target => true,
                     Kind::Source => labelled(shared, candidate.id),
                     _ => false,
-                }
+                };
+                offered && !sourced.leaves_out(candidate.id)
             })
             .collect();
         let labels = targets.iter().map(|&index| &*held.get(index).text);
         let patterns = patterns(labels);
-        let readable = Readable::of(&shared.base, &shared.capabilities);
+        let (commands, readable) = reading(
+            sourced.sources.inputs(),
+            Readable::of(&shared.base, &shared.capabilities),
+            &shared.capabilities,
+        );
         Completions {
             candidates,
             targets,
             patterns,
+            commands,
             readable,
         }
     }
@@ -418,7 +440,7 @@ pub(super) fn release(view: &mut GraphPanel) {
 /// graph's patterns on the first edit or cursor move made over it.
 pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if view.chips.completer.offered.is_none() {
-        let Some(completions) = view.model.read(cx).completions() else {
+        let Some(completions) = view.derived.sourcing().map(|s| s.completions().clone()) else {
             return;
         };
         view.chips.completer.offered = Some(Offered {
@@ -670,14 +692,14 @@ pub(super) fn list(
         let Some(offered) = view.chips.completer.offered.as_ref() else {
             return Vec::new();
         };
-        let inputs = offered.completions.shared().inputs.inputs();
-        let commands: Vec<Command> = inputs.map(command).collect();
-        let readable = offered.completions.get().readable;
+        let Completions {
+            commands, readable, ..
+        } = offered.completions.get();
         range
             .filter_map(|index| {
                 let (completion, row) = offered.row(index)?;
                 let (kind, note) = match completion.named {
-                    Named::Function(function) => function_note(function, &commands, readable),
+                    Named::Function(function) => function_note(function, commands, *readable),
                     named => (named.name(), None),
                 };
                 let accepts = match offered.aimed {
@@ -871,6 +893,7 @@ impl Accepts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::{Input as GraphInput, Sources};
     use bviz_ui_components::{KeyStyle, binding_text, binding_within, text_input};
     use gpui::Keymap;
 
@@ -948,6 +971,65 @@ mod tests {
         assert_eq!(
             note(Function::Inputs, &[Command::Query]),
             ("function", Some("inputs() requires an aquery".to_owned()))
+        );
+    }
+
+    /// A function reading what only an input the panel leaves out states is
+    /// noted as it is over a graph read without that input.
+    #[test]
+    fn a_function_is_noted_by_the_inputs_the_panel_reads() {
+        let with_actions = readable(&[Kind::Target, Kind::Action]);
+        let capabilities =
+            bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(InputSet::ALL);
+        let note = |read: &[GraphInput]| {
+            let read = InputSet::of(read.iter().copied()).expect("an input read");
+            let (commands, readable) = reading(read, with_actions, &capabilities);
+            function_note(Function::Mnemonic, &commands, readable)
+        };
+        assert_eq!(
+            note(&[GraphInput::Query, GraphInput::Aquery]),
+            ("function", None)
+        );
+        let without_aquery = readable(&[Kind::Target]);
+        assert_eq!(
+            note(&[GraphInput::Query]),
+            function_note(Function::Mnemonic, &[Command::Query], without_aquery)
+        );
+        assert_eq!(
+            note(&[GraphInput::Query]).1.as_deref(),
+            Some("mnemonic() requires an aquery")
+        );
+    }
+
+    /// The field completes only the targets the sources a panel reads keep,
+    /// and the packages those sit in.
+    #[test]
+    fn only_what_the_sources_keep_is_completed() {
+        let rules: &[(&str, &[&str])] = &[("//a:app", &[]), ("//b:lib", &[])];
+        let mut loaded = crate::model::joint_document(rules, &rules[..1]);
+        let every = Sources::reading(loaded.shared.inputs);
+        let mut offered = |sources: Sources| -> Vec<String> {
+            let sourcing = loaded.sourcing(sources).expect("the graph's inputs");
+            let completions = sourcing.completions().get();
+            (0..completions.len())
+                .map(|index| completions.get(index).text.to_owned())
+                .collect()
+        };
+        let whole = offered(every);
+        assert!(whole.iter().any(|text| text == "//b:lib"), "{whole:?}");
+        assert!(whole.iter().any(|text| text == "//b:*"), "{whole:?}");
+
+        let cquery = every
+            .with_input(GraphInput::Query, false)
+            .expect("cquery stays");
+        let configured = offered(cquery);
+        assert!(
+            configured.iter().any(|text| text == "//a:app"),
+            "{configured:?}"
+        );
+        assert!(
+            !configured.iter().any(|text| text.starts_with("//b")),
+            "{configured:?}"
         );
     }
 

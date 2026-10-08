@@ -178,13 +178,23 @@ struct Prepares {
     graph: Prepared<Sourced>,
     /// The graph as a query reads it.
     universe: Prepared<Universe>,
+    /// What the query field offers to complete a word with.
+    completions: Prepared<Completions>,
 }
 
 impl Sourcing {
     /// What `shared` prepares for `sources`, whose universe, where they read
-    /// the whole graph, resolves patterns through `targets`.
-    fn of(shared: &Shared, sources: Sources, targets: &Prepared<Arc<TargetIndex>>) -> Self {
+    /// the whole graph, resolves patterns through `targets`, and whose
+    /// completions are the share of `candidates` they keep.
+    fn of(
+        shared: &Shared,
+        sources: Sources,
+        targets: &Prepared<Arc<TargetIndex>>,
+        candidates: &Prepared<Candidates>,
+    ) -> Self {
         let graph = Prepared::new(shared, move |shared| Sourced::of(shared, sources));
+        let (offered, kept) = (candidates.clone(), graph.clone());
+        let completions = Prepared::new(shared, move |_| Completions::of(offered, kept.get()));
         let universe = match sources.whole() {
             true => {
                 let indexed = targets.clone();
@@ -217,6 +227,7 @@ impl Sourcing {
             sources,
             graph,
             universe,
+            completions,
         }))
     }
 
@@ -230,6 +241,10 @@ impl Sourcing {
 
     pub(crate) fn universe(&self) -> &Prepared<Universe> {
         &self.0.universe
+    }
+
+    pub(crate) fn completions(&self) -> &Prepared<Completions> {
+        &self.0.completions
     }
 }
 
@@ -267,8 +282,6 @@ pub(crate) struct Loaded {
     targets: Prepared<Arc<TargetIndex>>,
     /// The graph's nodes as the jump palette offers them.
     candidates: Prepared<Candidates>,
-    /// What the query field offers to complete a word with.
-    completions: Prepared<Completions>,
     /// What the graph prepares for reading every input.
     whole: Sourcing,
     /// What each other setting of the sources prepares, by the setting.
@@ -287,13 +300,11 @@ impl Loaded {
             Arc::new(index)
         });
         let candidates = Prepared::new(&shared, Candidates::of);
-        let offered = candidates.clone();
-        let completions = Prepared::new(&shared, move |_| Completions::of(offered));
-        let whole = Sourcing::of(&shared, Sources::reading(shared.inputs), &targets);
+        let every = Sources::reading(shared.inputs);
+        let whole = Sourcing::of(&shared, every, &targets, &candidates);
         Self {
             targets,
             candidates,
-            completions,
             whole,
             sourcings: HashMap::new(),
             shared,
@@ -334,7 +345,7 @@ impl Loaded {
         if let Some(held) = self.sourcings.get(&sources).and_then(Weak::upgrade) {
             return Some(Sourcing(held));
         }
-        let sourcing = Sourcing::of(&self.shared, sources, &self.targets);
+        let sourcing = Sourcing::of(&self.shared, sources, &self.targets, &self.candidates);
         self.sourcings.insert(sources, Arc::downgrade(&sourcing.0));
         Some(sourcing)
     }
@@ -669,6 +680,48 @@ pub(crate) fn landed(joint: Joint, inputs: InputSet) -> Loaded {
     } = read(joint, reduced_base, inputs);
     landing.land(placing.join().expect("the map places"));
     loaded
+}
+
+/// The read of a query of the rules `queried` and a cquery of the rules
+/// `configured`, each beside the labels it depends on, landed with its map.
+#[cfg(test)]
+pub(crate) fn joint_document(
+    queried: &[(&str, &[&str])],
+    configured: &[(&str, &[&str])],
+) -> Loaded {
+    use bazel_query_proto::analysis::{Configuration, ConfiguredTarget, CqueryResult};
+    use bazel_query_proto::blaze_query::{Rule, Target, target::Discriminator};
+    let rule = |&(name, deps): &(&str, &[&str])| Target {
+        r#type: Discriminator::Rule as i32,
+        rule: Some(Rule {
+            name: name.to_owned(),
+            rule_class: "cc_library".to_owned(),
+            rule_input: deps.iter().map(|dep| dep.to_string()).collect(),
+            ..Rule::default()
+        }),
+        ..Target::default()
+    };
+    let query: Vec<Target> = queried.iter().map(rule).collect();
+    let in_config = |target| ConfiguredTarget {
+        target: Some(target),
+        configuration_id: 1,
+        ..ConfiguredTarget::default()
+    };
+    let cquery = [CqueryResult {
+        results: configured.iter().map(rule).map(in_config).collect(),
+        configurations: vec![Configuration {
+            id: 1,
+            checksum: "aa11".to_owned(),
+            mnemonic: "k8-fastbuild".to_owned(),
+            ..Configuration::default()
+        }],
+    }];
+    let joint = bviz_graph_layout::build_joint(None, Some(&cquery), Some(&query), false);
+    let inputs = InputSet::of([
+        bviz_graph_layout::Input::Query,
+        bviz_graph_layout::Input::Cquery,
+    ]);
+    landed(joint, inputs.expect("two inputs"))
 }
 
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
@@ -1075,10 +1128,6 @@ impl GraphModel {
 
     pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
         Some(self.loaded()?.candidates.clone())
-    }
-
-    pub(crate) fn completions(&self) -> Option<Prepared<Completions>> {
-        Some(self.loaded()?.completions.clone())
     }
 
     /// What the loaded graph prepares for reading it through `sources`;

@@ -13,11 +13,11 @@ pub(crate) use complete::Completions;
 
 use crate::menu::over_window;
 use crate::{GraphPanel, Palette, derive};
-use bviz_graph_layout::Input;
 use bviz_graph_layout::query_lang::{
     ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
 };
 use bviz_graph_layout::select::{Filter, Scope};
+use bviz_graph_layout::{Input, InputSet, Sources};
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
     Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
@@ -758,20 +758,14 @@ pub(super) fn command(input: Input) -> Command {
 
 /// Copies the stack as a Bazel query, or says on the bar why it is none.
 ///
-/// The query is written for the deepest of the commands the graph was read
-/// from, where that command reads every function the stack calls; and the bar
-/// says so where the graph joins several commands' output, which no one
-/// command reads alike.
+/// The query is written for the deepest of the commands whose output the
+/// panel reads, where that command reads every function the stack calls; and
+/// the bar says so where the panel joins several commands' output, which no
+/// one command reads alike.
 pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let inputs = view
-        .model
-        .read(cx)
-        .loaded()
-        .map(|loaded| loaded.shared.inputs);
-    let deepest = inputs.and_then(|inputs| inputs.inputs().last());
-    let preferred = deepest.map_or(Command::Query, command);
+    let inputs = view.derived.sources().map(Sources::inputs);
     let joint = inputs.is_some_and(|inputs| inputs.inputs().count() > 1);
-    view.chips.notice = Some(match view.chips.stack.bazel_text(preferred) {
+    view.chips.notice = Some(match view.chips.stack.bazel_text(preferred(inputs)) {
         Ok(query) => {
             let command = query.command.name();
             cx.write_to_clipboard(ClipboardItem::new_string(query.text));
@@ -783,6 +777,13 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         Err(unportable) => format!("not a Bazel query: {unportable}").into(),
     });
     cx.notify();
+}
+
+/// The command a stack is preferably copied for over a panel reading `read`
+/// of a graph: the deepest whose output it reads.
+fn preferred(read: Option<InputSet>) -> Command {
+    let deepest = read.and_then(|read| read.inputs().last());
+    deepest.map_or(Command::Query, command)
 }
 
 /// The menu a chip or the stack put up, standing over the whole window.
@@ -1061,3 +1062,21 @@ const JOINT_RULE_HEIGHT: Pixels = px(16.);
 
 /// The size of the dot saying the stack holds changes not yet applied.
 const STAGED_DOT: Pixels = px(6.);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stack_is_copied_for_the_deepest_input_the_panel_reads() {
+        let read = |inputs: &[Input]| InputSet::of(inputs.iter().copied());
+        let every = read(&[Input::Query, Input::Cquery, Input::Aquery]);
+        assert_eq!(preferred(every), Command::Aquery);
+        assert_eq!(
+            preferred(read(&[Input::Query, Input::Cquery])),
+            Command::Cquery
+        );
+        assert_eq!(preferred(read(&[Input::Query])), Command::Query);
+        assert_eq!(preferred(None), Command::Query);
+    }
+}
