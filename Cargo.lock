@@ -883,9 +883,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_bazel_flags"
+version = "0.1.0"
+
+[[package]]
+name = "bviz_bazel_flags_args"
+version = "0.1.0"
+dependencies = [
+ "bviz_bazel_flags",
+ "bviz_ui_console_args",
+ "bviz_ui_execlog_args",
+ "bviz_ui_graph_args",
+ "bviz_ui_trace_args",
+ "clap",
+]
+
+[[package]]
 name = "bviz_cli"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags_args",
  "bviz_ui_console_args",
  "bviz_ui_execlog_args",
  "bviz_ui_graph_args",
@@ -915,6 +932,7 @@ dependencies = [
 name = "bviz_graph_layout"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags",
  "bviz_parallel",
  "fastrand 2.5.0",
  "fixedbitset",
@@ -1076,6 +1094,7 @@ dependencies = [
 name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags",
  "bviz_graph_layout",
  "bviz_invocation",
  "bviz_parallel",

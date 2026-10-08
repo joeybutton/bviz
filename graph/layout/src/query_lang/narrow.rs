@@ -36,12 +36,13 @@ use rustc_hash::FxHashMap;
 use super::ast::Function;
 use super::declared::{Attribute, FILE_KINDS, file_kind};
 use super::universe::Universe;
-use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
+use crate::capability::Support;
 use crate::exec_path::{ExecPath, LeftOutInputs};
 use crate::facets::{RuleCategory, Sym};
 use crate::graph::Kind;
 use crate::intern::Id;
 use crate::repo::{RepoCategory, RepoName};
+use bviz_bazel_flags::CONSISTENT_LABELS;
 
 /// The mnemonics of the actions that build a runfiles tree or lay down a
 /// symlink, manifest or expanded template: the wiring between the actions that
@@ -279,7 +280,7 @@ impl Universe {
             && hideable.iter().any(|category| matched.contains(category));
         if let Some(apparent) = self.unplaced_apparent_repo().filter(|_| undecidable) {
             return Err(format!(
-                "{}() requires {CONSISTENT_LABELS_FLAG} to tell where @{apparent} comes from",
+                "{}() requires {CONSISTENT_LABELS} to tell where @{apparent} comes from",
                 function.name()
             ));
         }

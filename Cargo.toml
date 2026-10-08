@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "alloc",
+    "bazel_flags",
+    "bazel_flags/args",
     "bviz",
     "cli",
     "critical_path",
@@ -39,6 +41,7 @@ repository = "https://github.com/yume-ag/bviz"
 
 [workspace.dependencies]
 alacritty_terminal = "0.26"
+bviz_bazel_flags = { path = "bazel_flags" }
 bviz_invocation = { path = "invocation" }
 bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }

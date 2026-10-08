@@ -5,12 +5,15 @@
 use clap::Args;
 use std::path::PathBuf;
 
+/// The long name of [`TraceArgs::profile`], for messages that name the flag.
+pub const PROFILE_LONG: &str = "profile";
+
 /// The profiles an action timeline is read from.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Timelines (one panel per file)")]
 pub struct TraceArgs {
     /// `bazel build --profile=FILE` output (`.profile.gz` or `.json`).
-    #[arg(long, value_name = "FILE")]
+    #[arg(long = PROFILE_LONG, value_name = "FILE")]
     pub profile: Vec<PathBuf>,
 }
 

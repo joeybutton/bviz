@@ -3,7 +3,7 @@
 
 mod group;
 
-use bviz_cli::{Cli, Source, Sources};
+use bviz_cli::{Cli, Request, Source, Sources};
 use bviz_invocation::Session;
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member};
@@ -122,7 +122,13 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
 
 fn main() {
     bviz_alloc::retain_freed_memory_across_load();
-    let sources = Cli::parse().sources().unwrap_or_else(|e| e.exit());
+    match Cli::parse().request().unwrap_or_else(|e| e.exit()) {
+        Request::Bazelrc(args) => args.print(),
+        Request::Open(sources) => open_window(sources),
+    }
+}
+
+fn open_window(sources: Sources) {
     let (first, rest) = group::by_invocation(Load::start_all(sources));
     bviz_ui_workspace::run_panels(
         "bviz",

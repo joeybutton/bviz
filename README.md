@@ -64,50 +64,25 @@ bviz --profile /tmp/build.profile.gz
 
 bviz opens every file named on its command line, and needs at least one.
 
-### Dependency graph
+### Capturing a build
+
+`bviz bazelrc` generates a Bazel config with every flag bviz needs. From the
+workspace root:
 
 ```sh
-bazel query --output=streamed_proto --consistent_labels //... > /tmp/query.pb
-bazel cquery --output=streamed_proto --consistent_labels --transitions=lite //... > /tmp/cquery.pb
-bazel aquery --output=streamed_proto //... > /tmp/aquery.pb
-bviz --query /tmp/query.pb --cquery /tmp/cquery.pb --aquery /tmp/aquery.pb
+mkdir -p .bviz && bviz bazelrc > .bviz/bazelrc
+echo 'try-import %workspace%/.bviz/bazelrc' >> .bazelrc
 ```
 
-Any one of the three is enough. bviz merges them into a single graph, so each
-flag takes one file. bviz reads the most from files written with these flags,
-some of which Bazel sets by default:
+Then follow the instructions at the top of `.bviz/bazelrc`.
 
-- query: `--consistent_labels`, `--proto:output_rule_attrs` (default `all`)
-- cquery: `--consistent_labels`, `--transitions=lite` (or `full`),
-  `--proto:output_rule_attrs` (default `all`)
-- aquery: `--include_artifacts` (default on)
+### Opening files
 
-### Trace profile
-
-```sh
-bazel build --profile=/tmp/build.profile.gz //...
-bviz --profile /tmp/build.profile.gz
-```
-
-For a more complete profile, add `--noslim_profile --record_full_profiler_data
---experimental_profile_include_target_label
---experimental_profile_include_target_configuration
---experimental_profile_include_primary_output`. The profile then keeps short
-events and names each action's target and primary output, at the cost of a
-larger file.
-
-### Console replay
-
-```sh
-bazel build --show_timestamps --build_event_binary_file=/tmp/build.bep //...
-bviz --bep /tmp/build.bep
-```
-
-Bazel does not timestamp its progress output, so without `--show_timestamps` the
-replay interpolates its timing between the events that do carry a clock.
-
-`--profile` and `--bep` can be repeated, and combined with the graph flags, to
-open several files grouped by Bazel invocation.
+Any one of the captured files is enough, and files captured without some of
+the flags still open, with less to show. bviz merges the three queries into a
+single graph, so each of their flags takes one file. `--profile`, `--bep` and
+`--exec_log` can be repeated, and combined with the graph flags, to open several
+files grouped by Bazel invocation.
 
 ## Getting help
 

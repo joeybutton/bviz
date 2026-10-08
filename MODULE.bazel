@@ -405,9 +405,9 @@ http_archive(
     url = "https://github.com/spdx/license-list-data/archive/refs/tags/v3.29.0.tar.gz",
 )
 
-# Bazel's own server jar, whose query engine bviz's query tests are checked
-# against. The release binary is a launcher with the jar appended as a zip; the
-# jar is pure Java, so this one download serves every development host.
+# Bazel's own server jar, which bviz's oracle tests run against. The release
+# binary is a launcher with the jar appended as a zip; the jar is pure Java, so
+# this one download serves every development host.
 http_archive(
     name = "bazel_server_jar",
     build_file = "//3rd-party:bazel_server_jar.BUILD",

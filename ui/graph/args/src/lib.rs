@@ -5,19 +5,26 @@
 use clap::Args;
 use std::path::PathBuf;
 
+/// The long name of [`GraphArgs::aquery`], for messages that name the flag.
+pub const AQUERY_LONG: &str = "aquery";
+/// The long name of [`GraphArgs::cquery`], for messages that name the flag.
+pub const CQUERY_LONG: &str = "cquery";
+/// The long name of [`GraphArgs::query`], for messages that name the flag.
+pub const QUERY_LONG: &str = "query";
+
 /// The files a joint build graph is read from.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Graph (one per command line; each file given at most once)")]
 pub struct GraphArgs {
     /// `bazel aquery --output=streamed_proto` file.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long = AQUERY_LONG, value_name = "FILE")]
     pub aquery: Option<PathBuf>,
     /// `bazel cquery --output=streamed_proto` file (run cquery with
     /// `--transitions=lite` for configuration-resolved edges).
-    #[arg(long, value_name = "FILE")]
+    #[arg(long = CQUERY_LONG, value_name = "FILE")]
     pub cquery: Option<PathBuf>,
     /// `bazel query --output=streamed_proto` file.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long = QUERY_LONG, value_name = "FILE")]
     pub query: Option<PathBuf>,
 }
 

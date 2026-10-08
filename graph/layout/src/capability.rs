@@ -9,13 +9,9 @@
 //! A field written and empty everywhere — an action list of aspect descriptors
 //! for a build that runs no aspect action — is support with no values to offer.
 
-/// The cquery flag under which each dependency edge states the configuration
-/// its dependency is built in.
-pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
-
-/// The query and cquery flag under which each label carries its repository's
-/// canonical name.
-pub const CONSISTENT_LABELS_FLAG: &str = "--consistent_labels";
+use bviz_bazel_flags::{
+    CONSISTENT_LABELS, Flag, INCLUDE_ARTIFACTS, OUTPUT_RULE_ATTRS, TRANSITIONS,
+};
 
 /// A property a query selects nodes by.
 ///
@@ -61,12 +57,12 @@ impl Axis {
     /// The Bazel query flag that makes an input carry this axis, where one
     /// governs it. An axis every output states regardless names none, so it is
     /// never reported as something a flag could restore.
-    pub fn flag(self) -> Option<&'static str> {
+    pub fn flag(self) -> Option<Flag> {
         match self {
             // query and cquery print apparent repository names unless asked for
             // canonical ones, and only a canonical name states where its
             // repository comes from.
-            Axis::Repo => Some(CONSISTENT_LABELS_FLAG),
+            Axis::Repo => Some(CONSISTENT_LABELS),
             Axis::Package | Axis::Label | Axis::Mnemonic | Axis::Aspect => None,
             // Every query writes the class a rule was declared by whatever else
             // it is asked for.
@@ -74,9 +70,9 @@ impl Axis {
             // A cquery asked for no configurations writes query's message type
             // instead, which is no longer cquery output at all.
             Axis::Configuration => None,
-            Axis::ExecConfiguration => Some(TRANSITIONS_FLAG),
-            Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
-            Axis::Artifacts => Some("--include_artifacts"),
+            Axis::ExecConfiguration => Some(TRANSITIONS),
+            Axis::Tags | Axis::Testonly => Some(OUTPUT_RULE_ATTRS),
+            Axis::Artifacts => Some(INCLUDE_ARTIFACTS),
         }
     }
 
@@ -105,10 +101,10 @@ pub enum Support {
     Partial {
         covered: usize,
         relevant: usize,
-        flag: Option<&'static str>,
+        flag: Option<Flag>,
     },
     Unavailable {
-        flag: &'static str,
+        flag: Flag,
     },
 }
 
@@ -198,7 +194,7 @@ mod tests {
         assert_eq!(
             support(Axis::Repo, 0, 7),
             Support::Unavailable {
-                flag: "--consistent_labels"
+                flag: CONSISTENT_LABELS
             }
         );
     }
@@ -231,7 +227,7 @@ mod tests {
             Support::Partial {
                 covered: 2,
                 relevant: 5,
-                flag: Some("--proto:output_rule_attrs")
+                flag: Some(OUTPUT_RULE_ATTRS)
             }
         );
     }

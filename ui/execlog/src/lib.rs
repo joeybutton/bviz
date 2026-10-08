@@ -14,7 +14,7 @@ pub use spawn_time::SpawnTimePanel;
 use bviz_execlog::ExecLog;
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::{Pending, declare_scopes};
-use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
+use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -84,7 +84,10 @@ pub fn run() {
     let mut loads = Cli::parse().exec_log.sources().map(Load::from);
     let Some(first) = loads.next() else {
         Cli::command()
-            .error(ErrorKind::MissingRequiredArgument, "--exec_log is required")
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                format!("--{EXEC_LOG_LONG} is required"),
+            )
             .exit()
     };
     bviz_ui_workspace::run_panels(

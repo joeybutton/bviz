@@ -5,12 +5,15 @@
 use clap::Args;
 use std::path::PathBuf;
 
+/// The long name of [`ConsoleArgs::bep`], for messages that name the flag.
+pub const BEP_LONG: &str = "bep";
+
 /// The build event streams a console replay is read from.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Console replays (one panel per file)")]
 pub struct ConsoleArgs {
     /// `bazel build --build_event_binary_file=FILE` output.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long = BEP_LONG, value_name = "FILE")]
     pub bep: Vec<PathBuf>,
 }
 

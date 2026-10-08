@@ -46,7 +46,7 @@ use bviz_ui_components::{
     track_drag, zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
-use bviz_ui_trace_args::{TraceArgs, TraceSource};
+use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
@@ -1780,7 +1780,10 @@ pub fn run() {
     let mut loads = Cli::parse().trace.sources().map(Load::from);
     let Some(first) = loads.next() else {
         Cli::command()
-            .error(ErrorKind::MissingRequiredArgument, "--profile is required")
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                format!("--{PROFILE_LONG} is required"),
+            )
             .exit()
     };
     bviz_ui_workspace::run_panels(

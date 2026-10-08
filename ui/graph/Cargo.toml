@@ -10,6 +10,7 @@ name = "graph"
 path = "src/main.rs"
 
 [dependencies]
+bviz_bazel_flags = { workspace = true }
 clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
 bviz_graph_layout = { path = "../../graph/layout" }

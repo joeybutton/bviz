@@ -12,7 +12,7 @@ use bviz_ui_components::{
     ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
     find_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
 };
-use bviz_ui_graph_args::{GraphArgs, GraphSource};
+use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_playback::{Clock, DocumentClock};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
@@ -1393,7 +1393,7 @@ pub fn run() {
         Cli::command()
             .error(
                 ErrorKind::MissingRequiredArgument,
-                "one of --aquery, --cquery or --query is required",
+                format!("one of --{AQUERY_LONG}, --{CQUERY_LONG} or --{QUERY_LONG} is required"),
             )
             .exit()
     });
