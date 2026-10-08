@@ -24,7 +24,7 @@ use bviz_ui_components::{
     Button, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice,
     centered_spinner, list_scrollbar, sort_gesture, sort_header,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use by_height::ByHeight;
 use fills::{Fills, outside};
 use gpui::{
@@ -1251,15 +1251,12 @@ impl Panel for CriticalPathPanel {
         PanelKind {
             view: ViewKind::new("trace-critical-path"),
             key_context: KEY_CONTEXT,
+            role: Role::Analysis,
         }
     }
 
     fn gestures() -> Vec<GestureRow> {
         GESTURES.rows().collect()
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

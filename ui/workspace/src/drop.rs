@@ -53,8 +53,9 @@ pub(crate) struct PaneGeometry<P> {
 /// window is aimed at to join them.
 pub(crate) struct Band {
     pub bounds: Bounds<Pixels>,
-    /// Where that frame laid the tab naming each panel out, in the order the
-    /// pane holds them. A tab for every panel the pane holds draws the
+    /// As much of the tab naming each panel as that frame showed, in the order
+    /// the pane holds them: a tab scrolled out of sight is an empty span at the
+    /// end of the strip it left by. A tab for every panel the pane holds draws the
     /// boundaries between them; anything else — a band that puts up no tabs of
     /// its own, or one drawn for panels the pane has since stopped holding —
     /// leaves the band aimed at as ever, with a drop anywhere in it joining the
@@ -113,9 +114,14 @@ impl<P> PaneGeometry<P> {
     fn caret(&self, index: usize) -> Option<Bounds<Pixels>> {
         let band = self.band_region()?;
         let tabs = self.boundaries().unwrap_or_default();
+        // Past a last tab scrolled out of sight, the end of the band marks the
+        // drop after it apart from one ahead of it, at the strip's edge.
         let at = match tabs.get(index) {
             Some(tab) => tab.left(),
-            None => tabs.last().map_or(band.right(), |tab| tab.right()),
+            None => tabs
+                .last()
+                .filter(|tab| tab.size.width > px(0.))
+                .map_or(band.right(), |tab| tab.right()),
         };
         let left = (at - CARET_WIDTH * 0.5)
             .min(band.right() - CARET_WIDTH)
@@ -128,9 +134,7 @@ impl<P> PaneGeometry<P> {
 }
 
 /// The middle of what `band` shows of `tab`, which parts that tab between the
-/// boundary ahead of it and the one after it. A tab wider than the band it is
-/// laid out in — a long title on a narrow pane — is parted at the middle of
-/// what is on screen of it, so that both of its boundaries can be aimed at.
+/// boundary ahead of it and the one after it.
 fn middle(tab: Bounds<Pixels>, band: Bounds<Pixels>) -> Pixels {
     (tab.left().max(band.left()) + tab.right().min(band.right())) * 0.5
 }
@@ -1023,6 +1027,52 @@ mod tests {
         };
         assert_eq!(joined(40.0), 0);
         assert_eq!(joined(120.0), 1);
+    }
+
+    /// Tabs scrolled out past the end of a strip are empty spans at its edge,
+    /// short of the controls the band carries after it. A drop between the
+    /// last tab in view and that edge joins ahead of the first tab out of view,
+    /// and one past the edge joins after them all; each is marked where it
+    /// lands, so the two are told apart.
+    #[test]
+    fn a_drop_past_tabs_scrolled_out_of_view_is_marked_where_it_lands() {
+        let (window, body) = window();
+        let bounds = at(0.0, 40.0, 600.0, 720.0);
+        let strip_end = 2.0 * TAB_WIDTH + 30.0;
+        let tab = |left: f32, width: f32| at(left, 40.0, width, STRIP_HEIGHT - BAND_BORDER);
+        let panes = vec![PaneGeometry {
+            band: Some(Band {
+                bounds: band_at(bounds, STRIP_HEIGHT),
+                tabs: vec![
+                    tab(0.0, TAB_WIDTH),
+                    tab(TAB_WIDTH, TAB_WIDTH),
+                    tab(2.0 * TAB_WIDTH, 30.0),
+                    tab(strip_end, 0.0),
+                    tab(strip_end, 0.0),
+                ],
+            }),
+            ..pane("scrolled", bounds, 5)
+        }];
+        let landing = |x: f32| {
+            let cursor = point(px(x), px(50.));
+            let to = dropped_at(cursor, window, body, &panes, Some(&ELSEWHERE), |_| true)
+                .expect("a drop over the band lands");
+            let index = match to {
+                Destination::Tab { index, .. } => index,
+                other => panic!("a drop at {x} lands at {other:?}"),
+            };
+            let caret = match preview(&to, cursor, body, &panes, halved) {
+                Some(Preview::Caret(caret)) => caret,
+                _ => panic!("a caret marks a drop at {x}"),
+            };
+            (index, caret.right())
+        };
+        let (ahead, ahead_caret) = landing(strip_end - 5.0);
+        let (after, after_caret) = landing(strip_end + 50.0);
+        assert_eq!(ahead, 3);
+        assert_eq!(after, 5);
+        assert_eq!(ahead_caret, px(strip_end) + CARET_WIDTH * 0.5);
+        assert_eq!(after_caret, bounds.right());
     }
 
     /// The tabs of a pane at the top of the window lie right against the body's

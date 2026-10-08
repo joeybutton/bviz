@@ -15,7 +15,7 @@ use bviz_ui_components::{
     Toolbar, centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header,
     track_drag,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, ScrollStrategy, SharedString,
@@ -629,15 +629,12 @@ impl Panel for StatsPanel {
         PanelKind {
             view: ViewKind::new("trace-stats"),
             key_context: STATS_KEY_CONTEXT,
+            role: Role::Analysis,
         }
     }
 
     fn gestures() -> Vec<GestureRow> {
         GESTURES.rows().collect()
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

@@ -16,7 +16,7 @@ use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    Member, Panel, PanelEvent, PanelGroup, PanelKind, ViewKind, ViewSpec, Weight, document_label,
+    Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -277,8 +277,6 @@ impl Palette {
 /// A view of a Bazel build graph, drawn under a layout mode and camera of its
 /// own.
 pub struct GraphPanel {
-    /// Names the document shown, labelling this panel's tab.
-    title: SharedString,
     focus_handle: FocusHandle,
     /// The graph drawn here, shared with every other view of it.
     model: Entity<GraphModel>,
@@ -415,7 +413,7 @@ impl GraphPanel {
         self.morph.at(Instant::now())
     }
 
-    fn new(title: SharedString, model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
+    fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let mode = LayoutMode::default();
         let mode_picker = cx.new(|cx| {
             Dropdown::new(
@@ -531,7 +529,6 @@ impl GraphPanel {
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
         Self {
             focus_handle: cx.focus_handle(),
-            title,
             model,
             derived,
             framing: Framing::new(),
@@ -1011,6 +1008,7 @@ impl Panel for GraphPanel {
         PanelKind {
             view: ViewKind::new("graph"),
             key_context: KEY_CONTEXT,
+            role: Role::Canvas,
         }
     }
 
@@ -1026,8 +1024,8 @@ impl Panel for GraphPanel {
             .collect()
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        self.title.clone()
+    fn titled() -> Titled {
+        Titled::File
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1373,18 +1371,15 @@ pub fn open(
     let label = load.title;
     let model = cx.new(|cx| GraphModel::reading(load.built, session, clock, cx));
     let graph = ViewSpec::new({
-        let (label, model) = (label.clone(), model.clone());
-        move |cx| cx.new(|cx| GraphPanel::new(label.clone(), model.clone(), cx))
+        let model = model.clone();
+        move |cx| cx.new(|cx| GraphPanel::new(model.clone(), cx))
     });
     let scatter = ViewSpec::new({
         let model = model.clone();
         move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx))
     });
     let exclusive = ViewSpec::new(move |cx| cx.new(|cx| ExclusivePanel::new(model.clone(), cx)));
-    Member::new(
-        label,
-        PanelGroup::tabs(graph, vec![scatter, exclusive]).with_weight(Weight::CHART),
-    )
+    Member::new(label, graph, vec![scatter, exclusive])
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`

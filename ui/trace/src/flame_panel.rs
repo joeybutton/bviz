@@ -18,7 +18,7 @@ use bviz_ui_components::{
     ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, overlay_canvas,
     paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PinchEvent, Pixels, Point,
@@ -918,15 +918,12 @@ impl Panel for FlamePanel {
         PanelKind {
             view: ViewKind::new("trace-flame-graph"),
             key_context: FLAME_KEY_CONTEXT,
+            role: Role::Analysis,
         }
     }
 
     fn gestures() -> Vec<GestureRow> {
         GESTURES.rows().collect()
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

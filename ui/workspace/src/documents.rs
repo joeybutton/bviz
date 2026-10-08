@@ -1,11 +1,11 @@
-use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
+use crate::panel::FileName;
+use crate::{AnyPanel, Panel, Regions, Role, ViewKind, Workspace};
 use bviz_ui_playback::Clock;
 use gpui::{
     App, AppContext, Context, Entity, EntityId, EventEmitter, Global, SharedString, Subscription,
     WeakEntity, Window,
 };
 use std::iter;
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// Identity of a document the session holds open. Two readings of one file are
@@ -22,13 +22,14 @@ impl DocumentId {
 }
 
 /// Builds a panel showing one view of a document, the panel carrying the
-/// document's identity and the number of its file. Takes no window, so a view
+/// document's identity and the name of its file. Takes no window, so a view
 /// can be minted wherever the reader asks for it.
-type Mint = Rc<dyn Fn(DocumentId, Option<NonZeroUsize>, &mut App) -> AnyPanel>;
+type Mint = Rc<dyn Fn(DocumentId, &FileName, &mut App) -> AnyPanel>;
 
 /// One view a document can show, and how to build a panel showing it.
 pub struct ViewSpec {
     kind: ViewKind,
+    role: Role,
     label: &'static str,
     mint: Mint,
 }
@@ -40,8 +41,9 @@ impl ViewSpec {
         let kind = T::kind();
         Self {
             kind: kind.view,
+            role: kind.role,
             label: kind.label(),
-            mint: Rc::new(move |document, ordinal, cx| AnyPanel::new(mint(cx), document, ordinal)),
+            mint: Rc::new(move |document, file, cx| AnyPanel::new(mint(cx), document, file)),
         }
     }
 
@@ -53,9 +55,10 @@ impl ViewSpec {
     /// A view of `kind` that mints no panel: minting one takes a running
     /// application, which the bookkeeping a test exercises stands apart from.
     #[cfg(test)]
-    pub(crate) fn for_test(kind: ViewKind) -> Self {
+    pub(crate) fn for_test(kind: ViewKind, role: Role) -> Self {
         Self {
             kind,
+            role,
             label: kind.as_str(),
             mint: Rc::new(move |_, _, _| panic!("{} mints no panel here", kind.as_str())),
         }
@@ -65,6 +68,7 @@ impl ViewSpec {
     fn registered(&self) -> View {
         View {
             kind: self.kind,
+            role: self.role,
             label: self.label,
             mint: self.mint.clone(),
             live: None,
@@ -174,21 +178,44 @@ pub(crate) struct Registration {
     pub(crate) clock: Option<Entity<Clock>>,
 }
 
-/// The views of one file of a document, arranged as the viewer opening it asked
-/// for them to be.
+/// The views of one file of a document, in the order its viewer gave them.
 pub(crate) struct Held<V> {
-    /// The number the file's panels carry.
-    pub(crate) ordinal: Option<NonZeroUsize>,
-    pub(crate) views: PanelGroup<V>,
+    pub(crate) file: FileName,
+    pub(crate) first: V,
+    pub(crate) rest: Vec<V>,
+}
+
+impl<V> Held<V> {
+    pub(crate) fn views(&self) -> impl Iterator<Item = &V> {
+        iter::once(&self.first).chain(&self.rest)
+    }
+
+    fn views_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        iter::once(&mut self.first).chain(&mut self.rest)
+    }
+
+    fn view_count(&self) -> usize {
+        1 + self.rest.len()
+    }
 }
 
 impl Held<ViewSpec> {
     /// The registry's record of this file, which no panel shows yet.
     fn registered(&self) -> Held<View> {
         Held {
-            ordinal: self.ordinal,
-            views: self.views.map(&mut ViewSpec::registered),
+            file: self.file.clone(),
+            first: self.first.registered(),
+            rest: self.rest.iter().map(ViewSpec::registered).collect(),
         }
+    }
+}
+
+impl Held<View> {
+    /// A panel for each of the file's views, in their order.
+    fn mint(&self, document: DocumentId, cx: &mut App) -> (AnyPanel, Vec<AnyPanel>) {
+        let mut mint = |view: &View| (view.mint)(document, &self.file, cx);
+        let first = mint(&self.first);
+        (first, self.rest.iter().map(mint).collect())
     }
 }
 
@@ -202,11 +229,11 @@ struct Registered {
 impl Registered {
     /// The document as a reader choosing among what is open is given it,
     /// `state` saying what each view has on screen. The views are in the order
-    /// the document's files lay them out.
+    /// the document's files give them.
     fn listed(&self, state: &mut impl FnMut(&View) -> ViewState) -> OpenDocument {
-        let mut views = Vec::with_capacity(self.members.len());
+        let mut views = Vec::with_capacity(self.members.iter().map(Held::view_count).sum());
         for (member, held) in self.members.iter().enumerate() {
-            views.extend(held.views.panels().map(|view| OpenView {
+            views.extend(held.views().map(|view| OpenView {
                 id: ViewId {
                     member,
                     kind: view.kind,
@@ -225,18 +252,19 @@ impl Registered {
     /// The view `id` names, and the file bringing it.
     fn view(&self, id: ViewId) -> Option<(&Held<View>, &View)> {
         let member = self.members.get(id.member)?;
-        let view = member.views.panels().find(|held| held.kind == id.kind)?;
+        let view = member.views().find(|held| held.kind == id.kind)?;
         Some((member, view))
     }
 
     fn view_mut(&mut self, id: ViewId) -> Option<&mut View> {
         let member = self.members.get_mut(id.member)?;
-        member.views.panels_mut().find(|held| held.kind == id.kind)
+        member.views_mut().find(|held| held.kind == id.kind)
     }
 }
 
 struct View {
     kind: ViewKind,
+    role: Role,
     label: &'static str,
     mint: Mint,
     live: Option<Live>,
@@ -274,15 +302,14 @@ impl Documents {
         }
     }
 
-    /// Registers `document`, and mints a panel for each view where its file's
-    /// group places it: the first file's group, then the others'. The registry
-    /// keeps what it takes to mint them again, and the arrangement they were
-    /// asked for.
+    /// Registers `document`, and mints a panel for each view of each of its
+    /// files, in the order the files and their views are given. The registry
+    /// keeps what it takes to mint them again.
     pub(crate) fn open(
         &mut self,
         document: Registration,
         cx: &mut Context<Self>,
-    ) -> (PanelGroup, Vec<PanelGroup>) {
+    ) -> (AnyPanel, Vec<AnyPanel>) {
         let Registration {
             name,
             first,
@@ -293,24 +320,28 @@ impl Documents {
             let mut members = Vec::with_capacity(1 + rest.len());
             let mut minted = |member: Held<ViewSpec>| {
                 let held = member.registered();
-                let panels = held
-                    .views
-                    .map(&mut |view: &View| (view.mint)(id, held.ordinal, cx));
+                let panels = held.mint(id, cx);
                 members.push(held);
                 panels
             };
             let first = minted(first);
-            let rest: Vec<PanelGroup> = rest.into_iter().map(minted).collect();
+            let rest: Vec<(AnyPanel, Vec<AnyPanel>)> = rest.into_iter().map(minted).collect();
             (members, (first, rest))
         });
-        for (member, panels) in iter::once(&first).chain(&rest).enumerate() {
-            for panel in panels.panels() {
+        for (member, (first, more)) in iter::once(&first).chain(&rest).enumerate() {
+            for panel in iter::once(first).chain(more) {
                 let kind = panel.view_kind();
                 self.watch(id, ViewId { member, kind }, panel, cx);
             }
         }
         cx.notify();
-        (first, rest)
+        let (lead, mut following) = first;
+        following.reserve(rest.iter().map(|(_, more)| 1 + more.len()).sum());
+        for (first, more) in rest {
+            following.push(first);
+            following.extend(more);
+        }
+        (lead, following)
     }
 
     /// Shows `view` of `document` in `workspace`: the panel already showing it,
@@ -331,13 +362,13 @@ impl Documents {
         let Some((member, found)) = held.view(view) else {
             return;
         };
-        let ordinal = member.ordinal;
+        let file = member.file.clone();
         let live = found.live.as_ref().map(|live| live.panel);
         let mint = found.mint.clone();
         match live {
             Some(panel) => self.reveal(panel, workspace, window, cx),
             None => {
-                let panel = mint(document, ordinal, cx);
+                let panel = mint(document, &file, cx);
                 self.watch(document, view, &panel, cx);
                 workspace.update(cx, |workspace, cx| {
                     workspace.add_panel(panel, window, cx);
@@ -365,24 +396,23 @@ impl Documents {
         open
     }
 
-    /// The arrangement the session's documents described when they opened, over
-    /// what `panel` makes of the panel showing each view: the group of every
-    /// file of every document [compacted](PanelGroup::compact) to the views
-    /// `panel` makes something of, stacked in the order the documents opened.
-    /// `None` where it makes nothing of any view of any document.
-    pub(crate) fn opening_arrangement<T>(
+    /// What `panel` makes of the panel showing each view of the session's
+    /// documents, gathered by the view's role in the order the documents opened
+    /// and gave their files and views. A view whose panel `panel` makes nothing
+    /// of takes no place, and `None` where none takes one.
+    pub(crate) fn opening_regions<T>(
         &self,
         panel: &mut impl FnMut(EntityId) -> Option<T>,
-    ) -> Option<PanelGroup<T>> {
-        let files = self.documents.iter().map(|held| held.members.len()).sum();
-        let mut stacked = Vec::with_capacity(files);
-        for member in self.documents.iter().flat_map(|held| &held.members) {
-            let mut shown = |view: &View| view.live.as_ref().and_then(|live| panel(live.panel));
-            stacked.extend(member.views.map(&mut shown).compact());
-        }
-        let mut stacked = stacked.into_iter();
-        let first = stacked.next()?;
-        Some(PanelGroup::stack(first, stacked.collect()))
+    ) -> Option<Regions<T>> {
+        let views = self
+            .documents
+            .iter()
+            .flat_map(|held| &held.members)
+            .flat_map(Held::views);
+        Regions::gather(views.filter_map(|view| {
+            let shown = panel(view.live.as_ref()?.panel)?;
+            Some((view.role, shown))
+        }))
     }
 
     /// Takes `workspace` as a place a view can be shown and a panel can be
@@ -505,6 +535,13 @@ impl Documents {
         Some((registered.name.clone(), clock))
     }
 
+    /// What `document` is listed under where it joins several files, a name
+    /// no title of its panels gives.
+    pub(crate) fn joined_name(&self, document: DocumentId) -> Option<SharedString> {
+        let registered = self.registered(document)?;
+        (registered.members.len() > 1).then(|| registered.name.clone())
+    }
+
     fn registered(&self, document: DocumentId) -> Option<&Registered> {
         self.documents.iter().find(|held| held.id == document)
     }
@@ -575,26 +612,56 @@ fn state(view: &View, workspaces: &[Entity<Workspace>], cx: &App) -> ViewState {
 mod tests {
     use super::*;
 
+    use crate::PanelGroup;
     use crate::layout::shape;
-    use crate::testing::{SHARE_ROUNDING, letter};
-    use crate::{Layout, Weight};
-    use gpui::Axis;
+    use crate::testing::{Extent, arrange, assert_extents, extents, letter};
     use std::collections::HashMap;
+    use std::num::NonZeroUsize;
 
     const TIMELINE: ViewKind = ViewKind::new("timeline");
     const FLAME: ViewKind = ViewKind::new("flame");
     const STATS: ViewKind = ViewKind::new("stats");
+    const CONSOLE: ViewKind = ViewKind::new("console");
+    const GRAPH: ViewKind = ViewKind::new("graph");
+
+    /// The role of a view of `kind`, as the viewer showing it declares.
+    fn role(kind: ViewKind) -> Role {
+        match kind {
+            TIMELINE => Role::Timeline,
+            CONSOLE => Role::Log,
+            GRAPH => Role::Canvas,
+            _ => Role::Analysis,
+        }
+    }
+
+    fn spec(kind: ViewKind) -> ViewSpec {
+        ViewSpec::for_test(kind, role(kind))
+    }
 
     fn view(kind: ViewKind) -> View {
-        ViewSpec::for_test(kind).registered()
+        spec(kind).registered()
+    }
+
+    fn unnumbered(label: &str) -> FileName {
+        FileName {
+            label: label.to_string().into(),
+            ordinal: None,
+        }
+    }
+
+    /// `views` as the views `file` brings.
+    fn held<V>(file: FileName, views: Vec<V>) -> Held<V> {
+        let mut views = views.into_iter();
+        Held {
+            file,
+            first: views.next().expect("a file brings a view"),
+            rest: views.collect(),
+        }
     }
 
     /// Registers a file opened by itself, which no other shares a label with.
-    fn register(documents: &mut Documents, label: &str, views: PanelGroup<View>) -> DocumentId {
-        let file = Held {
-            ordinal: None,
-            views,
-        };
+    fn register(documents: &mut Documents, label: &str, views: Vec<View>) -> DocumentId {
+        let file = held(unnumbered(label), views);
         documents
             .register(label.to_string().into(), None, |_| (vec![file], ()))
             .0
@@ -605,28 +672,18 @@ mod tests {
         ViewId { member: 0, kind }
     }
 
-    /// A timeline over a pane of a flame graph and a stats table tabbed behind
-    /// it, which is how a profile's viewer arranges its views.
-    fn profile_views() -> PanelGroup<View> {
-        PanelGroup::split(
-            Axis::Vertical,
-            0.5,
-            PanelGroup::one(view(TIMELINE)),
-            PanelGroup::tabs(view(FLAME), vec![view(STATS)]),
-        )
+    /// A timeline, a flame graph and a stats table, which is what a profile's
+    /// viewer shows.
+    fn profile_views() -> Vec<View> {
+        vec![view(TIMELINE), view(FLAME), view(STATS)]
     }
 
     /// A registry holding a document per label, each showing a timeline and a
     /// flame graph.
     fn registry(labels: [&str; 2]) -> (Documents, [DocumentId; 2]) {
         let mut documents = Documents::new();
-        let ids = labels.map(|label| {
-            register(
-                &mut documents,
-                label,
-                PanelGroup::tabs(view(TIMELINE), vec![view(FLAME)]),
-            )
-        });
+        let ids =
+            labels.map(|label| register(&mut documents, label, vec![view(TIMELINE), view(FLAME)]));
         (documents, ids)
     }
 
@@ -710,8 +767,7 @@ mod tests {
 
     /// A registry holding a document per label, each showing a profile's views
     /// with a panel open for every one of them. The panels are named by letter
-    /// in the order the documents registered and their groups lay their views
-    /// out.
+    /// in the order the documents registered and gave their views.
     fn shown(labels: &[&str]) -> (Documents, Vec<(EntityId, char)>) {
         let mut documents = Documents::new();
         let mut panels = Vec::new();
@@ -728,8 +784,8 @@ mod tests {
 
     /// The arrangement `documents` describes for a window holding the panels
     /// `here` names, over the letters naming those panels. Each panel is taken
-    /// as it is laid out, exactly as a window's rebuild takes it, so a registry
-    /// naming one panel from two places is handed it once.
+    /// as the registry meets it, exactly as a window's rebuild takes it, so a
+    /// registry naming one panel from two places is handed it once.
     fn rebuilt(
         documents: &Documents,
         panels: &[(EntityId, char)],
@@ -740,17 +796,16 @@ mod tests {
             .filter(|(_, letter)| here.contains(*letter))
             .copied()
             .collect();
-        documents.opening_arrangement(&mut |panel| held.remove(&panel))
+        documents
+            .opening_regions(&mut |panel| held.remove(&panel))
+            .map(Regions::arrange)
     }
 
     /// That arrangement written out, each pane as the panels it holds in tab
     /// order. A panel is laid out in one place: a window holds it in one.
     fn rebuilt_shape(documents: &Documents, panels: &[(EntityId, char)], here: &str) -> String {
         let group = rebuilt(documents, panels, here).expect("an arrangement of panels");
-        let written =
-            shape(&group.arrange(&mut |first, rest| {
-                std::iter::once(first).chain(rest).collect::<String>()
-            }));
+        let written = shape(&arrange(group));
         let mut laid_out: Vec<char> = written.chars().filter(char::is_ascii_alphabetic).collect();
         let places = laid_out.len();
         laid_out.sort_unstable();
@@ -759,10 +814,8 @@ mod tests {
         written
     }
 
-    /// A window holding every panel of its document is laid out exactly as that
-    /// document's viewer asked for.
     #[test]
-    fn a_window_holding_every_view_is_laid_out_as_its_document_asked() {
+    fn a_window_holding_every_view_lays_each_out_in_its_roles_region() {
         let (documents, panels) = shown(&["build.profile.gz"]);
         assert_eq!(rebuilt_shape(&documents, &panels, "abc"), "(a/bc)");
     }
@@ -796,7 +849,7 @@ mod tests {
     #[test]
     fn a_document_the_window_holds_nothing_of_is_left_out() {
         let (documents, panels) = shown(&["a.profile.gz", "b.profile.gz"]);
-        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), "(a/bc/d/ef)");
+        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), "(ad/bcef)");
         assert_eq!(rebuilt_shape(&documents, &panels, "def"), "(d/ef)");
         assert_eq!(rebuilt_shape(&documents, &panels, "b"), "b");
         assert!(rebuilt(&documents, &panels, "").is_none());
@@ -820,7 +873,7 @@ mod tests {
         let id = register(
             &mut documents,
             "build.profile.gz",
-            PanelGroup::tabs(view(TIMELINE), vec![view(TIMELINE)]),
+            vec![view(TIMELINE), view(TIMELINE)],
         );
         opened(&mut documents, id, alone(TIMELINE), panel(0));
         opened(&mut documents, id, alone(TIMELINE), panel(1));
@@ -830,36 +883,24 @@ mod tests {
         );
     }
 
-    const CONSOLE: ViewKind = ViewKind::new("console");
-    const GRAPH: ViewKind = ViewKind::new("graph");
-
-    /// A profile, a build event stream and a graph, each arranged and weighed
-    /// as its viewer asks.
+    /// A profile, a build event stream and a graph, each with the views its
+    /// viewer shows.
     fn invocation_files() -> [Held<ViewSpec>; 3] {
-        let spec = ViewSpec::for_test;
-        let file = |views| Held {
-            ordinal: None,
-            views,
-        };
+        let file = |label, views| held(unnumbered(label), views);
         [
             file(
-                PanelGroup::split(
-                    Axis::Vertical,
-                    0.65,
-                    PanelGroup::one(spec(TIMELINE)),
-                    PanelGroup::tabs(spec(FLAME), vec![spec(STATS)]),
-                )
-                .with_weight(Weight::CHART),
+                "build.profile.gz",
+                vec![spec(TIMELINE), spec(FLAME), spec(STATS)],
             ),
-            file(PanelGroup::one(spec(CONSOLE)).with_weight(Weight::LOG)),
-            file(PanelGroup::one(spec(GRAPH)).with_weight(Weight::CHART)),
+            file("build.bep", vec![spec(CONSOLE)]),
+            file("aquery.pb", vec![spec(GRAPH)]),
         ]
     }
 
     /// A registry holding a document per entry of `documents`, each the files
     /// given for it, with a panel open for every view. The panels are named by
-    /// letter in the order the documents registered and their files' groups lay
-    /// their views out.
+    /// letter in the order the documents registered and their files gave their
+    /// views.
     fn showing(documents: Vec<Vec<Held<ViewSpec>>>) -> (Documents, Vec<(EntityId, char)>) {
         let mut registry = Documents::new();
         let mut panels = Vec::new();
@@ -869,7 +910,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .flat_map(|(member, held)| {
-                    let kinds = held.views.panels().map(|view| view.kind);
+                    let kinds = held.views().map(|view| view.kind);
                     kinds.map(move |kind| ViewId { member, kind })
                 })
                 .collect();
@@ -883,44 +924,19 @@ mod tests {
         (registry, panels)
     }
 
-    /// The panes a window holding the panels `here` names is put back to, top
-    /// to bottom, each as the share of the height it takes and the panels it
-    /// holds.
-    fn rebuilt_regions(
+    /// The arrangement a window holding the panels `here` names is put back
+    /// to.
+    fn rebuilt_layout(
         documents: &Documents,
         panels: &[(EntityId, char)],
         here: &str,
-    ) -> Vec<(f32, String)> {
-        let group = rebuilt(documents, panels, here).expect("an arrangement of panels");
-        let layout = group
-            .arrange(&mut |first, rest| std::iter::once(first).chain(rest).collect::<String>());
-        match &layout {
-            Layout::Split(split) => {
-                assert_eq!(split.axis(), Axis::Vertical);
-                split
-                    .sides()
-                    .into_iter()
-                    .map(|side| (side.share, shape(side.layout)))
-                    .collect()
-            }
-            pane => vec![(1.0, shape(pane))],
-        }
-    }
-
-    fn assert_regions(regions: &[(f32, String)], expected: &[(f32, &str)], opened_as: &str) {
-        assert_eq!(regions.len(), expected.len(), "{opened_as}: {regions:?}");
-        for ((share, held), (want, want_held)) in regions.iter().zip(expected) {
-            assert_eq!(held, want_held, "{opened_as}");
-            assert!(
-                (share - want).abs() < SHARE_ROUNDING,
-                "{opened_as}: {held} is laid out at {share} of the window, not {want}"
-            );
-        }
+    ) -> crate::Layout<String> {
+        arrange(rebuilt(documents, panels, here).expect("an arrangement of panels"))
     }
 
     /// Joining files changes what they are listed under, not where a window lays
     /// their views out. Whichever of its panels the window holds, every pane
-    /// takes the same share with the files opened apart, joined into one
+    /// takes the same place with the files opened apart, joined into one
     /// document, and two of them joined beside the third.
     #[test]
     fn joined_files_are_laid_out_as_they_are_apart() {
@@ -933,45 +949,56 @@ mod tests {
             let [profile, bep, graph] = invocation_files();
             showing(vec![vec![profile, bep], vec![graph]])
         };
-        let held: [(&str, &[(f32, &str)]); 4] = [
-            (
-                "abcde",
-                &[(0.26, "a"), (0.14, "bc"), (0.2, "d"), (0.4, "e")],
-            ),
-            ("abce", &[(0.325, "a"), (0.175, "bc"), (0.5, "e")]),
-            ("de", &[(1.0 / 3.0, "d"), (2.0 / 3.0, "e")]),
-            ("ad", &[(2.0 / 3.0, "a"), (1.0 / 3.0, "d")]),
+        let held = [
+            ("abcde", "((e/d)|(a/bc))"),
+            ("abce", "(e|(a/bc))"),
+            ("de", "(e/d)"),
+            ("ad", "(d|a)"),
         ];
-        for (opened_as, (documents, panels), count) in [
-            ("apart", apart(), 3),
-            ("joined", joined(), 1),
-            ("joined beside a file", beside(), 2),
-        ] {
-            assert_eq!(documents.documents.len(), count);
-            for (here, expected) in held {
-                let regions = rebuilt_regions(&documents, &panels, here);
-                assert_regions(&regions, expected, opened_as);
+        let (apart, joined, beside) = (apart(), joined(), beside());
+        assert_eq!(
+            [&apart, &joined, &beside].map(|(documents, _)| documents.documents.len()),
+            [3, 1, 2]
+        );
+        for (here, want_shape) in held {
+            let [apart, joined, beside] = [&apart, &joined, &beside]
+                .map(|(documents, panels)| rebuilt_layout(documents, panels, here));
+            assert_eq!(shape(&apart), want_shape);
+            let laid_out_apart = extents(&apart);
+            let apart: Vec<Extent> = laid_out_apart
+                .iter()
+                .map(|(pane, width, height)| (pane.as_str(), *width, *height))
+                .collect();
+            for (opened_as, layout) in [("joined", joined), ("joined beside a file", beside)] {
+                assert_eq!(shape(&layout), want_shape, "{opened_as}");
+                assert_extents(&layout, &apart);
             }
         }
+    }
+
+    #[test]
+    fn only_a_document_joining_files_has_a_joined_name() {
+        let [profile, bep, graph] = invocation_files();
+        let (documents, _) = showing(vec![vec![profile, bep], vec![graph]]);
+        let [joined, alone] = [0, 1].map(|at| documents.documents[at].id);
+        assert_eq!(documents.joined_name(joined), Some("d0".into()));
+        assert_eq!(documents.joined_name(alone), None);
     }
 
     /// Two profiles joined into one document, each a timeline over a flame
     /// graph and a stats table, with a panel open for every view.
     fn two_profiles_joined() -> (Documents, Vec<(EntityId, char)>) {
-        let profile = || Held {
-            ordinal: None,
-            views: PanelGroup::split(
-                Axis::Vertical,
-                0.5,
-                PanelGroup::one(ViewSpec::for_test(TIMELINE)),
-                PanelGroup::tabs(ViewSpec::for_test(FLAME), vec![ViewSpec::for_test(STATS)]),
-            ),
+        let profile = || {
+            held(
+                unnumbered("build.profile.gz"),
+                vec![spec(TIMELINE), spec(FLAME), spec(STATS)],
+            )
         };
         showing(vec![vec![profile(), profile()]])
     }
 
     /// The views of a profile that is the `member`-th file of its document, in
-    /// the order its group lays them out.
+    /// the order its viewer gives them.
     fn profile_views_of(member: usize) -> [ViewId; 3] {
         [TIMELINE, FLAME, STATS].map(|kind| ViewId { member, kind })
     }
@@ -1030,8 +1057,12 @@ mod tests {
     fn a_view_is_found_with_the_number_of_its_own_file() {
         let mut documents = Documents::new();
         let file = |ordinal| Held {
-            ordinal: NonZeroUsize::new(ordinal),
-            views: PanelGroup::one(view(TIMELINE)),
+            file: FileName {
+                ordinal: NonZeroUsize::new(ordinal),
+                ..unnumbered("build.profile.gz")
+            },
+            first: view(TIMELINE),
+            rest: Vec::new(),
         };
         let (id, ()) = documents.register("Both".into(), None, |_| (vec![file(1), file(2)], ()));
         let ordinals: Vec<Option<NonZeroUsize>> = (0..2)
@@ -1041,18 +1072,19 @@ mod tests {
                     kind: TIMELINE,
                 };
                 let (file, _) = documents.registered(id)?.view(timeline)?;
-                file.ordinal
+                file.file.ordinal
             })
             .collect();
         assert_eq!(ordinals, [NonZeroUsize::new(1), NonZeroUsize::new(2)]);
     }
 
-    /// Putting a window back lays each file's panels out in that file's own
-    /// group, whichever of them the window holds.
+    /// Putting a window back lays the panels of files sharing every kind out as
+    /// tabs of their roles' regions, file by file, whichever of them the window
+    /// holds.
     #[test]
-    fn files_sharing_every_kind_are_each_laid_out_in_a_place_of_their_own() {
+    fn files_sharing_every_kind_are_laid_out_file_by_file() {
         let (documents, panels) = two_profiles_joined();
-        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), "(a/bc/d/ef)");
+        assert_eq!(rebuilt_shape(&documents, &panels, "abcdef"), "(ad/bcef)");
         assert_eq!(rebuilt_shape(&documents, &panels, "def"), "(d/ef)");
         assert_eq!(rebuilt_shape(&documents, &panels, "aef"), "(a/ef)");
     }
@@ -1071,62 +1103,5 @@ mod tests {
         assert_eq!(documents.panel(id, console(1)), Some(panels[3].0));
         assert_eq!(documents.panel(id, console(0)), None);
         assert_eq!(documents.panel(id, console(3)), None);
-    }
-
-    /// A registry holding a document per weight, each showing a timeline with a
-    /// panel open for it. The panels are named by letter in the order the
-    /// documents registered.
-    fn weighed(weights: &[Weight]) -> (Documents, Vec<(EntityId, char)>) {
-        let mut documents = Documents::new();
-        let mut panels = Vec::with_capacity(weights.len());
-        for (at, weight) in weights.iter().enumerate() {
-            let id = register(
-                &mut documents,
-                &format!("d{at}"),
-                PanelGroup::one(view(TIMELINE)).with_weight(*weight),
-            );
-            let named = (panel(at as u64), letter(at));
-            opened(&mut documents, id, alone(TIMELINE), named.0);
-            panels.push(named);
-        }
-        (documents, panels)
-    }
-
-    /// Asserts the documents of `weights`, in a window holding the panels
-    /// `here` names, are laid out at `expected` shares of it, top to bottom.
-    fn assert_rebuilt_shares(weights: &[Weight], here: &str, expected: &[f32]) {
-        let (documents, panels) = weighed(weights);
-        let group = rebuilt(&documents, &panels, here).expect("an arrangement of panels");
-        let Layout::Split(split) = group.arrange(&mut |first, _| first) else {
-            panic!("documents stacked in a window are parted by a split");
-        };
-        assert_eq!(split.axis(), Axis::Vertical);
-        let shares: Vec<f32> = split.sides().into_iter().map(|side| side.share).collect();
-        assert_eq!(shares.len(), expected.len(), "a share per document stacked");
-        for (share, want) in shares.into_iter().zip(expected) {
-            assert!(
-                (share - want).abs() < SHARE_ROUNDING,
-                "{weights:?} lays a document out at {share} of the window, not {want}"
-            );
-        }
-    }
-
-    /// Documents are stacked in the order they opened, each taking the share of
-    /// the window its own group asked to weigh.
-    #[test]
-    fn stacked_documents_take_the_shares_their_weights_ask_for() {
-        assert_rebuilt_shares(&[Weight::CHART, Weight::LOG], "ab", &[2.0 / 3.0, 1.0 / 3.0]);
-    }
-
-    /// A document the window holds no panel of takes no place in the stack, and
-    /// what it would have weighed is not divided out: the documents left hold
-    /// the proportions they asked for against each other.
-    #[test]
-    fn a_document_the_window_holds_nothing_of_leaves_the_rest_their_proportions() {
-        assert_rebuilt_shares(
-            &[Weight::CHART, Weight::LOG, Weight::CHART],
-            "ac",
-            &[0.5, 0.5],
-        );
     }
 }

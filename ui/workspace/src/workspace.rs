@@ -7,8 +7,8 @@ use crate::panel::keys_focus;
 use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
-    PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, documents, drag_icon,
-    drop, panel_menu,
+    PaneEvent, Regions, Removal, Role, Side, Split, SplitSide, WindowsChanged, documents,
+    drag_icon, drop, panel_menu,
 };
 use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{
@@ -328,16 +328,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Builds a workspace framing the arrangement `group` describes, showing and
-    /// focusing its leading panel.
+    /// Builds a workspace framing `regions`.
     pub(crate) fn new(
         app_name: impl Into<SharedString>,
-        group: PanelGroup,
+        regions: Regions<AnyPanel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (layout, panes) = framed_panes(group, window, cx);
-        let active = layout.first_pane().clone();
+        let (layout, active, panes) = framed_panes(regions, window, cx);
         let this = cx.weak_entity();
         let documents_menu = cx.new(|cx| DocumentsMenu::new(this, window, cx));
         let documents = Documents::global(cx);
@@ -374,17 +372,16 @@ impl Workspace {
         documents.update(cx, |documents, cx| {
             documents.watch_workspace(&framed, cx);
         });
-        // Every pane took focus as it was built, so the last one built holds it;
-        // the window opens on the leading panel instead.
+        // Every pane took focus as it was built, so the active pane's panel takes
+        // it back.
         let panel = workspace.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);
-        set_window_title(&workspace.app_name, &panel, window, cx);
+        set_window_title(&workspace.app_name, &panel, window);
         workspace
     }
 
-    /// Builds a workspace framing a region of the window per file: those of
-    /// `first` across the top and those of each of `others` under them in the
-    /// order given, every region laid out as its file's group describes.
+    /// Builds a workspace framing the views of `first` and `others`, each in its
+    /// role's region.
     pub(crate) fn with_documents(
         app_name: impl Into<SharedString>,
         first: Document,
@@ -392,7 +389,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(app_name, Document::stack(first, others, cx), window, cx)
+        Self::new(app_name, Document::open(first, others, cx), window, cx)
     }
 
     pub fn active_pane(&self) -> &Entity<Pane> {
@@ -443,50 +440,44 @@ impl Workspace {
         self.arrangement.rearrange()
     }
 
-    /// Lays the window out as the files it holds described when they opened:
-    /// each of them as its own group arranges the panels showing its views, the
-    /// files stacked in the order they opened and at the weights they asked
-    /// for. A view whose panel is closed, and one whose panel another window
-    /// holds, take no place in the arrangement.
+    /// Lays the window out as it opened.
     ///
     /// The panels themselves are laid out again — each keeps what it has
     /// scrolled to, zoomed in on and selected, and goes on being the panel the
-    /// registry records for its view — and every one the window holds keeps a
-    /// place in it ([`put_back`]).
+    /// registry records for its view.
     pub(crate) fn reset_arrangement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (leading, others) = self.held_panels(cx);
         let mut unplaced: HashMap<EntityId, AnyPanel> = iter::once(&leading)
             .chain(&others)
             .map(|panel| (panel.entity_id(), panel.clone()))
             .collect();
-        let described = Documents::global(cx)
+        let placed = Documents::global(cx)
             .read(cx)
-            .opening_arrangement(&mut |panel| unplaced.remove(&panel));
-        let group = put_back(described, leading, others, |panel| {
+            .opening_regions(&mut |panel| unplaced.remove(&panel));
+        let regions = put_back(placed, leading, others, AnyPanel::role, |panel| {
             unplaced.contains_key(&panel.entity_id())
         });
-        self.reframe(group, window, cx);
+        self.reframe(regions, window, cx);
     }
 
-    /// Frames `group` in place of the arrangement the window lays out, making
-    /// the pane holding its leading panel the active one.
+    /// Frames `regions` in place of the arrangement the window lays out, making
+    /// the pane holding their leading panel the active one.
     ///
     /// The panels move from the panes that held them to the panes built for
     /// them, and are held by both while the new panes are being built, so
     /// everything the old panes answer for is let go of first: the gestures
     /// aimed at them, the panels they tell they are on show, and the
     /// subscriptions carrying their events here.
-    fn reframe(&mut self, group: PanelGroup, window: &mut Window, cx: &mut Context<Self>) {
+    fn reframe(&mut self, regions: Regions<AnyPanel>, window: &mut Window, cx: &mut Context<Self>) {
         self.end_gestures();
         self.hide_shown_panels(window, cx);
         self.panes.clear();
-        let (layout, panes) = framed_panes(group, window, cx);
+        let (layout, leading, panes) = framed_panes(regions, window, cx);
         self.arrangement = Arrangement::new(layout);
         for pane in panes {
             self.watch(&pane, window, cx);
         }
-        let first = self.arrangement.layout().first_pane().clone();
-        self.activate_pane(first, window, cx);
+        self.activate_pane(leading, window, cx);
     }
 
     /// Lets go of every gesture the window is holding over the arrangement it
@@ -516,14 +507,14 @@ impl Workspace {
         }
     }
 
-    /// Every panel the window holds, in the order the arrangement lays them
-    /// out: the one its leading pane shows, and then the rest. A window frames
-    /// at least one pane and a pane holds at least one panel, so there is
-    /// always that leading one.
+    /// Every panel the window holds: the one its first pane shows, then the
+    /// others pane by pane in the order the arrangement lays them out, each
+    /// pane's in tab order.
     fn held_panels(&self, cx: &App) -> (AnyPanel, Vec<AnyPanel>) {
         let layout = self.arrangement.layout();
         let leading = layout.first_pane().read(cx).active_panel().clone();
-        let mut others = Vec::with_capacity(layout.panes().count());
+        let held: usize = layout.panes().map(|pane| pane.read(cx).tab_count()).sum();
+        let mut others = Vec::with_capacity(held - 1);
         for pane in layout.panes() {
             others.extend(
                 pane.read(cx)
@@ -670,7 +661,8 @@ impl Workspace {
         let app_name = self.app_name.clone();
         let size = window.viewport_size();
         bviz_ui_shell::open_window(&self.app_name, size, cx, move |window, cx| {
-            cx.new(|cx| Self::new(app_name, PanelGroup::one(panel), window, cx))
+            let regions = Regions::new(panel.role(), panel);
+            cx.new(|cx| Self::new(app_name, regions, window, cx))
         })
         .expect("a window opens for the panel moved out of this one");
     }
@@ -820,7 +812,7 @@ impl Workspace {
         let mut named = Vec::with_capacity(open.len());
         for (place, workspace) in open.iter().enumerate() {
             if workspace.entity_id() != here {
-                let shown = workspace.read(cx).active_panel(cx).display_title(cx);
+                let shown = workspace.read(cx).active_panel(cx).display_title();
                 named.push((workspace.downgrade(), window_name(place + 1, &shown)));
             }
         }
@@ -997,7 +989,7 @@ impl Workspace {
         };
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let chip = drag_icon::Chip {
-            title: panel.display_title(cx),
+            title: panel.display_title(),
             font_size: GHOST_TEXT.to_pixels(window.rem_size()),
             height: GHOST_HEIGHT,
             max_width: GHOST_MAX_WIDTH,
@@ -1155,6 +1147,7 @@ impl Workspace {
     /// The pane laid out nearest the active one on `side` of it, made active.
     fn focus_towards(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         if let Towards::Found(pane) = self.pane_in_direction(&self.active, side) {
+            pane.read(cx).reveal_shown_tab();
             self.activate_pane(pane, window, cx);
         }
     }
@@ -1252,14 +1245,19 @@ impl Workspace {
         self.playback.clone()
     }
 
-    /// Adds `panel` to the active pane and shows it.
+    /// Adds `panel` to the pane [`pane_for_role`] picks for its role and shows
+    /// it.
     pub(crate) fn add_panel(
         &mut self,
         panel: AnyPanel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = self.active.clone();
+        let panes = self.arrangement.layout().panes().map(|pane| {
+            let roles = pane.read(cx).panels().map(AnyPanel::role);
+            (pane, roles)
+        });
+        let pane = pane_for_role(panel.role(), panes, &self.active).clone();
         self.activate_pane(pane.clone(), window, cx);
         pane.update(cx, |pane, cx| pane.add(panel, window, cx));
     }
@@ -1279,12 +1277,7 @@ impl Workspace {
             |workspace, pane, event, window, cx| match event {
                 PaneEvent::Changed => {
                     if *pane == workspace.active {
-                        set_window_title(
-                            &workspace.app_name,
-                            &workspace.active_panel(cx),
-                            window,
-                            cx,
-                        );
+                        set_window_title(&workspace.app_name, &workspace.active_panel(cx), window);
                     }
                     cx.notify();
                 }
@@ -1349,7 +1342,7 @@ impl Workspace {
         self.active = pane;
         let panel = self.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);
-        set_window_title(&self.app_name, &panel, window, cx);
+        set_window_title(&self.app_name, &panel, window);
         cx.notify();
     }
 
@@ -1359,12 +1352,12 @@ impl Workspace {
         }
     }
 
-    /// Gives every side of the split `divider` parts the same share of that
-    /// split's extent, and lets go of whatever boundary a drag is holding, so
-    /// that the press ahead of this one leaves no drag running behind it.
-    fn even_split(&mut self, divider: DividerId, cx: &mut Context<Self>) {
+    /// Puts the split `divider` parts back to rest, and lets go of whatever
+    /// boundary a drag is holding, so that the press ahead of this one leaves
+    /// no drag running behind it.
+    fn rest_split(&mut self, divider: DividerId, cx: &mut Context<Self>) {
         self.divider_drag = None;
-        self.rearrange(cx).even_split(divider);
+        self.rearrange(cx).rest_split(divider);
         cx.notify();
     }
 
@@ -1663,7 +1656,7 @@ impl Workspace {
                         .size(GHOST_ICON_SIZE)
                         .text_color(ink)
                 }))
-                .child(div().truncate().child(panel.display_title(cx))),
+                .child(div().truncate().child(panel.display_title())),
         )
     }
 }
@@ -1684,43 +1677,66 @@ fn beside_cursor(at: Point<Pixels>, viewport: Size<Pixels>) -> Div {
     }
 }
 
-/// The arrangement a window holding `leading` and then `others` is put back to:
-/// `described` — what the session's documents make of the panels among them
-/// they lay out — with a pane of its own stacked under it for each panel
-/// `unplaced` still answers for, in the order the window held them. Every panel
-/// takes exactly one place, so a window put back goes on framing all of them
-/// however the documents describe themselves. Where the documents lay out none
-/// of them, each stands in a pane of its own.
-fn put_back<T: Clone>(
-    described: Option<PanelGroup<T>>,
-    leading: T,
-    others: Vec<T>,
-    unplaced: impl Fn(&T) -> bool,
-) -> PanelGroup<T> {
-    let alone = |panel: &T| PanelGroup::one(panel.clone());
-    match described {
-        Some(described) => PanelGroup::stack(
-            described,
-            iter::once(&leading)
-                .chain(&others)
-                .filter(|panel| unplaced(panel))
-                .map(alone)
-                .collect(),
-        ),
-        None => PanelGroup::stack(alone(&leading), others.iter().map(alone).collect()),
-    }
+/// The first of `panes`, each given with the roles of the panels it holds,
+/// holding a panel of `role`, and `active` where none does.
+fn pane_for_role<P>(
+    role: Role,
+    panes: impl IntoIterator<Item = (P, impl IntoIterator<Item = Role>)>,
+    active: P,
+) -> P {
+    panes
+        .into_iter()
+        .find_map(|(pane, roles)| roles.into_iter().any(|held| held == role).then_some(pane))
+        .unwrap_or(active)
 }
 
-/// The panes `group` describes, each holding the panels the group gives it and
-/// showing the first of them, and every pane among them for the caller to watch.
+/// `placed` with each of `leading` and `others` that is `unplaced` pushed into
+/// its role's region, in the order given. Where nothing is placed, every panel
+/// is unplaced and `leading` seeds the regions.
+fn put_back<T>(
+    placed: Option<Regions<T>>,
+    leading: T,
+    others: Vec<T>,
+    role: impl Fn(&T) -> Role,
+    unplaced: impl Fn(&T) -> bool,
+) -> Regions<T> {
+    let mut regions = match placed {
+        None => Regions::new(role(&leading), leading),
+        Some(mut placed) => {
+            if unplaced(&leading) {
+                placed.push(role(&leading), leading);
+            }
+            placed
+        }
+    };
+    regions.extend(
+        others
+            .into_iter()
+            .filter(|panel| unplaced(panel))
+            .map(|panel| (role(&panel), panel)),
+    );
+    regions
+}
+
+/// The panes `regions` describes, each holding the panels the region gives it
+/// and showing the first of them; the pane holding the leading panel of
+/// `regions`, which a window built around it opens on; and every pane among
+/// them for the caller to watch.
 fn framed_panes(
-    group: PanelGroup,
+    regions: Regions<AnyPanel>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) -> (Layout, Vec<Entity<Pane>>) {
+) -> (Layout, Entity<Pane>, Vec<Entity<Pane>>) {
+    let leading = regions.leading().entity_id();
+    let group = regions.arrange();
     let mut panes = Vec::new();
+    let mut leading_pane = None;
     let layout = group.arrange(&mut |panel, tabbed| {
+        let leads = panel.entity_id() == leading;
         let pane = cx.new(|cx| Pane::new(panel, window, cx));
+        if leads {
+            leading_pane = Some(pane.clone());
+        }
         pane.update(cx, |pane, cx| {
             for tab in tabbed {
                 pane.add(tab, window, cx);
@@ -1730,7 +1746,8 @@ fn framed_panes(
         panes.push(pane.clone());
         pane
     });
-    (layout, panes)
+    let leading_pane = leading_pane.expect("regions show their leading panel first in its pane");
+    (layout, leading_pane, panes)
 }
 
 /// Whether moving a panel to `to` would lay it out anywhere other than where
@@ -2003,8 +2020,8 @@ fn divider(
         axis,
         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
             CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
-                ChromeIntent::EvenSplit => {
-                    workspace.even_split(id, cx);
+                ChromeIntent::RestSplit => {
+                    workspace.rest_split(id, cx);
                     true
                 }
                 ChromeIntent::ResizeSplit => {
@@ -2102,7 +2119,7 @@ impl Render for Workspace {
         let playback = self.playback_bar(&panel, cx);
         let key_context = self.key_context(cx);
         let chrome = Chrome::new(&self.window_focus)
-            .title(window_title(&self.app_name, &panel, cx))
+            .title(window_title(&self.app_name, &panel))
             .menu(self.documents_menu.clone())
             .child(room_left().child(panes).children(playback));
         let chrome = match panel.status(cx) {
@@ -2206,8 +2223,8 @@ fn towards<Focus: Action, Move: Action, SplitOff: Action>(
 }
 
 /// What names the window: the application, then the document on show.
-fn window_title(app_name: &str, panel: &AnyPanel, cx: &App) -> String {
-    format!("{app_name} \u{2014} {}", panel.display_title(cx))
+fn window_title(app_name: &str, panel: &AnyPanel) -> String {
+    format!("{app_name} \u{2014} {}", panel.display_title())
 }
 
 /// How a window reads where another window's menu offers a move into it: what
@@ -2219,8 +2236,8 @@ fn window_name(place: usize, shown: &str) -> SharedString {
     format!("{place}. {shown}").into()
 }
 
-fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {
-    window.set_window_title(&window_title(app_name, panel, cx));
+fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window) {
+    window.set_window_title(&window_title(app_name, panel));
 }
 
 /// The context stack from the window's root to a panel scoped to `scope`,
@@ -2638,59 +2655,68 @@ mod tests {
         assert_eq!(nearest(from, Side::Left, [over]), None);
     }
 
-    /// The arrangement a window holding the panels 'a' to `held` is put back
-    /// to, `described` being what the documents make of the ones they lay out.
-    fn put_back_shape(described: Option<PanelGroup<char>>, held: &str) -> String {
-        let placed: Vec<char> = match &described {
-            Some(described) => described.panels().copied().collect(),
-            None => Vec::new(),
-        };
+    /// The arrangement a window holding the panels `held`, in that order, is
+    /// put back to, the documents having placed `placed`. Each panel's role is
+    /// the role of its letter in `roles`.
+    fn put_back_shape(placed: &[(Role, char)], held: &str, roles: &[(char, Role)]) -> String {
+        let regions = Regions::gather(placed.iter().copied());
+        let placed: Vec<char> = placed.iter().map(|(_, panel)| *panel).collect();
         let mut held = held.chars();
         let leading = held.next().expect("a window holds a panel");
-        let group = put_back(described, leading, held.collect(), |panel| {
+        let role = |panel: &char| {
+            let named = roles.iter().find(|(named, _)| named == panel);
+            named.expect("a role for every held panel").1
+        };
+        let regions = put_back(regions, leading, held.collect(), role, |panel| {
             !placed.contains(panel)
         });
-        crate::layout::shape(
-            &group.arrange(&mut |first, rest| iter::once(first).chain(rest).collect::<String>()),
-        )
+        crate::layout::shape(&crate::testing::arrange(regions.arrange()))
     }
 
-    /// A window put back frames every panel it was framing: a panel the
-    /// documents lay out nowhere keeps a pane of its own under what they do lay
-    /// out, rather than going with the panes that held it.
+    /// A panel the documents lay out nowhere joins its role's region behind the
+    /// ones they place there, in the order the window held it, and a panel
+    /// they place is not laid out again.
     #[test]
-    fn a_panel_the_documents_lay_out_nowhere_keeps_a_pane_of_its_own() {
-        let described = PanelGroup::split(
-            Axis::Vertical,
-            0.5,
-            PanelGroup::one('a'),
-            PanelGroup::tabs('b', vec!['c']),
+    fn a_panel_the_documents_lay_out_nowhere_joins_its_roles_region() {
+        let roles = [
+            ('a', Role::Canvas),
+            ('b', Role::Analysis),
+            ('x', Role::Analysis),
+            ('y', Role::Canvas),
+            ('z', Role::Analysis),
+        ];
+        let placed = [(Role::Canvas, 'a'), (Role::Analysis, 'b')];
+        assert_eq!(put_back_shape(&placed, "zaybx", &roles), "(ay|bzx)");
+        assert_eq!(put_back_shape(&placed, "ab", &roles), "(a|b)");
+    }
+
+    /// Where the documents lay out none of the window's panels, each joins its
+    /// role's region in the order the window held them.
+    #[test]
+    fn a_window_no_document_lays_out_is_laid_out_by_role() {
+        let roles = [('a', Role::Log), ('b', Role::Timeline), ('c', Role::Log)];
+        assert_eq!(put_back_shape(&[], "abc", &roles), "(ac|b)");
+    }
+
+    /// A panel brought into a window joins the first pane holding a panel of its
+    /// role, and the active pane where none does.
+    #[test]
+    fn a_panel_brought_in_joins_the_first_pane_of_its_role() {
+        let panes = || {
+            [
+                ("graph", vec![Role::Canvas]),
+                ("trace", vec![Role::Timeline]),
+                ("flame", vec![Role::Timeline, Role::Analysis]),
+                ("stats", vec![Role::Analysis]),
+            ]
+        };
+        assert_eq!(pane_for_role(Role::Analysis, panes(), "active"), "flame");
+        assert_eq!(pane_for_role(Role::Timeline, panes(), "active"), "trace");
+        assert_eq!(pane_for_role(Role::Log, panes(), "active"), "active");
+        assert_eq!(
+            pane_for_role(Role::Canvas, Vec::<(&str, Vec<Role>)>::new(), "active"),
+            "active"
         );
-        assert_eq!(put_back_shape(Some(described), "abcd"), "(a/bc/d)");
-        let beside = PanelGroup::split(
-            Axis::Horizontal,
-            0.5,
-            PanelGroup::one('a'),
-            PanelGroup::one('b'),
-        );
-        assert_eq!(put_back_shape(Some(beside), "abc"), "((a|b)/c)");
-    }
-
-    /// Nothing is laid out twice: a panel the documents place is not also given
-    /// a pane of its own.
-    #[test]
-    fn a_window_put_back_lays_every_panel_it_holds_out_once() {
-        let described = PanelGroup::tabs('a', vec!['b']);
-        assert_eq!(put_back_shape(Some(described), "ab"), "ab");
-    }
-
-    /// Documents that lay out none of the window's panels leave every one of
-    /// them standing in a pane of its own, so putting a window back is never
-    /// putting it back to nothing.
-    #[test]
-    fn a_window_no_document_lays_out_keeps_each_panel_in_a_pane_of_its_own() {
-        assert_eq!(put_back_shape(None, "abc"), "(a/b/c)");
-        assert_eq!(put_back_shape(None, "a"), "a");
     }
 
     /// A press is holding the panel nowhere until it is a drag of it, so what a

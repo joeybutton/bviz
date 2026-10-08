@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
-use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
+use crate::{DocumentId, Documents, Pane, Regions, Role, ViewSpec};
 use bviz_ui_components::KeyScope;
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -48,6 +48,7 @@ pub struct PanelKind {
     /// The gpui key context this panel's own key bindings are scoped to; unique
     /// across kinds, so such a binding reaches only this panel.
     pub key_context: KeyScope,
+    pub role: Role,
 }
 
 impl PanelKind {
@@ -65,7 +66,12 @@ pub trait Panel: Render + Focusable + EventEmitter<PanelEvent> {
     where
         Self: Sized;
 
-    fn title(&self, cx: &App) -> SharedString;
+    fn titled() -> Titled
+    where
+        Self: Sized,
+    {
+        Titled::View
+    }
 
     /// A line saying what panels of this kind show, for a reader the title
     /// alone leaves guessing.
@@ -99,9 +105,62 @@ pub trait Panel: Render + Focusable + EventEmitter<PanelEvent> {
     fn set_active(&mut self, _active: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
+/// What a panel's title names first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Titled {
+    /// The file, for a view that is the file's own rendering.
+    File,
+    /// The view, then the file it shows: one of several views a file offers.
+    View,
+}
+
+const TITLE_SEPARATOR: &str = " \u{b7} ";
+
+/// The title of a panel showing view `view` of `file`.
+#[derive(Clone)]
+struct PanelTitle {
+    /// The title without the number of the file.
+    plain: SharedString,
+    ordinal: Option<NonZeroUsize>,
+}
+
+impl PanelTitle {
+    fn new(titled: Titled, view: &str, file: &FileName) -> Self {
+        let plain = match titled {
+            Titled::File => file.label.clone(),
+            Titled::View => format!("{view}{TITLE_SEPARATOR}{}", file.label).into(),
+        };
+        Self {
+            plain,
+            ordinal: file.ordinal,
+        }
+    }
+
+    fn suffix(&self) -> Option<SharedString> {
+        self.ordinal.map(ordinal_suffix)
+    }
+
+    fn display(&self) -> SharedString {
+        numbered(self.plain.clone(), self.ordinal)
+    }
+}
+
+/// The file a panel shows a view of, as its panels name it.
+#[derive(Clone)]
+pub(crate) struct FileName {
+    /// The file's label, without its number.
+    pub(crate) label: SharedString,
+    pub(crate) ordinal: Option<NonZeroUsize>,
+}
+
+impl FileName {
+    pub(crate) fn numbered(&self) -> SharedString {
+        numbered(self.label.clone(), self.ordinal)
+    }
+}
+
 /// What a [`Panel`] tells its workspace about itself.
 pub enum PanelEvent {
-    TitleChanged,
     StatusChanged,
     Close,
     /// Asks to be brought forward in the pane holding it, and that pane made
@@ -111,27 +170,23 @@ pub enum PanelEvent {
 }
 
 /// A panel of any kind, holding it through operations resolved once for its
-/// concrete type. Cloning shares the one panel.
+/// concrete type. Cloning shares the one panel. Its title and number are fixed
+/// for its lifetime, so a panel keeps them when it moves to another pane or
+/// another window.
 #[derive(Clone)]
 pub struct AnyPanel {
     panel: Rc<dyn PanelOps>,
     /// The document the panel shows a view of, wherever the panel moves.
     document: DocumentId,
-    /// Fixed for the panel's lifetime, so a panel keeps its number when it moves
-    /// to another pane or another window.
-    ordinal: Option<NonZeroUsize>,
+    title: PanelTitle,
 }
 
 impl AnyPanel {
-    pub(crate) fn new<T: Panel>(
-        panel: Entity<T>,
-        document: DocumentId,
-        ordinal: Option<NonZeroUsize>,
-    ) -> Self {
+    pub(crate) fn new<T: Panel>(panel: Entity<T>, document: DocumentId, file: &FileName) -> Self {
         Self {
             panel: Rc::new(panel),
             document,
-            ordinal,
+            title: PanelTitle::new(T::titled(), T::kind().label(), file),
         }
     }
 
@@ -143,20 +198,24 @@ impl AnyPanel {
         self.panel.view_kind()
     }
 
-    /// The title the panel gives itself.
-    pub fn plain_title(&self, cx: &App) -> SharedString {
-        self.panel.title(cx)
+    pub fn role(&self) -> Role {
+        self.panel.role()
+    }
+
+    /// The title without the number of the file.
+    pub fn plain_title(&self) -> SharedString {
+        self.title.plain.clone()
     }
 
     /// The number following the plain title, if the file the panel shows has one.
     pub fn title_suffix(&self) -> Option<SharedString> {
-        self.ordinal.map(ordinal_suffix)
+        self.title.suffix()
     }
 
     /// The plain title followed by its suffix, for a place that shows the title
     /// as one string.
-    pub fn display_title(&self, cx: &App) -> SharedString {
-        numbered(self.plain_title(cx), self.ordinal)
+    pub fn display_title(&self) -> SharedString {
+        self.title.display()
     }
 
     pub fn description(&self) -> Option<&'static str> {
@@ -227,18 +286,19 @@ pub(crate) fn keys_focus(
         .map(|active| active.focus_handle(cx))
 }
 
-/// The views one file brings to a window, arranged and weighed as its viewer
-/// asks. Its label tells it apart from the other files the window opens with,
-/// whichever documents hold them: every panel of a file whose label another
-/// shares is numbered, counting in the order the window stacks the files.
+/// The views one file brings to a window, at least one. Its label tells it
+/// apart from the other files the window opens with, whichever documents hold
+/// them: every panel of a file whose label another shares is numbered, counting
+/// in the order the files are given.
 pub struct Member {
     label: SharedString,
-    views: PanelGroup<ViewSpec>,
+    first: ViewSpec,
+    rest: Vec<ViewSpec>,
 }
 
 impl Member {
-    pub fn new(label: SharedString, views: PanelGroup<ViewSpec>) -> Self {
-        Self { label, views }
+    pub fn new(label: SharedString, first: ViewSpec, rest: Vec<ViewSpec>) -> Self {
+        Self { label, first, rest }
     }
 }
 
@@ -273,8 +333,8 @@ impl From<Member> for Document {
 
 impl Document {
     /// `first`, `second` and each of `rest` as one document, which the Documents
-    /// menu lists under `label`. A window stacks, weighs and numbers each file
-    /// as it does one opened by itself.
+    /// menu lists under `label`. A window lays out and numbers each file as it
+    /// does one opened by itself.
     pub fn join(label: SharedString, first: Member, second: Member, rest: Vec<Member>) -> Self {
         Self {
             members: Members::Joined {
@@ -319,7 +379,7 @@ impl Document {
     /// `first` and `others` as the registry takes them. Files whose labels
     /// collide are numbered, and so are the joined documents whose own labels
     /// do. A file opened by itself is listed under its numbered label, which is
-    /// what its panels read.
+    /// how its panels' titles name it.
     fn registrations(first: Self, others: Vec<Self>) -> (Registration, Vec<Registration>) {
         let documents = || iter::once(&first).chain(&others);
         let mut files = Ordinals::of(
@@ -328,16 +388,20 @@ impl Document {
                 .map(|member| &member.label),
         );
         let mut joined = Ordinals::of(documents().filter_map(Self::joined_label));
-        let mut held = |member: Member| {
-            let ordinal = files.take(&member.label);
-            (member.label, ordinal, member.views)
+        let mut held = |member: Member| Held {
+            file: FileName {
+                ordinal: files.take(&member.label),
+                label: member.label,
+            },
+            first: member.first,
+            rest: member.rest,
         };
         let mut registration = |document: Self| match document.members {
             Members::Alone(member) => {
-                let (label, ordinal, views) = held(member);
+                let first = held(member);
                 Registration {
-                    name: numbered(label, ordinal),
-                    first: Held { ordinal, views },
+                    name: first.file.numbered(),
+                    first,
                     rest: Vec::new(),
                     clock: document.clock,
                 }
@@ -349,14 +413,10 @@ impl Document {
                 rest,
             } => {
                 let ordinal = joined.take(&label);
-                let mut held = |member| {
-                    let (_, ordinal, views) = held(member);
-                    Held { ordinal, views }
-                };
                 Registration {
                     name: numbered(label, ordinal),
                     first: held(first),
-                    rest: iter::once(second).chain(rest).map(held).collect(),
+                    rest: iter::once(second).chain(rest).map(&mut held).collect(),
                     clock: document.clock,
                 }
             }
@@ -377,20 +437,20 @@ impl Document {
     }
 
     /// The panels of `first` and `others`, each document registered with the
-    /// session's [`Documents`], every file's group stacked as
-    /// [`PanelGroup::stack`] stacks them.
-    pub(crate) fn stack(first: Self, others: Vec<Self>, cx: &mut App) -> PanelGroup {
-        let following = others.iter().flat_map(Self::members).count();
+    /// session's [`Documents`], gathered by role in the order the documents,
+    /// their files and the files' views are given.
+    pub(crate) fn open(first: Self, others: Vec<Self>, cx: &mut App) -> Regions<AnyPanel> {
         let (first, others) = Self::registrations(first, others);
+        let by_role = |panel: AnyPanel| (panel.role(), panel);
         Documents::global(cx).update(cx, |documents, cx| {
-            let (lead, mut stacked) = documents.open(first, cx);
-            stacked.reserve(following);
+            let (lead, following) = documents.open(first, cx);
+            let mut regions = Regions::new(lead.role(), lead);
+            regions.extend(following.into_iter().map(by_role));
             for document in others {
                 let (first, rest) = documents.open(document, cx);
-                stacked.push(first);
-                stacked.extend(rest);
+                regions.extend(iter::once(first).chain(rest).map(by_role));
             }
-            PanelGroup::stack(lead, stacked)
+            regions
         })
     }
 }
@@ -443,7 +503,7 @@ fn numbered(name: SharedString, ordinal: Option<NonZeroUsize>) -> SharedString {
 /// of differing kinds. Implemented once, for the entity holding the panel.
 trait PanelOps {
     fn view_kind(&self) -> ViewKind;
-    fn title(&self, cx: &App) -> SharedString;
+    fn role(&self) -> Role;
     fn description(&self) -> Option<&'static str>;
     fn gestures(&self) -> Vec<GestureRow>;
     fn key_scope(&self) -> KeyScope;
@@ -462,8 +522,8 @@ impl<T: Panel> PanelOps for Entity<T> {
         T::kind().view
     }
 
-    fn title(&self, cx: &App) -> SharedString {
-        self.read(cx).title(cx)
+    fn role(&self) -> Role {
+        T::kind().role
     }
 
     fn description(&self) -> Option<&'static str> {
@@ -516,7 +576,6 @@ impl<T: Panel> PanelOps for Entity<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Weight;
 
     #[test]
     fn a_document_is_labelled_by_its_file_name() {
@@ -542,57 +601,40 @@ mod tests {
     fn profile(label: &'static str) -> Member {
         Member::new(
             label.into(),
-            PanelGroup::tabs(
-                ViewSpec::for_test(TIMELINE),
-                vec![ViewSpec::for_test(FLAME)],
-            )
-            .with_weight(Weight::CHART),
+            ViewSpec::for_test(TIMELINE, Role::Timeline),
+            vec![ViewSpec::for_test(FLAME, Role::Analysis)],
         )
     }
 
-    fn one_view(label: &'static str, kind: ViewKind, weight: Weight) -> Member {
-        Member::new(
-            label.into(),
-            PanelGroup::one(ViewSpec::for_test(kind)).with_weight(weight),
-        )
+    fn one_view(label: &'static str, kind: ViewKind, role: Role) -> Member {
+        Member::new(label.into(), ViewSpec::for_test(kind, role), Vec::new())
     }
 
     fn session(label: &'static str, profile_label: &'static str) -> Document {
         Document::join(
             label.into(),
             profile(profile_label),
-            one_view("build.bep", CONSOLE, Weight::LOG),
+            one_view("build.bep", CONSOLE, Role::Log),
             Vec::new(),
         )
     }
 
-    /// A file as its panels are numbered, the kinds of the views it shows and
-    /// the weight it asks for.
-    type File = (String, Vec<ViewKind>, Weight);
+    /// A file as its panels are numbered, and the kinds of the views it shows.
+    type File = (String, Vec<ViewKind>);
 
     /// Each document a window opening with `first` and `others` holds: what it
     /// is listed under, and its files.
     fn opened(first: Document, others: Vec<Document>) -> Vec<(String, Vec<File>)> {
-        let labels: Vec<Vec<SharedString>> = iter::once(&first)
-            .chain(&others)
-            .map(|document| {
-                let labels = document.members().map(|member| member.label.clone());
-                labels.collect()
-            })
-            .collect();
         let (first, others) = Document::registrations(first, others);
         iter::once(first)
             .chain(others)
-            .zip(labels)
-            .map(|(registration, labels)| {
+            .map(|registration| {
                 let files = iter::once(&registration.first)
                     .chain(&registration.rest)
-                    .zip(labels)
-                    .map(|(held, label)| {
+                    .map(|held| {
                         (
-                            numbered(label, held.ordinal).to_string(),
-                            held.views.panels().map(|view| view.kind()).collect(),
-                            held.views.weight(),
+                            held.file.numbered().to_string(),
+                            held.views().map(ViewSpec::kind).collect(),
                         )
                     })
                     .collect();
@@ -620,37 +662,29 @@ mod tests {
             opened(profile("build.profile.gz").into(), Vec::new()),
             [(
                 "build.profile.gz".to_string(),
-                vec![(
-                    "build.profile.gz".to_string(),
-                    vec![TIMELINE, FLAME],
-                    Weight::CHART
-                )],
+                vec![("build.profile.gz".to_string(), vec![TIMELINE, FLAME])],
             )]
         );
     }
 
     /// A joined document holds each file as the file's viewer opened it: under
-    /// its own label, arranged and weighed as asked.
+    /// its own label, with the views it asked for.
     #[test]
     fn a_joined_document_holds_every_file_as_it_was_opened() {
         let joined = Document::join(
             "Invocation a5f7f3e6".into(),
             profile("build.profile.gz"),
-            one_view("build.bep", CONSOLE, Weight::LOG),
-            vec![one_view("aquery.pb", GRAPH, Weight::CHART)],
+            one_view("build.bep", CONSOLE, Role::Log),
+            vec![one_view("aquery.pb", GRAPH, Role::Canvas)],
         );
         assert_eq!(
             opened(joined, Vec::new()),
             [(
                 "Invocation a5f7f3e6".to_string(),
                 vec![
-                    (
-                        "build.profile.gz".to_string(),
-                        vec![TIMELINE, FLAME],
-                        Weight::CHART
-                    ),
-                    ("build.bep".to_string(), vec![CONSOLE], Weight::LOG),
-                    ("aquery.pb".to_string(), vec![GRAPH], Weight::CHART),
+                    ("build.profile.gz".to_string(), vec![TIMELINE, FLAME]),
+                    ("build.bep".to_string(), vec![CONSOLE]),
+                    ("aquery.pb".to_string(), vec![GRAPH]),
                 ],
             )]
         );
@@ -686,7 +720,7 @@ mod tests {
                 session("Invocation a5f7f3e6", "build.profile.gz"),
                 vec![
                     profile("build.profile.gz").into(),
-                    one_view("aquery.pb", GRAPH, Weight::CHART).into()
+                    one_view("aquery.pb", GRAPH, Role::Canvas).into()
                 ],
             ),
             [
@@ -708,7 +742,7 @@ mod tests {
             named(
                 session("Invocation a5f7f3e6", "a.profile.gz"),
                 vec![
-                    one_view("Invocation a5f7f3e6", GRAPH, Weight::CHART).into(),
+                    one_view("Invocation a5f7f3e6", GRAPH, Role::Canvas).into(),
                     session("Invocation a5f7f3e6", "b.profile.gz"),
                     session("Invocation 0b437916", "c.profile.gz"),
                 ],
@@ -758,6 +792,38 @@ mod tests {
             ordinals(&["x", "y", "y", "x", "z"]),
             [Some(1), Some(1), Some(2), Some(2), None]
         );
+    }
+
+    fn build_profile(ordinal: Option<NonZeroUsize>) -> FileName {
+        FileName {
+            label: "build.profile".into(),
+            ordinal,
+        }
+    }
+
+    #[test]
+    fn a_file_titled_panel_reads_as_its_file() {
+        let title = PanelTitle::new(Titled::File, "Timeline", &build_profile(None));
+        assert_eq!(title.display(), "build.profile");
+    }
+
+    #[test]
+    fn a_view_titled_panel_reads_as_its_view_of_the_file() {
+        let title = PanelTitle::new(Titled::View, "Flame Graph", &build_profile(None));
+        assert_eq!(title.display(), "Flame Graph \u{b7} build.profile");
+    }
+
+    /// The number tells files apart, so it follows the file's label.
+    #[test]
+    fn a_numbered_file_numbers_the_title_last() {
+        let title = PanelTitle::new(
+            Titled::View,
+            "Flame Graph",
+            &build_profile(NonZeroUsize::new(2)),
+        );
+        assert_eq!(title.plain, "Flame Graph \u{b7} build.profile");
+        assert_eq!(title.suffix(), Some(" (2)".into()));
+        assert_eq!(title.display(), "Flame Graph \u{b7} build.profile (2)");
     }
 
     #[test]

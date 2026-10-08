@@ -14,7 +14,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, Titled, ViewKind};
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
@@ -169,8 +169,6 @@ struct ContentLayout {
 /// A view replaying a build's captured console output as it stood at its
 /// document's playback time.
 pub struct ConsolePanel {
-    /// Names the document shown, labelling this panel's tab.
-    title: SharedString,
     /// The build replayed here, shared with every other view of it.
     model: Entity<ConsoleModel>,
     /// Redraws as the build is read.
@@ -225,11 +223,7 @@ pub struct ConsolePanel {
 }
 
 impl ConsolePanel {
-    pub(crate) fn new(
-        title: SharedString,
-        model: Entity<ConsoleModel>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(model: Entity<ConsoleModel>, cx: &mut Context<Self>) -> Self {
         // Tab cycles focus through the regions (handled by the shell's tab action
         // via window.focus_next), in this order: terminal, then the find field
         // when it is open (its tab index is set on creation).
@@ -241,7 +235,6 @@ impl ConsolePanel {
             .cloned()
             .map(|clock| cx.observe(&clock, |_, _, cx| cx.notify()));
         let mut view = Self {
-            title,
             model,
             _changed: changed,
             _clock_changed: clock_changed,
@@ -656,6 +649,7 @@ impl Panel for ConsolePanel {
         PanelKind {
             view: ViewKind::new("console"),
             key_context: CONSOLE_KEY_CONTEXT,
+            role: Role::Log,
         }
     }
 
@@ -663,8 +657,8 @@ impl Panel for ConsolePanel {
         GESTURES.rows().collect()
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        self.title.clone()
+    fn titled() -> Titled {
+        Titled::File
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {

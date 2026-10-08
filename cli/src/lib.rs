@@ -14,15 +14,17 @@ use clap::{CommandFactory, Parser};
 /// console replay, the spawn time by phase.
 ///
 /// The graph and each profile, build event stream and execution log named on
-/// the command line take a region of the one window each, the regions stacked
-/// one above another.
+/// the command line open in the one window, their views laid out by role: the
+/// graph canvases over the console, beside the profile timeline over the
+/// analysis views. The views of one role from several files share its region
+/// as tabs.
 ///
-/// Files written by one Bazel invocation open as one document, which stands
-/// where the first of them does. A profile, a build event stream and an
-/// execution log each carry the id of the invocation that wrote them, and one
-/// file of each kind carrying the same id are that invocation's document. A
-/// further file of a kind the invocation holds is a document of its own, and so
-/// is a file carrying no id.
+/// Files written by one Bazel invocation open as one document, ordered among
+/// the others, in tabs and numbering, by the first of them given. A profile, a
+/// build event stream and an execution log each carry the id of the invocation
+/// that wrote them, and one file of each kind carrying the same id are that
+/// invocation's document. A further file of a kind the invocation holds is a
+/// document of its own, and so is a file carrying no id.
 ///
 /// The query, cquery and aquery files carry no id, so bviz cannot check which
 /// build a graph describes. It takes the graph for the invocation's when every

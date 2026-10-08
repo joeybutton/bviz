@@ -15,6 +15,7 @@ mod layout;
 mod pane;
 mod panel;
 mod panel_menu;
+mod regions;
 #[cfg(test)]
 mod testing;
 mod workspace;
@@ -25,13 +26,15 @@ pub(crate) use documents::{
     DocumentId, Documents, OpenDocument, ViewId, ViewState, WindowsChanged,
 };
 pub use gestures::chrome_gestures;
-pub use group::{PanelGroup, Weight};
+pub(crate) use group::PanelGroup;
 pub use layout::{AtEdge, DividerId, Layout, Panes, Removal, Side, Split, SplitSide};
 pub(crate) use pane::Framing;
 pub use pane::{Pane, PaneEvent};
 pub use panel::{
-    AnyPanel, Document, Member, Panel, PanelEvent, PanelKind, ViewKind, document_label,
+    AnyPanel, Document, Member, Panel, PanelEvent, PanelKind, Titled, ViewKind, document_label,
 };
+pub(crate) use regions::Regions;
+pub use regions::Role;
 pub use workspace::Workspace;
 
 use workspace::register_keys;
@@ -39,7 +42,7 @@ use workspace::register_keys;
 use gpui::{App, AppContext, Pixels, Size, Window};
 
 /// Runs an app whose one window frames the [`Document`]s `open` builds from
-/// `first` and then `rest`, stacked top to bottom in that order. Each of
+/// `first` and then `rest`, their views laid out by [`Role`]. Each of
 /// `panel_keys` registers the bindings of one panel kind the app can show, and
 /// runs before the first window opens. Each runs exactly once per process:
 /// `cx.bind_keys` refreshes every window, which drops what each has cached of

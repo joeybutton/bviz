@@ -10,7 +10,7 @@ use bviz_ui_components::{
     list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_spawn_phase::phase_name;
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Subscription,
@@ -633,15 +633,12 @@ impl Panel for SpawnTimePanel {
         PanelKind {
             view: ViewKind::new("execlog-spawn-time"),
             key_context: KEY_CONTEXT,
+            role: Role::Analysis,
         }
     }
 
     fn gestures() -> Vec<GestureRow> {
         GESTURES.rows().collect()
-    }
-
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
