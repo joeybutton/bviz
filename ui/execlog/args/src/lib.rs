@@ -5,12 +5,15 @@
 use clap::Args;
 use std::path::PathBuf;
 
+/// The long name of [`ExecLogArgs::exec_log`], for messages that name the flag.
+pub const EXEC_LOG_LONG: &str = "exec_log";
+
 /// The compact execution logs spawn time is read from.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Spawn time by phase (one panel per file)")]
 pub struct ExecLogArgs {
     /// `bazel build --execution_log_compact_file=FILE` output.
-    #[arg(long = "exec_log", value_name = "FILE")]
+    #[arg(long = EXEC_LOG_LONG, value_name = "FILE")]
     pub exec_log: Vec<PathBuf>,
 }
 

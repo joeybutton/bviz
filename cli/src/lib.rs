@@ -3,10 +3,10 @@
 //! a command line names for each viewer to read. It names no window and draws
 //! nothing, so a parse can be exercised without a display.
 
-use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
-use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
-use bviz_ui_graph_args::{GraphArgs, GraphSource};
-use bviz_ui_trace_args::{TraceArgs, TraceSource};
+use bviz_ui_console_args::{BEP_LONG, ConsoleArgs, ConsoleSource};
+use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
+use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
+use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 
@@ -43,9 +43,6 @@ pub struct Cli {
     pub exec_log: ExecLogArgs,
 }
 
-/// The flags of [`Cli`] that name a file, for the command line that gives none.
-const SOURCE_FLAGS: &str = "--aquery, --cquery, --query, --profile, --bep or --exec_log";
-
 impl Cli {
     /// What this command line names to open.
     ///
@@ -66,7 +63,10 @@ impl Cli {
         let Some(first) = files.next() else {
             return Err(Self::command().error(
                 ErrorKind::MissingRequiredArgument,
-                format!("one of {SOURCE_FLAGS} is required"),
+                format!(
+                    "one of --{AQUERY_LONG}, --{CQUERY_LONG}, --{QUERY_LONG}, --{PROFILE_LONG}, \
+                     --{BEP_LONG} or --{EXEC_LOG_LONG} is required"
+                ),
             ));
         };
         Ok(Sources::Files {
@@ -147,10 +147,15 @@ mod tests {
     fn a_command_line_naming_no_file_is_a_usage_error() {
         let err = sources(&[]).expect_err("no file was named");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-        assert!(
-            err.to_string().contains(SOURCE_FLAGS),
-            "the error names no flag to give: {err}"
-        );
+        let error = err.to_string();
+        for arg in Cli::command().get_arguments() {
+            if let Some(long) = arg.get_long() {
+                assert!(
+                    error.contains(&format!("--{long}")),
+                    "the error does not name --{long}: {error}"
+                );
+            }
+        }
     }
 
     #[test]

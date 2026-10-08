@@ -17,7 +17,7 @@ use model::ConsoleModel;
 
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
-use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
+use bviz_ui_console_args::{BEP_LONG, ConsoleArgs, ConsoleSource};
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
@@ -95,7 +95,7 @@ pub fn run() {
         Cli::command()
             .error(
                 ErrorKind::MissingRequiredArgument,
-                "--bep or a file argument is required",
+                format!("--{BEP_LONG} or a file argument is required"),
             )
             .exit()
     };
