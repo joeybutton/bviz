@@ -8,9 +8,12 @@
 //! no edges, so the graphs drawn state neither, and the two engines walk the
 //! same edges.
 //!
-//! `attr` is drawn for tags and `testonly`, which the graphs drawn state as
-//! Bazel writes them by default: every rule its name and tags, some rules
-//! `testonly`.
+//! `attr` is drawn for attributes of every type the graphs drawn state, as
+//! Bazel writes them by default: every rule its name and tags, and some rules
+//! each of the others, some as `select`s, and for one no rule states. Bazel's
+//! engine reads each value through Bazel's own types, the combinations of
+//! `select` branches its `AggregatingAttributeMapper` visits, and its
+//! `TargetUtils.convertAttributeValue`.
 //!
 //! `somepath` and `some` may each answer any of several sets. Drawn only at
 //! the top of an expression, where nothing reads their answer further, each is
@@ -31,9 +34,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
+use bazel_query_proto::blaze_query::attribute::{
+    Discriminator as AttributeType, Selector, SelectorEntry, SelectorList, Tristate,
+};
 use bazel_query_proto::blaze_query::{
-    Attribute, GeneratedFile, PackageGroup, Rule, SourceFile, Target,
-    attribute::Discriminator as AttributeType, target::Discriminator,
+    Attribute, GeneratedFile, LabelDictUnaryEntry, LabelKeyedStringDictEntry, License,
+    PackageGroup, Rule, SourceFile, StringDictEntry, StringListDictEntry, Target,
+    target::Discriminator,
 };
 use bviz_graph_layout::build_joint;
 use bviz_graph_layout::query_lang::{Universe, parse};
@@ -233,6 +240,8 @@ impl Graph {
             if rng.u8(..3) == 0 {
                 attributes.push(boolean("testonly", rng.bool()));
             }
+            attributes.extend(typed_attributes(rng, &labels));
+            attributes.sort_by(|a, b| a.name.cmp(&b.name));
             targets.push(Target {
                 r#type: Discriminator::Rule as i32,
                 rule: Some(Rule {
@@ -338,6 +347,358 @@ fn package_group(name: &str) -> Target {
         package_group: Some(PackageGroup {
             name: name.to_string(),
             ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The conditions a drawn `select` branches on.
+const CONDITIONS: &[&str] = &["//c:x", "//c:y", "@@ext+//c:z", "//conditions:default"];
+const STRINGS: &[&str] = &["a", "b c", "-x", "=", ""];
+const DICT_KEYS: &[&str] = &["K", "L"];
+/// Few, so that concatenated selects of a set often repeat an element.
+const DISTRIBS: &[&str] = &["a", "b c"];
+
+/// Typed attributes a rule states besides its name, tags and `testonly`, as
+/// Bazel writes them by default: some of those a rule may have, some written
+/// in its BUILD file and some as `select`s.
+fn typed_attributes(rng: &mut Rng, labels: &[String]) -> Vec<Attribute> {
+    let mut drawn: Vec<(&str, Draw)> = vec![
+        ("srcs", |rng, labels| {
+            Value::Labels(many(rng, |rng| label(rng, labels)))
+        }),
+        ("src", |rng, labels| Value::Label(Some(label(rng, labels)))),
+        ("cmd", |rng, _| Value::String(pick(rng, STRINGS))),
+        ("shard_count", |rng, _| Value::Int(rng.i32(-2..3))),
+        ("ports", |rng, _| {
+            Value::Ints(many(rng, |rng| rng.i32(-2..3)))
+        }),
+        ("linkstatic", |rng, _| Value::Boolean(rng.bool())),
+        ("stamp", |rng, _| {
+            let tristates = [Tristate::No, Tristate::Yes, Tristate::Auto];
+            Value::Tristate(tristates[rng.usize(..tristates.len())])
+        }),
+        ("copts", |rng, _| {
+            Value::Strings(many(rng, |rng| pick(rng, STRINGS)))
+        }),
+        ("distribs", |rng, _| {
+            let at = distinct(rng, DISTRIBS.len());
+            Value::StringSet(at.into_iter().map(|at| DISTRIBS[at].to_string()).collect())
+        }),
+        ("env", |rng, _| {
+            let at = distinct(rng, DICT_KEYS.len());
+            let entries = at
+                .into_iter()
+                .map(|at| (DICT_KEYS[at].to_string(), pick(rng, STRINGS)));
+            Value::Dict(entries.collect())
+        }),
+        ("aliases", |rng, labels| {
+            let at = distinct(rng, DICT_KEYS.len());
+            let entries =
+                (at.into_iter()).map(|at| (DICT_KEYS[at].to_string(), label(rng, labels)));
+            Value::LabelDict(entries.collect())
+        }),
+        ("args_by_label", |rng, labels| {
+            let at = distinct(rng, labels.len());
+            let entries =
+                (at.into_iter()).map(|at| (respelled(rng, &labels[at]), pick(rng, STRINGS)));
+            Value::LabelKeyedDict(entries.collect())
+        }),
+        ("flags_by_key", |rng, _| {
+            let at = distinct(rng, DICT_KEYS.len());
+            let entries = (at.into_iter()).map(|at| {
+                (
+                    DICT_KEYS[at].to_string(),
+                    many(rng, |rng| pick(rng, STRINGS)),
+                )
+            });
+            Value::StringListDict(entries.collect())
+        }),
+        ("deps_by_key", |rng, labels| {
+            let at = distinct(rng, DICT_KEYS.len());
+            let entries = (at.into_iter()).map(|at| {
+                (
+                    DICT_KEYS[at].to_string(),
+                    many(rng, |rng| label(rng, labels)),
+                )
+            });
+            Value::LabelListDict(entries.collect())
+        }),
+        ("compatible_with_one", |rng, labels| {
+            Value::NodepLabel(Some(label(rng, labels)))
+        }),
+        ("out", |rng, labels| Value::Output(label(rng, labels))),
+        ("outs", |rng, labels| {
+            Value::Outputs(many(rng, |rng| label(rng, labels)))
+        }),
+        ("visibility", |rng, labels| {
+            Value::NodepLabels(many(rng, |rng| label(rng, labels)))
+        }),
+        ("licenses", |rng, labels| {
+            let types = vec![pick(rng, &["notice", "restricted", "unencumbered"])];
+            let at = distinct(rng, labels.len());
+            let mut exceptions: Vec<String> = (at.into_iter())
+                .map(|at| respelled(rng, &labels[at]))
+                .collect();
+            exceptions.sort_by_cached_key(|label| label_order(label));
+            Value::License(types, exceptions)
+        }),
+    ];
+    rng.shuffle(&mut drawn);
+    let stated = rng.usize(..drawn.len() + 1);
+    let drawn = drawn.into_iter().take(stated).map(|(name, draw)| {
+        // A rule's visibility, licenses and outputs may not be selects.
+        let configurable = !matches!(name, "visibility" | "licenses" | "out" | "outs");
+        let attribute = match rng.u8(..3) {
+            0 if configurable => select(rng, name, labels, draw),
+            _ => draw(rng, labels).attribute(name),
+        };
+        Attribute {
+            explicitly_specified: Some(rng.bool()),
+            ..attribute
+        }
+    });
+    drawn.collect()
+}
+
+/// Draws a value from the labels of a graph.
+type Draw = fn(&mut Rng, &[String]) -> Value;
+
+/// One of `labels`, now and then a main-repository one spelled with its
+/// repository, as `--consistent_labels` writes it.
+fn label(rng: &mut Rng, labels: &[String]) -> String {
+    let at = rng.usize(..labels.len());
+    respelled(rng, &labels[at])
+}
+
+/// `label`, now and then spelled with its repository if a main-repository one.
+fn respelled(rng: &mut Rng, label: &str) -> String {
+    match label.strip_prefix("//") {
+        Some(main) if rng.u8(..3) == 0 => format!("@@//{main}"),
+        _ => label.to_string(),
+    }
+}
+
+/// The order Java sorts labels in (`Label.compareTo`): by repository, then
+/// package, then name.
+fn label_order(label: &str) -> (String, String, String) {
+    let label = label
+        .strip_prefix("@@//")
+        .map_or(label.to_string(), |main| format!("//{main}"));
+    let (repo, rest) = label.split_once("//").unwrap();
+    let (package, name) = rest.split_once(':').unwrap();
+    (repo.to_string(), package.to_string(), name.to_string())
+}
+
+/// Up to two distinct positions in a list `len` long.
+fn distinct(rng: &mut Rng, len: usize) -> Vec<usize> {
+    let mut at: Vec<usize> = (0..len).collect();
+    rng.shuffle(&mut at);
+    at.truncate(rng.usize(..3.min(len + 1)));
+    at
+}
+
+fn pick(rng: &mut Rng, from: &[&str]) -> String {
+    from[rng.usize(..from.len())].to_string()
+}
+
+fn many<T>(rng: &mut Rng, mut draw: impl FnMut(&mut Rng) -> T) -> Vec<T> {
+    (0..rng.usize(..3)).map(|_| draw(rng)).collect()
+}
+
+/// A drawn attribute value, of the type it is written as.
+enum Value {
+    Int(i32),
+    Ints(Vec<i32>),
+    Boolean(bool),
+    Tristate(Tristate),
+    String(String),
+    /// `None` for no label, as a `select` branch of `None` writes one.
+    Label(Option<String>),
+    /// A label no dependency is drawn through, `None` as for [`Value::Label`].
+    NodepLabel(Option<String>),
+    Output(String),
+    Strings(Vec<String>),
+    /// A `DISTRIBUTION_SET`, its elements distinct.
+    StringSet(Vec<String>),
+    Labels(Vec<String>),
+    NodepLabels(Vec<String>),
+    Outputs(Vec<String>),
+    Dict(Vec<(String, String)>),
+    LabelDict(Vec<(String, String)>),
+    LabelKeyedDict(Vec<(String, String)>),
+    StringListDict(Vec<(String, Vec<String>)>),
+    LabelListDict(Vec<(String, Vec<String>)>),
+    /// The license types, and the exceptions in the order Java sorts them.
+    License(Vec<String>, Vec<String>),
+}
+
+impl Value {
+    fn discriminator(&self) -> AttributeType {
+        match self {
+            Value::Int(_) => AttributeType::Integer,
+            Value::Ints(_) => AttributeType::IntegerList,
+            Value::Boolean(_) => AttributeType::Boolean,
+            Value::Tristate(_) => AttributeType::Tristate,
+            Value::String(_) | Value::NodepLabel(_) => AttributeType::String,
+            Value::Label(_) => AttributeType::Label,
+            Value::Output(_) => AttributeType::Output,
+            Value::Strings(_) | Value::NodepLabels(_) => AttributeType::StringList,
+            Value::StringSet(_) => AttributeType::DistributionSet,
+            Value::Labels(_) => AttributeType::LabelList,
+            Value::Outputs(_) => AttributeType::OutputList,
+            Value::Dict(_) => AttributeType::StringDict,
+            Value::LabelDict(_) => AttributeType::LabelDictUnary,
+            Value::LabelKeyedDict(_) => AttributeType::LabelKeyedStringDict,
+            Value::StringListDict(_) => AttributeType::StringListDict,
+            Value::LabelListDict(_) => AttributeType::LabelListDict,
+            Value::License(..) => AttributeType::License,
+        }
+    }
+
+    fn nodep(&self) -> Option<bool> {
+        matches!(self, Value::NodepLabel(_) | Value::NodepLabels(_)).then_some(true)
+    }
+
+    /// The default of this value's type, which a `select` branch of `None`
+    /// takes and Bazel writes.
+    fn none(&self) -> Value {
+        match self {
+            Value::Int(_) => Value::Int(0),
+            Value::Ints(_) => Value::Ints(Vec::new()),
+            Value::Boolean(_) => Value::Boolean(false),
+            Value::Tristate(_) => Value::Tristate(Tristate::Auto),
+            Value::String(_) => Value::String(String::new()),
+            Value::Label(_) | Value::Output(_) => Value::Label(None),
+            Value::NodepLabel(_) => Value::NodepLabel(None),
+            Value::Strings(_) => Value::Strings(Vec::new()),
+            Value::StringSet(_) => Value::StringSet(Vec::new()),
+            Value::Labels(_) => Value::Labels(Vec::new()),
+            Value::NodepLabels(_) => Value::NodepLabels(Vec::new()),
+            Value::Outputs(_) => Value::Outputs(Vec::new()),
+            Value::Dict(_) => Value::Dict(Vec::new()),
+            Value::LabelDict(_) => Value::LabelDict(Vec::new()),
+            Value::LabelKeyedDict(_) => Value::LabelKeyedDict(Vec::new()),
+            Value::StringListDict(_) => Value::StringListDict(Vec::new()),
+            Value::LabelListDict(_) => Value::LabelListDict(Vec::new()),
+            Value::License(..) => Value::License(vec!["none".to_string()], Vec::new()),
+        }
+    }
+
+    fn attribute(self, name: &str) -> Attribute {
+        let mut attribute = Attribute {
+            name: name.to_string(),
+            r#type: self.discriminator() as i32,
+            nodep: self.nodep(),
+            ..Default::default()
+        };
+        match self {
+            Value::Int(value) => attribute.int_value = Some(value),
+            Value::Ints(values) => attribute.int_list_value = values,
+            Value::Boolean(value) => attribute.boolean_value = Some(value),
+            Value::Tristate(value) => attribute.tristate_value = Some(value as i32),
+            Value::String(value) | Value::Output(value) => attribute.string_value = Some(value),
+            Value::Label(value) | Value::NodepLabel(value) => attribute.string_value = value,
+            Value::Strings(values)
+            | Value::StringSet(values)
+            | Value::Labels(values)
+            | Value::NodepLabels(values)
+            | Value::Outputs(values) => attribute.string_list_value = values,
+            Value::Dict(entries) => {
+                attribute.string_dict_value = (entries.into_iter())
+                    .map(|(key, value)| StringDictEntry { key, value })
+                    .collect()
+            }
+            Value::LabelDict(entries) => {
+                attribute.label_dict_unary_value = (entries.into_iter())
+                    .map(|(key, value)| LabelDictUnaryEntry { key, value })
+                    .collect()
+            }
+            Value::LabelKeyedDict(entries) => {
+                attribute.label_keyed_string_dict_value = (entries.into_iter())
+                    .map(|(key, value)| LabelKeyedStringDictEntry { key, value })
+                    .collect()
+            }
+            // Bazel writes a label-list dict into the string-list dict field.
+            Value::StringListDict(entries) | Value::LabelListDict(entries) => {
+                attribute.string_list_dict_value = (entries.into_iter())
+                    .map(|(key, value)| StringListDictEntry { key, value })
+                    .collect()
+            }
+            Value::License(types, exceptions) => {
+                attribute.license = Some(License {
+                    license_type: types,
+                    exception: exceptions,
+                })
+            }
+        }
+        attribute
+    }
+
+    /// This value as a `select` branch on `condition`, `None` where `none`.
+    fn branch(self, condition: &str, none: bool) -> SelectorEntry {
+        let attribute = self.attribute("");
+        SelectorEntry {
+            label: Some(condition.to_string()),
+            is_default_value: Some(none),
+            int_value: attribute.int_value,
+            string_value: attribute.string_value,
+            boolean_value: attribute.boolean_value,
+            tristate_value: attribute.tristate_value,
+            string_list_value: attribute.string_list_value,
+            int_list_value: attribute.int_list_value,
+            string_dict_value: attribute.string_dict_value,
+            label_dict_unary_value: attribute.label_dict_unary_value,
+            label_keyed_string_dict_value: attribute.label_keyed_string_dict_value,
+            string_list_dict_value: attribute.string_list_dict_value,
+            ..Default::default()
+        }
+    }
+}
+
+/// The attribute `name` written as a `select`, or for a type that
+/// concatenates up to three, a later one now and then on the same conditions
+/// as the first, each branch drawn by `draw` or `None`.
+fn select(rng: &mut Rng, name: &str, labels: &[String], draw: Draw) -> Attribute {
+    let kind = draw(rng, labels);
+    let mut first: Vec<&str> = CONDITIONS.to_vec();
+    rng.shuffle(&mut first);
+    first.truncate(rng.usize(1..CONDITIONS.len() + 1));
+    // Bazel concatenates selects only of a type that concatenates.
+    let concatenates = !matches!(
+        kind,
+        Value::Boolean(_) | Value::Tristate(_) | Value::Label(_) | Value::NodepLabel(_)
+    );
+    let count = match concatenates {
+        true => rng.usize(1..4),
+        false => 1,
+    };
+    let selects = (0..count).map(|at| {
+        let conditions = match at > 0 && rng.bool() {
+            true => first.clone(),
+            false => {
+                let mut conditions = CONDITIONS.to_vec();
+                rng.shuffle(&mut conditions);
+                conditions.truncate(rng.usize(1..CONDITIONS.len() + 1));
+                conditions
+            }
+        };
+        let entries = conditions.into_iter().map(|condition| match rng.u8(..4) {
+            0 => kind.none().branch(condition, true),
+            _ => draw(rng, labels).branch(condition, false),
+        });
+        Selector {
+            entries: entries.collect(),
+            ..Default::default()
+        }
+    });
+    Attribute {
+        name: name.to_string(),
+        r#type: AttributeType::SelectorList as i32,
+        nodep: kind.nodep(),
+        selector_list: Some(SelectorList {
+            r#type: Some(kind.discriminator() as i32),
+            elements: selects.collect(),
         }),
         ..Default::default()
     }
@@ -463,13 +824,45 @@ const LABEL_PATTERNS: &[&str] = &[
     "(?i)APP",
     "\\w+\\.o$",
 ];
-const ATTRIBUTE_PATTERNS: [(&str, &[&str]); 3] = [
+const ATTRIBUTE_PATTERNS: &[(&str, &[&str])] = &[
     (
         "tags",
         &["manual", "^\\[\\]$", "local", "\\[manual\\]", "", ", "],
     ),
     ("testonly", &["1", "0", "", "^1$"]),
     ("name", &["^a", "lib|app", "t$", "", "^[a-c]$"]),
+    (
+        "srcs",
+        &["^\\[\\]$", "//a", "@@", "\\.txt", ", //", "^\\[//"],
+    ),
+    ("src", &["//", "^//a:", "@@ext\\+", "out\\d", ""]),
+    ("cmd", &["^$", "a", "b c", "-x", "=", "^a"]),
+    ("shard_count", &["^0$", "^-", "1", "2"]),
+    ("stamp", &["-1", "^0$", "1"]),
+    ("ports", &["^\\[\\]$", "-", "1, ", "\\[0"]),
+    ("linkstatic", &["^0$", "^1$"]),
+    (
+        "distribs",
+        &["^\\[\\]$", "a, ", "a, a", "b c, b c", "^\\[b"],
+    ),
+    ("aliases", &["^\\{\\}$", "K=//", "=@@", "L="]),
+    (
+        "args_by_label",
+        &["^\\{\\}$", "\\{//", "@@", "=b c", ", //"],
+    ),
+    ("flags_by_key", &["^\\{\\}$", "K=\\[\\]", "=\\[a", "-x\\]"]),
+    ("deps_by_key", &["^\\{\\}$", "K=\\[//", "@@", ", L="]),
+    ("compatible_with_one", &["^//", "@@ext\\+", ":a$", ""]),
+    ("out", &["^//", ":out", "@@"]),
+    ("outs", &["^\\[\\]$", "//", ", "]),
+    ("copts", &["^\\[\\]$", "-x", "a, ", "\\[=\\]", "b c"]),
+    ("env", &["^\\{\\}$", "K=", "L=b c", "=, ", "\\{K"]),
+    ("visibility", &["^\\[\\]$", "//", "@@", "\\]$"]),
+    (
+        "licenses",
+        &["notice", "^\\[restricted\\]$", "exceptions", "//a"],
+    ),
+    ("no_such_attribute", &["", "x"]),
 ];
 
 /// The variables a drawn `let` binds; a reference to one may fall outside it.
@@ -546,7 +939,8 @@ impl Drawer<'_> {
             6 => format!("kind({}, {one})", self.pick(KIND_PATTERNS)),
             7 => format!("filter({}, {one})", self.pick(LABEL_PATTERNS)),
             _ => {
-                let (attribute, patterns) = ATTRIBUTE_PATTERNS[self.rng.usize(..3)];
+                let (attribute, patterns) =
+                    ATTRIBUTE_PATTERNS[self.rng.usize(..ATTRIBUTE_PATTERNS.len())];
                 format!("attr({attribute}, {}, {one})", self.pick(patterns))
             }
         }

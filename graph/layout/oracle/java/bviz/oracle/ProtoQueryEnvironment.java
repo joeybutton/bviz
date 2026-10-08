@@ -17,8 +17,16 @@ import com.google.devtools.build.lib.cmdline.TargetPattern;
 import com.google.devtools.build.lib.cmdline.TargetPatternResolver;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
+import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
+import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.LabelConverter;
 import com.google.devtools.build.lib.packages.LabelPrinter;
 import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.packages.TargetUtils;
+import com.google.devtools.build.lib.packages.TriState;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.packages.Type.ConversionException;
+import com.google.devtools.build.lib.packages.Types;
 import com.google.devtools.build.lib.query2.common.AbstractBlazeQueryEnvironment;
 import com.google.devtools.build.lib.query2.engine.Callback;
 import com.google.devtools.build.lib.query2.engine.KeyExtractor;
@@ -37,16 +45,21 @@ import com.google.devtools.build.lib.query2.engine.Uniquifier;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build;
 import com.google.devtools.build.lib.server.FailureDetails.TargetPatterns;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeSet;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkInt;
 
 /**
  * A query environment over the targets of a {@code bazel query --output=streamed_proto} dump,
@@ -469,8 +482,8 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
       }
 
       /**
-       * The values {@code TargetUtils.getAttrAsString} prints for an attribute the proto states:
-       * a list as {@code List.toString} prints it, a boolean as {@code 1} or {@code 0}.
+       * The values {@code TargetUtils.getAttrAsString} prints for an attribute the proto states,
+       * each converted to the attribute's type and printed by Bazel's own code.
        */
       @Override
       public Iterable<String> getAttrAsString(Node node, String attrName) {
@@ -478,14 +491,9 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
           return List.of(node.label.getName());
         }
         for (Build.Attribute attribute : node.target.getRule().getAttributeList()) {
-          if (!attribute.getName().equals(attrName)) {
-            continue;
+          if (attribute.getName().equals(attrName)) {
+            return printed(attribute);
           }
-          return switch (attribute.getType()) {
-            case STRING_LIST -> List.of(new ArrayList<>(attribute.getStringListValueList()).toString());
-            case BOOLEAN -> List.of(attribute.getBooleanValue() ? "1" : "0");
-            default -> throw new UnsupportedOperationException(attribute.toString());
-          };
         }
         return List.of();
       }
@@ -494,6 +502,221 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
       public ImmutableSet<QueryVisibility<Node>> getVisibility(QueryExpression caller, Node node) {
         throw new UnsupportedOperationException();
       }
+    };
+  }
+
+  private static final Constructor<?> SELECTOR;
+  private static final Method ALL_VALUES;
+
+  static {
+    try {
+      SELECTOR =
+          BuildType.Selector.class.getDeclaredConstructor(
+              ImmutableMap.class, Object.class, LabelConverter.class, Type.class);
+      SELECTOR.setAccessible(true);
+      ALL_VALUES =
+          AggregatingAttributeMapper.class.getDeclaredMethod(
+              "getAllValues", List.class, Type.class, boolean.class);
+      ALL_VALUES.setAccessible(true);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  /**
+   * What {@code TargetUtils.getAttrAsString} returns for {@code attribute}: each value {@code
+   * AggregatingAttributeMapper.visitAttribute} visits, printed by {@code
+   * TargetUtils.convertAttributeValue}. A select is rebuilt as Bazel's own {@code Selector}s, whose
+   * combinations Bazel's {@code getAllValues} visits.
+   */
+  private static List<String> printed(Build.Attribute attribute) {
+    try {
+      List<String> printed = new ArrayList<>();
+      if (attribute.getType() == Build.Attribute.Discriminator.SELECTOR_LIST) {
+        Build.Attribute.SelectorList list = attribute.getSelectorList();
+        Type<?> type = type(list.getType(), attribute.getNodep());
+        List<Object> selectors = new ArrayList<>();
+        for (Build.Attribute.Selector selector : list.getElementsList()) {
+          ImmutableMap.Builder<Object, Object> branches = ImmutableMap.builder();
+          for (Build.Attribute.SelectorEntry entry : selector.getEntriesList()) {
+            Object value =
+                entry.getIsDefaultValue()
+                    ? Starlark.NONE
+                    : stated(list.getType(), new EntryFields(entry));
+            branches.put(Label.parseCanonical(entry.getLabel()), value);
+          }
+          selectors.add(SELECTOR.newInstance(branches.buildOrThrow(), attribute.getName(), null, type));
+        }
+        for (Object value : (List<?>) ALL_VALUES.invoke(null, selectors, type, false)) {
+          printed.add(TargetUtils.convertAttributeValue(type, value));
+        }
+      } else {
+        Type<?> type = type(attribute.getType(), attribute.getNodep());
+        Object value = stated(attribute.getType(), new AttributeFields(attribute));
+        if (value != null) {
+          Object converted = converting(type).convert(value, attribute.getName());
+          printed.add(TargetUtils.convertAttributeValue(type, converted));
+        }
+      }
+      return printed;
+    } catch (ReflectiveOperationException | ConversionException | LabelSyntaxException e) {
+      throw new IllegalStateException(attribute.toString(), e);
+    }
+  }
+
+  /**
+   * The type that converts a value of {@code type} as written. An output type checks its label
+   * against the package of the rule converting it, which a value read without its rule cannot name,
+   * so its labels convert as any other label.
+   */
+  private static Type<?> converting(Type<?> type) {
+    if (type == BuildType.OUTPUT) {
+      return BuildType.LABEL;
+    }
+    if (type == BuildType.OUTPUT_LIST) {
+      return BuildType.LABEL_LIST;
+    }
+    return type;
+  }
+
+  /** The type of an attribute the proto states as {@code kind}, a label one where {@code nodep}. */
+  private static Type<?> type(Build.Attribute.Discriminator kind, boolean nodep) {
+    return switch (kind) {
+      case INTEGER -> Type.INTEGER;
+      case STRING -> nodep ? BuildType.NODEP_LABEL : Type.STRING;
+      case LABEL -> BuildType.LABEL;
+      case OUTPUT -> BuildType.OUTPUT;
+      case STRING_LIST -> nodep ? BuildType.NODEP_LABEL_LIST : Types.STRING_LIST;
+      case DISTRIBUTION_SET -> Types.STRING_SET;
+      case LABEL_LIST -> BuildType.LABEL_LIST;
+      case OUTPUT_LIST -> BuildType.OUTPUT_LIST;
+      case LICENSE -> BuildType.LICENSE;
+      case STRING_DICT -> Types.STRING_DICT;
+      case LABEL_LIST_DICT -> BuildType.LABEL_LIST_DICT;
+      case STRING_LIST_DICT -> Types.STRING_LIST_DICT;
+      case BOOLEAN -> Type.BOOLEAN;
+      case TRISTATE -> BuildType.TRISTATE;
+      case INTEGER_LIST -> Types.INTEGER_LIST;
+      case LABEL_DICT_UNARY -> BuildType.LABEL_DICT_UNARY;
+      case LABEL_KEYED_STRING_DICT -> BuildType.LABEL_KEYED_STRING_DICT;
+      default -> throw new UnsupportedOperationException(kind.toString());
+    };
+  }
+
+  /** The value fields an attribute and a select branch share. */
+  private interface Fields {
+    boolean hasInt();
+
+    int intValue();
+
+    boolean hasString();
+
+    String stringValue();
+
+    boolean hasBoolean();
+
+    boolean booleanValue();
+
+    boolean hasTristate();
+
+    Build.Attribute.Tristate tristate();
+
+    List<String> strings();
+
+    List<Integer> ints();
+
+    boolean hasLicense();
+
+    Build.License license();
+
+    List<Build.StringDictEntry> stringDict();
+
+    List<Build.StringListDictEntry> stringListDict();
+
+    List<Build.LabelDictUnaryEntry> labelDict();
+
+    List<Build.LabelKeyedStringDictEntry> labelKeyedStringDict();
+  }
+
+  private record AttributeFields(Build.Attribute a) implements Fields {
+    public boolean hasInt() { return a.hasIntValue(); }
+    public int intValue() { return a.getIntValue(); }
+    public boolean hasString() { return a.hasStringValue(); }
+    public String stringValue() { return a.getStringValue(); }
+    public boolean hasBoolean() { return a.hasBooleanValue(); }
+    public boolean booleanValue() { return a.getBooleanValue(); }
+    public boolean hasTristate() { return a.hasTristateValue(); }
+    public Build.Attribute.Tristate tristate() { return a.getTristateValue(); }
+    public List<String> strings() { return a.getStringListValueList(); }
+    public List<Integer> ints() { return a.getIntListValueList(); }
+    public boolean hasLicense() { return a.hasLicense(); }
+    public Build.License license() { return a.getLicense(); }
+    public List<Build.StringDictEntry> stringDict() { return a.getStringDictValueList(); }
+    public List<Build.StringListDictEntry> stringListDict() { return a.getStringListDictValueList(); }
+    public List<Build.LabelDictUnaryEntry> labelDict() { return a.getLabelDictUnaryValueList(); }
+    public List<Build.LabelKeyedStringDictEntry> labelKeyedStringDict() {
+      return a.getLabelKeyedStringDictValueList();
+    }
+  }
+
+  private record EntryFields(Build.Attribute.SelectorEntry e) implements Fields {
+    public boolean hasInt() { return e.hasIntValue(); }
+    public int intValue() { return e.getIntValue(); }
+    public boolean hasString() { return e.hasStringValue(); }
+    public String stringValue() { return e.getStringValue(); }
+    public boolean hasBoolean() { return e.hasBooleanValue(); }
+    public boolean booleanValue() { return e.getBooleanValue(); }
+    public boolean hasTristate() { return e.hasTristateValue(); }
+    public Build.Attribute.Tristate tristate() { return e.getTristateValue(); }
+    public List<String> strings() { return e.getStringListValueList(); }
+    public List<Integer> ints() { return e.getIntListValueList(); }
+    public boolean hasLicense() { return e.hasLicense(); }
+    public Build.License license() { return e.getLicense(); }
+    public List<Build.StringDictEntry> stringDict() { return e.getStringDictValueList(); }
+    public List<Build.StringListDictEntry> stringListDict() { return e.getStringListDictValueList(); }
+    public List<Build.LabelDictUnaryEntry> labelDict() { return e.getLabelDictUnaryValueList(); }
+    public List<Build.LabelKeyedStringDictEntry> labelKeyedStringDict() {
+      return e.getLabelKeyedStringDictValueList();
+    }
+  }
+
+  /**
+   * The value {@code fields} state for an attribute of type {@code kind}, in a form the type's
+   * {@code convert} reads, labels still as written; {@code null} where they state none.
+   */
+  private static Object stated(Build.Attribute.Discriminator kind, Fields fields) {
+    return switch (kind) {
+      case INTEGER -> fields.hasInt() ? StarlarkInt.of(fields.intValue()) : null;
+      case STRING, LABEL, OUTPUT -> fields.hasString() ? fields.stringValue() : null;
+      case STRING_LIST, LABEL_LIST, OUTPUT_LIST -> fields.strings();
+      case DISTRIBUTION_SET -> new LinkedHashSet<>(fields.strings());
+      case INTEGER_LIST -> fields.ints().stream().map(StarlarkInt::of).toList();
+      case BOOLEAN -> fields.hasBoolean() ? fields.booleanValue() : null;
+      case TRISTATE ->
+          fields.hasTristate() ? TriState.valueOf(fields.tristate().name()) : null;
+      case STRING_DICT, LABEL_DICT_UNARY, LABEL_KEYED_STRING_DICT -> {
+        Map<String, String> dict = new LinkedHashMap<>();
+        fields.stringDict().forEach(entry -> dict.put(entry.getKey(), entry.getValue()));
+        fields.labelDict().forEach(entry -> dict.put(entry.getKey(), entry.getValue()));
+        fields
+            .labelKeyedStringDict()
+            .forEach(entry -> dict.put(entry.getKey(), entry.getValue()));
+        yield dict;
+      }
+      case STRING_LIST_DICT, LABEL_LIST_DICT -> {
+        Map<String, List<String>> dict = new LinkedHashMap<>();
+        fields.stringListDict().forEach(entry -> dict.put(entry.getKey(), entry.getValueList()));
+        yield dict;
+      }
+      case LICENSE -> {
+        if (!fields.hasLicense()) {
+          yield null;
+        }
+        List<String> written = new ArrayList<>(fields.license().getLicenseTypeList());
+        fields.license().getExceptionList().forEach(label -> written.add("exception=" + label));
+        yield written;
+      }
+      default -> throw new UnsupportedOperationException(kind.toString());
     };
   }
 
