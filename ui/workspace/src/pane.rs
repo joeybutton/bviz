@@ -2,7 +2,7 @@ use crate::drop::Band;
 use crate::gestures::{CHROME_GESTURES, ChromeIntent};
 use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
-use crate::{AnyPanel, PanelEvent};
+use crate::{AnyPanel, Documents, PanelEvent};
 use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
@@ -12,6 +12,7 @@ use gpui::{
     Point, Render, Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
 use std::cmp::Ordering;
+use std::iter;
 
 /// Height of the tab strip, giving a tab's icon, label and close control a line
 /// to sit on with room around them.
@@ -654,9 +655,7 @@ impl Pane {
             .on_click(cx.listener(|pane, event: &ClickEvent, window, cx| {
                 pane.clicked(None, event, window, cx);
             }))
-            .when_some(description_tooltip(&panel, colors), |handle, tooltip| {
-                handle.tooltip(tooltip)
-            })
+            .tooltip(naming_tooltip(&panel, colors))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(HANDLE_ICON_SIZE)
@@ -714,9 +713,7 @@ impl Pane {
             .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
                 pane.clicked(Some(index), event, window, cx);
             }))
-            .when_some(description_tooltip(&panel, colors), |tab, tooltip| {
-                tab.tooltip(tooltip)
-            })
+            .tooltip(naming_tooltip(&panel, colors))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
                     .size(TAB_ICON_SIZE)
@@ -878,17 +875,34 @@ fn band_laid_out(
     }
 }
 
-/// The tooltip a tab or handle naming `panel` shows, if its kind describes
-/// itself.
-fn description_tooltip(
+/// The tooltip a tab or handle naming `panel` shows, which reads the name of
+/// the panel's document only once it is put up.
+fn naming_tooltip(
     panel: &AnyPanel,
     colors: &ThemeColors,
-) -> Option<impl Fn(&mut Window, &mut App) -> AnyView + 'static> {
-    let description = panel.description()?;
-    Some(TextTooltip::builder(
-        description.into(),
-        TooltipColors::from_colors(colors),
-    ))
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let panel = panel.clone();
+    let colors = TooltipColors::from_colors(colors);
+    move |_, cx| {
+        let joined = Documents::global(cx).read(cx).joined_name(panel.document());
+        let tip = naming_tip(
+            &panel.display_title(),
+            joined.as_deref(),
+            panel.description(),
+        );
+        TextTooltip::view(tip.into(), None, colors, cx)
+    }
+}
+
+/// What the tooltip over a panel's tab or handle reads, a line each: the
+/// panel's whole title, the document `joined` names, and what the panel's
+/// kind shows.
+fn naming_tip(title: &str, joined: Option<&str>, description: Option<&str>) -> String {
+    let joined = joined.map(|name| format!("Part of {name}"));
+    let lines = iter::once(title)
+        .chain(joined.as_deref())
+        .chain(description);
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 /// A panel's name as the pane holding it puts it up: cut short where there is
@@ -992,6 +1006,28 @@ impl Render for Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_naming_tip_reads_the_whole_title_then_the_document_then_the_kind() {
+        let title = "Flame Graph \u{b7} build.profile.gz (2)";
+        assert_eq!(naming_tip(title, None, None), title);
+        assert_eq!(
+            naming_tip(
+                title,
+                Some("Invocation a5f7f3e6"),
+                Some("Time by call stack")
+            ),
+            format!("{title}\nPart of Invocation a5f7f3e6\nTime by call stack")
+        );
+        assert_eq!(
+            naming_tip(title, Some("Invocation a5f7f3e6"), None),
+            format!("{title}\nPart of Invocation a5f7f3e6")
+        );
+        assert_eq!(
+            naming_tip(title, None, Some("Time by call stack")),
+            format!("{title}\nTime by call stack")
+        );
+    }
 
     /// Several panels are picked between by their tabs, wherever the window
     /// lays the pane holding them out and whatever a drag is aimed at.

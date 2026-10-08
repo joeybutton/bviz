@@ -535,6 +535,13 @@ impl Documents {
         Some((registered.name.clone(), clock))
     }
 
+    /// What `document` is listed under where it joins several files, a name
+    /// no title of its panels gives.
+    pub(crate) fn joined_name(&self, document: DocumentId) -> Option<SharedString> {
+        let registered = self.registered(document)?;
+        (registered.members.len() > 1).then(|| registered.name.clone())
+    }
+
     fn registered(&self, document: DocumentId) -> Option<&Registered> {
         self.documents.iter().find(|held| held.id == document)
     }
@@ -967,6 +974,15 @@ mod tests {
                 assert_extents(&layout, &apart);
             }
         }
+    }
+
+    #[test]
+    fn only_a_document_joining_files_has_a_joined_name() {
+        let [profile, bep, graph] = invocation_files();
+        let (documents, _) = showing(vec![vec![profile, bep], vec![graph]]);
+        let [joined, alone] = [0, 1].map(|at| documents.documents[at].id);
+        assert_eq!(documents.joined_name(joined), Some("d0".into()));
+        assert_eq!(documents.joined_name(alone), None);
     }
 
     /// Two profiles joined into one document, each a timeline over a flame
