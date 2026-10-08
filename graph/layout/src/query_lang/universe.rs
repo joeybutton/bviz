@@ -17,7 +17,7 @@ use crate::facets::{Facets, Sym};
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
 use crate::joint::Joint;
-use crate::provenance::Input;
+use crate::provenance::{Input, InputSet};
 use crate::reach::{Index, Level};
 use crate::select::Scope;
 use crate::select::labels::LabelIndex;
@@ -36,6 +36,9 @@ pub struct Universe {
     members: FixedBitSet,
     pub(super) facets: Arc<Facets>,
     pub(super) attributes: Arc<Attributes>,
+    /// The inputs read, of which only query states a target's attributes and
+    /// only cquery a configured target's.
+    pub(super) inputs: InputSet,
     /// The name of the `visibility` attribute, where some rule states it.
     pub(super) visibility: Option<Sym>,
     pub(super) declared: Declared,
@@ -172,6 +175,7 @@ impl Universe {
             facets: Arc::clone(facets),
             visibility: attributes.name("visibility"),
             attributes: Arc::clone(attributes),
+            inputs: capabilities.inputs(),
             index,
             labels,
             targets,
@@ -297,7 +301,6 @@ impl Universe {
 mod tests {
     use super::*;
     use crate::joint::build_joint;
-    use crate::provenance::InputSet;
     use crate::sources::Sources;
     use crate::test_support::{ActionSpec, action_graph, rule};
 

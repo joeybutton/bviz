@@ -11,6 +11,8 @@ use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
+use crate::provenance::{Input, InputSet};
+use crate::sources::Sources;
 use crate::test_support::{
     explicit, generated, int, label_list, name_attribute, nodep_label_list, selector_list, source,
     string_dict, string_list,
@@ -510,6 +512,66 @@ fn attr_reads_a_configured_target_as_cquery_resolved_it() {
         query("attr(stamp, 1, //a:bin)"),
         ["//a:bin", "ct://a:bin#aa11"],
         "a configured target stating no attributes reads its target's"
+    );
+}
+
+/// The universe of `joint`'s graph as `inputs` alone leave it.
+fn reading(joint: &crate::joint::Joint, inputs: &[Input]) -> Universe {
+    let sources = Sources::reading(InputSet::of(inputs.iter().copied()).unwrap());
+    let graph = sources.mask(&joint.graph, &joint.provenance);
+    Universe::new(
+        &graph,
+        &joint.names,
+        &Arc::new(joint.facets.clone()),
+        &Arc::new(joint.attributes.clone()),
+        &joint.capabilities.reading(sources.inputs()),
+    )
+}
+
+/// A query and a cquery of `//a:bin`, which the query states `stamp` of and
+/// the cquery states no attributes of; and a cquery alone of `//a:lib`,
+/// which sets `copts`.
+#[test]
+fn attr_reads_only_the_inputs_read() {
+    use crate::test_support::{configuration, configured, rule};
+    let bin = stating_every_attribute(
+        "//a:bin",
+        vec![explicit(int("stamp", 1)), string_list("copts", &[])],
+    );
+    let lib = stating_every_attribute(
+        "//a:lib",
+        vec![explicit(string_list("copts", &["-y"])), int("stamp", 0)],
+    );
+    let query = [rule("//a:bin", "cc_binary", &[], bin)];
+    let cquery = [bazel_query_proto::analysis::CqueryResult {
+        results: vec![
+            configured(rule("//a:bin", "cc_binary", &[], Vec::new()), 1),
+            configured(rule("//a:lib", "cc_library", &[], lib), 1),
+        ],
+        configurations: vec![configuration(1, "aa11", "k8-fastbuild", false)],
+    }];
+    let joint = build_joint(None, Some(&cquery), Some(&query), false);
+    let names = &joint.names;
+    let both = reading(&joint, &[Input::Query, Input::Cquery]);
+    let query = reading(&joint, &[Input::Query]);
+    let cquery = reading(&joint, &[Input::Cquery]);
+    let read = |universe: &Universe, expr| configured_query(universe, names, expr).unwrap();
+
+    assert_eq!(
+        read(&both, "attr(stamp, 1, //a:all)"),
+        ["//a:bin", "ct://a:bin#aa11"]
+    );
+    assert_eq!(read(&query, "attr(stamp, 1, //a:all)"), ["//a:bin"]);
+    assert_eq!(
+        configured_query(&cquery, names, "attr(stamp, 1, //a:all)").unwrap_err(),
+        "attr() needs each rule's 'stamp' attribute, which the graph's inputs state only \
+         under --proto:output_rule_attrs=all --proto:default_values",
+        "a configured target falls back to its target's attributes only with query read"
+    );
+    assert_eq!(
+        read(&cquery, "attr(copts, '-y', //a:lib)"),
+        ["ct://a:lib#aa11"],
+        "a configured target reads its own description with cquery read"
     );
 }
 

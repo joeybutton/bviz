@@ -42,6 +42,7 @@ use crate::exec_path::{ExecPath, LeftOutInputs};
 use crate::facets::{RuleCategory, Sym};
 use crate::graph::Kind;
 use crate::intern::Id;
+use crate::provenance::Input;
 use crate::repo::{RepoCategory, RepoName};
 
 /// The mnemonics of the actions that build a runfiles tree or lay down a
@@ -356,8 +357,11 @@ impl Universe {
     /// target no query described reads its own, and so a public or private
     /// rule's as `[]`.
     fn attribute_of(&self, id: Id, name: Option<Sym>) -> Stated {
-        let target = self.position(id).map(|at| self.labels.entries()[at].0);
-        let configured = (self.index.kind(id) == Some(Kind::ConfiguredTarget)).then_some(id);
+        let target = (self.position(id).map(|at| self.labels.entries()[at].0))
+            .filter(|_| self.inputs.contains(Input::Query));
+        let configured = (self.index.kind(id) == Some(Kind::ConfiguredTarget))
+            .then_some(id)
+            .filter(|_| self.inputs.contains(Input::Cquery));
         let order = match name.is_some() && name == self.visibility {
             true => [target, configured],
             false => [configured, target],
