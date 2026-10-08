@@ -66,6 +66,7 @@ mod rules;
 mod scatter;
 mod scroll;
 mod selection;
+mod sources;
 mod spatial;
 mod status;
 mod timecard;
@@ -298,6 +299,10 @@ pub struct GraphPanel {
     colour_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`colour::set`].
     _colour_choices: Subscription,
+    /// The inputs the panel reads, as a menu offers them.
+    sources: Entity<MultiSelect>,
+    /// Carries a toggled sources-menu row into the panel's sources.
+    _source_choices: Subscription,
     /// The box classes the loaded graph carries, in the order the boxes menu's
     /// rows stand.
     box_classes: Vec<BoxClass>,
@@ -451,6 +456,10 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
+        let sources = cx.new(|cx| MultiSelect::new("graph-sources", "sources", Vec::new(), cx));
+        let source_choices = cx.subscribe(&sources, |view, _, event: &MultiSelectEvent, cx| {
+            sources::choose(view, event, cx);
+        });
         let boxes = cx.new(|cx| MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx));
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
@@ -515,6 +524,8 @@ impl GraphPanel {
             colouring,
             colour_picker,
             _colour_choices: colour_choices,
+            sources,
+            _source_choices: source_choices,
             box_classes: Vec::new(),
             boxes,
             _box_choices: box_choices,
@@ -555,10 +566,11 @@ impl GraphPanel {
         view
     }
 
-    /// Draws the graph the document holds, once it is read, and offers the box
-    /// classes it carries.
+    /// Draws the graph the document holds, once it is read, and offers the
+    /// inputs it was read from and the box classes it carries.
     fn take_up_source(&mut self, cx: &mut Context<Self>) {
         derive::opened(self, cx);
+        sources::restate(self, cx);
         boxes::adopt(self, cx);
     }
 
@@ -728,6 +740,7 @@ impl GraphPanel {
             mode: self.mode,
             chips: chips::bar(self, palette, window, cx),
             picker: self.mode_picker.clone(),
+            sources: sources::offered(self).then(|| self.sources.clone()),
             boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
@@ -1188,6 +1201,8 @@ struct Controls {
     /// The query bar.
     chips: AnyElement,
     picker: Entity<Dropdown>,
+    /// The sources menu, absent where it offers no choice.
+    sources: Option<Entity<MultiSelect>>,
     /// The boxes menu, offered only where the loaded graph carries a box class.
     boxes: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box

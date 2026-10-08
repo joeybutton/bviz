@@ -1058,6 +1058,39 @@ pub(crate) fn set_filter_framed(
     apply_filter(view, filter, true, cx);
 }
 
+/// Draws and queries the graph through `sources` from here on. The filter and
+/// the stack applied are laid over what they read; the dependency paths, found
+/// over what the panel read before, are put away.
+pub(crate) fn set_sources(view: &mut GraphPanel, sources: Sources, cx: &mut Context<GraphPanel>) {
+    if view.derived.sources() == Some(sources) {
+        return;
+    }
+    let Some(sourcing) = view.model.update(cx, |model, _| model.sourcing(sources)) else {
+        return;
+    };
+    crate::why::put_away(view, cx);
+    view.derived.show_paths(None);
+    view.derived.sourcing = Some(sourcing);
+    crate::sources::restate(view, cx);
+    crate::chips::resourced(view, cx);
+}
+
+/// Draws the graph through `filter` over the sources the panel reads afresh,
+/// moving the camera onto the drawing where `frame` and keeping it where it is
+/// otherwise.
+pub(crate) fn resourced(
+    view: &mut GraphPanel,
+    filter: Filter,
+    frame: bool,
+    cx: &mut Context<GraphPanel>,
+) {
+    view.derived.filter = filter;
+    crate::boxes::restate(view, cx);
+    publish_filter(view, cx);
+    view.derived.frame_on_landing = frame;
+    request(view, cx);
+}
+
 /// Draws `paths` in place of what the filter leaves, or the filter again where
 /// `None`, and moves the camera onto the drawing that lands.
 pub(crate) fn set_paths(

@@ -310,15 +310,36 @@ impl Chips {
 /// named was named of the graph replaced, so they are evaluated afresh, and
 /// the stack that was applied is applied again.
 pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    complete::release(view);
-    let chips = &mut view.chips;
-    chips.prefixes = Arc::default();
-    chips.landed = None;
-    let applied = chips.applied.take();
+    forget_evaluations(view);
+    let applied = view.chips.applied.take();
     changed(view, cx);
     if let Some((stack, _)) = applied {
-        apply(view, stack, cx);
+        apply(view, stack, Applying::Named, cx);
     }
+}
+
+/// Starts the bar over the sources the panel reads afresh: the chips are
+/// evaluated over what those read, and the stack that was applied is applied
+/// again over it, the drawing through the filter it leaves waiting on that.
+pub(crate) fn resourced(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    forget_evaluations(view);
+    // A stack applying now evaluates over the sources read before.
+    view.chips._applying = Task::ready(());
+    changed(view, cx);
+    match view.chips.applied.as_ref() {
+        Some((stack, _)) => apply(view, stack.clone(), Applying::Resourced, cx),
+        None => {
+            let filter = view.derived.filter().clone();
+            derive::resourced(view, filter, false, cx);
+        }
+    }
+}
+
+/// Drops what the bar evaluated over the universe it read until now.
+fn forget_evaluations(view: &mut GraphPanel) {
+    complete::release(view);
+    view.chips.prefixes = Arc::default();
+    view.chips.landed = None;
 }
 
 /// Takes up a change to the stack or the field: counts it afresh off the UI
@@ -399,12 +420,48 @@ fn scope_of(
     Ok(Some(universe.scope(compiled.expr.to_string(), value)))
 }
 
+/// Why a stack is applied, which decides what its landing does.
+#[derive(Clone, Copy)]
+enum Applying {
+    /// The reader named the part of the graph to look at: the camera moves
+    /// onto it, and a stack that does not apply leaves the filter as it
+    /// stands.
+    Named,
+    /// The stack applied before is applied again over the sources the panel
+    /// reads afresh, the drawing over them waiting on it: the camera stays
+    /// while the stack applies, and a stack that no longer applies leaves the
+    /// filter unscoped, its scope named over sources no longer read.
+    Resourced,
+}
+
+/// What a stack's landing does to the filter's scope.
+enum Taken {
+    /// The filter takes this scope.
+    Scope(Option<Scope>),
+    /// The filter keeps the scope it holds.
+    Kept,
+    /// The filter drops the scope it holds, and the camera moves onto the
+    /// whole drawing, since the view onto the part the scope left frames an
+    /// arbitrary corner of it.
+    Unscoped,
+}
+
+impl Applying {
+    fn taken(self, scope: Result<Option<Scope>, SharedString>) -> Taken {
+        match (scope, self) {
+            (Ok(scope), _) => Taken::Scope(scope),
+            (Err(_), Applying::Named) => Taken::Kept,
+            (Err(_), Applying::Resourced) => Taken::Unscoped,
+        }
+    }
+}
+
 /// Scopes the filter to what `stack` names, off the UI thread, giving up an
 /// apply of a stack committed before.
-fn apply(view: &mut GraphPanel, stack: Stack, cx: &mut Context<GraphPanel>) {
+fn apply(view: &mut GraphPanel, stack: Stack, applying: Applying, cx: &mut Context<GraphPanel>) {
     if matches!(stack.compile(), Ok(None)) {
         view.chips._applying = Task::ready(());
-        scope_landed(view, stack, Ok(None), cx);
+        scope_landed(view, stack, Ok(None), applying, cx);
         return;
     }
     let Some(universe) = view.derived.sourcing().map(|s| s.universe().clone()) else {
@@ -417,7 +474,7 @@ fn apply(view: &mut GraphPanel, stack: Stack, cx: &mut Context<GraphPanel>) {
             let scope = scope_of(&stack, universe.get(), &prefixes);
             (stack, scope)
         },
-        |view, (stack, scope), cx| scope_landed(view, stack, scope, cx),
+        move |view, (stack, scope), cx| scope_landed(view, stack, scope, applying, cx),
     );
 }
 
@@ -425,12 +482,16 @@ fn scope_landed(
     view: &mut GraphPanel,
     stack: Stack,
     scope: Result<Option<Scope>, SharedString>,
+    applying: Applying,
     cx: &mut Context<GraphPanel>,
 ) {
-    let scope = match scope {
-        Ok(scope) => scope,
-        Err(why) => {
-            view.chips.notice = Some(why);
+    if let Err(why) = &scope {
+        view.chips.notice = Some(why.clone());
+    }
+    let (scope, unscoped) = match applying.taken(scope) {
+        Taken::Scope(scope) => (scope, false),
+        Taken::Unscoped => (None, true),
+        Taken::Kept => {
             cx.notify();
             return;
         }
@@ -443,7 +504,10 @@ fn scope_landed(
         scope,
         ..view.derived.filter().clone()
     };
-    derive::set_filter_framed(view, filter, cx);
+    match applying {
+        Applying::Named => derive::set_filter_framed(view, filter, cx),
+        Applying::Resourced => derive::resourced(view, filter, unscoped, cx),
+    }
     cx.notify();
 }
 
@@ -475,7 +539,7 @@ fn commit(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.chips.field.update(cx, |field, cx| field.clear(cx));
     changed(view, cx);
     let stack = view.chips.stack.clone();
-    apply(view, stack, cx);
+    apply(view, stack, Applying::Named, cx);
 }
 
 /// Why `text` does not parse as a chip; `None` where it does, or is empty.
@@ -495,7 +559,7 @@ pub(crate) fn push(view: &mut GraphPanel, text: &str, cx: &mut Context<GraphPane
     view.chips.scroll_to(id);
     changed(view, cx);
     let stack = view.chips.stack.clone();
-    apply(view, stack, cx);
+    apply(view, stack, Applying::Named, cx);
 }
 
 /// Takes the focus into the field.
@@ -748,7 +812,7 @@ fn put_up(
 }
 
 /// The Bazel command whose output `input` is.
-pub(super) fn command(input: Input) -> Command {
+pub(crate) fn command(input: Input) -> Command {
     match input {
         Input::Aquery => Command::Aquery,
         Input::Cquery => Command::Cquery,
@@ -1078,5 +1142,22 @@ mod tests {
         );
         assert_eq!(preferred(read(&[Input::Query])), Command::Query);
         assert_eq!(preferred(None), Command::Query);
+    }
+
+    /// A stack that no longer applies over the sources the panel reads afresh
+    /// leaves the filter unscoped; one the reader named that does not apply
+    /// leaves it as it stands.
+    #[test]
+    fn a_stack_failing_over_new_sources_leaves_the_filter_unscoped() {
+        let failed = || Err("not applied: mnemonic() requires an aquery".into());
+        assert!(matches!(
+            Applying::Resourced.taken(failed()),
+            Taken::Unscoped
+        ));
+        assert!(matches!(Applying::Named.taken(failed()), Taken::Kept));
+        assert!(matches!(
+            Applying::Resourced.taken(Ok(None)),
+            Taken::Scope(None)
+        ));
     }
 }
