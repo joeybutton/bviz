@@ -1510,6 +1510,26 @@ mod tests {
         assert!(dispatched("/", IN_ROOTS).is_none());
     }
 
+    /// The field's word keys reach it inside the bar, beside the bar's own
+    /// keys that share their arrow or backspace.
+    #[test]
+    fn the_query_field_moves_and_deletes_by_word() {
+        let field = |key: &str| {
+            let keys = format!("{}-{key}", text_input::WORD_MODIFIER);
+            dispatched(&keys, IN_CHIP_FIELD)
+        };
+        assert!(is(field("left"), text_input::WordLeft));
+        assert!(is(field("right"), text_input::WordRight));
+        assert!(is(field("shift-left"), text_input::SelectWordLeft));
+        assert!(is(field("shift-right"), text_input::SelectWordRight));
+        assert!(is(field("backspace"), text_input::DeleteWordLeft));
+        assert!(is(field("delete"), text_input::DeleteWordRight));
+        assert!(is(
+            dispatched("secondary-shift-backspace", IN_CHIP_FIELD),
+            chips::ClearQuery
+        ));
+    }
+
     const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT.id()];
     const IN_CHIP_FIELD: &[&str] = &[
         KEY_CONTEXT.id(),

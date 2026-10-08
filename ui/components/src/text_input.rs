@@ -27,6 +27,18 @@ gpui::actions!(
         SelectLeft,
         /// Extend selection right
         SelectRight,
+        /// Move cursor left by word
+        WordLeft,
+        /// Move cursor right by word
+        WordRight,
+        /// Extend selection left by word
+        SelectWordLeft,
+        /// Extend selection right by word
+        SelectWordRight,
+        /// Delete word before cursor
+        DeleteWordLeft,
+        /// Delete word after cursor
+        DeleteWordRight,
         /// Select all
         SelectAll,
         /// Move cursor to start
@@ -63,16 +75,31 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings());
 }
 
+/// The modifier that turns a character key into its word key, by the
+/// platform's convention.
+pub const WORD_MODIFIER: &str = if cfg!(target_os = "macos") {
+    "alt"
+} else {
+    "ctrl"
+};
+
 /// The text field's key bindings.
 pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(KEY_CONTEXT.id());
-    vec![
+    let word = |key: &str| format!("{WORD_MODIFIER}-{key}");
+    let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
+        KeyBinding::new(&word("left"), WordLeft, ctx),
+        KeyBinding::new(&word("right"), WordRight, ctx),
+        KeyBinding::new(&word("shift-left"), SelectWordLeft, ctx),
+        KeyBinding::new(&word("shift-right"), SelectWordRight, ctx),
+        KeyBinding::new(&word("backspace"), DeleteWordLeft, ctx),
+        KeyBinding::new(&word("delete"), DeleteWordRight, ctx),
         KeyBinding::new("secondary-a", SelectAll, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
@@ -82,7 +109,16 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-x", Cut, ctx),
         KeyBinding::new("secondary-v", Paste, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
-    ]
+    ];
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("secondary-left", Home, ctx),
+            KeyBinding::new("secondary-right", End, ctx),
+            KeyBinding::new("secondary-shift-left", SelectHome, ctx),
+            KeyBinding::new("secondary-shift-right", SelectEnd, ctx),
+        ]);
+    }
+    bindings
 }
 
 /// How wide the cursor is drawn.
@@ -194,6 +230,46 @@ impl TextInput {
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start_before(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start_after(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(word_start_before(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(word_start_after(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(word_start_before(&self.content, self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(word_start_after(&self.content, self.cursor_offset()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
@@ -285,26 +361,10 @@ impl TextInput {
         cx.notify();
     }
 
-    /// The word (run of alphanumeric/underscore characters) around `ix`.
+    /// The word around `ix`.
     fn word_range(&self, ix: usize) -> Range<usize> {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        let mut start = ix;
-        for (i, c) in self.content[..ix].char_indices().rev() {
-            if is_word(c) {
-                start = i;
-            } else {
-                break;
-            }
-        }
-        let mut end = ix;
-        for (i, c) in self.content[ix..].char_indices() {
-            if is_word(c) {
-                end = ix + i + c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        start..end
+        let text = &self.content;
+        text[..ix].trim_end_matches(is_word).len()..ix + word_len(&text[ix..])
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -529,6 +589,35 @@ impl EntityInputHandler for TextInput {
         let ix = line.closest_index_for_x(point.x - self.line_left(bounds));
         Some(self.offset_to_utf16(ix))
     }
+}
+
+/// Whether `c` belongs to a word: a word is a run of letters, digits and
+/// underscores, so the punctuation of a label or a call parts its words.
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// How many bytes the word opening `text` runs; none where no word opens it.
+fn word_len(text: &str) -> usize {
+    text.char_indices()
+        .find(|&(_, c)| !is_word(c))
+        .map_or(text.len(), |(i, _)| i)
+}
+
+/// The next stop leftwards from `offset` in `text`: the start of the word the
+/// offset is in or after, past whatever parts that word from it.
+fn word_start_before(text: &str, offset: usize) -> usize {
+    let before = text[..offset].trim_end_matches(|c| !is_word(c));
+    before.trim_end_matches(is_word).len()
+}
+
+/// The next stop rightwards from `offset` in `text`: the start of the word
+/// after the one the offset is in, or the end of the text where no word
+/// follows.
+fn word_start_after(text: &str, offset: usize) -> usize {
+    let after = &text[offset..];
+    let past_word = &after[word_len(after)..];
+    text.len() - past_word.trim_start_matches(|c| !is_word(c)).len()
 }
 
 /// Paints the field's text and cursor and registers the platform input handler.
@@ -801,6 +890,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -865,6 +960,67 @@ mod tests {
             scrolled_to_cursor(px(120.), px(40.), width, VISIBLE),
             px(40.)
         );
+    }
+
+    /// Every word stop over `text`, from the start rightwards and from the end
+    /// leftwards.
+    fn word_stops(text: &str) -> (Vec<usize>, Vec<usize>) {
+        let walk = |mut at: usize, step: fn(&str, usize) -> usize| {
+            let mut stops = Vec::new();
+            loop {
+                let next = step(text, at);
+                if next == at {
+                    return stops;
+                }
+                stops.push(next);
+                at = next;
+            }
+        };
+        (
+            walk(0, word_start_after),
+            walk(text.len(), word_start_before),
+        )
+    }
+
+    /// Each segment of a label and the function calling it is a word of its
+    /// own, and motion either way stops just before each, the punctuation
+    /// between them parting them without a stop of its own.
+    #[test]
+    fn word_motion_stops_before_each_segment_of_a_label() {
+        let text = "deps(//foo/bar:baz)";
+        let (rightwards, leftwards) = word_stops(text);
+        let at = |part: &str| text.find(part).unwrap();
+        assert_eq!(rightwards, [at("foo"), at("bar"), at("baz"), text.len()]);
+        assert_eq!(leftwards, [at("baz"), at("bar"), at("foo"), 0]);
+    }
+
+    /// Spaces, operators and a word's own underscores and digits read as word
+    /// motion reads them in prose and identifiers alike.
+    #[test]
+    fn word_motion_steps_over_spaces_and_operators() {
+        let text = "kind(cc_library, x) except  y2";
+        let (rightwards, leftwards) = word_stops(text);
+        assert_eq!(rightwards, [5, 17, 20, 28, 30]);
+        assert_eq!(leftwards, [28, 20, 17, 5, 0]);
+    }
+
+    /// From inside a word, motion goes to its own start leftwards and to the
+    /// next word's start rightwards.
+    #[test]
+    fn word_motion_from_inside_a_word_goes_to_word_starts() {
+        let text = "//foo/bar:baz";
+        let inside = text.find("ar").unwrap();
+        assert_eq!(word_start_before(text, inside), text.find("bar").unwrap());
+        assert_eq!(word_start_after(text, inside), text.find("baz").unwrap());
+    }
+
+    /// Words outside ASCII are words, and motion lands only on character
+    /// boundaries.
+    #[test]
+    fn word_motion_steps_over_whole_characters() {
+        let text = "größe-ü";
+        assert_eq!(word_start_after(text, 0), text.find('ü').unwrap());
+        assert_eq!(word_start_before(text, text.len()), text.find('ü').unwrap());
     }
 
     /// Text cut from the end leaves no empty room behind the line's end.
