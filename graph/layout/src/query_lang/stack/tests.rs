@@ -463,12 +463,13 @@ fn a_negated_filter_chip_takes_out_what_the_joined_run_keeps() {
 }
 
 fn bazel(chips: &[&str]) -> Result<BazelQuery, Unportable> {
-    stack(chips).bazel_text(Command::Query)
+    stack(chips).bazel_text(Command::Query, |_| false)
 }
 
 fn query(command: Command, text: &str) -> Result<BazelQuery, Unportable> {
     Ok(BazelQuery {
         command,
+        left_out: Vec::new(),
         text: text.to_string(),
     })
 }
@@ -552,7 +553,7 @@ fn only_a_step_reading_the_set_before_it_twice_is_bound() {
 /// function the stack calls.
 #[test]
 fn a_stack_is_written_for_the_command_preferred_where_it_reads_the_stack() {
-    let written = |chips: &[&str], preferred| stack(chips).bazel_text(preferred);
+    let written = |chips: &[&str], preferred| stack(chips).bazel_text(preferred, |_| false);
     assert_eq!(
         written(&["//a:all", "kind(genrule)"], Command::Cquery),
         query(Command::Cquery, "kind('genrule', //a:all)")
@@ -657,4 +658,37 @@ fn a_chip_names_the_set_operator_it_opens_with() {
     let chips = stack(&["except kind(test)", "kind(test)", "  - //a:all"]);
     let operators: Vec<_> = chips.chips().map(Chip::leading_operator).collect();
     assert_eq!(operators, [Some(0..6), None, Some(2..3)]);
+}
+
+/// A query leaving dependencies out is read with the flags that do, and one
+/// leaving tool dependencies out by cquery alone.
+#[test]
+fn a_stack_leaving_dependencies_out_is_written_with_their_flags() {
+    use crate::sources::Deps;
+    let written = |chips: &[&str], left_out: &[Deps]| {
+        stack(chips).bazel_text(Command::Query, |deps| left_out.contains(&deps))
+    };
+    let leaving = |command, left_out: &[Deps], text: &str| {
+        Ok(BazelQuery {
+            command,
+            left_out: left_out.to_vec(),
+            text: text.to_string(),
+        })
+    };
+    assert_eq!(
+        written(&["//a:all", "deps()"], &[Deps::Implicit]),
+        leaving(Command::Query, &[Deps::Implicit], "deps(//a:all)")
+    );
+    assert_eq!(
+        written(&["//a:all", "deps()"], &[Deps::Tool, Deps::Implicit]),
+        leaving(
+            Command::Cquery,
+            &[Deps::Implicit, Deps::Tool],
+            "deps(//a:all)"
+        )
+    );
+    assert_eq!(
+        written(&["//a:all", "siblings()"], &[Deps::Tool]),
+        Err(Unportable::Extension(Extension::ToolDeps))
+    );
 }

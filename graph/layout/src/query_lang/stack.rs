@@ -30,6 +30,7 @@ use super::lex::{self, Token, TokenKind};
 use super::narrow::ActionFilter;
 use super::parse::parse;
 use super::universe::{Counts, Universe};
+use crate::sources::Deps;
 
 /// The variable a chip reads the set before it from.
 const CONTINUED: &str = "_";
@@ -669,8 +670,14 @@ impl Stack {
     /// stand on the chain of calls it filters by, and is bound by a `let`
     /// otherwise. The query is written for `preferred` where that command
     /// reads every function the stack calls, and for the first of query,
-    /// cquery and aquery that does otherwise.
-    pub fn bazel_text(&self, preferred: Command) -> Result<BazelQuery, Unportable> {
+    /// cquery and aquery that does otherwise, read with the flag leaving out
+    /// each kind of dependency `leaves_out` holds left out; and for cquery
+    /// alone where that leaves out [`Deps::Tool`].
+    pub fn bazel_text(
+        &self,
+        preferred: Command,
+        leaves_out: impl Fn(Deps) -> bool,
+    ) -> Result<BazelQuery, Unportable> {
         let (start, refinements) = self.steps().map_err(|_| Unportable::Invalid)?;
         let Some(start) = start else {
             return match refinements.is_empty() {
@@ -688,15 +695,24 @@ impl Stack {
             return Err(Unportable::Extension(Extension::AnyExec));
         }
         let reads_all = |command: Command| calls.functions.iter().all(|&f| command.reads(f));
-        let commands = [preferred, Command::Query, Command::Cquery, Command::Aquery];
-        let Some(command) = commands.into_iter().find(|&command| reads_all(command)) else {
-            return Err(Unportable::Extension(Extension::NoCommand));
+        let command = match leaves_out(Deps::Tool) {
+            true if reads_all(Command::Cquery) => Command::Cquery,
+            true => return Err(Unportable::Extension(Extension::ToolDeps)),
+            false => {
+                let commands = [preferred, Command::Query, Command::Cquery, Command::Aquery];
+                let found = commands.into_iter().find(|&command| reads_all(command));
+                found.ok_or(Unportable::Extension(Extension::NoCommand))?
+            }
         };
         if !action_filters_on_chain(&expr) {
             return Err(Unportable::Extension(Extension::ActionFilterOffChain));
         }
         Ok(BazelQuery {
             command,
+            left_out: Deps::ALL
+                .into_iter()
+                .filter(|&deps| leaves_out(deps))
+                .collect(),
             text: expr.to_string(),
         })
     }
@@ -909,10 +925,12 @@ fn every_action_filter(expr: &Expr, holds: &mut impl FnMut(&Expr) -> bool) -> bo
     }
 }
 
-/// A stack written as a Bazel query, and the command reading it.
+/// A stack written as a Bazel query, and how Bazel reads it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BazelQuery {
     pub command: Command,
+    /// The kinds of dependency the command is to leave out, each by its flag.
+    pub left_out: Vec<Deps>,
     pub text: String,
 }
 
@@ -992,6 +1010,9 @@ pub enum Extension {
     ActionFilterOffChain,
     /// No one query command reads every function the stack calls.
     NoCommand,
+    /// Tool dependencies are left out, which takes cquery, and cquery does
+    /// not read every function the stack calls.
+    ToolDeps,
 }
 
 impl fmt::Display for Unportable {
@@ -1019,6 +1040,9 @@ impl fmt::Display for Unportable {
             Unportable::Extension(Extension::NoCommand) => {
                 f.write_str("no one Bazel query command reads every function it calls")
             }
+            Unportable::Extension(Extension::ToolDeps) => f.write_str(
+                "leaving tool deps out takes cquery, which does not read every function it calls",
+            ),
         }
     }
 }

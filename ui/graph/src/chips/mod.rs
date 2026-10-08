@@ -823,19 +823,31 @@ pub(crate) fn command(input: Input) -> Command {
 /// Copies the stack as a Bazel query, or says on the bar why it is none.
 ///
 /// The query is written for the deepest of the commands whose output the
-/// panel reads, where that command reads every function the stack calls; and
-/// the bar says so where the panel joins several commands' output, which no
-/// one command reads alike.
+/// panel reads, where that command reads every function the stack calls. Only
+/// the expression is copied, so where the panel leaves dependencies out the
+/// bar names the flags the command is to be run with; and it says where the
+/// panel joins several commands' output, which no one command reads alike.
 pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let inputs = view.derived.sources().map(Sources::inputs);
+    let sources = view.derived.sources();
+    let inputs = sources.map(Sources::inputs);
     let joint = inputs.is_some_and(|inputs| inputs.inputs().count() > 1);
-    view.chips.notice = Some(match view.chips.stack.bazel_text(preferred(inputs)) {
+    let leaves_out = |deps| sources.is_some_and(|sources| !sources.keeps(deps));
+    let written = view.chips.stack.bazel_text(preferred(inputs), leaves_out);
+    view.chips.notice = Some(match written {
         Ok(query) => {
             let command = query.command.name();
             cx.write_to_clipboard(ClipboardItem::new_string(query.text));
+            let copied = match query.left_out.is_empty() {
+                true => format!("copied as bazel {command}"),
+                false => {
+                    let flags = query.left_out.iter().map(|&deps| deps.flag());
+                    let flags: Vec<&str> = flags.collect();
+                    format!("copied — run with bazel {command} {}", flags.join(" "))
+                }
+            };
             match joint {
-                true => format!("copied as bazel {command}; read here over a joint graph").into(),
-                false => format!("copied as bazel {command}").into(),
+                true => format!("{copied}; read here over a joint graph").into(),
+                false => copied.into(),
             }
         }
         Err(unportable) => format!("not a Bazel query: {unportable}").into(),
