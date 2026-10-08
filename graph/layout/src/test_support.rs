@@ -6,8 +6,8 @@ use bazel_query_proto::blaze_query::attribute::{
     Discriminator as AttributeType, Selector, SelectorEntry, SelectorList, Tristate,
 };
 use bazel_query_proto::blaze_query::{
-    Attribute, GeneratedFile, License, Rule, SourceFile, StringDictEntry, Target,
-    target::Discriminator,
+    Attribute, ConfiguredRuleInput, GeneratedFile, License, Rule, SourceFile, StringDictEntry,
+    Target, target::Discriminator,
 };
 
 use crate::graph::{DepClass, Graph, Node};
@@ -246,6 +246,18 @@ pub(crate) fn configured(target: Target, configuration_id: u32) -> ConfiguredTar
         configuration_id,
         ..Default::default()
     }
+}
+
+/// The configured inputs a rule depends on, each a label and the id of the
+/// configuration it is built in, if any.
+pub(crate) fn configured_inputs(inputs: &[(&str, Option<u32>)]) -> Vec<ConfiguredRuleInput> {
+    (inputs.iter())
+        .map(|&(label, configuration_id)| ConfiguredRuleInput {
+            label: Some(label.to_string()),
+            configuration_id,
+            ..Default::default()
+        })
+        .collect()
 }
 
 pub(crate) fn configuration(

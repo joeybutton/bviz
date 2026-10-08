@@ -55,6 +55,56 @@ impl<'a> Explicit<'a> {
     }
 }
 
+/// The labels a configured target's resolved attributes name, which tell its
+/// implicit dependencies as `Util.findImplicitDeps` does: what only attributes
+/// the BUILD file leaves unset name, its toolchains and platform, and its
+/// aspects' dependencies. Every other dependency is explicit, a `select`'s
+/// condition among them, which no resolved attribute names. A dependency is
+/// matched by its label alone, so one target depended on in two
+/// configurations through different attributes takes the class of either.
+pub(crate) struct ConfiguredExplicit<'a> {
+    /// The labels explicitly specified attributes name, then those only other
+    /// attributes name; `None` where the description states too little.
+    named: Option<[HashSet<Cow<'a, str>>; 2]>,
+}
+
+impl<'a> ConfiguredExplicit<'a> {
+    /// What the configured target `rule` describes names.
+    pub(crate) fn of(rule: &'a Rule, repos: &RepoMapping) -> Self {
+        let mut explicit: HashSet<Cow<'a, str>> = HashSet::new();
+        let mut otherwise: HashSet<Cow<'a, str>> = HashSet::new();
+        let mut classifies = false;
+        for attribute in &rule.attribute {
+            classifies |= states_name(attribute);
+            let into = match attribute.explicitly_specified == Some(true) {
+                true => &mut explicit,
+                false => &mut otherwise,
+            };
+            into.extend(
+                named_labels(attribute)
+                    .into_iter()
+                    .map(|l| repos.canonicalize_label(l)),
+            );
+        }
+        otherwise.retain(|label| !explicit.contains(label));
+        ConfiguredExplicit {
+            named: classifies.then_some([explicit, otherwise]),
+        }
+    }
+
+    /// The class of the dependency on the label `canonical` names, a target
+    /// `select` conditions on where `condition`.
+    pub(crate) fn class(&self, canonical: &str, condition: bool) -> DepClass {
+        DepClass::new(match &self.named {
+            None => Declared::Unknown,
+            Some([explicit, _]) if explicit.contains(canonical) => Declared::Explicit,
+            Some([_, otherwise]) if otherwise.contains(canonical) => Declared::Implicit,
+            Some(_) if condition => Declared::Explicit,
+            Some(_) => Declared::Implicit,
+        })
+    }
+}
+
 /// Whether `rule`'s description states enough to classify its dependencies.
 /// One stating no `name`, as a restricted `--proto:output_rule_attrs` writes
 /// it, may leave out an attribute its BUILD file sets.

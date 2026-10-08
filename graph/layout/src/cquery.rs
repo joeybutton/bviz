@@ -25,10 +25,11 @@ use bazel_query_proto::blaze_query::{Rule, Target};
 
 use crate::attributes::AttributesBuilder;
 use crate::capability::Axis;
+use crate::explicit::ConfiguredExplicit;
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{ConfigRef, FacetsBuilder};
-use crate::graph::{EdgeKind, Graph, Kind, Node};
+use crate::graph::{Declared, DepClass, EdgeKind, Graph, Kind, Node, UniqueEdges};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 use crate::provenance::Input;
@@ -144,6 +145,14 @@ impl Builder<'_> {
         )
     }
 
+    /// Whether the configuration `config_id` names builds tools, which one
+    /// the results do not state does not.
+    fn builds_tools(&self, config_id: u32) -> bool {
+        self.configurations
+            .get(&config_id)
+            .is_some_and(|c| c.is_tool)
+    }
+
     /// The handle for the configuration `config_id` names, absent for a target
     /// carrying no configuration, which names id `0`.
     fn intern_config(&mut self, config_id: u32) -> Option<ConfigRef> {
@@ -189,7 +198,13 @@ struct NodeIndex {
     leaf_id: HashMap<String, Id>,
     /// The (label, configuration key) pairs that have a configured-target node.
     ct_ids: HashSet<(String, String)>,
+    /// The labels of the rules a `select` may condition on.
+    conditions: HashSet<String>,
 }
+
+/// The rule classes a `select` key names, which Bazel resolves as configuration
+/// conditions rather than through an attribute.
+const CONDITION_CLASSES: [&str; 2] = ["config_setting", "constraint_value"];
 
 /// Pass 1: the nodes each target contributes.
 fn build_nodes(
@@ -250,12 +265,20 @@ impl Nodes<'_, '_> {
             query::describe_target(self.b.facets, Input::Cquery, target, id, parent, &label);
             self.index.target_box.insert(label.to_string(), id);
         }
+        if CONDITION_CLASSES.contains(&rule.rule_class.as_str()) {
+            self.index.conditions.insert(label.to_string());
+        }
         let container = self.index.target_box[label.as_ref()];
         if let Some(configured) = self.add_configured(written, container, config_id) {
-            let complete = self.b.attributes.describe(configured, rule, self.b.repos);
-            self.b
-                .facets
-                .observe(Input::Cquery, Axis::Attributes, complete);
+            let b = &mut *self.b;
+            query::describe_rule(
+                b.attributes,
+                b.facets,
+                Input::Cquery,
+                configured,
+                rule,
+                b.repos,
+            );
         }
     }
 
@@ -304,7 +327,7 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
     let mut edges = Edges {
         b,
         index,
-        seen: HashSet::new(),
+        edges: UniqueEdges::with_capacity(EdgeKind::Cquery, dependencies(cts)),
     };
     for ct in cts {
         let Some(target) = ct.target.as_ref() else {
@@ -326,13 +349,35 @@ fn wire_edges(b: &mut Builder, cts: &[&ConfiguredTarget], index: &NodeIndex) {
     }
 }
 
+/// How many dependencies `cts` state, the most edges they make.
+fn dependencies(cts: &[&ConfiguredTarget]) -> usize {
+    let rules = cts
+        .iter()
+        .filter_map(|ct| ct.target.as_ref()?.rule.as_ref());
+    rules
+        .map(|rule| rule.rule_input.len().max(rule.configured_rule_input.len()))
+        .sum::<usize>()
+        + cts.len()
+}
+
+/// Whether `--notool_deps` drops a configured dependency of a target built in
+/// a tool configuration where `from_tool`, the dependency built in one where
+/// `into_tool` holds, and in none where it is `None`
+/// (`PostAnalysisQueryEnvironment.getAllowedDeps`). From a tool, only what is
+/// built for tools stays; from anything else, everything but that.
+fn drops_as_tool(from_tool: bool, into_tool: Option<bool>) -> bool {
+    match from_tool {
+        true => into_tool != Some(true),
+        false => into_tool == Some(true),
+    }
+}
+
 /// Resolves dependencies against the nodes pass 1 created and wires them to
 /// their consumer.
 struct Edges<'a, 'n> {
     b: &'a mut Builder<'n>,
     index: &'a NodeIndex,
-    /// The (from, to) pairs already wired, so a dependency named twice gets one edge.
-    seen: HashSet<(Id, Id)>,
+    edges: UniqueEdges,
 }
 
 impl Edges<'_, '_> {
@@ -348,21 +393,34 @@ impl Edges<'_, '_> {
         let key = self.b.config_key(config_id);
         let name = self.b.canonical(&rule.name);
         let consumer = self.b.names.intern(&label::ct_node_id(&name, &key));
+        let explicit = ConfiguredExplicit::of(rule, self.b.repos);
+        let index: &NodeIndex = self.index;
+        let conditions = &index.conditions;
+        let class_of = |dep_label: &str| explicit.class(dep_label, conditions.contains(dep_label));
         if rule.configured_rule_input.is_empty() {
             for dep_label in &rule.rule_input {
                 let dep_label = self.b.canonical(dep_label);
+                let class = class_of(&dep_label);
                 if let Some(dep) = self.label_dep(&dep_label) {
-                    self.add_edge(dep, consumer);
+                    self.add_edge(dep, consumer, class);
                 }
             }
         } else {
+            let from_tool = self.b.builds_tools(config_id);
             for input in &rule.configured_rule_input {
                 let Some(dep_label) = input.label.as_deref() else {
                     continue;
                 };
                 let dep_label = self.b.canonical(dep_label);
+                let into_tool = (input.configuration_id)
+                    .filter(|&id| id != 0)
+                    .map(|id| self.b.builds_tools(id));
+                let class = match drops_as_tool(from_tool, into_tool) {
+                    true => class_of(&dep_label).tool(),
+                    false => class_of(&dep_label),
+                };
                 if let Some(dep) = self.configured_dep(&dep_label, input.configuration_id) {
-                    self.add_edge(dep, consumer);
+                    self.add_edge(dep, consumer, class);
                 }
             }
         }
@@ -378,7 +436,7 @@ impl Edges<'_, '_> {
         };
         let rule = self.b.canonical(generating).into_owned();
         if let Some(rule) = self.configured_dep(&rule, Some(config_id)) {
-            self.add_edge(rule, file);
+            self.add_edge(rule, file, DepClass::new(Declared::Unattributed));
         }
     }
 
@@ -421,12 +479,9 @@ impl Edges<'_, '_> {
             .copied()
     }
 
-    fn add_edge(&mut self, from: Id, to: Id) {
-        if from == to {
-            return;
-        }
-        if self.seen.insert((from, to)) {
-            self.b.graph.add_edge(from, to, EdgeKind::Cquery);
+    fn add_edge(&mut self, from: Id, to: Id, class: DepClass) {
+        if from != to {
+            self.edges.add(&mut self.b.graph, from, to, class);
         }
     }
 }
@@ -435,10 +490,9 @@ impl Edges<'_, '_> {
 mod tests {
     use super::*;
     use crate::facets::{RuleCategory, Tri};
-    use crate::test_support::{edges, find, parent_of};
+    use crate::test_support::{configured_inputs, edge_class as class, edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
-        Attribute, ConfiguredRuleInput, GeneratedFile, Rule, SourceFile,
-        attribute::Discriminator as AttributeType,
+        Attribute, GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
     };
 
     fn rule_ct(name: &str, config_id: u32) -> ConfiguredTarget {
@@ -487,14 +541,7 @@ mod tests {
     ) -> ConfiguredTarget {
         let rule = ct.target.as_mut().unwrap().rule.as_mut().unwrap();
         rule.rule_input = rule_input.iter().map(|s| s.to_string()).collect();
-        rule.configured_rule_input = configured
-            .iter()
-            .map(|(label, config_id)| ConfiguredRuleInput {
-                label: Some(label.to_string()),
-                configuration_id: *config_id,
-                ..Default::default()
-            })
-            .collect();
+        rule.configured_rule_input = configured_inputs(configured);
         ct
     }
 
@@ -838,5 +885,120 @@ mod tests {
 
         assert!(!graph.nodes.iter().any(|n| n.label == "@external//:dep"));
         assert!(edges(&graph, &names).is_empty());
+    }
+
+    fn is_tool(class: DepClass) -> bool {
+        class.is_tool(Input::Cquery.into())
+    }
+
+    /// A configured target's dependency is explicit where an attribute its
+    /// BUILD file sets names it as resolved in its configuration, or where a
+    /// `select` conditions on it, which no resolved attribute names; and a
+    /// toolchain, platform or aspect dependency no attribute names is implicit.
+    #[test]
+    fn a_configured_dependency_is_explicit_where_a_set_attribute_names_it() {
+        use crate::test_support::{explicit, label_list, name_attribute};
+        let app = declared_ct(
+            "//foo:app",
+            1,
+            "cc_library",
+            vec![
+                name_attribute("//foo:app"),
+                explicit(label_list("deps", &["//foo:lib"])),
+                label_list("$toolchain", &["//foo:cc"]),
+            ],
+        );
+        let (graph, names, _) = build(&[result(
+            vec![
+                with_inputs(
+                    app,
+                    &[],
+                    &[
+                        ("//foo:lib", Some(1)),
+                        ("//foo:cc", Some(1)),
+                        ("//foo:aspect", Some(1)),
+                        ("//foo:linux", Some(1)),
+                        ("//foo:x86", Some(1)),
+                        ("//foo:platform", Some(1)),
+                    ],
+                ),
+                rule_ct("//foo:lib", 1),
+                rule_ct("//foo:cc", 1),
+                rule_ct("//foo:aspect", 1),
+                declared_ct("//foo:linux", 1, "config_setting", Vec::new()),
+                declared_ct("//foo:x86", 1, "constraint_value", Vec::new()),
+                declared_ct("//foo:platform", 1, "platform", Vec::new()),
+            ],
+            vec![config(1, "target")],
+        )]);
+
+        let declared = |dep| class(&graph, &names, dep, "ct://foo:app#ck1").declaration();
+        assert_eq!(declared("ct://foo:lib#ck1"), Declared::Explicit);
+        assert_eq!(declared("ct://foo:cc#ck1"), Declared::Implicit);
+        assert_eq!(declared("ct://foo:aspect#ck1"), Declared::Implicit);
+        assert_eq!(declared("ct://foo:linux#ck1"), Declared::Explicit);
+        assert_eq!(declared("ct://foo:x86#ck1"), Declared::Explicit);
+        assert_eq!(declared("ct://foo:platform#ck1"), Declared::Implicit);
+    }
+
+    /// `--notool_deps` drops what a target built for the target depends on in
+    /// a tool configuration, and what a tool depends on outside one, a source
+    /// file, built in none, included.
+    #[test]
+    fn a_tool_dependency_crosses_between_tool_and_other_configurations() {
+        let (graph, names, _) = build(&[result(
+            vec![
+                with_inputs(
+                    rule_ct("//foo:app", 1),
+                    &[],
+                    &[
+                        ("//foo:lib", Some(1)),
+                        ("//foo:gen", Some(2)),
+                        ("//foo:in.c", None),
+                    ],
+                ),
+                with_inputs(
+                    rule_ct("//foo:gen", 2),
+                    &[],
+                    &[
+                        ("//foo:lib", Some(2)),
+                        ("//foo:lib", Some(1)),
+                        ("//foo:in.c", None),
+                    ],
+                ),
+                rule_ct("//foo:lib", 1),
+                rule_ct("//foo:lib", 2),
+                source_ct("//foo:in.c"),
+            ],
+            vec![config(1, "target"), tool_config(2, "exec")],
+        )]);
+
+        let tool = |from, to| is_tool(class(&graph, &names, from, to));
+        assert!(!tool("ct://foo:lib#ck1", "ct://foo:app#ck1"));
+        assert!(tool("ct://foo:gen#ck2", "ct://foo:app#ck1"));
+        assert!(!tool("target://foo:in.c", "ct://foo:app#ck1"));
+        assert!(!tool("ct://foo:lib#ck2", "ct://foo:gen#ck2"));
+        assert!(tool("ct://foo:lib#ck1", "ct://foo:gen#ck2"));
+        assert!(tool("target://foo:in.c", "ct://foo:gen#ck2"));
+    }
+
+    /// Without `--transitions` a dependency's configuration is unknown, so no
+    /// edge reads as a tool's.
+    #[test]
+    fn a_dependency_of_unknown_configuration_is_no_tool_dependency() {
+        let (graph, names, _) = build(&[result(
+            vec![
+                with_inputs(rule_ct("//foo:gen", 2), &["//foo:lib"], &[]),
+                rule_ct("//foo:lib", 1),
+            ],
+            vec![config(1, "target"), tool_config(2, "exec")],
+        )]);
+
+        assert!(!is_tool(class(
+            &graph,
+            &names,
+            "target://foo:lib",
+            "ct://foo:gen#ck2"
+        )));
     }
 }

@@ -9,15 +9,15 @@
 //! hierarchy from the union of all inputs' packages: a `pkg:` box then carries
 //! one label and parent no matter which input emitted it.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
 use crate::attributes::{Attributes, AttributesBuilder};
 use crate::capability::Capabilities;
-use crate::facets::{Facets, FacetsBuilder};
-use crate::graph::{Edge, Graph, Node};
+use crate::facets::{Facets, FacetsBuilder, Tri};
+use crate::graph::{Edge, EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, RepoMapping, canonical_repo};
 use crate::provenance::{Input, InputSet, Provenance};
@@ -69,12 +69,10 @@ pub fn build_joint(
     let loaded = InputSet::of(graphs.iter().map(|&(input, _)| input))
         .expect("a joint graph is read from at least one input");
     let (facets, capabilities) = facets.seal(loaded);
-    let (mut graph, names, facets, attributes, provenance) = canonicalize(
-        merge(graphs, names.len()),
-        &names,
-        facets,
-        attributes.seal(),
-    );
+    let mut merged = merge(graphs, names.len());
+    mark_target_tool_edges(&mut merged, &facets, names.len());
+    let (mut graph, names, facets, attributes, provenance) =
+        canonicalize(merged, &names, facets, attributes.seal());
     label::show_written_repositories(&mut graph, &facets);
     Joint {
         graph,
@@ -220,6 +218,54 @@ fn canonicalize(
     facets.renumber(&remap);
     attributes.renumber(&remap);
     (out, canon, facets, attributes, Provenance::new(built_by))
+}
+
+/// Marks each query edge as cquery's tool dependency where the dependent's
+/// configured targets built outside tool configurations depend on the
+/// dependency through at least one configured edge, and only through edges
+/// `--notool_deps` drops, as cquery states them. A configured target stands for
+/// the target holding it, and every other node for itself; ids are all below
+/// `ids`, and `facets` tells each node's configuration.
+///
+/// What a tool-configured target depends on does not count: from one,
+/// `--notool_deps` keeps only what tools are built from, which a target edge
+/// cannot tell from the rest.
+fn mark_target_tool_edges(merged: &mut Merged, facets: &Facets, ids: usize) {
+    let mut target_of: Vec<Option<Id>> = vec![None; ids];
+    for (node, _) in &merged.nodes {
+        target_of[node.id.0 as usize] = match node.kind {
+            Kind::ConfiguredTarget => node.parent,
+            _ => Some(node.id),
+        };
+    }
+    let builds_tools = |id: Id| {
+        let entry = facets
+            .config(id)
+            .and_then(|config| facets.config_entry(config));
+        entry.is_some_and(|entry| entry.is_tool == Tri::Yes)
+    };
+    let cquery = InputSet::from(Input::Cquery);
+    let configured = (merged.edges.iter())
+        .filter(|edge| edge.kind == EdgeKind::Cquery && !builds_tools(edge.to));
+    let mut all_tool: HashMap<(Id, Id), bool> = HashMap::with_capacity(merged.edges.len());
+    for edge in configured {
+        let ends = (
+            target_of[edge.from.0 as usize],
+            target_of[edge.to.0 as usize],
+        );
+        if let (Some(from), Some(to)) = ends {
+            *all_tool.entry((from, to)).or_insert(true) &= edge.class.is_tool(cquery);
+        }
+    }
+    for edge in merged
+        .edges
+        .iter_mut()
+        .filter(|e| e.kind == EdgeKind::Query)
+    {
+        if all_tool.get(&(edge.from, edge.to)) == Some(&true) {
+            edge.class = edge.class.tool_in_cquery();
+        }
+    }
 }
 
 /// The union of the inputs' graphs.
@@ -1095,5 +1141,71 @@ mod tests {
                 flag: Some("--proto:output_rule_attrs"),
             }
         );
+    }
+
+    /// A query edge reads as a tool dependency only while cquery is read, and
+    /// only where the dependent's configured targets outside tool
+    /// configurations depend on the dependency, through tool edges alone; what
+    /// a tool-configured target depends on does not count.
+    #[test]
+    fn a_target_edge_is_a_tool_dependency_where_cquery_states_only_tool_ones() {
+        use crate::test_support::{configuration, configured, configured_inputs, edge_class};
+        let depending = |name: &str, config: u32, deps: &[(&str, Option<u32>)]| {
+            let mut target = rule(name, &[]);
+            target.rule.as_mut().unwrap().configured_rule_input = configured_inputs(deps);
+            configured(target, config)
+        };
+        let (target, exec) = (Some(1), Some(2));
+        let cquery = [CqueryResult {
+            results: vec![
+                depending(
+                    "//foo:app",
+                    1,
+                    &[("//foo:gen", exec), ("//foo:lib", target)],
+                ),
+                depending(
+                    "//foo:lib",
+                    1,
+                    &[("//foo:gen", exec), ("//foo:gen", target)],
+                ),
+                depending("//foo:gen", 2, &[]),
+                depending("//foo:gen", 1, &[]),
+                depending("//foo:cov", 1, &[("//foo:gen", exec)]),
+                depending("//foo:cov", 2, &[("//foo:gen", exec)]),
+                depending("//foo:tool", 2, &[("//foo:tool.cc", None)]),
+                configured(source("//foo:tool.cc"), 0),
+            ],
+            configurations: vec![
+                configuration(1, "ck1", "k8-fastbuild", false),
+                configuration(2, "ck2", "k8-opt-exec", true),
+            ],
+        }];
+        let query = [
+            rule("//foo:app", &["//foo:gen", "//foo:lib"]),
+            rule("//foo:lib", &["//foo:gen"]),
+            rule("//foo:gen", &[]),
+            rule("//foo:cov", &["//foo:gen"]),
+            rule("//foo:tool", &["//foo:tool.cc"]),
+            source("//foo:tool.cc"),
+        ];
+        let Joint { graph, names, .. } = build_joint(None, Some(&cquery), Some(&query), false);
+
+        let class = |from: &str, to: &str| {
+            edge_class(
+                &graph,
+                &names,
+                &format!("target:{from}"),
+                &format!("target:{to}"),
+            )
+        };
+        let every = InputSet::ALL;
+        let query_alone = InputSet::from(Input::Query);
+        let gen_to_app = class("//foo:gen", "//foo:app");
+        assert!(gen_to_app.is_tool(every));
+        assert!(!gen_to_app.is_tool(query_alone));
+        assert!(!class("//foo:gen", "//foo:lib").is_tool(every));
+        assert!(!class("//foo:lib", "//foo:app").is_tool(every));
+        assert!(class("//foo:gen", "//foo:cov").is_tool(every));
+        assert!(!class("//foo:tool.cc", "//foo:tool").is_tool(every));
     }
 }

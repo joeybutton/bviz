@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::intern::Id;
-use crate::provenance::Input;
+use crate::provenance::{Input, InputSet};
 
 /// A coarse node category, used to pick a fill when rendering and to decide
 /// which leaves may merge.
@@ -119,13 +119,20 @@ pub enum Declared {
 }
 
 /// What kind of dependency an edge stands for, as Bazel's query flags filter
-/// them: whether it is [`Declared`].
+/// them: whether it is [`Declared`], and whether it crosses between the
+/// configurations tools are built in and the others (`--notool_deps`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DepClass(u8);
 
 impl DepClass {
     /// The bits holding the [`Declared`] value.
     const DECLARED: u8 = 0b11;
+    /// A configured edge `--notool_deps` drops.
+    const TOOL: u8 = 1 << 2;
+    /// A target edge cquery states tool edges for, as [`Self::TOOL`] marks
+    /// them, from the dependent's configured targets outside tool
+    /// configurations, and only those; which holds only while cquery is read.
+    const TOOL_IN_CQUERY: u8 = 1 << 3;
 
     /// A dependency declared as `declared` says.
     pub fn new(declared: Declared) -> Self {
@@ -141,6 +148,23 @@ impl DepClass {
         }
     }
 
+    /// This dependency as a configured edge `--notool_deps` drops.
+    pub fn tool(self) -> Self {
+        DepClass(self.0 | Self::TOOL)
+    }
+
+    /// This target edge as one cquery states only tool edges for.
+    pub fn tool_in_cquery(self) -> Self {
+        DepClass(self.0 | Self::TOOL_IN_CQUERY)
+    }
+
+    /// Whether `--notool_deps` drops this dependency over a graph reading
+    /// `inputs`.
+    pub fn is_tool(self, inputs: InputSet) -> bool {
+        self.0 & Self::TOOL != 0
+            || (self.0 & Self::TOOL_IN_CQUERY != 0 && inputs.contains(Input::Cquery))
+    }
+
     /// The class of one edge standing for two dependencies between the same
     /// nodes, which a filter drops only where it drops both.
     pub fn either(self, other: Self) -> Self {
@@ -151,7 +175,8 @@ impl DepClass {
             (Unknown, _) | (_, Unknown) => Unknown,
             (Implicit, Implicit) => Implicit,
         };
-        DepClass::new(declared)
+        let tool = self.0 & other.0 & (Self::TOOL | Self::TOOL_IN_CQUERY);
+        DepClass(DepClass::new(declared).0 | tool)
     }
 }
 
