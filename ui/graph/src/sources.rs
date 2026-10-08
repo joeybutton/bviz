@@ -74,9 +74,15 @@ pub(crate) fn choose(
 mod tests {
     use super::*;
     use bviz_graph_layout::InputSet;
+    use bviz_graph_layout::capability::CapabilitiesBuilder;
+
+    /// Every input of `loaded` on, each describing everything it may.
+    fn reading(loaded: InputSet) -> Sources {
+        Sources::reading(&CapabilitiesBuilder::default().seal(loaded))
+    }
 
     fn every() -> Sources {
-        Sources::reading(InputSet::ALL)
+        reading(InputSet::ALL)
     }
 
     fn checked(sources: Sources) -> Vec<bool> {
@@ -106,12 +112,12 @@ mod tests {
     #[test]
     fn only_the_inputs_the_graph_was_read_from_are_offered() {
         let loaded = InputSet::of([Input::Query, Input::Aquery]).unwrap();
-        let labels: Vec<String> = (options(Sources::reading(loaded)).iter())
+        let labels: Vec<String> = (options(reading(loaded)).iter())
             .map(|option| option.label.to_string())
             .collect();
         assert_eq!(labels, ["query", "aquery"]);
-        assert!(offers_choice(Sources::reading(loaded)));
-        assert!(!offers_choice(Sources::reading(Input::Cquery.into())));
+        assert!(offers_choice(reading(loaded)));
+        assert!(!offers_choice(reading(Input::Cquery.into())));
     }
 
     #[test]

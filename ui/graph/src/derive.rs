@@ -890,8 +890,8 @@ fn past_the_caps(over: Overflow) -> String {
 /// the read sized, and lays out what the selected mode draws.
 pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let whole = view.model.update(cx, |model, _| {
-        let inputs = model.loaded()?.shared.inputs;
-        model.sourcing(Sources::reading(inputs))
+        let every = Sources::reading(&model.loaded()?.shared.capabilities);
+        model.sourcing(every)
     });
     let (Some(whole), Some(loaded)) = (whole, view.model.read(cx).loaded()) else {
         return;
@@ -1537,7 +1537,7 @@ mod tests {
     #[test]
     fn a_panel_draws_only_the_inputs_it_reads() {
         let mut loaded = joint_document();
-        let every = Sources::reading(loaded.shared.inputs);
+        let every = Sources::reading(&loaded.shared.capabilities);
         let query = every.with_input(Input::Cquery, false).expect("query stays");
         let mut derived = opened(&loaded);
         derived.sourcing = loaded.sourcing(query);
@@ -1590,7 +1590,7 @@ mod tests {
     #[test]
     fn a_query_walks_only_the_inputs_read() {
         let mut loaded = joint_document();
-        let every = Sources::reading(loaded.shared.inputs);
+        let every = Sources::reading(&loaded.shared.capabilities);
         let mut deps = |sources: Sources| {
             let sourcing = loaded.sourcing(sources).expect("the graph's inputs");
             let universe = sourcing.universe();
@@ -1625,7 +1625,7 @@ mod tests {
     #[test]
     fn a_setting_is_kept_only_while_a_panel_reads_through_it() {
         let mut loaded = joint_document();
-        let every = Sources::reading(loaded.shared.inputs);
+        let every = Sources::reading(&loaded.shared.capabilities);
         let query = every.with_input(Input::Cquery, false).expect("query stays");
         let held = loaded.sourcing(query).expect("the graph's inputs");
         let again = loaded.sourcing(query).expect("the graph's inputs");
@@ -1639,7 +1639,7 @@ mod tests {
             loaded.whole().graph()
         ));
 
-        let aquery = Sources::reading(Input::Aquery.into());
+        let aquery = Sources::reading(&loaded.shared.capabilities.reading(Input::Aquery.into()));
         assert!(loaded.sourcing(aquery).is_none());
     }
 

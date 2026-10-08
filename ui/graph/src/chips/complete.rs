@@ -1007,7 +1007,7 @@ mod tests {
     fn only_what_the_sources_keep_is_completed() {
         let rules: &[(&str, &[&str])] = &[("//a:app", &[]), ("//b:lib", &[])];
         let mut loaded = crate::model::joint_document(rules, &rules[..1]);
-        let every = Sources::reading(loaded.shared.inputs);
+        let every = Sources::reading(&loaded.shared.capabilities);
         let mut offered = |sources: Sources| -> Vec<String> {
             let sourcing = loaded.sourcing(sources).expect("the graph's inputs");
             let completions = sourcing.completions().get();

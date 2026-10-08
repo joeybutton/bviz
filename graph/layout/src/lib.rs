@@ -54,4 +54,4 @@ pub use layout::{Anchor, Box, Connector, LaidOut, layout, layout_pinned};
 pub use map::{MapLayout, map_layout};
 pub use provenance::{Input, InputSet, Provenance};
 pub use reach::Walking;
-pub use sources::Sources;
+pub use sources::{Deps, Sources};

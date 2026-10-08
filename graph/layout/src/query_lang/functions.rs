@@ -6,7 +6,7 @@ use rustc_hash::FxHashSet;
 
 use super::universe::Universe;
 use crate::intern::Id;
-use crate::reach::{Bounds, Level, Routed, State, Toward, Walk};
+use crate::reach::{Bounds, Level, Routed, Toward, Walk};
 
 /// Every level of the graph, shallowest first.
 const LEVELS: [Level; 3] = [Level::Target, Level::ConfiguredTarget, Level::Action];
@@ -87,10 +87,7 @@ impl Universe {
         for level in LEVELS {
             let mut states: Vec<usize> = Vec::new();
             for seed in self.at_level(from, level) {
-                states.extend([
-                    State::arrived(seed.0 as usize),
-                    State::lifted(seed.0 as usize),
-                ]);
+                states.extend(self.index.starts(seed));
             }
             if states.is_empty() {
                 continue;
@@ -102,8 +99,7 @@ impl Universe {
             let routed = self.index.routed(&states, Toward::Dependencies, bounds);
             let mut best: Option<(u32, usize, Id)> = None;
             for id in (0..self.ids()).map(|id| Id(id as u32)) {
-                let state = State::arrived(id.0 as usize);
-                let Some(edges) = routed.walk.fewest(state) else {
+                let Some((state, edges)) = routed.walk.nearest_arrival(id) else {
                     continue;
                 };
                 let holder = self
@@ -125,7 +121,7 @@ impl Universe {
         if let Some((_, level, routed, state, end)) = nearest {
             let (seed, edges) = routed.route(state);
             let ends = edges.into_iter().flat_map(|edge| self.index.ends(edge));
-            let nodes = [Id(State::id(seed) as u32), Id(State::id(state) as u32), end];
+            let nodes = [self.index.node(seed), self.index.node(state), end];
             // A node above the level is one the walk only passed through.
             let covered = nodes
                 .into_iter()
@@ -259,10 +255,7 @@ impl Universe {
             states.clear();
             for seed in self.at_level(seeds, level) {
                 match toward {
-                    Toward::Dependencies => states.extend([
-                        State::arrived(seed.0 as usize),
-                        State::lifted(seed.0 as usize),
-                    ]),
+                    Toward::Dependencies => states.extend(self.index.starts(seed)),
                     Toward::Dependents => self.subtree_arrivals(seed, &mut states),
                 }
             }
@@ -281,13 +274,10 @@ impl Universe {
 
     /// Pushes the arrival at `root` and at each node it holds onto `states`.
     fn subtree_arrivals(&self, root: Id, states: &mut Vec<usize>) {
-        let start = states.len();
-        states.push(State::arrived(root.0 as usize));
-        let mut at = start;
-        while at < states.len() {
-            let held = self.index.children(Id(State::id(states[at]) as u32));
-            states.extend(held.map(|child| State::arrived(child.0 as usize)));
-            at += 1;
+        let mut open: Vec<Id> = vec![root];
+        while let Some(id) = open.pop() {
+            states.extend(self.index.arrivals(id));
+            open.extend(self.index.children(id));
         }
     }
 }

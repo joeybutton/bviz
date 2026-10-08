@@ -12,7 +12,12 @@ use bazel_query_proto::blaze_query::{
 
 use crate::graph::{DepClass, Graph, Node};
 use crate::intern::Names;
+use crate::joint::Joint;
+use crate::query_lang::Universe;
+use crate::reach::Walking;
+use crate::sources::Sources;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 pub(crate) fn find<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a Node {
     graph
@@ -191,6 +196,24 @@ pub(crate) fn license(name: &str, types: &[&str], exceptions: &[&str]) -> Attrib
         }),
         ..Default::default()
     }
+}
+
+/// The universe of `joint`'s graph as `sources` leave it.
+pub(crate) fn through(joint: &Joint, sources: Sources) -> Universe {
+    let graph = sources.mask(&joint.graph, &joint.provenance);
+    let tools = sources.tools(&graph, &joint.facets);
+    let walking = Walking {
+        tools: tools.as_ref(),
+        ..Default::default()
+    };
+    Universe::walking(
+        &graph,
+        walking,
+        &joint.names,
+        &Arc::new(joint.facets.clone()),
+        &Arc::new(joint.attributes.clone()),
+        &joint.capabilities.reading(sources.inputs()),
+    )
 }
 
 /// The `name` attribute of the rule `label`, as its BUILD file writes it.

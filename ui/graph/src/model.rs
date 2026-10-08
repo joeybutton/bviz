@@ -126,6 +126,9 @@ pub(crate) struct Sourced {
     /// The edges a query walks that the base leaves out, of those
     /// [`Shared::undrawn`] holds the ones the sources keep.
     pub(crate) undrawn: Arc<[Edge]>,
+    /// The base's configured targets built in a tool configuration, where
+    /// the sources leave tool dependencies out.
+    tools: Option<FixedBitSet>,
     /// The base with its transitively-redundant edges removed.
     pub(crate) reduced: Arc<Graph>,
     /// The multi-child containers of the base.
@@ -139,9 +142,10 @@ impl Sourced {
     /// The document's graph whole, with every input read.
     pub(crate) fn whole(shared: &Shared) -> Self {
         Sourced {
-            sources: Sources::reading(shared.inputs),
+            sources: Sources::reading(&shared.capabilities),
             base: Arc::clone(&shared.base),
             undrawn: Arc::clone(&shared.undrawn),
+            tools: None,
             reduced: Arc::clone(&shared.reduced_base),
             containers: Arc::clone(&shared.containers),
             left_out: None,
@@ -154,6 +158,7 @@ impl Sourced {
         }
         let base = sources.mask(&shared.base, &shared.provenance);
         let undrawn = sources.mask_edges(&shared.undrawn, &base);
+        let tools = sources.tools(&base, &shared.facets);
         let span = id_span(&shared.base);
         let mut left_out = FixedBitSet::with_capacity(span);
         left_out.insert_range(..);
@@ -166,6 +171,7 @@ impl Sourced {
             sources,
             base: Arc::new(base),
             undrawn: undrawn.into(),
+            tools,
             reduced: Arc::new(reduced),
             containers: Arc::new(containers),
             left_out: Some(Arc::new(left_out)),
@@ -176,6 +182,7 @@ impl Sourced {
     pub(crate) fn walking(&self) -> Walking<'_> {
         Walking {
             undrawn: &self.undrawn,
+            tools: self.tools.as_ref(),
         }
     }
 
@@ -220,6 +227,7 @@ impl Sourcing {
                     let targets = Arc::clone(indexed.get());
                     let walking = Walking {
                         undrawn: &shared.undrawn,
+                        tools: None,
                     };
                     Universe::with_targets(
                         &shared.base,
@@ -324,7 +332,7 @@ impl Loaded {
             Arc::new(index)
         });
         let candidates = Prepared::new(&shared, Candidates::of);
-        let every = Sources::reading(shared.inputs);
+        let every = Sources::reading(&shared.capabilities);
         let whole = Sourcing::of(&shared, every, &targets, &candidates);
         Self {
             targets,

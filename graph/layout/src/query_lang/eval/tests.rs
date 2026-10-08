@@ -15,7 +15,7 @@ use crate::provenance::{Input, InputSet};
 use crate::sources::Sources;
 use crate::test_support::{
     explicit, generated, int, label_list, name_attribute, nodep_label_list, selector_list, source,
-    string_dict, string_list,
+    string_dict, string_list, through,
 };
 use bazel_query_proto::blaze_query::Attribute;
 
@@ -517,15 +517,8 @@ fn attr_reads_a_configured_target_as_cquery_resolved_it() {
 
 /// The universe of `joint`'s graph as `inputs` alone leave it.
 fn reading(joint: &crate::joint::Joint, inputs: &[Input]) -> Universe {
-    let sources = Sources::reading(InputSet::of(inputs.iter().copied()).unwrap());
-    let graph = sources.mask(&joint.graph, &joint.provenance);
-    Universe::new(
-        &graph,
-        &joint.names,
-        &Arc::new(joint.facets.clone()),
-        &Arc::new(joint.attributes.clone()),
-        &joint.capabilities.reading(sources.inputs()),
-    )
+    let inputs = InputSet::of(inputs.iter().copied()).unwrap();
+    through(joint, Sources::reading(&joint.capabilities.reading(inputs)))
 }
 
 /// A query and a cquery of `//a:bin`, which the query states `stamp` of and
@@ -2278,5 +2271,178 @@ fn a_chip_taking_out_a_file_class_leaves_its_files_undrawn() {
     assert_eq!(
         drawn.iter().filter(|&name| unlabeled_output(name)).count(),
         2
+    );
+}
+
+/// `//a:app` sets `deps` to `//a:lib` and is visible to `//a:pg`, and
+/// depends implicitly on `//a:cc`; `//a:lib` is visible to `//a:pg` by its
+/// package's default.
+fn declaring() -> crate::joint::Joint {
+    use crate::test_support::rule;
+    let app = stating_every_attribute(
+        "//a:app",
+        vec![
+            explicit(label_list("deps", &["//a:lib"])),
+            explicit(nodep_label_list("visibility", &["//a:pg"])),
+        ],
+    );
+    let lib = stating_every_attribute("//a:lib", vec![nodep_label_list("visibility", &["//a:pg"])]);
+    let targets = [
+        rule("//a:app", "cc_binary", &["//a:lib", "//a:cc"], app),
+        rule("//a:lib", "cc_library", &[], lib),
+        rule("//a:cc", "cc_toolchain", &[], Vec::new()),
+        crate::test_support::package_group("//a:pg", &[]),
+    ];
+    build_joint(None, None, Some(&targets), false)
+}
+
+/// Every walk follows the visibility declarations a rule states, and leaving
+/// implicit dependencies out drops from every walk the edges of those no
+/// attribute the BUILD file sets names, a package default visibility among
+/// them.
+#[test]
+fn walks_follow_the_dependencies_the_sources_keep() {
+    let joint = declaring();
+    let names = &joint.names;
+    let walk = |sources: Sources, expr: &str| {
+        configured_query(&through(&joint, sources), names, expr).unwrap()
+    };
+    let every = Sources::reading(&joint.capabilities);
+    let explicit = every
+        .with_deps(crate::sources::Deps::Implicit, false)
+        .unwrap();
+
+    assert_eq!(
+        walk(every, "deps(//a:app)"),
+        ["//a:app", "//a:cc", "//a:lib", "//a:pg"]
+    );
+    assert_eq!(
+        walk(explicit, "deps(//a:app)"),
+        ["//a:app", "//a:lib", "//a:pg"]
+    );
+    assert_eq!(walk(every, "deps(//a:lib)"), ["//a:lib", "//a:pg"]);
+    assert_eq!(walk(explicit, "deps(//a:lib)"), ["//a:lib"]);
+    assert_eq!(walk(every, "rdeps(//..., //a:cc)"), ["//a:app", "//a:cc"]);
+    assert_eq!(walk(explicit, "rdeps(//..., //a:cc)"), ["//a:cc"]);
+    assert_eq!(
+        walk(explicit, "somepath(//a:app, //a:cc)"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        walk(every, "allpaths(//a:app, //a:pg)"),
+        ["//a:app", "//a:lib", "//a:pg"]
+    );
+}
+
+/// `//g:lib` built for the target depends on `//g:hash` there and on the tool
+/// `//g:gen` built in the exec configuration, which depends on `//g:hash`
+/// built there too, as a library and a proc macro sharing a dependency do,
+/// and on its source `//g:gen.rs`.
+fn crossing_tools() -> crate::joint::Joint {
+    use crate::test_support::{configuration, configured, configured_inputs, rule, source};
+    use bazel_query_proto::analysis::CqueryResult;
+    let (target, exec) = (Some(1), Some(2));
+    let depending = |name: &str, config: u32, deps: &[(&str, Option<u32>)]| {
+        let mut target = rule(name, "rust_library", &[], Vec::new());
+        target.rule.as_mut().unwrap().configured_rule_input = configured_inputs(deps);
+        configured(target, config)
+    };
+    let cquery = [CqueryResult {
+        results: vec![
+            depending("//g:lib", 1, &[("//g:hash", target), ("//g:gen", exec)]),
+            depending("//g:gen", 2, &[("//g:hash", exec), ("//g:gen.rs", None)]),
+            depending("//g:hash", 1, &[]),
+            depending("//g:hash", 2, &[]),
+            configured(source("//g:gen.rs"), 0),
+        ],
+        configurations: vec![
+            configuration(1, "k8", "k8-fastbuild", false),
+            configuration(2, "exec", "k8-opt-exec", true),
+        ],
+    }];
+    let query = [
+        rule(
+            "//g:lib",
+            "rust_library",
+            &["//g:hash", "//g:gen"],
+            Vec::new(),
+        ),
+        rule(
+            "//g:gen",
+            "rust_proc_macro",
+            &["//g:hash", "//g:gen.rs"],
+            Vec::new(),
+        ),
+        rule("//g:hash", "rust_library", &[], Vec::new()),
+        source("//g:gen.rs"),
+    ];
+    build_joint(None, Some(&cquery), Some(&query), false)
+}
+
+/// Leaving tool dependencies out keeps a walk on the side of the tool
+/// boundary it starts on: from a target built for the target it reaches no
+/// configured target built for tools through the targets holding them, and
+/// from one built for tools no other.
+#[test]
+fn leaving_tool_dependencies_out_keeps_a_walk_on_its_side() {
+    let joint = crossing_tools();
+    let names = &joint.names;
+    let walk = |sources: Sources, expr: &str| {
+        configured_query(&through(&joint, sources), names, expr).unwrap()
+    };
+    let every = Sources::reading(&joint.capabilities);
+    let targets = every.with_deps(crate::sources::Deps::Tool, false).unwrap();
+
+    let deps = "deps(//g:lib, 1)";
+    assert_eq!(
+        walk(every, deps),
+        [
+            "//g:gen",
+            "//g:hash",
+            "//g:lib",
+            "ct://g:gen#exec",
+            "ct://g:hash#exec",
+            "ct://g:hash#k8",
+            "ct://g:lib#k8"
+        ]
+    );
+    assert_eq!(
+        walk(targets, deps),
+        ["//g:hash", "//g:lib", "ct://g:hash#k8", "ct://g:lib#k8"]
+    );
+    let rdeps = "rdeps(//..., config(//g:hash, exec))";
+    assert_eq!(
+        walk(every, rdeps),
+        ["ct://g:gen#exec", "ct://g:hash#exec", "ct://g:lib#k8"]
+    );
+    assert_eq!(
+        walk(targets, rdeps),
+        ["ct://g:gen#exec", "ct://g:hash#exec"]
+    );
+}
+
+/// Leaving tool dependencies out keeps a walk among tools from a source file,
+/// which is built in no configuration, even where it reaches it through a
+/// target; a walk outside tools reaches it.
+#[test]
+fn leaving_tool_dependencies_out_keeps_tools_from_source_files() {
+    let joint = crossing_tools();
+    let names = &joint.names;
+    let walk = |sources: Sources, expr: &str| {
+        configured_query(&through(&joint, sources), names, expr).unwrap()
+    };
+    let every = Sources::reading(&joint.capabilities);
+    let targets = every.with_deps(crate::sources::Deps::Tool, false).unwrap();
+
+    let tool = "deps(config(//g:gen, exec))";
+    assert!(walk(every, tool).contains(&"//g:gen.rs".to_owned()));
+    assert_eq!(walk(targets, tool), ["ct://g:gen#exec", "ct://g:hash#exec"]);
+    assert_eq!(
+        walk(targets, "deps(//g:gen)"),
+        ["//g:gen", "//g:hash", "ct://g:gen#exec", "ct://g:hash#exec"]
+    );
+    assert_eq!(
+        walk(targets, "rdeps(//g:*, //g:gen.rs)"),
+        ["//g:gen", "//g:gen.rs"]
     );
 }

@@ -11,7 +11,7 @@
 
 use crate::graph::{Edge, EdgeKind, Graph, id_span};
 use crate::intern::Id;
-use crate::reach::{Bounds, Index, State, Toward, Walking};
+use crate::reach::{Bounds, Index, Toward, Walking};
 
 /// The nodes and edges lying on some dependency path.
 #[derive(Clone)]
@@ -71,7 +71,7 @@ pub struct Between {
 pub fn dependents(graph: &Graph, walking: Walking<'_>, dependency: Id) -> Paths {
     let index = Index::new(graph, walking, &[dependency]);
     let seeds = index.subtree(dependency);
-    let reach = index.walk(&arrivals(&seeds), Toward::Dependents, Bounds::NONE);
+    let reach = index.walk(&arrivals(&index, &seeds), Toward::Dependents, Bounds::NONE);
     let edges: Vec<Edge> = (graph.edges.iter().chain(walking.undrawn))
         .filter(|e| walked(e) && reach.reached(e.from) && !within(&seeds, e))
         .cloned()
@@ -92,16 +92,12 @@ pub fn between(
 ) -> Option<Between> {
     let index = Index::new(graph, walking, &[dependency, dependent]);
     let from = index.subtree(dependency);
-    let routed = index.routed(&arrivals(&from), Toward::Dependents, Bounds::NONE);
+    let routed = index.routed(&arrivals(&index, &from), Toward::Dependents, Bounds::NONE);
     let forward = &routed.walk;
     let end = forward.nearest(dependent)?;
     let to = index.subtree(dependent);
-    let at_dependent = dependent.0 as usize;
-    let backward = index.walk(
-        &[State::arrived(at_dependent), State::lifted(at_dependent)],
-        Toward::Dependencies,
-        Bounds::NONE,
-    );
+    let starts: Vec<usize> = index.starts(dependent).collect();
+    let backward = index.walk(&starts, Toward::Dependencies, Bounds::NONE);
     let edges: Vec<Edge> = (graph.edges.iter().chain(walking.undrawn))
         .filter(|e| {
             walked(e)
@@ -122,15 +118,12 @@ pub fn between(
     })
 }
 
-/// The arrival at each node `members` marks.
-fn arrivals(members: &[bool]) -> Vec<usize> {
+/// The arrivals a walk starts from at each node `members` marks.
+fn arrivals(index: &Index, members: &[bool]) -> Vec<usize> {
     let count = members.iter().filter(|&&member| member).count();
     let mut states: Vec<usize> = Vec::with_capacity(count);
-    states.extend(
-        (0..members.len())
-            .filter(|&id| members[id])
-            .map(State::arrived),
-    );
+    let marked = (0..members.len()).filter(|&id| members[id]);
+    states.extend(marked.flat_map(|id| index.arrivals(Id(id as u32))));
     states
 }
 

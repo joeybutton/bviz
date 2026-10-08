@@ -340,7 +340,7 @@ mod tests {
         let every = Readable::of(&joint.graph, &joint.capabilities);
         assert_eq!(every.check(Function::Mnemonic), Ok(()));
 
-        let query = Sources::reading(Input::Query.into());
+        let query = Sources::reading(&joint.capabilities.reading(Input::Query.into()));
         let capabilities = joint.capabilities.reading(query.inputs());
         let narrowed = every.reading(&capabilities);
         assert_eq!(

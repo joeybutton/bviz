@@ -74,6 +74,18 @@ pub struct Walking<'a> {
     /// the graph leaves out, positioned after the graph's own in the walk's
     /// edge list.
     pub undrawn: &'a [Edge],
+    /// The configured targets built in a tool configuration, by id, given
+    /// where tool dependencies are left out. A walk then keeps to one side of
+    /// the boundary between tool configurations and the rest, as
+    /// `PostAnalysisQueryEnvironment.getAllowedDeps` keeps a tool's walk to
+    /// tools and any other's to the rest: it takes the side of each configured
+    /// target it arrives at, enters a node built in no configuration, a source
+    /// file or a package group, only outside tools, keeps its side at any
+    /// other node, and a target lets the walk down only into its configured
+    /// targets on the walk's side. A walk from a node of none starts on each
+    /// side its configured targets stand on, and outside tool configurations
+    /// where it holds none.
+    pub tools: Option<&'a FixedBitSet>,
 }
 
 /// Which way along its edges a walk runs.
@@ -131,6 +143,8 @@ pub(crate) struct Index {
     outgoing: CompressedSparseRows,
     /// The edges landing on each node, likewise.
     incoming: CompressedSparseRows,
+    /// As [`Walking::tools`] gives them.
+    tools: Option<FixedBitSet>,
 }
 
 impl Index {
@@ -179,7 +193,93 @@ impl Index {
             children,
             outgoing,
             incoming,
+            tools: walking.tools.cloned(),
         }
+    }
+
+    /// How many sides of the tool boundary a walk tells apart.
+    fn sides(&self) -> usize {
+        match self.tools {
+            Some(_) => 2,
+            None => 1,
+        }
+    }
+
+    /// How many states a walk over the index has.
+    fn states(&self) -> usize {
+        2 * self.sides() * self.ids()
+    }
+
+    /// The state of the node `id` on the `side` of the tool boundary, lifted
+    /// through where `lifted`. A node's states lie next to one another.
+    fn state(&self, id: usize, side: usize, lifted: bool) -> usize {
+        2 * (id * self.sides() + side) + lifted as usize
+    }
+
+    /// The node a walk's `state` stands at.
+    pub(crate) fn node(&self, state: usize) -> Id {
+        Id((state / (2 * self.sides())) as u32)
+    }
+
+    /// The side of the tool boundary a walk's `state` keeps to.
+    fn side(&self, state: usize) -> usize {
+        (state / 2) % self.sides()
+    }
+
+    /// The side of the tool boundary the configured target `id` stands on,
+    /// `None` for any other node.
+    fn own_side(&self, id: usize) -> Option<usize> {
+        match (&self.tools, self.kind[id]) {
+            (Some(tools), Some(Kind::ConfiguredTarget)) => Some(tools.contains(id) as usize),
+            _ => None,
+        }
+    }
+
+    /// The side of the tool boundary a walk on `side` stands on at `id`,
+    /// `None` where it does not enter `id`.
+    fn side_at(&self, id: usize, side: usize) -> Option<usize> {
+        let side = self.own_side(id).unwrap_or(side);
+        let unconfigured = matches!(self.kind[id], Some(Kind::Source | Kind::TargetGroup));
+        (side != TOOLS || !unconfigured).then_some(side)
+    }
+
+    /// Whether a walk on `side` descends from a target into `child`.
+    fn enters(&self, child: usize, side: usize) -> bool {
+        self.side_at(child, side) == Some(side)
+    }
+
+    /// The sides of the tool boundary a walk from `id` starts on.
+    fn start_sides(&self, id: Id) -> impl Iterator<Item = usize> + '_ {
+        let id = id.0 as usize;
+        let mut sides = [false; 2];
+        match self.kind[id] {
+            Some(Kind::Target) if self.tools.is_some() => {
+                for &child in self.children.of(id) {
+                    if let Some(side) = self.own_side(child as usize) {
+                        sides[side] = true;
+                    }
+                }
+            }
+            _ => sides[self.own_side(id).unwrap_or(0)] = true,
+        }
+        if sides == [false; 2] {
+            sides[0] = true;
+        }
+        (0..self.sides()).filter(move |&side| sides[side])
+    }
+
+    /// The arrivals at `id` a walk toward dependents starts from.
+    pub(crate) fn arrivals(&self, id: Id) -> impl Iterator<Item = usize> + '_ {
+        let at = id.0 as usize;
+        (self.start_sides(id)).map(move |side| self.state(at, side, false))
+    }
+
+    /// The states of `id`, arrived at and lifted through, a walk toward
+    /// dependencies starts from.
+    pub(crate) fn starts(&self, id: Id) -> impl Iterator<Item = usize> + '_ {
+        let at = id.0 as usize;
+        (self.start_sides(id))
+            .flat_map(move |side| [false, true].map(|lifted| self.state(at, side, lifted)))
     }
 
     /// One past the largest id the index spans.
@@ -257,7 +357,7 @@ impl Index {
 
     /// The walk [`Self::walk`] makes, recording how it reached each state.
     pub(crate) fn routed(&self, seeds: &[usize], toward: Toward, bounds: Bounds<'_>) -> Routed {
-        let mut step = vec![Step::Seed; 2 * self.ids()];
+        let mut step = vec![Step::Seed; self.states()];
         let walk = self.search(seeds, toward, bounds, Some(&mut step));
         Routed { walk, step }
     }
@@ -270,11 +370,12 @@ impl Index {
         mut steps: Option<&mut [Step]>,
     ) -> Walk {
         let mut walk = Walk {
-            fewest: vec![UNREACHED; 2 * self.ids()],
+            fewest: vec![UNREACHED; self.states()],
+            per_node: 2 * self.sides(),
         };
         let above = |id: usize| self.above(Id(id as u32), bounds.ceiling);
         let kept = |state: usize| {
-            let id = State::id(state);
+            let id = self.node(state).0 as usize;
             above(id) || bounds.within.is_none_or(|within| within.contains(id))
         };
         let mut open: VecDeque<usize> = VecDeque::with_capacity(self.ids());
@@ -314,40 +415,52 @@ impl Index {
 
     /// Every move a walk `toward` makes from the state `at`, into `moves`.
     fn moves(&self, at: usize, toward: Toward, moves: &mut Vec<Move>) {
-        let id = State::id(at);
-        let arrival = State::is_arrival(at);
-        let held = || self.children.of(id).iter().map(|&child| child as usize);
+        let id = self.node(at).0 as usize;
+        let side = self.side(at);
+        let arrival = at.is_multiple_of(2);
+        let onto = |to: usize, lifted: bool| Some(self.state(to, self.side_at(to, side)?, lifted));
+        let held = || {
+            (self.children.of(id).iter())
+                .map(|&child| child as usize)
+                .filter(move |&child| self.enters(child, side))
+        };
         let is_target = |id: usize| self.kind[id] == Some(Kind::Target);
         match toward {
             Toward::Dependents => {
                 for &edge in self.outgoing.of(id) {
                     let to = self.ends[edge as usize][1] as usize;
-                    moves.push(Move::over(State::arrived(to), edge, to));
+                    moves.extend(onto(to, false).map(|state| Move::over(state, edge, to)));
                 }
                 if let Some(parent) = self.parent[id] {
-                    moves.push(Move::within(State::lifted(parent.0 as usize), id));
+                    let lifted = onto(parent.0 as usize, true);
+                    moves.extend(lifted.map(|state| Move::within(state, id)));
                 }
                 if arrival && is_target(id) {
-                    moves.extend(held().map(|child| Move::within(State::arrived(child), id)));
+                    let entered = held().filter_map(|child| onto(child, false));
+                    moves.extend(entered.map(|state| Move::within(state, id)));
                 }
             }
             Toward::Dependencies => {
                 if arrival {
                     for &edge in self.incoming.of(id) {
                         let from = self.ends[edge as usize][0] as usize;
-                        moves.push(Move::over(State::arrived(from), edge, id));
-                        moves.push(Move::over(State::lifted(from), edge, id));
+                        let states = [false, true]
+                            .into_iter()
+                            .filter_map(|lifted| onto(from, lifted));
+                        moves.extend(states.map(|state| Move::over(state, edge, id)));
                     }
                 } else {
                     for child in held() {
-                        moves.push(Move::within(State::arrived(child), child));
-                        moves.push(Move::within(State::lifted(child), child));
+                        let states = [false, true]
+                            .into_iter()
+                            .filter_map(|lifted| onto(child, lifted));
+                        moves.extend(states.map(|state| Move::within(state, child)));
                     }
                 }
                 match self.parent[id] {
                     Some(parent) if arrival && is_target(parent.0 as usize) => {
                         let parent = parent.0 as usize;
-                        moves.push(Move::within(State::arrived(parent), parent));
+                        moves.extend(onto(parent, false).map(|state| Move::within(state, parent)));
                     }
                     _ => {}
                 }
@@ -386,30 +499,11 @@ impl Move {
     }
 }
 
+/// The side of the tool boundary a walk among tools keeps to.
+const TOOLS: usize = 1;
+
 /// The fewest edges of a state no walk has reached.
 const UNREACHED: u32 = u32::MAX;
-
-/// A walk's position: a node, arrived at or only lifted through. Each node has
-/// two, the arrival at `2 * id` and the lift beside it.
-pub(crate) struct State;
-
-impl State {
-    pub(crate) fn arrived(id: usize) -> usize {
-        2 * id
-    }
-
-    pub(crate) fn lifted(id: usize) -> usize {
-        2 * id + 1
-    }
-
-    pub(crate) fn id(state: usize) -> usize {
-        state / 2
-    }
-
-    fn is_arrival(state: usize) -> bool {
-        state.is_multiple_of(2)
-    }
-}
 
 /// How a walk last reached a state.
 #[derive(Clone, Copy)]
@@ -422,9 +516,13 @@ enum Step {
     Edge(usize, u32),
 }
 
-/// What one walk reached, by state.
+/// What one walk reached, by state: a node arrived at or only lifted through,
+/// on one side of the tool boundary.
 pub(crate) struct Walk {
     fewest: Vec<u32>,
+    /// How many states each node has, which lie next to one another, the
+    /// arrivals at even positions.
+    per_node: usize,
 }
 
 /// A walk with how it reached each state.
@@ -435,28 +533,34 @@ pub(crate) struct Routed {
 }
 
 impl Walk {
+    /// The states of `id` and the fewest edges the walk took to each.
+    fn of(&self, id: Id) -> impl Iterator<Item = (usize, u32)> + '_ {
+        let first = id.0 as usize * self.per_node;
+        (first..first + self.per_node).map(|state| (state, self.fewest[state]))
+    }
+
     pub(crate) fn reached(&self, id: Id) -> bool {
-        let id = id.0 as usize;
-        self.fewest[State::arrived(id)] != UNREACHED || self.fewest[State::lifted(id)] != UNREACHED
+        self.of(id).any(|(_, edges)| edges != UNREACHED)
     }
 
     pub(crate) fn arrived(&self, id: Id) -> bool {
-        self.fewest[State::arrived(id.0 as usize)] != UNREACHED
+        self.nearest_arrival(id).is_some()
     }
 
-    /// The state of `id` reached in fewest edges, `None` where neither is.
+    /// The state of `id` reached in fewest edges, `None` where none is.
     pub(crate) fn nearest(&self, id: Id) -> Option<usize> {
-        let id = id.0 as usize;
-        [State::arrived(id), State::lifted(id)]
-            .into_iter()
-            .filter(|&state| self.fewest[state] != UNREACHED)
-            .min_by_key(|&state| self.fewest[state])
+        let reached = self.of(id).filter(|&(_, edges)| edges != UNREACHED);
+        reached
+            .min_by_key(|&(_, edges)| edges)
+            .map(|(state, _)| state)
     }
 
-    /// The fewest edges the walk took to `state`, `None` where it never
-    /// reached it.
-    pub(crate) fn fewest(&self, state: usize) -> Option<u32> {
-        Some(self.fewest[state]).filter(|&edges| edges != UNREACHED)
+    /// The arrival at `id` reached in fewest edges, and how many it took,
+    /// `None` where the walk arrived at none.
+    pub(crate) fn nearest_arrival(&self, id: Id) -> Option<(usize, u32)> {
+        let arrivals = self.of(id).filter(|&(state, _)| state.is_multiple_of(2));
+        let reached = arrivals.filter(|&(_, edges)| edges != UNREACHED);
+        reached.min_by_key(|&(_, edges)| edges)
     }
 }
 
@@ -572,8 +676,12 @@ mod tests {
         ids
     }
 
-    fn both(id: u32) -> [usize; 2] {
-        [State::arrived(id as usize), State::lifted(id as usize)]
+    fn both(index: &Index, id: u32) -> Vec<usize> {
+        index.starts(Id(id)).collect()
+    }
+
+    fn arrival(index: &Index, id: u32) -> Vec<usize> {
+        index.arrivals(Id(id)).collect()
     }
 
     fn ceiling(ceiling: Level) -> Bounds<'static> {
@@ -591,7 +699,7 @@ mod tests {
             depth,
             ..Bounds::NONE
         };
-        let seeds = [State::arrived(0)];
+        let seeds = arrival(&index, 0);
         let walk = |depth| index.walk(&seeds, Toward::Dependents, bounded(depth));
         assert_eq!(reached(&graph, &walk(Some(0))), [0]);
         assert_eq!(reached(&graph, &walk(Some(2))), [0, 1, 2]);
@@ -606,7 +714,7 @@ mod tests {
             depth: Some(1),
             ..Bounds::NONE
         };
-        let walk = index.walk(&[State::arrived(1)], Toward::Dependents, bounds);
+        let walk = index.walk(&arrival(&index, 1), Toward::Dependents, bounds);
         assert_eq!(reached(&graph, &walk), [0, 1, 2, 11, 12]);
     }
 
@@ -620,9 +728,9 @@ mod tests {
             within: Some(&within),
             ..Bounds::NONE
         };
-        let walk = index.walk(&[State::arrived(0)], Toward::Dependents, bounds);
+        let walk = index.walk(&arrival(&index, 0), Toward::Dependents, bounds);
         assert_eq!(reached(&graph, &walk), [0, 1]);
-        let walk = index.walk(&[State::arrived(2)], Toward::Dependents, bounds);
+        let walk = index.walk(&arrival(&index, 2), Toward::Dependents, bounds);
         assert!(reached(&graph, &walk).is_empty(), "a seed outside");
     }
 
@@ -631,22 +739,26 @@ mod tests {
         let graph = levels();
         let index = Index::new(&graph, Walking::default(), &[]);
         let configured = Level::ConfiguredTarget;
-        let walk = index.walk(&both(13), Toward::Dependencies, ceiling(configured));
+        let walk = index.walk(&both(&index, 13), Toward::Dependencies, ceiling(configured));
         assert_eq!(covered(&graph, &walk, configured), [11, 12, 13, 14, 22, 23]);
-        let walk = index.walk(&both(13), Toward::Dependencies, ceiling(Level::Target));
+        let walk = index.walk(
+            &both(&index, 13),
+            Toward::Dependencies,
+            ceiling(Level::Target),
+        );
         assert_eq!(
             covered(&graph, &walk, Level::Target),
             [1, 2, 3, 4, 11, 12, 13, 14, 22, 23]
         );
 
         let walk = index.walk(
-            &[State::arrived(11)],
+            &arrival(&index, 11),
             Toward::Dependents,
             ceiling(configured),
         );
         assert_eq!(covered(&graph, &walk, configured), [11, 12, 13]);
         let walk = index.walk(
-            &[State::arrived(14)],
+            &arrival(&index, 14),
             Toward::Dependents,
             ceiling(configured),
         );
@@ -662,9 +774,9 @@ mod tests {
         let graph = levels();
         let index = Index::new(&graph, Walking::default(), &[]);
         let action = Level::Action;
-        let walk = index.walk(&[State::arrived(22)], Toward::Dependents, ceiling(action));
+        let walk = index.walk(&arrival(&index, 22), Toward::Dependents, ceiling(action));
         assert_eq!(covered(&graph, &walk, action), [22, 23]);
-        let walk = index.walk(&both(23), Toward::Dependencies, ceiling(action));
+        let walk = index.walk(&both(&index, 23), Toward::Dependencies, ceiling(action));
         assert_eq!(covered(&graph, &walk, action), [22, 23]);
     }
 
