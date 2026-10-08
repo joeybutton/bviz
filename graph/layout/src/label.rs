@@ -536,7 +536,12 @@ mod tests {
         let mut names = Names::default();
         let mut facets = FacetsBuilder::default();
         let hierarchy = PackageHierarchy::build(&set, &mut graph, &mut names, &mut facets);
-        (graph, hierarchy, names, facets.seal().0)
+        (
+            graph,
+            hierarchy,
+            names,
+            facets.seal(crate::provenance::InputSet::ALL).0,
+        )
     }
 
     fn node<'a>(graph: &'a Graph, names: &Names, id: &str) -> &'a crate::graph::Node {

@@ -1107,7 +1107,12 @@ fn levels() -> (Universe, Names) {
             Some(target),
         ));
         graph.add_node(Node::new(action, name, Kind::Action, Some(configured)));
-        builder.describe_label(target, Some(package), &format!("//a:{name}"));
+        builder.describe_label(
+            crate::provenance::Input::Query,
+            target,
+            Some(package),
+            &format!("//a:{name}"),
+        );
         builder.facets().inherit(configured, target);
         builder.facets().inherit(action, configured);
         ids.push([target, configured, action]);
@@ -1118,7 +1123,7 @@ fn levels() -> (Universe, Names) {
     {
         graph.add_edge(ids[0][level], ids[1][level], kind);
     }
-    let (facets, capabilities) = builder.seal();
+    let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
     (
         Universe::new(
             &graph,
@@ -1255,7 +1260,12 @@ fn joint(rng: &mut fastrand::Rng) -> (Universe, Names) {
                 kind,
                 Some(package),
             );
-            builder.describe_label(target, Some(package), &label);
+            builder.describe_label(
+                crate::provenance::Input::Query,
+                target,
+                Some(package),
+                &label,
+            );
             labeled.push(target);
             if kind == Kind::Source {
                 sources.push(target);
@@ -1328,7 +1338,12 @@ fn joint(rng: &mut fastrand::Rng) -> (Universe, Names) {
                     Kind::Source,
                     Some(group),
                 );
-                builder.describe_label(source, Some(package), &label);
+                builder.describe_label(
+                    crate::provenance::Input::Query,
+                    source,
+                    Some(package),
+                    &label,
+                );
                 labeled.push(source);
                 sources.push(source);
                 leaves.push(source);
@@ -1368,7 +1383,7 @@ fn joint(rng: &mut fastrand::Rng) -> (Universe, Names) {
             _ => {}
         }
     }
-    let (facets, capabilities) = builder.seal();
+    let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
     (
         Universe::new(
             &graph,
@@ -1462,9 +1477,14 @@ fn deps_reach_the_target_whose_action_writes_a_file_read() {
     graph.add_edge(write, file, EdgeKind::Aquery);
     graph.add_edge(file, read, EdgeKind::Aquery);
     for (target, label) in [(r, "//a:r"), (app, "//a:app")] {
-        builder.describe_label(target, Some(package), label);
+        builder.describe_label(
+            crate::provenance::Input::Query,
+            target,
+            Some(package),
+            label,
+        );
     }
-    let (facets, capabilities) = builder.seal();
+    let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
     let universe = Universe::new(
         &graph,
         &names,
@@ -1601,7 +1621,12 @@ fn held() -> (Universe, Names) {
         (source, "//a:in.c"),
         (output, "//a:gen.out"),
     ] {
-        builder.describe_label(target, Some(package), label);
+        builder.describe_label(
+            crate::provenance::Input::Query,
+            target,
+            Some(package),
+            label,
+        );
     }
     for (child, holder) in [
         (rule_ct, rule),
@@ -1627,7 +1652,7 @@ fn held() -> (Universe, Names) {
     ] {
         graph.add_edge(from, to, kind);
     }
-    let (facets, capabilities) = builder.seal();
+    let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
     (
         Universe::new(
             &graph,
@@ -1903,7 +1928,12 @@ fn tools(stated: bool) -> (Universe, Names) {
         ("ct:target", "act:target", "out:target", false),
         ("ct:exec", "act:exec", "out:exec", true),
     ];
-    builder.describe_label(target, Some(package), "//t:gen");
+    builder.describe_label(
+        crate::provenance::Input::Query,
+        target,
+        Some(package),
+        "//t:gen",
+    );
     let mut writes = Vec::with_capacity(held.len());
     for (configured, action, output, tool) in held {
         let configured = node(configured, Kind::ConfiguredTarget, target);
@@ -1915,7 +1945,11 @@ fn tools(stated: bool) -> (Universe, Names) {
         let config = builder.facets().intern_config(checksum, None, is_tool);
         let config = Some(config).filter(|_| stated || !tool);
         builder.facets().set_config(configured, config);
-        builder.observe(Axis::Configuration, config.is_some());
+        builder.observe(
+            crate::provenance::Input::Cquery,
+            Axis::Configuration,
+            config.is_some(),
+        );
         for child in [action, output] {
             builder.facets().inherit(child, configured);
         }
@@ -1924,7 +1958,7 @@ fn tools(stated: bool) -> (Universe, Names) {
     for (action, output) in writes {
         graph.add_edge(action, output, EdgeKind::Aquery);
     }
-    let (facets, capabilities) = builder.seal();
+    let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
     (
         Universe::new(
             &graph,

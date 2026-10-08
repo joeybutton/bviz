@@ -17,6 +17,7 @@ use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
+use crate::provenance::Input;
 
 #[cfg(test)]
 fn build(targets: &[Target]) -> (Graph, Names, Facets) {
@@ -38,7 +39,7 @@ fn build_in(targets: &[Target], repos: &RepoMapping) -> (Graph, Names, Facets) {
         &mut facets,
         &mut attributes,
     );
-    (graph, names, facets.seal().0)
+    (graph, names, facets.seal(Input::Query.into()).0)
 }
 
 /// Every label this query names.
@@ -105,10 +106,10 @@ pub(crate) fn build_with_packages(
             kind,
             parent,
         ));
-        describe_target(facets, target, node_id, parent, &label);
+        describe_target(facets, Input::Query, target, node_id, parent, &label);
         if let Some(rule) = &target.rule {
             let complete = attributes.describe(node_id, rule, repos);
-            facets.observe(Axis::Attributes, complete);
+            facets.observe(Input::Query, Axis::Attributes, complete);
         }
         node_by_label.insert(label.into_owned(), node_id);
     }
@@ -138,26 +139,27 @@ pub(crate) fn build_with_packages(
     graph
 }
 
-/// Records what `target` states about the node it became: the `canonical` label
-/// placing it in `package`, and, where the target is a rule, how it was
-/// declared.
+/// Records what `target`, as `input` describes it, states about the node it
+/// became: the `canonical` label placing it in `package`, and, where the
+/// target is a rule, how it was declared.
 ///
 /// A rule's attributes reach the proto only under `--proto:output_rule_attrs`,
 /// so a rule stating none is as ordinary as one stating all of them.
 pub(crate) fn describe_target(
     facets: &mut FacetsBuilder,
+    input: Input,
     target: &Target,
     node: Id,
     package: Option<Id>,
     canonical: &str,
 ) {
-    facets.describe_label(node, package, canonical);
+    facets.describe_label(input, node, package, canonical);
     let Some(rule) = target.rule.as_ref() else {
         return;
     };
     let declared = !rule.rule_class.is_empty();
-    facets.observe(Axis::RuleClass, declared);
-    facets.observe(Axis::RuleCategory, declared);
+    facets.observe(input, Axis::RuleClass, declared);
+    facets.observe(input, Axis::RuleCategory, declared);
     if declared {
         let rule_class = facets.facets().intern_rule_class(&rule.rule_class);
         facets.facets().set_rule_class(node, Some(rule_class));
@@ -177,8 +179,8 @@ pub(crate) fn describe_target(
             _ => {}
         }
     }
-    facets.observe(Axis::Tags, tagged);
-    facets.observe(Axis::Testonly, testonly);
+    facets.observe(input, Axis::Tags, tagged);
+    facets.observe(input, Axis::Testonly, testonly);
 }
 
 /// The value of an attribute that says yes or no, which the proto states as a
@@ -546,7 +548,7 @@ mod tests {
         use std::sync::Arc;
 
         let facets = Arc::new(facets.clone());
-        let capabilities = CapabilitiesBuilder::default().seal();
+        let capabilities = CapabilitiesBuilder::default().seal(Input::Query.into());
         let universe = Universe::new(graph, names, &facets, &Arc::default(), &capabilities);
         let mut stack = Stack::default();
         let chip = stack.push(text);

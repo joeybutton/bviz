@@ -1047,7 +1047,8 @@ mod tests {
                 attributes: Arc::default(),
                 labels,
                 containers,
-                capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
+                capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default()
+                    .seal(bviz_graph_layout::InputSet::ALL),
                 provenance: Arc::default(),
                 inputs: Input::Query.into(),
                 config_names: Arc::new(ConfigNames::of(&facets)),

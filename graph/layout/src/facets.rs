@@ -17,6 +17,7 @@ use crate::capability::{Axis, Capabilities, CapabilitiesBuilder};
 use crate::exec_path::{ExecPath, ExecPaths, ExecPathsBuilder, LeftOutInputs};
 use crate::intern::Id;
 use crate::label;
+use crate::provenance::{Input, InputSet};
 use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
@@ -965,16 +966,17 @@ impl FacetsBuilder {
         &mut self.facets
     }
 
-    /// Records what the label of the node `node` names outright: itself as a
-    /// target, the `package` box it sits in, and its repository. `canonical` is
-    /// the label in the form node ids are keyed by.
-    pub fn describe_label(&mut self, node: Id, package: Option<Id>, canonical: &str) {
+    /// Records what the label of the node `node`, as `input` describes it,
+    /// names outright: itself as a target, the `package` box it sits in, and
+    /// its repository. `canonical` is the label in the form node ids are keyed
+    /// by.
+    pub fn describe_label(&mut self, input: Input, node: Id, package: Option<Id>, canonical: &str) {
         self.facets.set_label(node, node);
-        self.observe(Axis::Label, true);
+        self.observe(input, Axis::Label, true);
         if let Some(package) = package {
             self.facets.set_package(node, package);
         }
-        self.observe(Axis::Package, package.is_some());
+        self.observe(input, Axis::Package, package.is_some());
         if let Some(name) = label::identified_repo(canonical) {
             let repo = match name {
                 RepoName::Canonical(canonical_repo) => self.facets.intern_repo(canonical_repo),
@@ -982,7 +984,7 @@ impl FacetsBuilder {
             };
             self.facets.set_repo(node, Some(repo));
         }
-        self.observe(Axis::Repo, label::is_canonical(canonical));
+        self.observe(input, Axis::Repo, label::is_canonical(canonical));
     }
 
     pub fn set_tags<'a>(
@@ -1014,16 +1016,18 @@ impl FacetsBuilder {
         self.facets.left_out_inputs = inputs;
     }
 
-    pub fn observe(&mut self, axis: Axis, carried: bool) {
-        self.capabilities.observe(axis, carried);
+    pub fn observe(&mut self, input: Input, axis: Axis, carried: bool) {
+        self.capabilities.observe(input, axis, carried);
     }
 
-    pub fn seal(mut self) -> (Facets, Capabilities) {
+    /// The facets, and how far each axis reaches across `loaded`, the inputs
+    /// the graph was read from.
+    pub fn seal(mut self, loaded: InputSet) -> (Facets, Capabilities) {
         self.facets.set_tags(self.tags.values.seal());
         self.facets.set_aspects(self.aspects.values.seal());
         self.facets.exec_paths = self.exec_paths.seal();
         self.facets.strings.shrink_to_fit();
-        (self.facets, self.capabilities.seal())
+        (self.facets, self.capabilities.seal(loaded))
     }
 }
 
@@ -1228,7 +1232,7 @@ mod tests {
         builder.set_tags(Id(1), ["manual", "flaky"]);
         builder.set_tags(Id(1), ["local"]);
 
-        let (facets, _) = builder.seal();
+        let (facets, _) = builder.seal(InputSet::ALL);
         let tags: Vec<&str> = facets
             .tags()
             .values(Id(1))
@@ -1247,7 +1251,7 @@ mod tests {
         builder.set_tags(Id(200), ["local"]);
         builder.set_tags(Id(200), ["flaky"]);
 
-        let (facets, _) = builder.seal();
+        let (facets, _) = builder.seal(InputSet::ALL);
         let tags = |id| {
             facets
                 .tags()
@@ -1666,7 +1670,7 @@ mod tests {
         builder.set_exec_path(Id(2), "b/two");
         builder.set_exec_path(Id(1), "a/one");
         builder.set_exec_path(Id(2), "b/again");
-        let (mut facets, _) = builder.seal();
+        let (mut facets, _) = builder.seal(InputSet::ALL);
         let path = |facets: &Facets, id| facets.exec_path(Id(id)).map(|path| path.to_string());
         assert_eq!(path(&facets, 1).as_deref(), Some("a/one"));
         assert_eq!(path(&facets, 2).as_deref(), Some("b/two"));

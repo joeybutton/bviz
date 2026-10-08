@@ -125,7 +125,7 @@ mod tests {
             ] {
                 let id = names.intern(&format!("target:{canonical}"));
                 graph.add_node(Node::new(id, reads, Kind::Target, None));
-                builder.describe_label(id, None, canonical);
+                builder.describe_label(crate::provenance::Input::Query, id, None, canonical);
             }
             let owner = names
                 .get("target://app:main")
@@ -134,7 +134,7 @@ mod tests {
             graph.add_node(Node::new(action, "CppCompile", Kind::Action, Some(owner)));
             builder.facets().inherit(action, owner);
 
-            let (facets, _) = builder.seal();
+            let (facets, _) = builder.seal(crate::provenance::InputSet::ALL);
             let group = names.intern("group:target://app:main");
             graph.add_node(Node::new(group, "2 sources", Kind::Source, None));
             Fixture {

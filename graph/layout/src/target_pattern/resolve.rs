@@ -372,10 +372,12 @@ mod tests {
                 Kind::Target
             };
             self.graph.add_node(Node::new(id, name, kind, None));
-            self.builder.describe_label(id, None, label);
+            self.builder
+                .describe_label(crate::provenance::Input::Query, id, None, label);
             if kind == Kind::Target {
                 self.builder.set_tags(id, tags.iter().copied());
-                self.builder.observe(Axis::Tags, true);
+                self.builder
+                    .observe(crate::provenance::Input::Query, Axis::Tags, true);
             }
             self
         }
@@ -389,7 +391,7 @@ mod tests {
 
         fn index(&mut self) -> (TargetIndex, Names) {
             let builder = std::mem::take(&mut self.builder);
-            let (facets, capabilities) = builder.seal();
+            let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
             let labels = Arc::new(LabelIndex::of(&self.graph, &self.names, &facets));
             let index = TargetIndex::of(labels, &self.graph, &facets, &capabilities);
             (index, std::mem::take(&mut self.names))
@@ -712,8 +714,8 @@ mod tests {
         fixture.targets(&["//a:a"]);
         assert_eq!(fixture.index().0.tags(), Support::Available);
         let mut builder = FacetsBuilder::default();
-        builder.observe(Axis::Tags, false);
-        let (facets, capabilities) = builder.seal();
+        builder.observe(crate::provenance::Input::Query, Axis::Tags, false);
+        let (facets, capabilities) = builder.seal(crate::provenance::InputSet::ALL);
         let (graph, names) = (Graph::new(), Names::default());
         let labels = Arc::new(LabelIndex::of(&graph, &names, &facets));
         let index = TargetIndex::of(labels, &graph, &facets, &capabilities);

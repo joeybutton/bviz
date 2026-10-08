@@ -38,6 +38,10 @@ pub struct Joint {
 }
 
 /// Merges the inputs given into one joint graph.
+///
+/// # Panics
+///
+/// Where no input is given, since a joint graph is read from at least one.
 pub fn build_joint(
     aquery: Option<&[ActionGraphContainer]>,
     cquery: Option<&[CqueryResult]>,
@@ -62,7 +66,9 @@ pub fn build_joint(
         &mut facets,
         &mut attributes,
     );
-    let (facets, capabilities) = facets.seal();
+    let loaded = InputSet::of(graphs.iter().map(|&(input, _)| input))
+        .expect("a joint graph is read from at least one input");
+    let (facets, capabilities) = facets.seal(loaded);
     let (mut graph, names, facets, attributes, provenance) = canonicalize(
         merge(graphs, names.len()),
         &names,
@@ -750,6 +756,20 @@ mod tests {
             .expect("the action writing the output");
         assert_eq!(graph.nodes[action.0 as usize].kind, Kind::Action);
         assert_eq!(resolver.action("bazel-out/bin/pkg/other.out"), None);
+    }
+
+    #[test]
+    fn the_capabilities_count_the_inputs_the_graph_was_read_from() {
+        let joint = build_joint(
+            Some(&[aquery_generating("//pkg:gen", "ck1", "pkg/gen.out")]),
+            None,
+            Some(&[rule("//pkg:gen", &[])]),
+            false,
+        );
+        assert_eq!(
+            joint.capabilities.inputs(),
+            InputSet::of([Input::Query, Input::Aquery]).unwrap()
+        );
     }
 
     #[test]

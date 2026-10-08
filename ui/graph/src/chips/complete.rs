@@ -904,7 +904,8 @@ mod tests {
             nodes: nodes.collect(),
             edges: Vec::new(),
         };
-        let capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default().seal();
+        let capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default()
+            .seal(bviz_graph_layout::InputSet::ALL);
         Readable::of(&graph, &capabilities)
     }
 

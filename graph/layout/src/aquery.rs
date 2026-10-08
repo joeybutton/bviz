@@ -39,6 +39,7 @@ use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping};
+use crate::provenance::Input;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ArtifactId(u32);
@@ -69,7 +70,7 @@ fn build_promoting(
         &mut names,
         &mut facets,
     );
-    (graph, names, facets.seal().0)
+    (graph, names, facets.seal(Input::Aquery.into()).0)
 }
 
 /// Every target label this aquery names.
@@ -571,18 +572,18 @@ impl Boxes<'_> {
     /// configured-target box `owner` it runs under states.
     fn describe_action(&mut self, node: Id, owner: Id, action: &Action) {
         self.facets
-            .observe(Axis::Mnemonic, !action.mnemonic.is_empty());
+            .observe(Input::Aquery, Axis::Mnemonic, !action.mnemonic.is_empty());
         if !action.mnemonic.is_empty() {
             let mnemonic = self.facets.facets().intern_mnemonic(&action.mnemonic);
             self.facets.facets().set_mnemonic(node, Some(mnemonic));
         }
         // An action lists the aspects that produced it whether or not any did,
         // so every action carries the field the aspect axis reads.
-        self.facets.observe(Axis::Aspect, true);
+        self.facets.observe(Input::Aquery, Axis::Aspect, true);
         let aspects: Vec<&str> = self.tables.aspect_names(action).collect();
         self.facets.set_aspects(node, aspects);
         let files = !action.output_ids.is_empty() || !action.input_dep_set_ids.is_empty();
-        self.facets.observe(Axis::Artifacts, files);
+        self.facets.observe(Input::Aquery, Axis::Artifacts, files);
         self.facets.facets().inherit(node, owner);
     }
 
@@ -662,13 +663,15 @@ impl Boxes<'_> {
                 package,
             ));
             self.facets
-                .describe_label(target_node_id, package, target.canonical);
+                .describe_label(Input::Aquery, target_node_id, package, target.canonical);
             if target.kind == Kind::Target {
                 // Only a rule is declared by a rule class; the box a promoted
                 // output file gets is a file, which no rule class describes.
                 let declared = target.rule_class.is_some();
-                self.facets.observe(Axis::RuleClass, declared);
-                self.facets.observe(Axis::RuleCategory, declared);
+                self.facets
+                    .observe(Input::Aquery, Axis::RuleClass, declared);
+                self.facets
+                    .observe(Input::Aquery, Axis::RuleCategory, declared);
             }
             if let Some(name) = target.rule_class {
                 let facets = self.facets.facets();
@@ -691,7 +694,8 @@ impl Boxes<'_> {
             Some(target_node_id),
         ));
         let config = self.intern_config(config_id);
-        self.facets.observe(Axis::Configuration, config.is_some());
+        self.facets
+            .observe(Input::Aquery, Axis::Configuration, config.is_some());
         if let Some(config) = config {
             self.facets.facets().set_config(ct_node_id, Some(config));
         }
@@ -826,7 +830,8 @@ impl Wiring<'_, '_> {
                         Kind::Source,
                         parent,
                     ));
-                    self.facets.describe_label(node_id, parent, &label);
+                    self.facets
+                        .describe_label(Input::Aquery, node_id, parent, &label);
                 }
                 node_id
             }

@@ -298,7 +298,7 @@ pub(crate) mod tests {
             (bin, "//app:bin"),
             (src, "//app:lib.cc"),
         ] {
-            builder.describe_label(target, Some(app), label);
+            builder.describe_label(Input::Query, target, Some(app), label);
         }
         let facets = builder.facets();
         for (ct, target) in [(lib_ct, lib), (bin_ct, bin)] {
@@ -315,7 +315,7 @@ pub(crate) mod tests {
         graph.add_edge(bin_ct, lib_ct, EdgeKind::Cquery);
         graph.add_edge(bin_ct, lib_ct, EdgeKind::Aquery);
         graph.add_edge(lib, src, EdgeKind::Query);
-        let (facets, _) = builder.seal();
+        let (facets, _) = builder.seal(bviz_graph_layout::InputSet::ALL);
         let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&graph);
         let containers = Arc::new(bviz_graph_layout::lod::expandable_containers(&graph));
         let labels = Arc::new(LabelIndex::of(&graph, &names, &facets));
@@ -329,7 +329,8 @@ pub(crate) mod tests {
             attributes: Arc::default(),
             labels,
             containers,
-            capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default().seal(),
+            capabilities: bviz_graph_layout::capability::CapabilitiesBuilder::default()
+                .seal(bviz_graph_layout::InputSet::ALL),
             provenance: Arc::default(),
             inputs: Input::Aquery.into(),
         }

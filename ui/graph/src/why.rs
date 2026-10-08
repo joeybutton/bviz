@@ -852,9 +852,13 @@ mod tests {
     fn observed(resolved: &[bool]) -> Capabilities {
         let mut capabilities = CapabilitiesBuilder::default();
         for &resolved in resolved {
-            capabilities.observe(Axis::ExecConfiguration, resolved);
+            capabilities.observe(
+                bviz_graph_layout::Input::Cquery,
+                Axis::ExecConfiguration,
+                resolved,
+            );
         }
-        capabilities.seal()
+        capabilities.seal(bviz_graph_layout::InputSet::ALL)
     }
 
     #[test]

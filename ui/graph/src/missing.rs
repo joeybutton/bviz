@@ -159,10 +159,10 @@ mod tests {
         let mut capabilities = CapabilitiesBuilder::default();
         for axis in Axis::ALL {
             for _ in 0..relevant {
-                capabilities.observe(axis, carried);
+                capabilities.observe(bviz_graph_layout::Input::Query, axis, carried);
             }
         }
-        capabilities.seal()
+        capabilities.seal(bviz_graph_layout::InputSet::ALL)
     }
 
     #[test]
@@ -222,6 +222,8 @@ mod tests {
     /// support all of them say nothing at all.
     #[test]
     fn inputs_that_state_every_axis_report_nothing() {
-        assert!(gaps(&CapabilitiesBuilder::default().seal()).is_empty());
+        assert!(
+            gaps(&CapabilitiesBuilder::default().seal(bviz_graph_layout::InputSet::ALL)).is_empty()
+        );
     }
 }

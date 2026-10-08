@@ -17,6 +17,7 @@ use crate::facets::{Facets, Sym};
 use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
 use crate::joint::Joint;
+use crate::provenance::Input;
 use crate::reach::{Index, Level};
 use crate::select::Scope;
 use crate::select::labels::LabelIndex;
@@ -45,7 +46,7 @@ pub struct Universe {
 
 /// What a graph's inputs state of the data some functions read whatever they
 /// are called with.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Readable {
     holds_actions: bool,
     /// How far the inputs state the configuration each configured target is
@@ -56,9 +57,23 @@ pub struct Readable {
 }
 
 impl Readable {
+    /// What `graph` states with the inputs `capabilities` counts read.
     pub fn of(graph: &Graph, capabilities: &Capabilities) -> Self {
+        let holds_actions = graph.nodes.iter().any(|node| node.kind == Kind::Action);
+        Self::holding(holds_actions, capabilities)
+    }
+
+    /// What the graph `self` was taken of, with every input that built it
+    /// read, states with only the inputs `capabilities` counts read.
+    pub fn reading(self, capabilities: &Capabilities) -> Self {
+        Self::holding(self.holds_actions, capabilities)
+    }
+
+    /// Only aquery describes actions, so a graph's actions are read only with
+    /// it.
+    fn holding(holds_actions: bool, capabilities: &Capabilities) -> Self {
         Readable {
-            holds_actions: graph.nodes.iter().any(|node| node.kind == Kind::Action),
+            holds_actions: holds_actions && capabilities.inputs().contains(Input::Aquery),
             configured: capabilities.support(Axis::Configuration),
             artifacts: capabilities.support(Axis::Artifacts),
         }
@@ -275,5 +290,49 @@ impl Universe {
             value.extend(configured.map(|c| c.0 as usize));
         }
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::joint::build_joint;
+    use crate::provenance::InputSet;
+    use crate::sources::Sources;
+    use crate::test_support::{ActionSpec, action_graph, rule};
+
+    /// The joint graph of one rule query read and the action aquery read
+    /// registering it.
+    fn joint() -> Joint {
+        let query = [rule("//app:bin", "cc_binary", &[], Vec::new())];
+        let aquery = action_graph(&[ActionSpec {
+            label: "//app:bin",
+            mnemonic: "CppLink",
+            inputs: &[],
+            outputs: &["bazel-out/bin/app/bin"],
+        }]);
+        build_joint(Some(&[aquery]), None, Some(&query), false)
+    }
+
+    /// With aquery off, what reads actions fails as it does over a graph read
+    /// without one, and the graph the setting leaves states the same.
+    #[test]
+    fn what_a_graph_states_follows_the_inputs_read() {
+        let joint = joint();
+        let every = Readable::of(&joint.graph, &joint.capabilities);
+        assert_eq!(every.check(Function::Mnemonic), Ok(()));
+
+        let query = Sources::reading(Input::Query.into());
+        let capabilities = joint.capabilities.reading(query.inputs());
+        let narrowed = every.reading(&capabilities);
+        assert_eq!(
+            narrowed.check(Function::Mnemonic),
+            Err("mnemonic() requires an aquery".to_owned())
+        );
+        let masked = query.mask(&joint.graph, &joint.provenance);
+        assert_eq!(narrowed, Readable::of(&masked, &capabilities));
+
+        let both = InputSet::of([Input::Query, Input::Aquery]).unwrap();
+        assert_eq!(every.reading(&joint.capabilities.reading(both)), every);
     }
 }

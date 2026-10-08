@@ -9,6 +9,8 @@
 //! A field written and empty everywhere — an action list of aspect descriptors
 //! for a build that runs no aspect action — is support with no values to offer.
 
+use crate::provenance::{Input, InputSet};
+
 /// The cquery flag under which each dependency edge states the configuration
 /// its dependency is built in.
 pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
@@ -123,23 +125,43 @@ pub enum Support {
 /// How far each axis reaches across one set of inputs.
 #[derive(Clone)]
 pub struct Capabilities {
-    support: [Support; Axis::ALL.len()],
+    counts: PerInput,
+    inputs: InputSet,
 }
+
+/// Each input's tally of each axis, by input and then by axis.
+type PerInput = [[Counts; Axis::ALL.len()]; Input::ALL.len()];
 
 impl Capabilities {
     pub fn support(&self, axis: Axis) -> Support {
-        self.support[axis as usize]
+        let counts = (self.inputs.inputs())
+            .map(|input| self.counts[input as usize][axis as usize])
+            .fold(Counts::default(), Counts::add);
+        axis.support(counts)
     }
 
     pub fn axes(&self) -> impl Iterator<Item = (Axis, Support)> {
         Axis::ALL.into_iter().map(|axis| (axis, self.support(axis)))
+    }
+
+    /// The inputs whose descriptions this counts.
+    pub fn inputs(&self) -> InputSet {
+        self.inputs
+    }
+
+    /// How far each axis reaches across `inputs` alone.
+    pub fn reading(&self, inputs: InputSet) -> Self {
+        Capabilities {
+            counts: self.counts,
+            inputs,
+        }
     }
 }
 
 /// Counts, while the inputs are read, how far each axis reaches.
 #[derive(Default)]
 pub struct CapabilitiesBuilder {
-    counts: [Counts; Axis::ALL.len()],
+    counts: PerInput,
 }
 
 /// One axis's tally. Both count the descriptions the inputs make rather than
@@ -151,20 +173,32 @@ struct Counts {
     relevant: usize,
 }
 
+impl Counts {
+    fn add(self, other: Counts) -> Counts {
+        Counts {
+            covered: self.covered + other.covered,
+            relevant: self.relevant + other.relevant,
+        }
+    }
+}
+
 impl CapabilitiesBuilder {
-    /// Records one description of a node `axis` applies to. `carried` says
-    /// whether that description stated the field the axis reads, which for a
-    /// repeated field is whether the message holding it was written at all and
-    /// not whether the list holds a value.
-    pub fn observe(&mut self, axis: Axis, carried: bool) {
-        let counts = &mut self.counts[axis as usize];
+    /// Records one description `input` makes of a node `axis` applies to.
+    /// `carried` says whether that description stated the field the axis
+    /// reads, which for a repeated field is whether the message holding it was
+    /// written at all and not whether the list holds a value.
+    pub fn observe(&mut self, input: Input, axis: Axis, carried: bool) {
+        let counts = &mut self.counts[input as usize][axis as usize];
         counts.relevant += 1;
         counts.covered += usize::from(carried);
     }
 
-    pub fn seal(self) -> Capabilities {
+    /// How far each axis reaches across `loaded`, the inputs the graph was
+    /// read from.
+    pub fn seal(self, loaded: InputSet) -> Capabilities {
         Capabilities {
-            support: std::array::from_fn(|axis| Axis::ALL[axis].support(self.counts[axis])),
+            counts: self.counts,
+            inputs: loaded,
         }
     }
 }
@@ -177,9 +211,9 @@ mod tests {
     fn support(axis: Axis, covered: usize, relevant: usize) -> Support {
         let mut builder = CapabilitiesBuilder::default();
         for i in 0..relevant {
-            builder.observe(axis, i < covered);
+            builder.observe(Input::Query, axis, i < covered);
         }
-        builder.seal().support(axis)
+        builder.seal(Input::Query.into()).support(axis)
     }
 
     #[test]
@@ -244,9 +278,45 @@ mod tests {
         );
     }
 
+    /// Each input's descriptions are counted apart, so a set of inputs reads
+    /// how far an axis reaches across its own alone.
+    #[test]
+    fn a_set_of_inputs_reads_its_own_descriptions_alone() {
+        let mut builder = CapabilitiesBuilder::default();
+        for _ in 0..3 {
+            builder.observe(Input::Query, Axis::Tags, false);
+        }
+        for _ in 0..2 {
+            builder.observe(Input::Cquery, Axis::Tags, true);
+        }
+        let every = builder.seal(InputSet::ALL);
+        let flag = Axis::Tags.flag();
+
+        assert_eq!(
+            every.support(Axis::Tags),
+            Support::Partial {
+                covered: 2,
+                relevant: 5,
+                flag
+            }
+        );
+        let cquery = every.reading(Input::Cquery.into());
+        assert_eq!(cquery.inputs(), Input::Cquery.into());
+        assert_eq!(cquery.support(Axis::Tags), Support::Available);
+        assert_eq!(
+            every.reading(Input::Query.into()).support(Axis::Tags),
+            Support::Unavailable {
+                flag: flag.unwrap()
+            }
+        );
+        // An input describing nothing leaves nothing missing.
+        let aquery = every.reading(Input::Aquery.into());
+        assert_eq!(aquery.support(Axis::Tags), Support::Available);
+    }
+
     #[test]
     fn every_axis_is_summarized() {
-        let summary = CapabilitiesBuilder::default().seal();
+        let summary = CapabilitiesBuilder::default().seal(InputSet::ALL);
 
         let axes: Vec<Axis> = summary.axes().map(|(axis, _)| axis).collect();
         assert_eq!(axes, Axis::ALL);

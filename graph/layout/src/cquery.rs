@@ -31,6 +31,7 @@ use crate::facets::{ConfigRef, FacetsBuilder};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
+use crate::provenance::Input;
 use crate::query;
 
 #[cfg(test)]
@@ -48,7 +49,7 @@ fn build(results: &[CqueryResult]) -> (Graph, Names, Facets) {
         &mut facets,
         &mut attributes,
     );
-    (graph, names, facets.seal().0)
+    (graph, names, facets.seal(Input::Cquery.into()).0)
 }
 
 /// Every label this cquery names. A rule contributes its rule name, any other
@@ -154,7 +155,8 @@ impl Builder<'_> {
     /// built in, and what its target container `container` states.
     fn describe_configured(&mut self, node: Id, container: Id, config_id: u32) {
         let config = self.intern_config(config_id);
-        self.facets.observe(Axis::Configuration, config.is_some());
+        self.facets
+            .observe(Input::Cquery, Axis::Configuration, config.is_some());
         if let Some(config) = config {
             self.facets.facets().set_config(node, Some(config));
         }
@@ -245,13 +247,15 @@ impl Nodes<'_, '_> {
                 Kind::Target,
                 parent,
             ));
-            query::describe_target(self.b.facets, target, id, parent, &label);
+            query::describe_target(self.b.facets, Input::Cquery, target, id, parent, &label);
             self.index.target_box.insert(label.to_string(), id);
         }
         let container = self.index.target_box[label.as_ref()];
         if let Some(configured) = self.add_configured(written, container, config_id) {
             let complete = self.b.attributes.describe(configured, rule, self.b.repos);
-            self.b.facets.observe(Axis::Attributes, complete);
+            self.b
+                .facets
+                .observe(Input::Cquery, Axis::Attributes, complete);
         }
     }
 
@@ -288,7 +292,7 @@ impl Nodes<'_, '_> {
         self.b
             .graph
             .add_node(Node::new(id, label::target_label(&label), kind, parent));
-        query::describe_target(self.b.facets, target, id, parent, &label);
+        query::describe_target(self.b.facets, Input::Cquery, target, id, parent, &label);
         self.index.leaf_id.insert(label.into_owned(), id);
         id
     }
@@ -337,7 +341,9 @@ impl Edges<'_, '_> {
     fn wire_rule(&mut self, rule: &Rule, config_id: u32) {
         if !rule.rule_input.is_empty() || !rule.configured_rule_input.is_empty() {
             let resolved = !rule.configured_rule_input.is_empty();
-            self.b.facets.observe(Axis::ExecConfiguration, resolved);
+            self.b
+                .facets
+                .observe(Input::Cquery, Axis::ExecConfiguration, resolved);
         }
         let key = self.b.config_key(config_id);
         let name = self.b.canonical(&rule.name);
