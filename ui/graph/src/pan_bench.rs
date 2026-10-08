@@ -198,15 +198,18 @@ enum Setup {
 pub(crate) enum Tally {
     Boxes,
     Connectors,
+    /// Connectors the spatial index offered, each then tested for being drawn.
+    RouteCandidates,
     PaintPaths,
     /// Labels shaped, including those then dropped for overlapping another.
     ShapedLabels,
 }
 
 impl Tally {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Boxes,
         Self::Connectors,
+        Self::RouteCandidates,
         Self::PaintPaths,
         Self::ShapedLabels,
     ];
@@ -215,6 +218,7 @@ impl Tally {
         match self {
             Self::Boxes => "boxes",
             Self::Connectors => "connectors",
+            Self::RouteCandidates => "route_candidates",
             Self::PaintPaths => "paint_paths",
             Self::ShapedLabels => "shaped_labels",
         }

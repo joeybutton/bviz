@@ -491,7 +491,7 @@ pub(crate) fn canvas_body(
             .collect();
         pan_bench::tally(Tally::Boxes, drawn.len());
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
-        let mut connectors = 0;
+        let (mut candidates, mut connectors) = (0, 0);
         // Painted over the labels, which a badge at a route's middle can fall
         // under where the route crosses a container's title band.
         let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
@@ -501,6 +501,7 @@ pub(crate) fn canvas_body(
             let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
             let mut courses = Courses::default();
             for c in indexed.routes_near(&visible) {
+                candidates += 1;
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let filtered = scene.edge_strength(c.from, c.to);
@@ -515,6 +516,7 @@ pub(crate) fn canvas_body(
             ink.paint(&scene.palette, window);
             order_fence(bounds, window);
         }
+        pan_bench::tally(Tally::RouteCandidates, candidates);
         pan_bench::tally(Tally::Connectors, connectors);
         for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
             paint_critical_halo(b, *rect, camera.zoom, &scene.palette, window);
