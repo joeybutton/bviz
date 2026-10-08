@@ -78,10 +78,15 @@ flag takes one file. bviz reads the most from files written with these flags,
 some of which Bazel sets by default:
 
 - query: `--consistent_labels`, `--proto:output_rule_attrs` (default `all`),
-  `--noproto:flatten_selects`, without which a `select` is written merged
-  into one value and `attr()` cannot match its branches as Bazel does
-- cquery: `--consistent_labels`, `--transitions=lite` (or `full`),
-  `--proto:output_rule_attrs` (default `all`)
+  which tells implicit dependencies from explicit ones,
+  `--proto:default_values` (default on), which states the package default
+  visibility a query's dependencies follow, and `--noproto:flatten_selects`,
+  without which a `select` is written merged into one value, so `attr()`
+  cannot match its branches as Bazel does and its conditions read as
+  implicit dependencies
+- cquery: `--consistent_labels`, `--transitions=lite` (or `full`), which
+  tells tool dependencies apart, and `--proto:output_rule_attrs` (default
+  `all`)
 - aquery: `--include_artifacts` (default on)
 
 ### Trace profile
