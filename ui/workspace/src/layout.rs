@@ -136,14 +136,31 @@ struct Child<P> {
     id: SideId,
     layout: Layout<P>,
     flex: Flex,
+    /// What this side asked for when its split was built, `None` for a side
+    /// that joined the split afterwards. A split at rest lays its sides out at
+    /// what they were built asking for where every side it holds was built with
+    /// it, and evenly where any joined it since.
+    built: Option<Flex>,
 }
 
 impl<P> Child<P> {
-    fn new(layout: Layout<P>, flex: Flex) -> Self {
+    /// A side of a split being built, asking for `flex`.
+    fn built(layout: Layout<P>, flex: Flex) -> Self {
         Self {
             id: SideId::next(),
             layout,
             flex,
+            built: Some(flex),
+        }
+    }
+
+    /// A side joining a split already built, asking for `flex`.
+    fn joined(layout: Layout<P>, flex: Flex) -> Self {
+        Self {
+            id: SideId::next(),
+            layout,
+            flex,
+            built: None,
         }
     }
 }
@@ -259,19 +276,48 @@ impl<P> Split<P> {
         }
     }
 
-    /// Brings the side at `at` into normal form.
+    /// Lays every side out at what it asks for at rest.
+    fn rest(&mut self) {
+        let built: Option<Vec<Flex>> = self.children.iter().map(|child| child.built).collect();
+        match built {
+            Some(built) => {
+                for (child, flex) in self.children.iter_mut().zip(built) {
+                    child.flex = flex;
+                }
+            }
+            None => self.even(),
+        }
+    }
+
+    /// Brings the side at `at` into normal form. A spliced side asks for its
+    /// share of what the side it replaces asked for, and was built asking for
+    /// its share of what that side was built asking for.
     fn splice(&mut self, at: usize) {
-        let Child { id, layout, flex } = self.children.remove(at);
-        match layout {
+        let child = self.children.remove(at);
+        match child.layout {
             Layout::Split(inner) if inner.axis == self.axis => {
                 let total: f32 = inner.children.iter().map(|side| side.flex.shares()).sum();
-                let spliced = inner.children.into_iter().map(|side| Child {
-                    flex: Flex::new(flex.shares() * side.flex.shares() / total),
-                    ..side
+                let built_total: Option<f32> = inner
+                    .children
+                    .iter()
+                    .map(|side| side.built.map(Flex::shares))
+                    .sum();
+                let spliced = inner.children.into_iter().map(|side| {
+                    let built = match (child.built, side.built, built_total) {
+                        (Some(whole), Some(part), Some(total)) => {
+                            Some(Flex::new(whole.shares() * part.shares() / total))
+                        }
+                        _ => None,
+                    };
+                    Child {
+                        flex: Flex::new(child.flex.shares() * side.flex.shares() / total),
+                        built,
+                        ..side
+                    }
                 });
                 self.children.splice(at..at, spliced);
             }
-            layout => self.children.insert(at, Child { id, layout, flex }),
+            layout => self.children.insert(at, Child { layout, ..child }),
         }
     }
 }
@@ -299,7 +345,7 @@ impl<P> Layout<P> {
     /// each at the flex of the extent it asks for. A lone arrangement is laid
     /// out in place of the split it would be the only side of.
     pub fn divided(axis: Axis, first: (Layout<P>, f32), rest: Vec<(Layout<P>, f32)>) -> Self {
-        let flexed = |(layout, flex): (Layout<P>, f32)| Child::new(layout, Flex::new(flex));
+        let flexed = |(layout, flex): (Layout<P>, f32)| Child::built(layout, Flex::new(flex));
         let mut children = Vec::with_capacity(1 + rest.len());
         children.push(flexed(first));
         children.extend(rest.into_iter().map(flexed));
@@ -369,6 +415,18 @@ impl<P> Layout<P> {
         match self.parted_by(divider) {
             Some((split, _)) => {
                 split.even();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Lays every side of the split the divider belongs to out at what it asks
+    /// for at rest, reporting whether the arrangement holds it.
+    pub fn rest_split(&mut self, divider: DividerId) -> bool {
+        match self.parted_by(divider) {
+            Some((split, _)) => {
+                split.rest();
                 true
             }
             None => false,
@@ -472,7 +530,7 @@ impl<P: Clone + PartialEq> Layout<P> {
         };
         split
             .children
-            .insert(at, Child::new(Layout::Pane(new), half));
+            .insert(at, Child::joined(Layout::Pane(new), half));
         true
     }
 
@@ -494,7 +552,7 @@ impl<P: Clone + PartialEq> Layout<P> {
             };
             split
                 .children
-                .insert(at, Child::new(Layout::Pane(new), even));
+                .insert(at, Child::joined(Layout::Pane(new), even));
             return;
         }
         let held = std::mem::replace(self, Layout::Pane(new.clone()));
@@ -1093,6 +1151,152 @@ mod tests {
         let elsewhere = even_row(3);
         assert!(!layout.even_split(divider_at(root(&elsewhere), 1)));
         assert_shares(root(&layout), &[0.5, 0.25, 0.25]);
+    }
+
+    /// A split built at proportions of its own rests at them: however its
+    /// divider has been dragged, or the split evened, putting it back to rest
+    /// lays its sides out where it was built to.
+    #[test]
+    fn a_built_split_rests_at_the_proportions_it_was_built_at() {
+        let mut layout = row(&[1.0, 2.0]);
+        let divider = divider_at(root(&layout), 0);
+        assert!(layout.move_divider(divider, 0.8));
+        assert!(layout.rest_split(divider));
+        assert_shares(root(&layout), &[1.0 / 3.0, 2.0 / 3.0]);
+        assert!(layout.even_split(divider));
+        assert_shares(root(&layout), &[0.5, 0.5]);
+        assert!(layout.rest_split(divider));
+        assert_shares(root(&layout), &[1.0 / 3.0, 2.0 / 3.0]);
+    }
+
+    /// A split made by putting a pane beside another rests evenly.
+    #[test]
+    fn a_split_parting_a_pane_from_one_put_beside_it_rests_evenly() {
+        let mut layout = Layout::Pane('a');
+        assert!(layout.insert_beside(&'a', Side::Right, 'b'));
+        let divider = divider_at(root(&layout), 0);
+        assert!(layout.move_divider(divider, 0.2));
+        assert!(layout.rest_split(divider));
+        assert_shares(root(&layout), &[0.5, 0.5]);
+    }
+
+    /// Asserts that `split`, once its first divider has been dragged and then
+    /// put back to rest, lays its sides out at `expected` shares.
+    fn assert_rests_at(
+        layout: &mut Layout<char>,
+        split: impl Fn(&Layout<char>) -> &Split<char>,
+        expected: &[f32],
+    ) {
+        let divider = divider_at(split(layout), 0);
+        assert!(layout.move_divider(divider, 0.9));
+        assert!(layout.rest_split(divider));
+        assert_shares(split(layout), expected);
+    }
+
+    /// A side joining a built split, put beside one of its sides or against
+    /// the edge it spans, leaves the split resting evenly.
+    #[test]
+    fn a_split_a_side_joins_rests_evenly() {
+        let mut beside = row(&[1.0, 2.0]);
+        assert!(beside.insert_beside(&'b', Side::Right, 'z'));
+        assert_eq!(shape(&beside), "(a|b|z)");
+        assert_rests_at(&mut beside, root, &[1.0 / 3.0; 3]);
+
+        let mut at_edge = row(&[1.0, 2.0]);
+        at_edge.insert_at_edge(Side::Left, 'z');
+        assert_eq!(shape(&at_edge), "(z|a|b)");
+        assert_rests_at(&mut at_edge, root, &[1.0 / 3.0; 3]);
+    }
+
+    /// A side leaving a built split leaves the sides it had divide what it took
+    /// in the proportions they were built at.
+    #[test]
+    fn a_split_a_side_leaves_rests_at_its_built_proportions() {
+        let mut layout = row(&[1.0, 2.0, 3.0]);
+        assert_eq!(layout.remove(&'b'), Removal::Removed);
+        assert_eq!(shape(&layout), "(a|c)");
+        assert_rests_at(&mut layout, root, &[0.25, 0.75]);
+    }
+
+    /// A pane split off below another and then closed again leaves the split
+    /// resting where it was built to.
+    #[test]
+    fn a_split_a_joined_side_leaves_again_rests_as_built() {
+        let mut layout = column(&[2.0, 1.0]);
+        assert!(layout.insert_beside(&'b', Side::Bottom, 'z'));
+        assert_eq!(shape(&layout), "(a/b/z)");
+        assert_eq!(layout.remove(&'z'), Removal::Removed);
+        assert_rests_at(&mut layout, root, &[2.0 / 3.0, 1.0 / 3.0]);
+    }
+
+    /// A split spliced into one along its own axis divides what it was built
+    /// asking for between its sides in the proportions they were built at,
+    /// whether it is spliced in as the arrangement is built or once a pane
+    /// closing leaves it there.
+    #[test]
+    fn a_spliced_split_rests_at_the_shares_its_sides_were_built_at() {
+        let mut built = Layout::divided(
+            Axis::Horizontal,
+            (row(&[1.0, 3.0]), 1.0),
+            vec![(pane(2), 1.0)],
+        );
+        assert_eq!(shape(&built), "(a|b|c)");
+        assert_rests_at(&mut built, root, &[0.125, 0.375, 0.5]);
+
+        let inner = Layout::divided(
+            Axis::Vertical,
+            (pane(3), 1.0),
+            vec![(row(&[1.0, 4.0]), 1.0)],
+        );
+        let mut closed = Layout::divided(Axis::Horizontal, (pane(2), 1.0), vec![(inner, 2.0)]);
+        assert!(closed.move_divider(divider_at(root(&closed), 0), 0.5));
+        assert_eq!(closed.remove(&'d'), Removal::Removed);
+        assert_eq!(shape(&closed), "(c|a|b)");
+        assert_rests_at(&mut closed, root, &[1.0 / 3.0, 2.0 / 15.0, 8.0 / 15.0]);
+    }
+
+    /// A pane put against an edge across the arrangement's axis is parted from
+    /// all of it by a split that rests evenly, and the arrangement it parts
+    /// goes on resting as it was built to.
+    #[test]
+    fn a_pane_put_against_an_edge_across_the_axis_rests_beside_it_evenly() {
+        let mut layout = row(&[1.0, 2.0]);
+        layout.insert_at_edge(Side::Bottom, 'z');
+        assert_eq!(shape(&layout), "((a|b)/z)");
+        assert_rests_at(&mut layout, root, &[0.5, 0.5]);
+        assert_rests_at(
+            &mut layout,
+            |layout| nested(root(layout), 0),
+            &[1.0 / 3.0, 2.0 / 3.0],
+        );
+    }
+
+    /// A split keeps its own proportions at rest while the arrangements laid
+    /// out at its sides change within them: a side that is a split losing a
+    /// pane, or a pane parted from one put across the split's axis.
+    #[test]
+    fn a_split_whose_sides_keep_their_place_rests_as_built() {
+        let column = |top, bottom| {
+            Layout::divided(Axis::Vertical, (pane(top), 2.0), vec![(pane(bottom), 1.0)])
+        };
+        let built = || {
+            Layout::divided(
+                Axis::Horizontal,
+                (column(0, 1), 1.0),
+                vec![(column(2, 3), 2.0)],
+            )
+        };
+        let as_built = [1.0 / 3.0, 2.0 / 3.0];
+
+        let mut closed = built();
+        assert_eq!(closed.remove(&'b'), Removal::Removed);
+        assert_eq!(shape(&closed), "(a|(c/d))");
+        assert_rests_at(&mut closed, root, &as_built);
+
+        let mut across = built();
+        assert!(across.insert_beside(&'c', Side::Bottom, 'z'));
+        assert_eq!(shape(&across), "((a/b)|(c/z/d))");
+        assert_rests_at(&mut across, root, &as_built);
     }
 
     /// The split a gesture on a pane evens is the innermost one laying that pane

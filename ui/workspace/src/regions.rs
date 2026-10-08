@@ -167,6 +167,40 @@ mod tests {
         );
     }
 
+    /// Every split of the template rests at the shares it lays out: a divider
+    /// dragged away and put back to rest returns to its share.
+    #[test]
+    fn the_template_rests_at_its_shares() {
+        let mut layout = arranged(&[CANVAS, LOG, TIMELINE, ANALYSIS]);
+        let crate::Layout::Split(columns) = &layout else {
+            panic!("the template is a split");
+        };
+        let mut dividers: Vec<_> = columns
+            .sides()
+            .iter()
+            .filter_map(|side| side.divider)
+            .collect();
+        for column in columns.sides() {
+            if let crate::Layout::Split(regions) = column.layout {
+                dividers.extend(regions.sides().iter().filter_map(|side| side.divider));
+            }
+        }
+        assert_eq!(dividers.len(), 3);
+        for divider in dividers {
+            assert!(layout.move_divider(divider, 0.5));
+            assert!(layout.rest_split(divider));
+        }
+        assert_extents(
+            &layout,
+            &[
+                ("c", LEFT, TOP),
+                ("l", LEFT, BOTTOM),
+                ("t", RIGHT, TOP),
+                ("a", RIGHT, BOTTOM),
+            ],
+        );
+    }
+
     /// A region holding no panel takes no place: the region above or below it
     /// takes its height, and a column left empty gives its width to the other.
     #[test]

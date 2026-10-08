@@ -13,7 +13,7 @@ pub(crate) enum ChromeIntent {
     Move,
     OpenMenu,
     ScrollTabs,
-    EvenSplit,
+    RestSplit,
     ResizeSplit,
 }
 
@@ -54,8 +54,8 @@ pub(crate) const CHROME_GESTURES: Gestures<ChromeIntent> = Gestures::new(&[
     Entry::new(
         Input::new(Motion::Press(Button::Left, Clicks::Repeated)),
         DIVIDER,
-        "Even out split",
-        ChromeIntent::EvenSplit,
+        "Restore split proportions",
+        ChromeIntent::RestSplit,
     ),
     Entry::new(
         Input::drag(Button::Left),

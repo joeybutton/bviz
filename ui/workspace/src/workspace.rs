@@ -1352,12 +1352,12 @@ impl Workspace {
         }
     }
 
-    /// Gives every side of the split `divider` parts the same share of that
-    /// split's extent, and lets go of whatever boundary a drag is holding, so
-    /// that the press ahead of this one leaves no drag running behind it.
-    fn even_split(&mut self, divider: DividerId, cx: &mut Context<Self>) {
+    /// Puts the split `divider` parts back to rest, and lets go of whatever
+    /// boundary a drag is holding, so that the press ahead of this one leaves
+    /// no drag running behind it.
+    fn rest_split(&mut self, divider: DividerId, cx: &mut Context<Self>) {
         self.divider_drag = None;
-        self.rearrange(cx).even_split(divider);
+        self.rearrange(cx).rest_split(divider);
         cx.notify();
     }
 
@@ -2020,8 +2020,8 @@ fn divider(
         axis,
         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
             CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
-                ChromeIntent::EvenSplit => {
-                    workspace.even_split(id, cx);
+                ChromeIntent::RestSplit => {
+                    workspace.rest_split(id, cx);
                     true
                 }
                 ChromeIntent::ResizeSplit => {
