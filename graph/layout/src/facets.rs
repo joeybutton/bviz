@@ -337,33 +337,33 @@ impl RuleCategory {
 /// order, and every node's values end to end in one array, which `starts` cuts
 /// into one run per id and so runs one entry longer than `ids`.
 #[derive(Clone)]
-pub struct SparseFacet {
+pub struct SparseFacet<V = Sym> {
     ids: Vec<Id>,
     starts: Vec<u32>,
-    values: Vec<Sym>,
+    values: Vec<V>,
 }
 
-impl Default for SparseFacet {
+impl<V: Copy + PartialEq> Default for SparseFacet<V> {
     fn default() -> Self {
         SparseFacetBuilder::default().seal()
     }
 }
 
-impl SparseFacet {
+impl<V: Copy + PartialEq> SparseFacet<V> {
     /// The values `id` carries, empty where it carries none.
-    pub fn values(&self, id: Id) -> &[Sym] {
+    pub fn values(&self, id: Id) -> &[V] {
         match self.ids.binary_search(&id) {
             Ok(row) => self.row(row),
             Err(_) => &[],
         }
     }
 
-    pub fn contains(&self, id: Id, value: Sym) -> bool {
+    pub fn contains(&self, id: Id, value: V) -> bool {
         self.values(id).contains(&value)
     }
 
     /// Every node carrying a value, in ascending id order.
-    pub fn rows(&self) -> impl Iterator<Item = (Id, &[Sym])> {
+    pub fn rows(&self) -> impl Iterator<Item = (Id, &[V])> {
         self.ids
             .iter()
             .enumerate()
@@ -382,18 +382,23 @@ impl SparseFacet {
         *self = renumbered.seal();
     }
 
-    fn row(&self, row: usize) -> &[Sym] {
+    fn row(&self, row: usize) -> &[V] {
         &self.values[self.starts[row] as usize..self.starts[row + 1] as usize]
     }
 }
 
 /// Collects a [`SparseFacet`]'s values as the inputs state them, in any order.
-#[derive(Default)]
-pub struct SparseFacetBuilder {
-    pairs: Vec<(Id, Sym)>,
+pub struct SparseFacetBuilder<V = Sym> {
+    pairs: Vec<(Id, V)>,
 }
 
-impl SparseFacetBuilder {
+impl<V> Default for SparseFacetBuilder<V> {
+    fn default() -> Self {
+        Self { pairs: Vec::new() }
+    }
+}
+
+impl<V: Copy + PartialEq> SparseFacetBuilder<V> {
     pub fn with_capacity(values: usize) -> Self {
         Self {
             pairs: Vec::with_capacity(values),
@@ -404,7 +409,7 @@ impl SparseFacetBuilder {
         self.pairs.reserve(values);
     }
 
-    pub fn push(&mut self, id: Id, value: Sym) {
+    pub fn push(&mut self, id: Id, value: V) {
         self.pairs.push((id, value));
     }
 
@@ -412,13 +417,13 @@ impl SparseFacetBuilder {
     /// they are looked up in and each one's values kept in the order it was
     /// given them. A node carries each of its values once, however many times
     /// it was given one.
-    pub fn seal(mut self) -> SparseFacet {
+    pub fn seal(mut self) -> SparseFacet<V> {
         self.pairs.sort_by_key(|&(id, _)| id);
-        let carrying = |a: &(Id, Sym), b: &(Id, Sym)| a.0 == b.0;
+        let carrying = |a: &(Id, V), b: &(Id, V)| a.0 == b.0;
         let rows = self.pairs.chunk_by(carrying).count();
         let mut ids = Vec::with_capacity(rows);
         let mut starts = Vec::with_capacity(rows + 1);
-        let mut values: Vec<Sym> = Vec::with_capacity(self.pairs.len());
+        let mut values: Vec<V> = Vec::with_capacity(self.pairs.len());
         starts.push(0);
         for row in self.pairs.chunk_by(carrying) {
             ids.push(row[0].0);
