@@ -378,7 +378,7 @@ impl Workspace {
         // the window opens on the leading panel instead.
         let panel = workspace.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);
-        set_window_title(&workspace.app_name, &panel, window, cx);
+        set_window_title(&workspace.app_name, &panel, window);
         workspace
     }
 
@@ -820,7 +820,7 @@ impl Workspace {
         let mut named = Vec::with_capacity(open.len());
         for (place, workspace) in open.iter().enumerate() {
             if workspace.entity_id() != here {
-                let shown = workspace.read(cx).active_panel(cx).display_title(cx);
+                let shown = workspace.read(cx).active_panel(cx).display_title();
                 named.push((workspace.downgrade(), window_name(place + 1, &shown)));
             }
         }
@@ -997,7 +997,7 @@ impl Workspace {
         };
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let chip = drag_icon::Chip {
-            title: panel.display_title(cx),
+            title: panel.display_title(),
             font_size: GHOST_TEXT.to_pixels(window.rem_size()),
             height: GHOST_HEIGHT,
             max_width: GHOST_MAX_WIDTH,
@@ -1279,12 +1279,7 @@ impl Workspace {
             |workspace, pane, event, window, cx| match event {
                 PaneEvent::Changed => {
                     if *pane == workspace.active {
-                        set_window_title(
-                            &workspace.app_name,
-                            &workspace.active_panel(cx),
-                            window,
-                            cx,
-                        );
+                        set_window_title(&workspace.app_name, &workspace.active_panel(cx), window);
                     }
                     cx.notify();
                 }
@@ -1349,7 +1344,7 @@ impl Workspace {
         self.active = pane;
         let panel = self.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);
-        set_window_title(&self.app_name, &panel, window, cx);
+        set_window_title(&self.app_name, &panel, window);
         cx.notify();
     }
 
@@ -1663,7 +1658,7 @@ impl Workspace {
                         .size(GHOST_ICON_SIZE)
                         .text_color(ink)
                 }))
-                .child(div().truncate().child(panel.display_title(cx))),
+                .child(div().truncate().child(panel.display_title())),
         )
     }
 }
@@ -2102,7 +2097,7 @@ impl Render for Workspace {
         let playback = self.playback_bar(&panel, cx);
         let key_context = self.key_context(cx);
         let chrome = Chrome::new(&self.window_focus)
-            .title(window_title(&self.app_name, &panel, cx))
+            .title(window_title(&self.app_name, &panel))
             .menu(self.documents_menu.clone())
             .child(room_left().child(panes).children(playback));
         let chrome = match panel.status(cx) {
@@ -2206,8 +2201,8 @@ fn towards<Focus: Action, Move: Action, SplitOff: Action>(
 }
 
 /// What names the window: the application, then the document on show.
-fn window_title(app_name: &str, panel: &AnyPanel, cx: &App) -> String {
-    format!("{app_name} \u{2014} {}", panel.display_title(cx))
+fn window_title(app_name: &str, panel: &AnyPanel) -> String {
+    format!("{app_name} \u{2014} {}", panel.display_title())
 }
 
 /// How a window reads where another window's menu offers a move into it: what
@@ -2219,8 +2214,8 @@ fn window_name(place: usize, shown: &str) -> SharedString {
     format!("{place}. {shown}").into()
 }
 
-fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {
-    window.set_window_title(&window_title(app_name, panel, cx));
+fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window) {
+    window.set_window_title(&window_title(app_name, panel));
 }
 
 /// The context stack from the window's root to a panel scoped to `scope`,

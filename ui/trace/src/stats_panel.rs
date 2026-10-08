@@ -636,10 +636,6 @@ impl Panel for StatsPanel {
         GESTURES.rows().collect()
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
-    }
-
     fn status(&self, cx: &App) -> Option<SharedString> {
         Some(profile_status(&self.model, cx))
     }

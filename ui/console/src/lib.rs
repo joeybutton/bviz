@@ -65,10 +65,7 @@ pub fn open(
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, clock, cx));
-    let console = ViewSpec::new({
-        let label = label.clone();
-        move |cx| cx.new(|cx| ConsolePanel::new(label.clone(), model.clone(), cx))
-    });
+    let console = ViewSpec::new(move |cx| cx.new(|cx| ConsolePanel::new(model.clone(), cx)));
     Member::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
 }
 

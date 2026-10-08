@@ -1078,10 +1078,6 @@ impl Panel for ScatterPanel {
         GESTURES.rows().collect()
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
-    }
-
     fn status(&self, cx: &App) -> Option<SharedString> {
         let model = self.model.read(cx);
         let status = model.source().status("No graph", |_| match &self.plot {

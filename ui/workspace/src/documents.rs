@@ -1,3 +1,4 @@
+use crate::panel::FileName;
 use crate::{AnyPanel, Panel, PanelGroup, ViewKind, Workspace};
 use bviz_ui_playback::Clock;
 use gpui::{
@@ -5,7 +6,6 @@ use gpui::{
     WeakEntity, Window,
 };
 use std::iter;
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// Identity of a document the session holds open. Two readings of one file are
@@ -22,9 +22,9 @@ impl DocumentId {
 }
 
 /// Builds a panel showing one view of a document, the panel carrying the
-/// document's identity and the number of its file. Takes no window, so a view
+/// document's identity and the name of its file. Takes no window, so a view
 /// can be minted wherever the reader asks for it.
-type Mint = Rc<dyn Fn(DocumentId, Option<NonZeroUsize>, &mut App) -> AnyPanel>;
+type Mint = Rc<dyn Fn(DocumentId, &FileName, &mut App) -> AnyPanel>;
 
 /// One view a document can show, and how to build a panel showing it.
 pub struct ViewSpec {
@@ -41,7 +41,7 @@ impl ViewSpec {
         Self {
             kind: kind.view,
             label: kind.label(),
-            mint: Rc::new(move |document, ordinal, cx| AnyPanel::new(mint(cx), document, ordinal)),
+            mint: Rc::new(move |document, file, cx| AnyPanel::new(mint(cx), document, file)),
         }
     }
 
@@ -177,8 +177,7 @@ pub(crate) struct Registration {
 /// The views of one file of a document, arranged as the viewer opening it asked
 /// for them to be.
 pub(crate) struct Held<V> {
-    /// The number the file's panels carry.
-    pub(crate) ordinal: Option<NonZeroUsize>,
+    pub(crate) file: FileName,
     pub(crate) views: PanelGroup<V>,
 }
 
@@ -186,7 +185,7 @@ impl Held<ViewSpec> {
     /// The registry's record of this file, which no panel shows yet.
     fn registered(&self) -> Held<View> {
         Held {
-            ordinal: self.ordinal,
+            file: self.file.clone(),
             views: self.views.map(&mut ViewSpec::registered),
         }
     }
@@ -295,7 +294,7 @@ impl Documents {
                 let held = member.registered();
                 let panels = held
                     .views
-                    .map(&mut |view: &View| (view.mint)(id, held.ordinal, cx));
+                    .map(&mut |view: &View| (view.mint)(id, &held.file, cx));
                 members.push(held);
                 panels
             };
@@ -331,13 +330,13 @@ impl Documents {
         let Some((member, found)) = held.view(view) else {
             return;
         };
-        let ordinal = member.ordinal;
+        let file = member.file.clone();
         let live = found.live.as_ref().map(|live| live.panel);
         let mint = found.mint.clone();
         match live {
             Some(panel) => self.reveal(panel, workspace, window, cx),
             None => {
-                let panel = mint(document, ordinal, cx);
+                let panel = mint(document, &file, cx);
                 self.watch(document, view, &panel, cx);
                 workspace.update(cx, |workspace, cx| {
                     workspace.add_panel(panel, window, cx);
@@ -580,6 +579,7 @@ mod tests {
     use crate::{Layout, Weight};
     use gpui::Axis;
     use std::collections::HashMap;
+    use std::num::NonZeroUsize;
 
     const TIMELINE: ViewKind = ViewKind::new("timeline");
     const FLAME: ViewKind = ViewKind::new("flame");
@@ -589,10 +589,17 @@ mod tests {
         ViewSpec::for_test(kind).registered()
     }
 
+    fn unnumbered(label: &str) -> FileName {
+        FileName {
+            label: label.to_string().into(),
+            ordinal: None,
+        }
+    }
+
     /// Registers a file opened by itself, which no other shares a label with.
     fn register(documents: &mut Documents, label: &str, views: PanelGroup<View>) -> DocumentId {
         let file = Held {
-            ordinal: None,
+            file: unnumbered(label),
             views,
         };
         documents
@@ -837,12 +844,13 @@ mod tests {
     /// as its viewer asks.
     fn invocation_files() -> [Held<ViewSpec>; 3] {
         let spec = ViewSpec::for_test;
-        let file = |views| Held {
-            ordinal: None,
+        let file = |label, views| Held {
+            file: unnumbered(label),
             views,
         };
         [
             file(
+                "build.profile.gz",
                 PanelGroup::split(
                     Axis::Vertical,
                     0.65,
@@ -851,8 +859,14 @@ mod tests {
                 )
                 .with_weight(Weight::CHART),
             ),
-            file(PanelGroup::one(spec(CONSOLE)).with_weight(Weight::LOG)),
-            file(PanelGroup::one(spec(GRAPH)).with_weight(Weight::CHART)),
+            file(
+                "build.bep",
+                PanelGroup::one(spec(CONSOLE)).with_weight(Weight::LOG),
+            ),
+            file(
+                "aquery.pb",
+                PanelGroup::one(spec(GRAPH)).with_weight(Weight::CHART),
+            ),
         ]
     }
 
@@ -959,7 +973,7 @@ mod tests {
     /// graph and a stats table, with a panel open for every view.
     fn two_profiles_joined() -> (Documents, Vec<(EntityId, char)>) {
         let profile = || Held {
-            ordinal: None,
+            file: unnumbered("build.profile.gz"),
             views: PanelGroup::split(
                 Axis::Vertical,
                 0.5,
@@ -1030,7 +1044,10 @@ mod tests {
     fn a_view_is_found_with_the_number_of_its_own_file() {
         let mut documents = Documents::new();
         let file = |ordinal| Held {
-            ordinal: NonZeroUsize::new(ordinal),
+            file: FileName {
+                ordinal: NonZeroUsize::new(ordinal),
+                ..unnumbered("build.profile.gz")
+            },
             views: PanelGroup::one(view(TIMELINE)),
         };
         let (id, ()) = documents.register("Both".into(), None, |_| (vec![file(1), file(2)], ()));
@@ -1041,7 +1058,7 @@ mod tests {
                     kind: TIMELINE,
                 };
                 let (file, _) = documents.registered(id)?.view(timeline)?;
-                file.ordinal
+                file.file.ordinal
             })
             .collect();
         assert_eq!(ordinals, [NonZeroUsize::new(1), NonZeroUsize::new(2)]);

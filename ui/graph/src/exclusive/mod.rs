@@ -1686,10 +1686,6 @@ impl Panel for ExclusivePanel {
         }
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
-    }
-
     fn description() -> Option<&'static str> {
         Some("What exists only because of each target (the build's dominator tree)")
     }

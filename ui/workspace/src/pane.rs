@@ -662,7 +662,7 @@ impl Pane {
                     .size(HANDLE_ICON_SIZE)
                     .text_color(ink)
             }))
-            .child(title(&panel, cx))
+            .child(title(&panel))
             .child(
                 div()
                     .flex()
@@ -722,7 +722,7 @@ impl Pane {
                     .size(TAB_ICON_SIZE)
                     .text_color(ink)
             }))
-            .child(title(&panel, cx))
+            .child(title(&panel))
             .child(
                 div()
                     // A press on the close control must not also reach the tab
@@ -893,12 +893,12 @@ fn description_tooltip(
 
 /// A panel's name as the pane holding it puts it up: cut short where there is
 /// no room for it, keeping the number of the document it belongs to in view.
-fn title(panel: &AnyPanel, cx: &App) -> Div {
+fn title(panel: &AnyPanel) -> Div {
     div()
         .flex()
         .flex_row()
         .min_w(px(0.))
-        .child(div().min_w(px(0.)).truncate().child(panel.plain_title(cx)))
+        .child(div().min_w(px(0.)).truncate().child(panel.plain_title()))
         .children(
             panel
                 .title_suffix()

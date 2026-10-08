@@ -30,7 +30,7 @@ pub use layout::{AtEdge, DividerId, Layout, Panes, Removal, Side, Split, SplitSi
 pub(crate) use pane::Framing;
 pub use pane::{Pane, PaneEvent};
 pub use panel::{
-    AnyPanel, Document, Member, Panel, PanelEvent, PanelKind, ViewKind, document_label,
+    AnyPanel, Document, Member, Panel, PanelEvent, PanelKind, Titled, ViewKind, document_label,
 };
 pub use workspace::Workspace;
 

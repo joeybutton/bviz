@@ -640,10 +640,6 @@ impl Panel for SpawnTimePanel {
         GESTURES.rows().collect()
     }
 
-    fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label().into()
-    }
-
     fn status(&self, cx: &App) -> Option<SharedString> {
         let status = self
             .model
