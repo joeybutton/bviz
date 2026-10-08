@@ -883,6 +883,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_bazel_flags"
+version = "0.1.0"
+
+[[package]]
 name = "bviz_cli"
 version = "0.1.0"
 dependencies = [

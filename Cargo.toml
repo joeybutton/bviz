@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "alloc",
+    "bazel_flags",
     "bviz",
     "cli",
     "critical_path",
