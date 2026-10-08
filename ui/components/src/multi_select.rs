@@ -6,6 +6,7 @@ use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
 use crate::scrollbar::ScrollbarColors;
+use crate::{TextTooltip, TooltipColors};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -52,6 +53,10 @@ pub struct MultiOption {
     /// Whether the state behind the control has this value checked, as the owner
     /// of that state last stated it.
     pub checked: bool,
+    /// Why the value cannot be flipped, where it cannot: the row is drawn as a
+    /// menu draws a disabled one, a click on it asks nothing, and hovering it
+    /// tells this.
+    pub unavailable: Option<SharedString>,
 }
 
 impl MultiOption {
@@ -60,6 +65,15 @@ impl MultiOption {
         MultiOption {
             label: label.into(),
             checked,
+            unavailable: None,
+        }
+    }
+
+    /// This value as one that cannot be flipped, for `why`.
+    pub fn unavailable(self, why: impl Into<SharedString>) -> Self {
+        MultiOption {
+            unavailable: Some(why.into()),
+            ..self
         }
     }
 }
@@ -139,18 +153,24 @@ impl Rows {
     /// value to flip. The menu stays open, since a multi-select is visited to
     /// check several values in one go, and the options stand as they were given.
     fn clicked(&mut self, index: usize) -> Option<MultiSelectEvent> {
-        let option = self.options.get(index)?;
+        let option = self
+            .options
+            .get(index)
+            .filter(|o| o.unavailable.is_none())?;
         Some(MultiSelectEvent::Toggled {
             index,
             checked: !option.checked,
         })
     }
 
-    /// What a click on the menu-wide action asks: every value, so it leaves
-    /// what a click on each row in turn would.
+    /// What a click on the menu-wide action asks: every value that can be
+    /// flipped, so it leaves what a click on each row in turn would.
     fn set_all(&self, checked: bool) -> MultiSelectEvent {
+        let available = (self.options.iter().enumerate())
+            .filter(|(_, option)| option.unavailable.is_none())
+            .map(|(index, _)| index);
         MultiSelectEvent::SetAll {
-            rows: (0..self.options.len()).collect(),
+            rows: available.collect(),
             checked,
         }
     }
@@ -312,18 +332,16 @@ impl MultiSelect {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let row_height = menu_chrome::row_height(window);
         let rows = (self.rows.options.iter())
             .enumerate()
-            .map(|(index, option)| self.row(index, option, colors, label_width, cx));
+            .map(|(index, option)| self.row(index, option, colors, label_width, row_height, cx));
         let list = div()
             .id("multi-select-list")
             .flex()
             .flex_col()
             .w_full()
-            .max_h(menu_chrome::whole_rows(
-                menu_chrome::row_height(window),
-                MENU_MAX_HEIGHT,
-            ))
+            .max_h(menu_chrome::whole_rows(row_height, MENU_MAX_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(self.scroll.handle())
             .children(rows);
@@ -349,21 +367,27 @@ impl MultiSelect {
         option: &MultiOption,
         colors: &ThemeColors,
         label_width: Pixels,
+        row_height: Pixels,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        menu_chrome::clear_of_scrollbar(menu_chrome::row(
-            ("multi-select-option", index).into(),
-            colors,
-            option.checked,
-        ))
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            if let Some(event) = this.rows.clicked(index) {
-                cx.emit(event);
-            }
-            cx.notify();
-        }))
-        .child(menu_chrome::check(colors, option.checked))
-        .child(menu_chrome::reading(label_width, option.label.clone()))
+        let id: ElementId = ("multi-select-option", index).into();
+        let row = match option.unavailable {
+            Some(_) => menu_chrome::disabled_row(id, colors),
+            None => menu_chrome::row(id, colors, option.checked),
+        };
+        menu_chrome::clear_of_scrollbar(row)
+            .when_some(option.unavailable.clone(), |row, why| {
+                let tip = TooltipColors::from_colors(colors);
+                row.tooltip(TextTooltip::builder_clear_of(why, tip, row_height))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(event) = this.rows.clicked(index) {
+                    cx.emit(event);
+                }
+                cx.notify();
+            }))
+            .child(menu_chrome::check(colors, option.checked))
+            .child(menu_chrome::reading(label_width, option.label.clone()))
     }
 }
 
@@ -491,6 +515,23 @@ mod tests {
         rows.clicked(2);
 
         assert!(rows.open);
+    }
+
+    /// A value that cannot be flipped asks nothing of a click, and a
+    /// menu-wide action passes over it.
+    #[test]
+    fn an_unavailable_value_is_never_asked_to_flip() {
+        let mut rows = rows([false, true, false]);
+        rows.options[1] = rows.options[1].clone().unavailable("not now");
+
+        assert_eq!(rows.clicked(1), None);
+        assert_eq!(
+            rows.set_all(false),
+            MultiSelectEvent::SetAll {
+                rows: vec![0, 2],
+                checked: false,
+            }
+        );
     }
 
     #[test]

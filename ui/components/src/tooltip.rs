@@ -185,6 +185,9 @@ pub struct TextTooltip {
     /// The keys that do what the text names, set beside its first line.
     keys: Option<SharedString>,
     colors: TooltipColors,
+    /// Room the panel keeps from the cursor it opens at, on whichever side of
+    /// it the window places the panel.
+    clear: Pixels,
 }
 
 impl TextTooltip {
@@ -196,6 +199,25 @@ impl TextTooltip {
         move |_, cx| Self::view(text.clone(), None, colors, cx)
     }
 
+    /// Builds the tooltip showing `text`, held `clear` from the cursor above or
+    /// below it, so it covers nothing of a row `clear` tall the cursor is on.
+    pub fn builder_clear_of(
+        text: SharedString,
+        colors: TooltipColors,
+        clear: Pixels,
+    ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+        move |_, cx| {
+            let text = text.clone();
+            cx.new(|_| TextTooltip {
+                text,
+                keys: None,
+                colors,
+                clear,
+            })
+            .into()
+        }
+    }
+
     /// The tooltip showing `text`, and `keys` beside it where given.
     pub fn view(
         text: SharedString,
@@ -203,7 +225,13 @@ impl TextTooltip {
         colors: TooltipColors,
         cx: &mut App,
     ) -> AnyView {
-        cx.new(|_| TextTooltip { text, keys, colors }).into()
+        cx.new(|_| TextTooltip {
+            text,
+            keys,
+            colors,
+            clear: px(0.),
+        })
+        .into()
     }
 }
 
@@ -217,7 +245,7 @@ impl Render for TextTooltip {
         );
         // A tooltip view is drawn outside the element tree that sets the UI
         // face, so it inherits none.
-        div()
+        let panel = div()
             .font_family(bviz_ui_assets::UI)
             .p(px(TOOLTIP_PAD))
             .rounded(px(TOOLTIP_RADIUS))
@@ -240,7 +268,8 @@ impl Render for TextTooltip {
                 self.keys
                     .clone()
                     .map(|keys| div().text_color(self.colors.keys).child(keys)),
-            )
+            );
+        div().py(self.clear).child(panel)
     }
 }
 

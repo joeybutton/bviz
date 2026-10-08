@@ -317,6 +317,14 @@ pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful
         .hover(move |style| style.bg(hover))
 }
 
+/// One row of a menu that cannot be chosen: muted, and filled neither under
+/// the cursor nor for a value that stands, which its check mark alone tells.
+pub(crate) fn disabled_row(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
+    row_frame(id, colors)
+        .text_color(colors.text_muted)
+        .cursor_default()
+}
+
 /// One row of a menu whose fill follows an aim the caller keeps, moved by the
 /// cursor and the keys alike, so that the two never fill a row each.
 pub fn aimed_row(id: ElementId, colors: &ThemeColors, aimed: bool) -> Stateful<Div> {
