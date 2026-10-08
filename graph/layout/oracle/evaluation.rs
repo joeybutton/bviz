@@ -6,7 +6,12 @@
 //! dependencies are those `LabelVisitationUtils.visitTarget` visits: a rule's
 //! inputs and the package groups its visibility names, Bazel's own
 //! `RuleVisibility` parsing them, a file's generating rule and package
-//! groups, and a package group's includes.
+//! groups, and a package group's includes. A rule's inputs are every label
+//! its dependency attributes name and some no attribute does, as an aspect's.
+//! Each graph is also queried under `--noimplicit_deps`, over the graph a view
+//! leaving implicit dependencies out walks and, on Bazel's side, over the
+//! labels the rule's explicitly specified attributes name as Bazel's own types
+//! and `Selector`s visit them.
 //!
 //! `attr` is drawn for attributes of every type the graphs drawn state, as
 //! Bazel writes them by default: every rule its name and tags, and some rules
@@ -33,6 +38,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bazel_query_proto::blaze_query::attribute::{
     Discriminator as AttributeType, Selector, SelectorEntry, SelectorList, Tristate,
@@ -42,9 +48,9 @@ use bazel_query_proto::blaze_query::{
     PackageGroup, Rule, SourceFile, StringDictEntry, StringListDictEntry, Target,
     target::Discriminator,
 };
-use bviz_graph_layout::build_joint;
 use bviz_graph_layout::query_lang::{Universe, parse};
 use bviz_graph_layout::streamed_proto::read_query_targets;
+use bviz_graph_layout::{Deps, Sources, build_joint};
 use fastrand::Rng;
 use prost::Message;
 
@@ -114,33 +120,49 @@ fn evaluates_as_bazel_does() {
         let path = graph.write(seed);
         let targets = read_query_targets(&std::fs::read(&path).unwrap()).unwrap();
         let joint = build_joint(None, None, Some(&targets), false);
-        let (universe, _) = Universe::of_joint(joint);
-        let ours = Ours {
-            universe: &universe,
-            graph: &graph,
-        };
+        let every = Sources::reading(&joint.capabilities);
+        let explicit = every.with_deps(Deps::Implicit, false).unwrap();
+        let settings = [
+            (every, &graph.deps, &[][..]),
+            (explicit, &graph.explicit_deps, &[Deps::Implicit.flag()][..]),
+        ];
+        for (sources, deps, flags) in settings {
+            let walked = sources.mask(&joint.graph, &joint.provenance);
+            let universe = Universe::new(
+                &walked,
+                &joint.names,
+                &Arc::new(joint.facets.clone()),
+                &Arc::new(joint.attributes.clone()),
+                &joint.capabilities,
+            );
+            let ours = Ours {
+                universe: &universe,
+                deps,
+            };
 
-        let expressions: Vec<Drawn> = (0..EXPRESSIONS_PER_GRAPH)
-            .map(|_| Drawn::draw(&mut rng, &graph))
-            .collect();
-        let asked: Vec<&str> = expressions.iter().flat_map(Drawn::asked).collect();
-        let answers = ask_bazel(Some(&path), asked.iter().copied());
-        assert_eq!(
-            answers.len(),
-            asked.len(),
-            "the oracle answers every expression"
-        );
-        let mut answers = answers.iter().map(String::as_str);
-        for drawn in &expressions {
-            cases += 1;
-            let bazel: Vec<&str> = drawn.asked().map(|_| answers.next().unwrap()).collect();
-            match named(bazel[0]) {
-                Some(labels) if labels.is_empty() => outcomes[0] += 1,
-                Some(_) => outcomes[1] += 1,
-                None => outcomes[2] += 1,
-            }
-            if let Err(why) = ours.check(drawn, &bazel) {
-                mismatches.push(format!("graph {seed}: {}\n  {why}", drawn.text));
+            let expressions: Vec<Drawn> = (0..EXPRESSIONS_PER_GRAPH)
+                .map(|_| Drawn::draw(&mut rng, &graph))
+                .collect();
+            let asked: Vec<&str> = expressions.iter().flat_map(Drawn::asked).collect();
+            let answers = ask_bazel(Some(&path), flags, asked.iter().copied());
+            assert_eq!(
+                answers.len(),
+                asked.len(),
+                "the oracle answers every expression"
+            );
+            let mut answers = answers.iter().map(String::as_str);
+            for drawn in &expressions {
+                cases += 1;
+                let bazel: Vec<&str> = drawn.asked().map(|_| answers.next().unwrap()).collect();
+                match named(bazel[0]) {
+                    Some(labels) if labels.is_empty() => outcomes[0] += 1,
+                    Some(_) => outcomes[1] += 1,
+                    None => outcomes[2] += 1,
+                }
+                if let Err(why) = ours.check(drawn, &bazel) {
+                    let flags = flags.join(" ");
+                    mismatches.push(format!("graph {seed} {flags}: {}\n  {why}", drawn.text));
+                }
             }
         }
     }
@@ -168,6 +190,8 @@ struct Graph {
     packages: Vec<(String, String)>,
     /// The labels each target depends on that the graph holds.
     deps: HashMap<String, Vec<String>>,
+    /// The same under `--noimplicit_deps`.
+    explicit_deps: HashMap<String, Vec<String>>,
 }
 
 impl Graph {
@@ -183,6 +207,7 @@ impl Graph {
         let mut rules: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
         let mut files: Vec<Target> = Vec::new();
         let mut labels: Vec<String> = Vec::new();
+        let mut groups: Vec<String> = Vec::new();
         for (repo, path) in &packages {
             let label = |name: &str| format!("{repo}//{path}:{name}");
             let mut names: Vec<&str> = RULE_NAMES.to_vec();
@@ -208,25 +233,34 @@ impl Graph {
                 files.push(generated(&output, &rules[owner].0));
                 labels.push(output);
             }
-            if rng.u8(..6) == 0 {
-                files.push(package_group(&label("group")));
+            if rng.u8(..3) == 0 {
+                groups.push(label("group"));
                 labels.push(label("group"));
             }
         }
+        for file in &mut files {
+            if let Some(source) = file.source_file.as_mut() {
+                source.package_group = (0..rng.usize(..3))
+                    .filter_map(|_| Some(groups.get(rng.usize(..groups.len().max(1)))?.clone()))
+                    .collect();
+                source.package_group.dedup();
+            }
+        }
+        for group in &groups {
+            let mut includes: Vec<String> = (0..rng.usize(..3))
+                .map(|_| groups[rng.usize(..groups.len())].clone())
+                .filter(|included| included != group)
+                .collect();
+            includes.sort();
+            includes.dedup();
+            files.push(package_group(group, includes));
+        }
         let mut targets: Vec<Target> = Vec::with_capacity(rules.len() + files.len());
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        let mut explicit_deps: HashMap<String, Vec<String>> = HashMap::new();
         // By rule, the package groups its visibility names.
         let mut visibilities: HashMap<String, Vec<String>> = HashMap::new();
         for (name, outputs, tags) in &rules {
-            let mut inputs: Vec<String> = (0..rng.usize(..4))
-                .map(|_| labels[rng.usize(..labels.len())].clone())
-                .filter(|input| input != name)
-                .collect();
-            if rng.u8(..8) == 0 {
-                inputs.push("//zz:absent".to_string());
-            }
-            inputs.sort();
-            inputs.dedup();
             let class = RULE_CLASSES[rng.usize(..RULE_CLASSES.len())];
             let (_, short) = name.split_once(':').unwrap();
             let mut attributes = vec![
@@ -242,8 +276,24 @@ impl Graph {
             if rng.u8(..3) == 0 {
                 attributes.push(boolean("testonly", rng.bool()));
             }
-            attributes.extend(typed_attributes(rng, &labels));
+            attributes.extend(typed_attributes(rng, &labels, &groups));
             attributes.sort_by(|a, b| a.name.cmp(&b.name));
+            // A rule's inputs are what its attributes name and what aspects
+            // add, which no attribute does.
+            let mut inputs: Vec<String> = (0..rng.usize(..3))
+                .map(|_| labels[rng.usize(..labels.len())].clone())
+                .chain(attributes.iter().flat_map(dependency_labels))
+                .filter(|input| input != name)
+                .collect();
+            if rng.u8(..8) == 0 {
+                inputs.push("//zz:absent".to_string());
+            }
+            inputs.sort();
+            inputs.dedup();
+            let named_explicitly: Vec<String> = (attributes.iter())
+                .filter(|attribute| attribute.explicitly_specified == Some(true))
+                .flat_map(dependency_labels)
+                .collect();
             targets.push(Target {
                 r#type: Discriminator::Rule as i32,
                 rule: Some(Rule {
@@ -256,21 +306,40 @@ impl Graph {
                 }),
                 ..Default::default()
             });
-            let visibility = targets.last().and_then(visibility_groups);
-            visibilities.insert(name.clone(), visibility.clone().unwrap_or_default());
-            let held = (inputs.into_iter().chain(visibility.into_iter().flatten()))
-                .filter(|input| labels.contains(input));
-            deps.insert(name.clone(), held.collect());
+            let (visibility, explicit_visibility) =
+                visibility_groups(targets.last().unwrap()).unwrap_or_default();
+            visibilities.insert(name.clone(), visibility.clone());
+            let held = |named: Vec<String>| -> Vec<String> {
+                named
+                    .into_iter()
+                    .filter(|input| labels.contains(input))
+                    .collect()
+            };
+            let explicit_visibility = visibility.iter().filter(|_| explicit_visibility);
+            let explicit = named_explicitly
+                .into_iter()
+                .chain(explicit_visibility.cloned());
+            explicit_deps.insert(name.clone(), held(explicit.collect()));
+            deps.insert(
+                name.clone(),
+                held(inputs.into_iter().chain(visibility).collect()),
+            );
         }
         for file in &files {
-            if let Some(generated) = &file.generated_file {
+            let (name, depending) = if let Some(generated) = &file.generated_file {
                 let rule = &generated.generating_rule;
                 let groups = visibilities.get(rule).into_iter().flatten().cloned();
-                deps.insert(
-                    generated.name.clone(),
-                    std::iter::once(rule.clone()).chain(groups).collect(),
-                );
-            }
+                let depending = std::iter::once(rule.clone()).chain(groups).collect();
+                (&generated.name, depending)
+            } else if let Some(source) = &file.source_file {
+                (&source.name, source.package_group.clone())
+            } else if let Some(group) = &file.package_group {
+                (&group.name, group.included_package_group.clone())
+            } else {
+                continue;
+            };
+            deps.insert(name.clone(), depending.clone());
+            explicit_deps.insert(name.clone(), depending);
         }
         targets.extend(files);
         rng.shuffle(&mut targets);
@@ -279,6 +348,7 @@ impl Graph {
             labels,
             packages,
             deps,
+            explicit_deps,
         }
     }
 
@@ -325,17 +395,91 @@ impl Graph {
     }
 }
 
-/// The labels a drawn rule's visibility names, each written without the
-/// repository a main-repository label may be spelled with. A drawn visibility
-/// names only labels of the graph, so every one is a package group's to Bazel.
-fn visibility_groups(target: &Target) -> Option<Vec<String>> {
+/// The package groups a drawn rule's visibility names, as Bazel's
+/// `RuleVisibility` reads them, each written without the repository a
+/// main-repository label may be spelled with; and whether the BUILD file sets
+/// the visibility.
+fn visibility_groups(target: &Target) -> Option<(Vec<String>, bool)> {
     let rule = target.rule.as_ref()?;
     let visibility = rule.attribute.iter().find(|a| a.name == "visibility")?;
-    let unspelled = |label: &String| match label.strip_prefix("@@//") {
-        Some(main) => format!("//{main}"),
-        None => label.clone(),
+    let labels: Vec<String> = visibility
+        .string_list_value
+        .iter()
+        .map(|l| unspelled(l))
+        .collect();
+    let groups = match labels.iter().any(|label| label == PUBLIC) {
+        true => Vec::new(),
+        false => (labels.into_iter())
+            .filter(|label| label != PRIVATE && !label.ends_with(":__pkg__"))
+            .collect(),
     };
-    Some(visibility.string_list_value.iter().map(unspelled).collect())
+    Some((groups, visibility.explicitly_specified == Some(true)))
+}
+
+const PUBLIC: &str = "//visibility:public";
+const PRIVATE: &str = "//visibility:private";
+
+/// `label` written without the repository a main-repository label may be
+/// spelled with.
+fn unspelled(label: &str) -> String {
+    match label.strip_prefix("@@//") {
+        Some(main) => format!("//{main}"),
+        None => label.to_string(),
+    }
+}
+
+/// The labels `attribute` names as dependencies, each [`unspelled`]: those
+/// `AggregatingAttributeMapper.visitLabels` visits of every branch of a select
+/// and every condition but the default, and none of an output or nodep
+/// attribute.
+fn dependency_labels(attribute: &Attribute) -> Vec<String> {
+    if attribute.nodep == Some(true) {
+        return Vec::new();
+    }
+    let mut named: Vec<String> = Vec::new();
+    match &attribute.selector_list {
+        Some(list) => {
+            let kind = list.r#type.unwrap();
+            for entry in list.elements.iter().flat_map(|selector| &selector.entries) {
+                let key = unspelled(entry.label.as_deref().unwrap());
+                if key != "//conditions:default" {
+                    named.push(key);
+                }
+                let fields = Attribute {
+                    r#type: kind,
+                    string_value: entry.string_value.clone(),
+                    string_list_value: entry.string_list_value.clone(),
+                    label_dict_unary_value: entry.label_dict_unary_value.clone(),
+                    label_keyed_string_dict_value: entry.label_keyed_string_dict_value.clone(),
+                    string_list_dict_value: entry.string_list_dict_value.clone(),
+                    ..Default::default()
+                };
+                named.extend(value_labels(&fields));
+            }
+        }
+        None => named.extend(value_labels(attribute)),
+    }
+    named
+}
+
+/// The labels the value `attribute` states names as dependencies, each
+/// [`unspelled`].
+fn value_labels(attribute: &Attribute) -> Vec<String> {
+    let labels: Vec<&String> = match AttributeType::try_from(attribute.r#type) {
+        Ok(AttributeType::Label) => attribute.string_value.iter().collect(),
+        Ok(AttributeType::LabelList) => attribute.string_list_value.iter().collect(),
+        Ok(AttributeType::LabelDictUnary) => (attribute.label_dict_unary_value.iter())
+            .map(|e| &e.value)
+            .collect(),
+        Ok(AttributeType::LabelKeyedStringDict) => (attribute.label_keyed_string_dict_value.iter())
+            .map(|e| &e.key)
+            .collect(),
+        Ok(AttributeType::LabelListDict) => (attribute.string_list_dict_value.iter())
+            .flat_map(|e| &e.value)
+            .collect(),
+        _ => Vec::new(),
+    };
+    labels.into_iter().map(|label| unspelled(label)).collect()
 }
 
 fn source(name: &str) -> Target {
@@ -361,11 +505,12 @@ fn generated(name: &str, rule: &str) -> Target {
     }
 }
 
-fn package_group(name: &str) -> Target {
+fn package_group(name: &str, includes: Vec<String>) -> Target {
     Target {
         r#type: Discriminator::PackageGroup as i32,
         package_group: Some(PackageGroup {
             name: name.to_string(),
+            included_package_group: includes,
             ..Default::default()
         }),
         ..Default::default()
@@ -382,7 +527,11 @@ const DISTRIBS: &[&str] = &["a", "b c"];
 /// Typed attributes a rule states besides its name, tags and `testonly`, as
 /// Bazel writes them by default: some of those a rule may have, some written
 /// in its BUILD file and some as `select`s.
-fn typed_attributes(rng: &mut Rng, labels: &[String]) -> Vec<Attribute> {
+fn typed_attributes(rng: &mut Rng, labels: &[String], groups: &[String]) -> Vec<Attribute> {
+    let labels = &Labels {
+        all: labels,
+        groups,
+    };
     let mut drawn: Vec<(&str, Draw)> = vec![
         ("srcs", |rng, labels| {
             Value::Labels(many(rng, |rng| label(rng, labels)))
@@ -452,7 +601,7 @@ fn typed_attributes(rng: &mut Rng, labels: &[String]) -> Vec<Attribute> {
             Value::Outputs(many(rng, |rng| label(rng, labels)))
         }),
         ("visibility", |rng, labels| {
-            Value::NodepLabels(many(rng, |rng| label(rng, labels)))
+            Value::NodepLabels(many(rng, |rng| visibility_label(rng, labels)))
         }),
         ("licenses", |rng, labels| {
             let types = vec![pick(rng, &["notice", "restricted", "unencumbered"])];
@@ -482,7 +631,39 @@ fn typed_attributes(rng: &mut Rng, labels: &[String]) -> Vec<Attribute> {
 }
 
 /// Draws a value from the labels of a graph.
-type Draw = fn(&mut Rng, &[String]) -> Value;
+type Draw = fn(&mut Rng, &Labels) -> Value;
+
+/// The labels of a graph, and those of its package groups.
+struct Labels<'a> {
+    all: &'a [String],
+    groups: &'a [String],
+}
+
+impl std::ops::Deref for Labels<'_> {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        self.all
+    }
+}
+
+/// A label a visibility names: mostly a package group, now and then every
+/// package, one package directly, or a target no package group is.
+fn visibility_label(rng: &mut Rng, labels: &Labels) -> String {
+    match rng.u8(..8) {
+        0 => PUBLIC.to_string(),
+        1 => {
+            let (package, _) = labels[rng.usize(..labels.len())].rsplit_once(':').unwrap();
+            format!("{package}:__pkg__")
+        }
+        2 => label(rng, labels),
+        _ if labels.groups.is_empty() => label(rng, labels),
+        _ => {
+            let at = rng.usize(..labels.groups.len());
+            respelled(rng, &labels.groups[at])
+        }
+    }
+}
 
 /// One of `labels`, now and then a main-repository one spelled with its
 /// repository, as `--consistent_labels` writes it.
@@ -678,12 +859,20 @@ impl Value {
 
 /// The attribute `name` written as a `select`, or for a type that
 /// concatenates up to three, a later one now and then on the same conditions
-/// as the first, each branch drawn by `draw` or `None`.
-fn select(rng: &mut Rng, name: &str, labels: &[String], draw: Draw) -> Attribute {
+/// as the first, each branch drawn by `draw` or `None`. Its conditions are
+/// drawn from [`CONDITIONS`] and one target of the graph, which the select
+/// then depends on.
+fn select(rng: &mut Rng, name: &str, labels: &Labels, draw: Draw) -> Attribute {
     let kind = draw(rng, labels);
-    let mut first: Vec<&str> = CONDITIONS.to_vec();
+    let target = labels[rng.usize(..labels.len())].clone();
+    let pool: Vec<&str> = CONDITIONS
+        .iter()
+        .copied()
+        .chain([target.as_str()])
+        .collect();
+    let mut first: Vec<&str> = pool.clone();
     rng.shuffle(&mut first);
-    first.truncate(rng.usize(1..CONDITIONS.len() + 1));
+    first.truncate(rng.usize(1..pool.len() + 1));
     // Bazel concatenates selects only of a type that concatenates.
     let concatenates = !matches!(
         kind,
@@ -697,9 +886,9 @@ fn select(rng: &mut Rng, name: &str, labels: &[String], draw: Draw) -> Attribute
         let conditions = match at > 0 && rng.bool() {
             true => first.clone(),
             false => {
-                let mut conditions = CONDITIONS.to_vec();
+                let mut conditions = pool.clone();
                 rng.shuffle(&mut conditions);
-                conditions.truncate(rng.usize(1..CONDITIONS.len() + 1));
+                conditions.truncate(rng.usize(1..pool.len() + 1));
                 conditions
             }
         };
@@ -970,7 +1159,8 @@ impl Drawer<'_> {
 /// bviz's engine over one graph.
 struct Ours<'a> {
     universe: &'a Universe,
-    graph: &'a Graph,
+    /// The labels each target depends on in the graph the universe walks.
+    deps: &'a HashMap<String, Vec<String>>,
 }
 
 impl Ours<'_> {
@@ -1054,7 +1244,7 @@ impl Ours<'_> {
             if to.contains(at) {
                 return Some(fewest[at]);
             }
-            for dep in self.graph.deps.get(at).into_iter().flatten() {
+            for dep in self.deps.get(at).into_iter().flatten() {
                 if !fewest.contains_key(dep.as_str()) {
                     fewest.insert(dep, fewest[at] + 1);
                     open.push_back(dep);
@@ -1073,7 +1263,7 @@ impl Ours<'_> {
             if to.contains(at) {
                 return true;
             }
-            for dep in self.graph.deps.get(at).into_iter().flatten() {
+            for dep in self.deps.get(at).into_iter().flatten() {
                 if path.contains(dep.as_str()) && seen.insert(dep) {
                     open.push(dep);
                 }

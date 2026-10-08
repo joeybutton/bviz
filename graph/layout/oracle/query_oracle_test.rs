@@ -112,7 +112,7 @@ fn parses_as_bazel_does() {
         })
         .collect();
 
-    let answers = ask_bazel(None, cases.iter().map(|(_, expr)| expr.as_str()));
+    let answers = ask_bazel(None, &[], cases.iter().map(|(_, expr)| expr.as_str()));
     assert_eq!(
         answers.len(),
         cases.len(),
@@ -152,11 +152,16 @@ fn parses_as_bazel_does() {
 
 /// Bazel's answer to each expression, one record apiece: how it parses, or
 /// with the streamed_proto dump at `graph`, what it names there.
-fn ask_bazel<'a>(graph: Option<&Path>, expressions: impl Iterator<Item = &'a str>) -> Vec<String> {
+fn ask_bazel<'a>(
+    graph: Option<&Path>,
+    flags: &[&str],
+    expressions: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
     let runfiles = runfiles::Runfiles::create().unwrap();
     let oracle = runfiles::rlocation!(runfiles, std::env::var("QUERY_ORACLE").unwrap()).unwrap();
     let mut child = Command::new(oracle)
         .args(graph)
+        .args(flags)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

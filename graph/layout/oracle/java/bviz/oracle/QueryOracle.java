@@ -43,7 +43,8 @@ import java.util.stream.Stream;
  * <p>Run bare, it parses each expression: {@code parse\t<expression>} with the parsed expression
  * printed back, or {@code error\t<message>}. Run with the path of a {@code bazel query
  * --output=streamed_proto} dump, it evaluates each over the dump's targets: {@code ok\t<labels>}
- * with the labels named, sorted and separated by spaces, or {@code error\t<message>}.
+ * with the labels named, sorted and separated by spaces, or {@code error\t<message>}. A further
+ * {@code --noimplicit_deps} walks the explicit dependencies alone.
  *
  * <p>Bazel holds strings internally as one char per UTF-8 byte, so stdin and stdout are read and
  * written as ISO-8859-1 to hand the engine its own encoding.
@@ -67,7 +68,9 @@ public final class QueryOracle {
     // Guava logs each failure a combined future drops after its first, which the engine
     // reports on its own.
     Logger.getLogger("").setLevel(Level.OFF);
-    ProtoQueryEnvironment env = args.length == 0 ? null : environment(Path.of(args[0]));
+    boolean noImplicitDeps = List.of(args).contains("--noimplicit_deps");
+    ProtoQueryEnvironment env =
+        args.length == 0 ? null : environment(Path.of(args[0]), noImplicitDeps);
     BufferedReader in = new BufferedReader(new InputStreamReader(System.in, ISO_8859_1));
     try (Writer out = new BufferedWriter(new OutputStreamWriter(System.out, ISO_8859_1))) {
       for (String record = nextRecord(in); record != null; record = nextRecord(in)) {
@@ -93,7 +96,8 @@ public final class QueryOracle {
    * The environment over the dump at {@code path}. Each repository named {@code <module>+}, as
    * Bzlmod names a module's, is visible as {@code @<module>}.
    */
-  private static ProtoQueryEnvironment environment(Path path) throws Exception {
+  private static ProtoQueryEnvironment environment(Path path, boolean noImplicitDeps)
+      throws Exception {
     List<Build.Target> targets = new ArrayList<>();
     Map<String, RepositoryName> mapping = new HashMap<>();
     try (InputStream in = new BufferedInputStream(Files.newInputStream(path))) {
@@ -109,7 +113,7 @@ public final class QueryOracle {
         mapping.put(repo.substring(0, repo.length() - 1), RepositoryName.createUnvalidated(repo));
       }
     }
-    return new ProtoQueryEnvironment(targets, ImmutableMap.copyOf(mapping));
+    return new ProtoQueryEnvironment(targets, ImmutableMap.copyOf(mapping), noImplicitDeps);
   }
 
   private static String evaluate(ProtoQueryEnvironment env, String expression)

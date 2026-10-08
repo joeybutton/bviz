@@ -69,8 +69,9 @@ import net.starlark.java.eval.StarlarkInt;
  * their own paths.
  *
  * <p>A target's dependencies are those {@code LabelVisitationUtils.visitTarget} visits, as far
- * as the proto states them. A pattern naming a target, package or repository the dump lacks fails
- * with the message bviz gives for it, the dump holding no BUILD file for Bazel's own.
+ * as the proto states them, under {@code DependencyFilter.NO_IMPLICIT_DEPS} where asked. A
+ * pattern naming a target, package or repository the dump lacks fails with the message bviz
+ * gives for it, the dump holding no BUILD file for Bazel's own.
  */
 final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQueryEnvironment.Node> {
   /** One target of the dump. */
@@ -110,7 +111,10 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
   private final TargetPattern.Parser parser;
   private final Resolver resolver = new Resolver();
 
-  ProtoQueryEnvironment(List<Build.Target> targets, ImmutableMap<String, RepositoryName> mapping)
+  ProtoQueryEnvironment(
+      List<Build.Target> targets,
+      ImmutableMap<String, RepositoryName> mapping,
+      boolean noImplicitDeps)
       throws LabelSyntaxException {
     super(
         /* keepGoing= */ false,
@@ -141,7 +145,7 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
           .put(label.getName(), node);
     }
     for (Node node : byName.values()) {
-      for (String dep : depLabels(node.target, byName)) {
+      for (String dep : depLabels(node.target, byName, noImplicitDeps)) {
         Node to = byName.get(Label.parseCanonical(dep).getCanonicalForm());
         if (to != null) {
           node.deps.add(to);
@@ -163,13 +167,25 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
 
   /**
    * The labels {@code LabelVisitationUtils.visitTarget} visits for {@code target}, an output
-   * file's visibility being that of its generating rule, found among {@code byName}.
+   * file's visibility being that of its generating rule, found among {@code byName}. Under {@code
+   * noImplicitDeps} a rule's are those its explicitly specified attributes name, and its
+   * visibility's where its BUILD file sets that, which is what the filter keeps of {@code
+   * visitRule} and {@code visitRuleVisibility}; the rest is visited through no attribute.
    */
-  private static List<String> depLabels(Build.Target target, Map<String, Node> byName) {
+  private static List<String> depLabels(
+      Build.Target target, Map<String, Node> byName, boolean noImplicitDeps) {
     return switch (target.getType()) {
       case RULE -> {
-        List<String> deps = new ArrayList<>(target.getRule().getRuleInputList());
-        deps.addAll(visibilityDeps(target.getRule()));
+        Build.Rule rule = target.getRule();
+        List<String> deps =
+            new ArrayList<>(noImplicitDeps ? explicitDeps(rule) : rule.getRuleInputList());
+        // A drawn attribute may name its own rule, which as a dependency is a cycle Bazel
+        // refuses to load, so a dump's rule inputs never hold it.
+        String self = Label.parseCanonicalUnchecked(rule.getName()).getCanonicalForm();
+        deps.removeIf(self::equals);
+        if (!noImplicitDeps || visibilityExplicit(rule)) {
+          deps.addAll(visibilityDeps(rule));
+        }
         yield deps;
       }
       case SOURCE_FILE -> target.getSourceFile().getPackageGroupList();
@@ -196,6 +212,67 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
     } catch (ReflectiveOperationException e) {
       throw new ExceptionInInitializerError(e);
     }
+  }
+
+  private static boolean visibilityExplicit(Build.Rule rule) {
+    return rule.getAttributeList().stream()
+        .anyMatch(a -> a.getName().equals("visibility") && a.getExplicitlySpecified());
+  }
+
+  /**
+   * The labels {@code AggregatingAttributeMapper.visitLabels} visits of {@code rule}'s explicitly
+   * specified attributes: every label of a value, through Bazel's own types, and of a select
+   * every condition but the default and every branch set, visited as {@code visitLabelsInSelect}
+   * does; none of an output or nodep attribute. A branch of {@code None} takes the type's default,
+   * which names no label of any type drawn.
+   */
+  private static List<String> explicitDeps(Build.Rule rule) {
+    List<String> deps = new ArrayList<>();
+    Type.LabelVisitor visitor = (label, attribute) -> deps.add(label.getCanonicalForm());
+    for (Build.Attribute attribute : rule.getAttributeList()) {
+      if (!attribute.getExplicitlySpecified() || attribute.getNodep()) {
+        continue;
+      }
+      try {
+        if (attribute.getType() == Build.Attribute.Discriminator.SELECTOR_LIST) {
+          @SuppressWarnings("unchecked")
+          Type<Object> type =
+              (Type<Object>) type(attribute.getSelectorList().getType(), false);
+          for (Object built : selectors(attribute, type)) {
+            @SuppressWarnings("unchecked")
+            BuildType.Selector<Object> selector = (BuildType.Selector<Object>) built;
+            boolean hasDefault = selector.hasDefault();
+            boolean unconditional = selector.isUnconditional();
+            selector.forEach(
+                (key, value) -> {
+                  if (!unconditional
+                      && (!hasDefault || !BuildType.Selector.isDefaultConditionLabel(key))) {
+                    visitor.visit(key, null);
+                  }
+                  if (selector.isValueSet(key)) {
+                    type.visitLabels(visitor, value, null);
+                  }
+                });
+          }
+        } else {
+          Type<?> type = type(attribute.getType(), false);
+          if (type == BuildType.OUTPUT || type == BuildType.OUTPUT_LIST) {
+            continue;
+          }
+          Object value = stated(attribute.getType(), new AttributeFields(attribute));
+          if (value != null) {
+            visit(type, type.convert(value, attribute.getName()), visitor);
+          }
+        }
+      } catch (ReflectiveOperationException | ConversionException | LabelSyntaxException e) {
+        throw new IllegalStateException(attribute.toString(), e);
+      }
+    }
+    return deps;
+  }
+
+  private static <T> void visit(Type<T> type, Object value, Type.LabelVisitor visitor) {
+    type.visitLabels(visitor, type.cast(value), null);
   }
 
   /**
@@ -580,20 +657,8 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
     try {
       List<String> printed = new ArrayList<>();
       if (attribute.getType() == Build.Attribute.Discriminator.SELECTOR_LIST) {
-        Build.Attribute.SelectorList list = attribute.getSelectorList();
-        Type<?> type = type(list.getType(), attribute.getNodep());
-        List<Object> selectors = new ArrayList<>();
-        for (Build.Attribute.Selector selector : list.getElementsList()) {
-          ImmutableMap.Builder<Object, Object> branches = ImmutableMap.builder();
-          for (Build.Attribute.SelectorEntry entry : selector.getEntriesList()) {
-            Object value =
-                entry.getIsDefaultValue()
-                    ? Starlark.NONE
-                    : stated(list.getType(), new EntryFields(entry));
-            branches.put(Label.parseCanonical(entry.getLabel()), value);
-          }
-          selectors.add(SELECTOR.newInstance(branches.buildOrThrow(), attribute.getName(), null, type));
-        }
+        Type<?> type = type(attribute.getSelectorList().getType(), attribute.getNodep());
+        List<Object> selectors = selectors(attribute, type);
         for (Object value : (List<?>) ALL_VALUES.invoke(null, selectors, type, false)) {
           printed.add(TargetUtils.convertAttributeValue(type, value));
         }
@@ -609,6 +674,25 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
     } catch (ReflectiveOperationException | ConversionException | LabelSyntaxException e) {
       throw new IllegalStateException(attribute.toString(), e);
     }
+  }
+
+  /** The selects {@code attribute} concatenates, rebuilt as Bazel's own {@code Selector}s. */
+  private static List<Object> selectors(Build.Attribute attribute, Type<?> type)
+      throws ReflectiveOperationException, LabelSyntaxException {
+    Build.Attribute.SelectorList list = attribute.getSelectorList();
+    List<Object> selectors = new ArrayList<>();
+    for (Build.Attribute.Selector selector : list.getElementsList()) {
+      ImmutableMap.Builder<Object, Object> branches = ImmutableMap.builder();
+      for (Build.Attribute.SelectorEntry entry : selector.getEntriesList()) {
+        Object value =
+            entry.getIsDefaultValue()
+                ? Starlark.NONE
+                : stated(list.getType(), new EntryFields(entry));
+        branches.put(Label.parseCanonical(entry.getLabel()), value);
+      }
+      selectors.add(SELECTOR.newInstance(branches.buildOrThrow(), attribute.getName(), null, type));
+    }
+    return selectors;
   }
 
   /**
