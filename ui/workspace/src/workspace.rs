@@ -1147,6 +1147,7 @@ impl Workspace {
     /// The pane laid out nearest the active one on `side` of it, made active.
     fn focus_towards(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         if let Towards::Found(pane) = self.pane_in_direction(&self.active, side) {
+            pane.read(cx).reveal_shown_tab();
             self.activate_pane(pane, window, cx);
         }
     }

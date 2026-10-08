@@ -12,6 +12,7 @@ pub(crate) enum ChromeIntent {
     Activate,
     Move,
     OpenMenu,
+    ScrollTabs,
     EvenSplit,
     ResizeSplit,
 }
@@ -43,6 +44,12 @@ pub(crate) const CHROME_GESTURES: Gestures<ChromeIntent> = Gestures::new(&[
         TAB_OR_HANDLE,
         "Open panel menu",
         ChromeIntent::OpenMenu,
+    ),
+    Entry::new(
+        Input::SCROLL,
+        Place::On("a tab strip"),
+        "Scroll tabs",
+        ChromeIntent::ScrollTabs,
     ),
     Entry::new(
         Input::new(Motion::Press(Button::Left, Clicks::Repeated)),

@@ -3,13 +3,16 @@ use crate::gestures::{CHROME_GESTURES, ChromeIntent};
 use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, Documents, PanelEvent};
-use bviz_ui_components::gesture::Pointer;
-use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors};
+use bviz_ui_components::gesture::{Pointer, scroll_pixels};
+use bviz_ui_components::{
+    Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors, overlay_canvas,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Anchor, AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, Entity, EntityId,
-    EventEmitter, FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    Point, Render, Subscription, Window, anchored, deferred, div, prelude::*, px,
+    EventEmitter, FocusHandle, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, Subscription, Window, anchored,
+    deferred, div, linear_color_stop, linear_gradient, point, prelude::*, px, size,
 };
 use std::cmp::Ordering;
 use std::iter;
@@ -26,6 +29,20 @@ const HANDLE_HEIGHT: Pixels = px(24.);
 /// How wide a tab may grow before its label is cut, so one long title cannot
 /// push its neighbours off the strip.
 const MAX_TAB_WIDTH: Pixels = px(200.);
+
+/// How narrow a tab shrinks before the strip scrolls instead: room for its
+/// icon, its close control and the number of its document, with a few letters
+/// of its title ahead of the cut.
+const MIN_TAB_WIDTH: Pixels = px(120.);
+
+/// How far into the strip the fade over an end it has scrolled tabs past
+/// reaches.
+const OVERFLOW_FADE_WIDTH: Pixels = px(24.);
+
+/// How near an end of its scroll a strip is taken to stand at it: gpui rounds
+/// the furthest a strip scrolls, and leaves where a reveal scrolls it to
+/// unrounded.
+const SCROLL_END_SLACK: Pixels = px(1.);
 
 const TAB_ICON_SIZE: Pixels = px(14.);
 
@@ -93,8 +110,8 @@ struct DrawnBand {
     /// is told from it.
     naming: Naming,
     bounds: Bounds<Pixels>,
-    /// Where it laid out the tab naming each panel, in the order the pane held
-    /// them. Empty for a band that puts up no tabs of its own.
+    /// The tabs as [`Band::tabs`] reads them; empty for a band that puts up
+    /// no tabs of its own.
     tabs: Vec<Bounds<Pixels>>,
 }
 
@@ -128,10 +145,9 @@ pub struct Pane {
     /// `None` until a frame has drawn one, and while the pane names its panels
     /// not at all.
     band: Option<DrawnBand>,
-    /// Where the frame being laid out has measured the tabs of the band it is
-    /// drawing. The band takes them as it is laid out itself, so that a band
-    /// carries the tabs of its own frame and no other.
-    laid_out_tabs: Vec<Bounds<Pixels>>,
+    /// How far the tabs are scrolled along the strip, and where the frame last
+    /// laid them out.
+    tab_scroll: ScrollHandle,
     /// The height the last frame laid the shown panel out at, which the keys
     /// help over it is kept within. `None` until a frame has drawn the pane.
     body_height: Option<Pixels>,
@@ -205,7 +221,7 @@ impl Pane {
             restore_clicked: false,
             joined_by_drag: false,
             band: None,
-            laid_out_tabs: Vec::new(),
+            tab_scroll: ScrollHandle::new(),
             body_height: None,
             keys_help: None,
         };
@@ -257,6 +273,11 @@ impl Pane {
 
     pub(crate) fn set_window_active(&mut self, active: bool) {
         self.window_active = active;
+    }
+
+    /// Scrolls the tab on show into view in the frame drawn next.
+    pub(crate) fn reveal_shown_tab(&self) {
+        self.tab_scroll.scroll_to_item(self.active);
     }
 
     /// The focus this pane's control acting on `panel` looks up the keys it
@@ -412,11 +433,12 @@ impl Pane {
         Some(taken)
     }
 
-    /// Brings the panel `active` indexes forward, and tells the workspace what
-    /// the pane is showing.
+    /// Brings the panel `active` indexes forward, its tab into view, and tells
+    /// the workspace what the pane is showing.
     fn show_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panel = self.active_panel().clone();
         panel.set_active(true, window, cx);
+        self.reveal_shown_tab();
         self.mark_shown(cx);
         cx.emit(PaneEvent::Changed);
     }
@@ -510,20 +532,30 @@ impl Pane {
             .border_b_1()
             .border_color(colors.border)
             .text_sm()
-            // The tabs are measured through a container of their own, so that
-            // what a drag reads as the boundaries between them is the tabs and
-            // nothing else the strip carries.
+            // The tabs scroll in a container of their own, so that what a drag
+            // reads as the boundaries between them is the tabs and nothing else
+            // the strip carries, and the controls after them stay in view.
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
+                    .relative()
                     .flex_1()
                     .min_w(px(0.))
                     .h_full()
-                    .overflow_hidden()
-                    .children(tabs)
-                    .on_children_prepainted(tabs_laid_out(cx)),
+                    .child(
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "pane-tabs".into(),
+                                cx.entity_id().as_u64(),
+                            ))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .size_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
+                            .children(tabs),
+                    )
+                    .child(overflow_fades(self.tab_scroll.clone(), colors.surface)),
             )
             .children(self.restore_control(cx))
             .child(self.keys_help_control(cx))
@@ -696,6 +728,7 @@ impl Pane {
             .gap_1()
             .h_full()
             .px_2()
+            .min_w(MIN_TAB_WIDTH)
             .max_w(MAX_TAB_WIDTH)
             .border_r_1()
             .border_color(colors.border)
@@ -710,18 +743,21 @@ impl Pane {
             .on_mouse_down(MouseButton::Left, pressed(panel.entity_id(), cx))
             .on_mouse_down(MouseButton::Right, menu_asked(panel.entity_id(), cx))
             .on_mouse_up(MouseButton::Left, released(cx))
+            .on_scroll_wheel(scrolled(cx))
             .on_click(cx.listener(move |pane, event: &ClickEvent, window, cx| {
                 pane.clicked(Some(index), event, window, cx);
             }))
             .tooltip(naming_tooltip(&panel, colors))
             .children(panel.icon(cx).map(|name| {
                 bviz_ui_assets::icon(name)
+                    .flex_shrink_0()
                     .size(TAB_ICON_SIZE)
                     .text_color(ink)
             }))
             .child(title(&panel))
             .child(
                 div()
+                    .flex_shrink_0()
                     // A press on the close control must not also reach the tab
                     // and bring forward the panel it is about to close.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -804,13 +840,95 @@ fn menu_asked(
     })
 }
 
-/// Records where the frame being laid out put the tabs of the band it is
-/// drawing, for the band itself to take as it is laid out.
-fn tabs_laid_out(
-    cx: &Context<Pane>,
-) -> impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static {
-    let pane = cx.entity();
-    move |tabs, _, cx| pane.update(cx, |pane, _| pane.laid_out_tabs = tabs)
+/// Scrolls the tabs along the strip, as [`CHROME_GESTURES`] has it.
+fn scrolled(cx: &mut Context<Pane>) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static {
+    cx.listener(|pane, event: &ScrollWheelEvent, _, cx| {
+        CHROME_GESTURES.dispatch(Pointer::scroll(event), |intent| match intent {
+            ChromeIntent::ScrollTabs => {
+                // The strip's own scroll would move the tabs a second time.
+                cx.stop_propagation();
+                let scroll = &pane.tab_scroll;
+                let mut offset = scroll.offset();
+                let along = scrolled_along(offset.x, scroll_pixels(event), scroll.max_offset().x);
+                if along != offset.x {
+                    offset.x = along;
+                    scroll.set_offset(offset);
+                    cx.notify();
+                }
+                true
+            }
+            _ => false,
+        });
+    })
+}
+
+/// Where tabs scrolled to `offset`, at most `max` past their start, stand once
+/// a wheel turns by `delta`. A strip scrolls along one axis only, so it takes
+/// whichever axis the wheel turns furthest on — a mouse without a horizontal
+/// wheel turns only the other.
+fn scrolled_along(offset: Pixels, delta: Point<Pixels>, max: Pixels) -> Pixels {
+    let along = if delta.x.abs() >= delta.y.abs() {
+        delta.x
+    } else {
+        delta.y
+    };
+    (offset + along).clamp(-max, px(0.))
+}
+
+/// As much of each tab as the strip scrolled by `scroll` shows, so that a tab
+/// scrolled out of sight sits at the end of the strip it left by.
+fn shown_tabs(scroll: &ScrollHandle) -> Vec<Bounds<Pixels>> {
+    let strip = scroll.bounds();
+    let offset = scroll.offset().x;
+    let count = scroll.children_count();
+    let mut tabs = Vec::with_capacity(count);
+    tabs.extend(
+        (0..count)
+            .map_while(|index| scroll.bounds_for_item(index))
+            .map(|tab| shown_part(tab, offset, strip)),
+    );
+    tabs
+}
+
+/// What `strip` shows of `tab`, laid out unscrolled and drawn scrolled by
+/// `offset`: its span across the strip, empty at the end it lies beyond.
+fn shown_part(tab: Bounds<Pixels>, offset: Pixels, strip: Bounds<Pixels>) -> Bounds<Pixels> {
+    let clamp = |x: Pixels| x.clamp(strip.left(), strip.right());
+    let left = clamp(tab.left() + offset);
+    let right = clamp(tab.right() + offset);
+    Bounds::new(point(left, tab.top()), size(right - left, tab.size.height))
+}
+
+/// Fades the tabs out toward each end of the strip that `scroll` has scrolled
+/// tabs past, into the strip's `surface`, so that a strip cut at a tab's edge
+/// still shows there is more of it.
+fn overflow_fades(scroll: ScrollHandle, surface: Hsla) -> impl IntoElement {
+    overlay_canvas(move |bounds, window, _| {
+        let offset = scroll.offset().x;
+        let max = scroll.max_offset().x;
+        let clear = surface.opacity(0.);
+        let fade = |left: Pixels, from: Hsla, to: Hsla| {
+            let band = Bounds::new(
+                point(left, bounds.top()),
+                size(OVERFLOW_FADE_WIDTH, bounds.size.height),
+            );
+            let toward_right = 90.;
+            gpui::fill(
+                band,
+                linear_gradient(
+                    toward_right,
+                    linear_color_stop(from, 0.),
+                    linear_color_stop(to, 1.),
+                ),
+            )
+        };
+        if offset < -SCROLL_END_SLACK {
+            window.paint_quad(fade(bounds.left(), surface, clear));
+        }
+        if offset > -max + SCROLL_END_SLACK {
+            window.paint_quad(fade(bounds.right() - OVERFLOW_FADE_WIDTH, clear, surface));
+        }
+    })
 }
 
 /// The tallest the keys help may stand over a panel `height` tall: inside it
@@ -846,8 +964,9 @@ fn body_laid_out(
 }
 
 /// Records where a frame laid the `naming` band out, for a drag over the pane
-/// to read. A band drawn in place of another draws boundaries no frame has
-/// read yet, so drawing one asks for a frame that aims the drag at them.
+/// to read. A band drawn in place of another, or at another width, draws
+/// boundaries no frame has read yet, so drawing one asks for a frame that aims
+/// the drag at them.
 fn band_laid_out(
     naming: Naming,
     cx: &Context<Pane>,
@@ -857,18 +976,30 @@ fn band_laid_out(
         let Some(&bounds) = band.first() else {
             return;
         };
-        let replaced = pane.update(cx, |pane, _| {
-            let replaced = pane.band.as_ref().map(|band| band.naming) != Some(naming);
+        let relaid = pane.update(cx, |pane, _| {
+            let drawn = pane.band.as_ref();
+            let replaced = drawn.map(|band| band.naming) != Some(naming);
+            let resized = drawn.map(|band| band.bounds.size.width) != Some(bounds.size.width);
+            // A reveal asked for before the strip was laid out at this width
+            // was measured against the width it had before.
+            if replaced || resized {
+                pane.reveal_shown_tab();
+            }
+            let tabs = match naming {
+                Naming::Strip | Naming::Row => shown_tabs(&pane.tab_scroll),
+                Naming::Handle => Vec::new(),
+            };
             pane.band = Some(DrawnBand {
                 naming,
                 bounds,
-                tabs: std::mem::take(&mut pane.laid_out_tabs),
+                tabs,
             });
-            replaced
+            replaced || resized
         });
-        if replaced {
+        if relaid {
             // A notify from within the frame being drawn schedules nothing, so
-            // the frame reading them is asked for from the one after this.
+            // the frame reading the band and revealing the tab on show is asked
+            // for from the one after this.
             let pane = pane.clone();
             window.on_next_frame(move |_, cx| pane.update(cx, |_, cx| cx.notify()));
         }
@@ -959,7 +1090,6 @@ impl Render for Pane {
         let help = self.keys_help_overlay();
         let Some(naming) = self.naming() else {
             self.band = None;
-            self.laid_out_tabs.clear();
             return div()
                 .relative()
                 .flex()
@@ -1120,5 +1250,75 @@ mod tests {
     fn a_tab_before_the_one_on_show_moves_it_nearer_the_front() {
         assert_eq!(showing_after(2, 0, 3), 1);
         assert_eq!(showing_after(1, 0, 2), 0);
+    }
+
+    /// A wheel turning along the strip scrolls it, one turning only across it
+    /// scrolls it just as far, and a sweep turning both is read along the axis
+    /// it turns furthest on.
+    #[test]
+    fn either_wheel_scrolls_the_strip_along() {
+        let max = px(300.);
+        assert_eq!(
+            scrolled_along(px(-100.), point(px(-40.), px(0.)), max),
+            px(-140.)
+        );
+        assert_eq!(
+            scrolled_along(px(-100.), point(px(0.), px(-40.)), max),
+            px(-140.)
+        );
+        assert_eq!(
+            scrolled_along(px(-100.), point(px(-40.), px(25.)), max),
+            px(-140.),
+            "a sweep mostly along the strip"
+        );
+        assert_eq!(
+            scrolled_along(px(-100.), point(px(5.), px(-40.)), max),
+            px(-140.),
+            "a sweep mostly across the strip"
+        );
+    }
+
+    /// The strip stops at its first tab and at its last.
+    #[test]
+    fn the_strip_scrolls_no_further_than_its_tabs() {
+        let max = px(300.);
+        assert_eq!(
+            scrolled_along(px(-10.), point(px(0.), px(40.)), max),
+            px(0.)
+        );
+        assert_eq!(
+            scrolled_along(px(-290.), point(px(0.), px(-40.)), max),
+            px(-300.)
+        );
+        assert_eq!(
+            scrolled_along(px(0.), point(px(0.), px(-40.)), px(0.)),
+            px(0.),
+            "tabs that fit do not scroll"
+        );
+    }
+
+    /// A tab scrolled partly out of the strip is aimed at by the part of it in
+    /// view, and one wholly out of it by the end of the strip it left by.
+    #[test]
+    fn a_tab_is_shown_as_far_as_the_strip_shows_it() {
+        let strip = Bounds::new(point(px(100.), px(0.)), size(px(300.), px(30.)));
+        let tab = |left: f32| Bounds::new(point(px(left), px(0.)), size(px(120.), px(30.)));
+        let span = |bounds: Bounds<Pixels>| (bounds.left(), bounds.right());
+        assert_eq!(
+            span(shown_part(tab(220.), px(0.), strip)),
+            (px(220.), px(340.))
+        );
+        assert_eq!(
+            span(shown_part(tab(220.), px(-180.), strip)),
+            (px(100.), px(160.))
+        );
+        assert_eq!(
+            span(shown_part(tab(100.), px(-180.), strip)),
+            (px(100.), px(100.))
+        );
+        assert_eq!(
+            span(shown_part(tab(460.), px(0.), strip)),
+            (px(400.), px(400.))
+        );
     }
 }
