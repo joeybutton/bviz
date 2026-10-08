@@ -642,6 +642,19 @@ impl GraphPanel {
             .overflow_hidden()
             .child(cached_layer(self.canvas.clone()))
             .children(underived.then(|| div().absolute().size_full().flex().child(laying_out())))
+            .children(self.derived.too_dense(self.mode).map(|too_dense| {
+                let notice = format!(
+                    "{} connectors are more than a layered layout takes on ({}). \
+                     Filter the graph further, or draw it as a map.",
+                    too_dense.connectors,
+                    build::MAX_LAID_OUT_CONNECTORS,
+                );
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .child(bviz_ui_components::centered_notice(notice, &palette.colors))
+            }))
             .child(
                 // What the drawing itself cannot state, held clear of the graph
                 // at the foot of the canvas.
