@@ -1244,14 +1244,19 @@ impl Workspace {
         self.playback.clone()
     }
 
-    /// Adds `panel` to the active pane and shows it.
+    /// Adds `panel` to the pane [`pane_for_role`] picks for its role and shows
+    /// it.
     pub(crate) fn add_panel(
         &mut self,
         panel: AnyPanel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = self.active.clone();
+        let panes = self.arrangement.layout().panes().map(|pane| {
+            let roles = pane.read(cx).panels().map(AnyPanel::role);
+            (pane, roles)
+        });
+        let pane = pane_for_role(panel.role(), panes, &self.active).clone();
         self.activate_pane(pane.clone(), window, cx);
         pane.update(cx, |pane, cx| pane.add(panel, window, cx));
     }
@@ -1669,6 +1674,19 @@ fn beside_cursor(at: Point<Pixels>, viewport: Size<Pixels>) -> Div {
         true => ghost.bottom(viewport.height - at.y + GHOST_OFFSET),
         false => ghost.top(at.y + GHOST_OFFSET),
     }
+}
+
+/// The first of `panes`, each given with the roles of the panels it holds,
+/// holding a panel of `role`, and `active` where none does.
+fn pane_for_role<P>(
+    role: Role,
+    panes: impl IntoIterator<Item = (P, impl IntoIterator<Item = Role>)>,
+    active: P,
+) -> P {
+    panes
+        .into_iter()
+        .find_map(|(pane, roles)| roles.into_iter().any(|held| held == role).then_some(pane))
+        .unwrap_or(active)
 }
 
 /// `placed` with each of `leading` and `others` that is `unplaced` pushed into
@@ -2677,6 +2695,27 @@ mod tests {
     fn a_window_no_document_lays_out_is_laid_out_by_role() {
         let roles = [('a', Role::Log), ('b', Role::Timeline), ('c', Role::Log)];
         assert_eq!(put_back_shape(&[], "abc", &roles), "(ac|b)");
+    }
+
+    /// A panel brought into a window joins the first pane holding a panel of its
+    /// role, and the active pane where none does.
+    #[test]
+    fn a_panel_brought_in_joins_the_first_pane_of_its_role() {
+        let panes = || {
+            [
+                ("graph", vec![Role::Canvas]),
+                ("trace", vec![Role::Timeline]),
+                ("flame", vec![Role::Timeline, Role::Analysis]),
+                ("stats", vec![Role::Analysis]),
+            ]
+        };
+        assert_eq!(pane_for_role(Role::Analysis, panes(), "active"), "flame");
+        assert_eq!(pane_for_role(Role::Timeline, panes(), "active"), "trace");
+        assert_eq!(pane_for_role(Role::Log, panes(), "active"), "active");
+        assert_eq!(
+            pane_for_role(Role::Canvas, Vec::<(&str, Vec<Role>)>::new(), "active"),
+            "active"
+        );
     }
 
     /// A press is holding the panel nowhere until it is a drag of it, so what a
