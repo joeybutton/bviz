@@ -3,10 +3,10 @@
 //!
 //! A graph is written as Bazel writes `query --output=streamed_proto`, read by
 //! bviz's query loader, and handed to Bazel's engine as targets whose
-//! dependencies are those `LabelVisitationUtils.visitTarget` visits. bviz
-//! draws a source file's `visibility_label` and a package group's includes as
-//! no edges, so the graphs drawn state neither, and the two engines walk the
-//! same edges.
+//! dependencies are those `LabelVisitationUtils.visitTarget` visits: a rule's
+//! inputs and the package groups its visibility names, Bazel's own
+//! `RuleVisibility` parsing them, a file's generating rule and package
+//! groups, and a package group's includes.
 //!
 //! `attr` is drawn for attributes of every type the graphs drawn state, as
 //! Bazel writes them by default: every rule its name and tags, and some rules
@@ -215,6 +215,8 @@ impl Graph {
         }
         let mut targets: Vec<Target> = Vec::with_capacity(rules.len() + files.len());
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        // By rule, the package groups its visibility names.
+        let mut visibilities: HashMap<String, Vec<String>> = HashMap::new();
         for (name, outputs, tags) in &rules {
             let mut inputs: Vec<String> = (0..rng.usize(..4))
                 .map(|_| labels[rng.usize(..labels.len())].clone())
@@ -254,14 +256,19 @@ impl Graph {
                 }),
                 ..Default::default()
             });
-            let held = inputs.into_iter().filter(|input| labels.contains(input));
+            let visibility = targets.last().and_then(visibility_groups);
+            visibilities.insert(name.clone(), visibility.clone().unwrap_or_default());
+            let held = (inputs.into_iter().chain(visibility.into_iter().flatten()))
+                .filter(|input| labels.contains(input));
             deps.insert(name.clone(), held.collect());
         }
         for file in &files {
             if let Some(generated) = &file.generated_file {
+                let rule = &generated.generating_rule;
+                let groups = visibilities.get(rule).into_iter().flatten().cloned();
                 deps.insert(
                     generated.name.clone(),
-                    vec![generated.generating_rule.clone()],
+                    std::iter::once(rule.clone()).chain(groups).collect(),
                 );
             }
         }
@@ -316,6 +323,19 @@ impl Graph {
             _ => self.labels[rng.usize(..self.labels.len())].clone(),
         }
     }
+}
+
+/// The labels a drawn rule's visibility names, each written without the
+/// repository a main-repository label may be spelled with. A drawn visibility
+/// names only labels of the graph, so every one is a package group's to Bazel.
+fn visibility_groups(target: &Target) -> Option<Vec<String>> {
+    let rule = target.rule.as_ref()?;
+    let visibility = rule.attribute.iter().find(|a| a.name == "visibility")?;
+    let unspelled = |label: &String| match label.strip_prefix("@@//") {
+        Some(main) => format!("//{main}"),
+        None => label.clone(),
+    };
+    Some(visibility.string_list_value.iter().map(unspelled).collect())
 }
 
 fn source(name: &str) -> Target {

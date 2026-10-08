@@ -102,7 +102,7 @@ impl EdgeKind {
 
 /// Whether a dependency is one its dependent's BUILD file writes, as Bazel's
 /// `--noimplicit_deps` tells them apart (`DependencyFilter.NO_IMPLICIT_DEPS`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Declared {
     /// Some attribute the BUILD file sets names the dependency.
@@ -119,8 +119,9 @@ pub enum Declared {
 }
 
 /// What kind of dependency an edge stands for, as Bazel's query flags filter
-/// them: whether it is [`Declared`], and whether it crosses between the
-/// configurations tools are built in and the others (`--notool_deps`).
+/// them: whether it is [`Declared`], whether it crosses between the
+/// configurations tools are built in and the others (`--notool_deps`), and
+/// whether it names a package group a visibility declaration reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DepClass(u8);
 
@@ -133,6 +134,7 @@ impl DepClass {
     /// them, from the dependent's configured targets outside tool
     /// configurations, and only those; which holds only while cquery is read.
     const TOOL_IN_CQUERY: u8 = 1 << 3;
+    const VISIBILITY: u8 = 1 << 4;
 
     /// A dependency declared as `declared` says.
     pub fn new(declared: Declared) -> Self {
@@ -165,6 +167,16 @@ impl DepClass {
             || (self.0 & Self::TOOL_IN_CQUERY != 0 && inputs.contains(Input::Cquery))
     }
 
+    /// This dependency as one on a package group a visibility declaration
+    /// reads, which `deps` follows and a drawing leaves out.
+    pub fn visibility(self) -> Self {
+        DepClass(self.0 | Self::VISIBILITY)
+    }
+
+    pub fn is_visibility(self) -> bool {
+        self.0 & Self::VISIBILITY != 0
+    }
+
     /// The class of one edge standing for two dependencies between the same
     /// nodes, which a filter drops only where it drops both.
     pub fn either(self, other: Self) -> Self {
@@ -175,8 +187,8 @@ impl DepClass {
             (Unknown, _) | (_, Unknown) => Unknown,
             (Implicit, Implicit) => Implicit,
         };
-        let tool = self.0 & other.0 & (Self::TOOL | Self::TOOL_IN_CQUERY);
-        DepClass(DepClass::new(declared).0 | tool)
+        let flags = self.0 & other.0 & (Self::TOOL | Self::TOOL_IN_CQUERY | Self::VISIBILITY);
+        DepClass(DepClass::new(declared).0 | flags)
     }
 }
 
@@ -430,5 +442,26 @@ mod tests {
         assert_eq!(containment.sibling_pair(Id(0), Id(3)), None);
         assert_eq!(containment.sibling_pair(Id(3), Id(0)), None);
         assert_eq!(containment.sibling_pair(Id(2), Id(2)), None);
+    }
+
+    /// One edge standing for two is dropped by a filter only where both are.
+    #[test]
+    fn an_edge_standing_for_two_keeps_what_either_keeps() {
+        let explicit = DepClass::new(Declared::Explicit);
+        let implicit = DepClass::new(Declared::Implicit);
+        let unknown = DepClass::new(Declared::Unknown);
+        let unattributed = DepClass::new(Declared::Unattributed);
+        let visibility = explicit.visibility();
+        assert_eq!(implicit.either(explicit).declaration(), Declared::Explicit);
+        assert_eq!(implicit.either(unknown).declaration(), Declared::Unknown);
+        assert_eq!(
+            unknown.either(unattributed).declaration(),
+            Declared::Unattributed
+        );
+        assert!(!implicit.either(visibility).is_visibility());
+        assert!(visibility.either(visibility).is_visibility());
+        let every = InputSet::ALL;
+        assert!(implicit.tool().either(explicit.tool()).is_tool(every));
+        assert!(!implicit.tool().either(explicit).is_tool(every));
     }
 }

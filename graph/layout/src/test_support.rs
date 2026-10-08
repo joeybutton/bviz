@@ -6,8 +6,8 @@ use bazel_query_proto::blaze_query::attribute::{
     Discriminator as AttributeType, Selector, SelectorEntry, SelectorList, Tristate,
 };
 use bazel_query_proto::blaze_query::{
-    Attribute, ConfiguredRuleInput, GeneratedFile, License, Rule, SourceFile, StringDictEntry,
-    Target, target::Discriminator,
+    Attribute, ConfiguredRuleInput, GeneratedFile, License, PackageGroup, Rule, SourceFile,
+    StringDictEntry, Target, target::Discriminator,
 };
 
 use crate::graph::{DepClass, Graph, Node};
@@ -32,6 +32,19 @@ pub(crate) fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'
         .iter()
         .map(|e| (names.resolve(e.from), names.resolve(e.to)))
         .collect()
+}
+
+/// A package group including the groups `includes` names.
+pub(crate) fn package_group(name: &str, includes: &[&str]) -> Target {
+    Target {
+        r#type: Discriminator::PackageGroup as i32,
+        package_group: Some(PackageGroup {
+            name: name.to_string(),
+            included_package_group: includes.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 /// The class of the edge from the node named `from` to the one named `to`.

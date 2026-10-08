@@ -21,6 +21,7 @@ import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.LabelConverter;
 import com.google.devtools.build.lib.packages.LabelPrinter;
+import com.google.devtools.build.lib.packages.RuleVisibility;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.packages.TriState;
@@ -140,7 +141,7 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
           .put(label.getName(), node);
     }
     for (Node node : byName.values()) {
-      for (String dep : depLabels(node.target)) {
+      for (String dep : depLabels(node.target, byName)) {
         Node to = byName.get(Label.parseCanonical(dep).getCanonicalForm());
         if (to != null) {
           node.deps.add(to);
@@ -160,15 +161,61 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
     };
   }
 
-  /** The labels {@code LabelVisitationUtils.visitTarget} visits for {@code target}. */
-  private static List<String> depLabels(Build.Target target) {
+  /**
+   * The labels {@code LabelVisitationUtils.visitTarget} visits for {@code target}, an output
+   * file's visibility being that of its generating rule, found among {@code byName}.
+   */
+  private static List<String> depLabels(Build.Target target, Map<String, Node> byName) {
     return switch (target.getType()) {
-      case RULE -> target.getRule().getRuleInputList();
-      case SOURCE_FILE -> target.getSourceFile().getVisibilityLabelList();
-      case GENERATED_FILE -> List.of(target.getGeneratedFile().getGeneratingRule());
+      case RULE -> {
+        List<String> deps = new ArrayList<>(target.getRule().getRuleInputList());
+        deps.addAll(visibilityDeps(target.getRule()));
+        yield deps;
+      }
+      case SOURCE_FILE -> target.getSourceFile().getPackageGroupList();
+      case GENERATED_FILE -> {
+        String rule = target.getGeneratedFile().getGeneratingRule();
+        List<String> deps = new ArrayList<>(List.of(rule));
+        Node generating = byName.get(Label.parseCanonicalUnchecked(rule).getCanonicalForm());
+        if (generating != null && generating.isRule()) {
+          deps.addAll(visibilityDeps(generating.target.getRule()));
+        }
+        yield deps;
+      }
       case PACKAGE_GROUP -> target.getPackageGroup().getIncludedPackageGroupList();
       default -> List.of();
     };
+  }
+
+  private static final Method PARSE_VISIBILITY;
+
+  static {
+    try {
+      PARSE_VISIBILITY = RuleVisibility.class.getDeclaredMethod("parse", List.class);
+      PARSE_VISIBILITY.setAccessible(true);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  /**
+   * The package groups {@code rule}'s visibility names, as Bazel's own {@code RuleVisibility}
+   * parses them (reached reflectively, being package-private).
+   */
+  private static List<String> visibilityDeps(Build.Rule rule) {
+    for (Build.Attribute attribute : rule.getAttributeList()) {
+      if (attribute.getName().equals("visibility")) {
+        List<Label> labels =
+            attribute.getStringListValueList().stream().map(Label::parseCanonicalUnchecked).toList();
+        try {
+          RuleVisibility visibility = (RuleVisibility) PARSE_VISIBILITY.invoke(null, labels);
+          return visibility.getDependencyLabels().stream().map(Label::getCanonicalForm).toList();
+        } catch (ReflectiveOperationException e) {
+          throw new IllegalStateException(attribute.toString(), e);
+        }
+      }
+    }
+    return List.of();
   }
 
   /** The labels {@code expression} names, sorted, or the message it fails with. */

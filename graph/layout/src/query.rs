@@ -1,7 +1,8 @@
 //! Builds a compound graph from `bazel query --output=streamed_proto` output:
 //! one leaf node per target, grouped under its package container, with edges
-//! from each rule's inputs to the rule and from each generating rule to the
-//! files it generates, the dependencies `deps` follows
+//! from each rule's inputs to the rule, from each generating rule to the
+//! files it generates, and from each package group a target's visibility
+//! names or a package group includes, the dependencies `deps` follows
 //! (`LabelVisitationUtils.visitTarget`). A label naming a target absent from
 //! the stream is left unwired, with no phantom node made up for it.
 
@@ -116,26 +117,66 @@ pub(crate) fn build_with_packages(
 
     // Pass 2: edges from each target's dependencies (dependency -> dependent).
     let node = |label: &str| node_by_label.get(repos.canonicalize_label(label).as_ref());
+    // By rule node, the visibility the rule states.
+    let mut visibility: HashMap<Id, &Attribute> = HashMap::with_capacity(targets.len());
+    visibility.extend(targets.iter().filter_map(|target| {
+        let rule = target.rule.as_ref()?;
+        let stated = rule.attribute.iter().find(|a| a.name == "visibility")?;
+        Some((*node(&rule.name)?, stated))
+    }));
     let dependencies = (targets.iter())
         .map(|target| target.rule.as_ref().map_or(1, |rule| rule.rule_input.len()))
         .sum();
     let mut edges = UniqueEdges::with_capacity(EdgeKind::Query, dependencies);
+    let mut add = |graph: &mut Graph, from: Option<&Id>, to: Id, class: DepClass| {
+        if let Some(&from) = from {
+            edges.add(graph, from, to, class);
+        }
+    };
+    let unattributed = DepClass::new(Declared::Unattributed);
     for target in targets {
+        let Some(&to) = label_and_kind(target).and_then(|(label, _)| node(label)) else {
+            continue;
+        };
         if let Some(rule) = &target.rule {
-            let Some(&to) = node(&rule.name) else {
-                continue;
-            };
             let explicit = Explicit::of(rule, repos);
             for dependency in &rule.rule_input {
                 let dependency = repos.canonicalize_label(dependency);
-                if let Some(&from) = node_by_label.get(dependency.as_ref()) {
-                    edges.add(&mut graph, from, to, explicit.class(&dependency));
+                let from = node_by_label.get(dependency.as_ref());
+                add(&mut graph, from, to, explicit.class(&dependency));
+            }
+            if let Some(stated) = visibility.get(&to) {
+                let declared = match stated.explicitly_specified == Some(true) {
+                    true => Declared::Explicit,
+                    false => Declared::Implicit,
+                };
+                for group in package_groups(stated, repos) {
+                    add(
+                        &mut graph,
+                        node(group),
+                        to,
+                        DepClass::new(declared).visibility(),
+                    );
                 }
             }
-        } else if let Some(file) = &target.generated_file
-            && let (Some(&to), Some(&from)) = (node(&file.name), node(&file.generating_rule))
-        {
-            edges.add(&mut graph, from, to, DepClass::new(Declared::Unattributed));
+        } else if let Some(file) = &target.generated_file {
+            let rule = node(&file.generating_rule);
+            add(&mut graph, rule, to, unattributed);
+            let rule = rule.and_then(|rule| visibility.get(rule));
+            for group in rule
+                .into_iter()
+                .flat_map(|&stated| package_groups(stated, repos))
+            {
+                add(&mut graph, node(group), to, unattributed.visibility());
+            }
+        } else if let Some(file) = &target.source_file {
+            for group in &file.package_group {
+                add(&mut graph, node(group), to, unattributed.visibility());
+            }
+        } else if let Some(group) = &target.package_group {
+            for included in &group.included_package_group {
+                add(&mut graph, node(included), to, unattributed.visibility());
+            }
         }
     }
 
@@ -156,6 +197,29 @@ pub(crate) fn describe_rule(
     let complete = attributes.describe(node, rule, repos);
     facets.observe(input, Axis::Attributes, complete);
     facets.observe(input, Axis::DependencyClass, explicit::classifies(rule));
+}
+
+/// The package groups a `visibility` attribute names
+/// (`RuleVisibility.getDependencyLabels`): none where it names
+/// `//visibility:public`, and otherwise every label but
+/// `//visibility:private` and those naming a package directly.
+fn package_groups<'a>(
+    visibility: &'a Attribute,
+    repos: &'a RepoMapping,
+) -> impl Iterator<Item = &'a str> {
+    const PUBLIC: &str = "//visibility:public";
+    const PRIVATE: &str = "//visibility:private";
+    const DIRECT: [&str; 2] = ["__pkg__", "__subpackages__"];
+    let canonical = move |label: &'a str| repos.canonicalize_label(label);
+    let labels = &visibility.string_list_value;
+    let public = labels.iter().any(|label| canonical(label) == PUBLIC);
+    (labels.iter())
+        .filter(move |_| !public)
+        .filter(move |label| {
+            let name = label.rsplit_once(':').map_or("", |(_, name)| name);
+            canonical(label) != PRIVATE && !DIRECT.contains(&name)
+        })
+        .map(String::as_str)
 }
 
 /// Records what `target`, as `input` describes it, states about the node it
@@ -856,5 +920,119 @@ mod tests {
             declaration(&graph, &names, "target://foo:gen", "target://foo:out.o"),
             Declared::Unattributed
         );
+    }
+
+    /// `deps` follows the package groups a rule's visibility names, the
+    /// package's default visibility one its BUILD file does not set, and
+    /// none that names a package directly or every package.
+    #[test]
+    fn a_rules_visibility_names_the_package_groups_it_depends_on() {
+        use test_support::{explicit, nodep_label_list};
+        let (graph, names, _) = build(&[
+            app(
+                &[],
+                vec![explicit(nodep_label_list(
+                    "visibility",
+                    &["//pg:a", "//foo:__pkg__", "//bar:__subpackages__"],
+                ))],
+            ),
+            test_support::rule(
+                "//foo:lib",
+                "cc_library",
+                &[],
+                vec![
+                    test_support::name_attribute("//foo:lib"),
+                    nodep_label_list("visibility", &["@@//pg:b"]),
+                ],
+            ),
+            test_support::rule(
+                "//foo:pub",
+                "cc_library",
+                &[],
+                vec![
+                    test_support::name_attribute("//foo:pub"),
+                    nodep_label_list("visibility", &["//visibility:public"]),
+                ],
+            ),
+            test_support::package_group("//pg:a", &[]),
+            test_support::package_group("//pg:b", &[]),
+        ]);
+
+        let class = |from, to| test_support::edge_class(&graph, &names, from, to);
+        let explicit = class("target://pg:a", "target://foo:app");
+        assert!(explicit.is_visibility());
+        assert_eq!(explicit.declaration(), Declared::Explicit);
+        let default = class("target://pg:b", "target://foo:lib");
+        assert!(default.is_visibility());
+        assert_eq!(default.declaration(), Declared::Implicit);
+        assert_eq!(graph.edges.len(), 2);
+    }
+
+    /// A file depends on the package groups its visibility names, a source
+    /// file's as the proto states them and a generated one's being its
+    /// rule's, and a package group on those it includes, the rule alone
+    /// through an attribute.
+    #[test]
+    fn files_and_package_groups_depend_on_the_package_groups_they_name() {
+        use test_support::{explicit, nodep_label_list};
+        let mut input = source("//foo:in.c");
+        (input.source_file.as_mut().unwrap().package_group).push("//pg:a".to_string());
+        let (graph, names, _) = build(&[
+            input,
+            test_support::rule(
+                "//foo:gen",
+                "genrule",
+                &[],
+                vec![
+                    test_support::name_attribute("//foo:gen"),
+                    explicit(nodep_label_list("visibility", &["//pg:a"])),
+                ],
+            ),
+            generated_by("//foo:out.o", "//foo:gen"),
+            test_support::package_group("//pg:a", &["//pg:b"]),
+            test_support::package_group("//pg:b", &[]),
+        ]);
+
+        let visibility: BTreeSet<(&str, &str, Declared)> = (graph.edges.iter())
+            .filter(|edge| edge.class.is_visibility())
+            .map(|edge| {
+                let (from, to) = (names.resolve(edge.from), names.resolve(edge.to));
+                (from, to, edge.class.declaration())
+            })
+            .collect();
+        let unattributed = Declared::Unattributed;
+        assert_eq!(
+            visibility,
+            BTreeSet::from([
+                ("target://pg:a", "target://foo:in.c", unattributed),
+                ("target://pg:a", "target://foo:gen", Declared::Explicit),
+                ("target://pg:a", "target://foo:out.o", unattributed),
+                ("target://pg:b", "target://pg:a", unattributed),
+            ])
+        );
+    }
+
+    /// A package group a rule both depends on and names in its visibility is
+    /// one edge, drawn as the dependency it is.
+    #[test]
+    fn a_dependency_also_named_by_visibility_is_no_visibility_edge() {
+        use test_support::{explicit, label_list, nodep_label_list};
+        let (graph, names, _) = build(&[
+            app(
+                &["//pg:a"],
+                vec![
+                    label_list("data", &["//pg:a"]),
+                    explicit(nodep_label_list("visibility", &["//pg:a"])),
+                ],
+            ),
+            test_support::package_group("//pg:a", &[]),
+        ]);
+
+        let [edge] = graph.edges.as_slice() else {
+            panic!("one edge");
+        };
+        assert!(!edge.class.is_visibility());
+        assert_eq!(edge.class.declaration(), Declared::Explicit);
+        assert_eq!(names.resolve(edge.from), "target://pg:a");
     }
 }
