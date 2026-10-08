@@ -160,7 +160,6 @@ impl FileName {
 
 /// What a [`Panel`] tells its workspace about itself.
 pub enum PanelEvent {
-    TitleChanged,
     StatusChanged,
     Close,
     /// Asks to be brought forward in the pane holding it, and that pane made

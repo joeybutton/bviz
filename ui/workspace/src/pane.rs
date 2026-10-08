@@ -376,7 +376,7 @@ impl Pane {
             return;
         };
         match event {
-            PanelEvent::TitleChanged | PanelEvent::StatusChanged => {
+            PanelEvent::StatusChanged => {
                 if index == self.active {
                     cx.emit(PaneEvent::Changed);
                 }
