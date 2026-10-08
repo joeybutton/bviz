@@ -32,7 +32,7 @@ pub use stack::{
     BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,
     Prefixes, Stack, Unportable, Value,
 };
-pub use universe::{Counts, Universe};
+pub use universe::{Counts, Readable, Universe};
 
 /// Where an expression fails to scan or parse, with the message Bazel gives for
 /// it word for word, but for two cases. A long expression Bazel quotes cut

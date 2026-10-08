@@ -238,13 +238,14 @@ impl Universe {
                 Ok(self.rule_category(&regex, &values[0]))
             }
             Evaluable::RunfilesPlumbing => {
-                self.filters_actions(function).map_err(fail)?;
+                self.readable.check(function).map_err(fail)?;
                 let (values, _) = arguments()?;
                 Ok(self.runfiles_plumbing(&values[0]))
             }
             Evaluable::ToolConfigured => {
+                self.readable.check(function).map_err(fail)?;
                 let (values, _) = arguments()?;
-                self.tool_configured(function, &values[0]).map_err(fail)
+                Ok(self.tool_configured(&values[0]))
             }
             Evaluable::Config => {
                 let (values, _) = arguments()?;
@@ -273,7 +274,7 @@ impl Universe {
                 span: at.span.clone(),
             };
             let regex = self.whole_regex(*function, words(args)[0]).map_err(fail)?;
-            self.filters_actions(*function).map_err(fail)?;
+            self.readable.check(*function).map_err(fail)?;
             filters.add(filter, regex);
             let Some(&argument) = expressions(args).first() else {
                 return Err(fail(

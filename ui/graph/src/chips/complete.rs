@@ -8,9 +8,9 @@ use super::{AcceptCompletion, GraphPanel, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
-use crate::model::{Prepared, Shared};
+use crate::model::Prepared;
 use bviz_graph_layout::query_lang::{
-    ArgType, Function, Params, Place, Vocabulary, word_at, written_word,
+    ArgType, Command, Function, Params, Place, Readable, Vocabulary, word_at, written_word,
 };
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
@@ -161,11 +161,36 @@ impl Few {
     }
 }
 
-/// Whether a command the graph `shared` was read from reads `function`; one
-/// none reads is bviz's own extension over that graph.
-fn read_by_graph(shared: &Shared, function: Function) -> bool {
-    let inputs = shared.inputs;
-    inputs.inputs().any(|input| command(input).reads(function))
+/// The tooltip of every row offering one of [`Function::EXTENSIONS`] that
+/// evaluates over the graph.
+const EXTENSION_NOTE: &str = "bviz extension, not part of Bazel's query language";
+
+/// The kind a row offering `function` names, and its tooltip, if any, over a
+/// graph `commands` were read from whose data `readable` states.
+fn function_note(
+    function: Function,
+    commands: &[Command],
+    readable: Readable,
+) -> (&'static str, Option<String>) {
+    let kind = match function.is_extension() {
+        true => "bviz extension",
+        false => "function",
+    };
+    let note = (function.unevaluable())
+        .or_else(|| readable.check(function).err())
+        .or_else(|| function.is_extension().then(|| EXTENSION_NOTE.to_owned()))
+        .or_else(|| {
+            if commands.iter().any(|command| command.reads(function)) {
+                return None;
+            }
+            let commands: Vec<&str> = commands.iter().map(|command| command.name()).collect();
+            Some(format!(
+                "{}() is no {} function; bviz evaluates it",
+                function.name(),
+                commands.join(" or ")
+            ))
+        });
+    (kind, note)
 }
 
 /// One pattern, function or word of a vocabulary the field offers to complete
@@ -199,6 +224,7 @@ pub(crate) struct Completions {
     /// The targets, as their indices among `candidates`.
     targets: Vec<u32>,
     patterns: Vec<Pattern>,
+    readable: Readable,
 }
 
 impl Completions {
@@ -216,10 +242,12 @@ impl Completions {
             .collect();
         let labels = targets.iter().map(|&index| &*held.get(index).text);
         let patterns = patterns(labels);
+        let readable = Readable::of(&shared.base, &shared.capabilities);
         Completions {
             candidates,
             targets,
             patterns,
+            readable,
         }
     }
 
@@ -642,13 +670,15 @@ pub(super) fn list(
         let Some(offered) = view.chips.completer.offered.as_ref() else {
             return Vec::new();
         };
-        let shared = offered.completions.shared();
+        let inputs = offered.completions.shared().inputs.inputs();
+        let commands: Vec<Command> = inputs.map(command).collect();
+        let readable = offered.completions.get().readable;
         range
             .filter_map(|index| {
                 let (completion, row) = offered.row(index)?;
-                let read = match completion.named {
-                    Named::Function(function) => read_by_graph(shared, function),
-                    _ => true,
+                let (kind, note) = match completion.named {
+                    Named::Function(function) => function_note(function, &commands, readable),
+                    named => (named.name(), None),
                 };
                 let accepts = match offered.aimed {
                     Some(aimed) => (aimed == index).then_some(Accepts::Aimed),
@@ -658,7 +688,8 @@ pub(super) fn list(
                     completion: &completion,
                     row,
                     index,
-                    read,
+                    kind,
+                    note,
                     accepts,
                     accepts_keys: accepts.and_then(|accepts| accepts.keys(cx)),
                 };
@@ -700,9 +731,9 @@ struct Listed<'a> {
     completion: &'a Completion<'a>,
     row: &'a Row,
     index: usize,
-    /// Whether a command the graph was read from reads the row's function;
-    /// true for a pattern.
-    read: bool,
+    kind: &'static str,
+    /// The row's tooltip.
+    note: Option<String>,
     accepts: Option<Accepts>,
     /// The keys that accept the row, where any do.
     accepts_keys: Option<SharedString>,
@@ -710,14 +741,14 @@ struct Listed<'a> {
 
 /// One row: the pattern or the function's signature with the characters the
 /// word matched picked out, and what it names. A function no graph
-/// evaluates is dimmed, and one no command of this graph reads is marked as
-/// bviz's own; the tooltip says why.
+/// evaluates is dimmed.
 fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Stateful<Div> {
     let Listed {
         completion,
         row,
         index,
-        read,
+        kind,
+        note,
         accepts,
         accepts_keys,
     } = listed;
@@ -735,18 +766,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         }
         None => (completion.text.to_string(), completion.path.clone()),
     };
-    let unevaluable = function.and_then(Function::unevaluable);
-    let kind = match read {
-        true => completion.named.name(),
-        false => "bviz function",
-    };
-    let why = unevaluable.clone().or_else(|| {
-        let name = function.filter(|_| !read)?.name();
-        Some(format!(
-            "no Bazel command this graph was read from has {name}(); bviz evaluates it"
-        ))
-    });
-    let ink = match unevaluable {
+    let ink = match function.and_then(Function::unevaluable) {
         Some(_) => colors.text_disabled,
         None => colors.text,
     };
@@ -756,9 +776,9 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         colors,
         aimed,
     ))
-    .when_some(why, |row, why| {
+    .when_some(note, |row, note| {
         row.tooltip(TextTooltip::builder(
-            why.into(),
+            note.into(),
             TooltipColors::from_colors(colors),
         ))
     })
@@ -867,6 +887,67 @@ mod tests {
         };
         assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
         assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+    }
+
+    /// What a graph `holding` nodes of those kinds states, every axis
+    /// available.
+    fn readable(holding: &[Kind]) -> Readable {
+        let nodes =
+            (holding.iter().enumerate()).map(|(at, &kind)| bviz_graph_layout::graph::Node {
+                id: Id(at as u32),
+                label: format!("n{at}"),
+                kind,
+                group: false,
+                parent: None,
+            });
+        let graph = bviz_graph_layout::graph::Graph {
+            nodes: nodes.collect(),
+            edges: Vec::new(),
+        };
+        let capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default().seal();
+        Readable::of(&graph, &capabilities)
+    }
+
+    /// An extension says it is bviz's own whatever commands the graph was
+    /// read from, unless the graph lacks what it reads.
+    #[test]
+    fn an_extension_is_noted_as_bviz_own_unless_the_graph_lacks_its_data() {
+        let with_actions = readable(&[Kind::ConfiguredTarget, Kind::Action]);
+        let note = |commands: &[Command], readable| {
+            function_note(Function::RunfilesPlumbing, commands, readable)
+        };
+        let own = ("bviz extension", Some(EXTENSION_NOTE.to_owned()));
+        assert_eq!(note(&[Command::Aquery], with_actions), own);
+        assert_eq!(note(&[Command::Cquery, Command::Aquery], with_actions), own);
+        let without_actions = readable(&[Kind::ConfiguredTarget]);
+        assert_eq!(
+            note(&[Command::Cquery], without_actions),
+            (
+                "bviz extension",
+                Some("runfiles_plumbing() requires an aquery".to_owned())
+            )
+        );
+    }
+
+    /// A Bazel function the graph's commands read carries no note; one they
+    /// do not is noted as evaluated by bviz, or as needing what the graph
+    /// lacks.
+    #[test]
+    fn a_bazel_function_is_noted_only_off_the_graph_commands() {
+        let targets = readable(&[Kind::Target]);
+        let note = |function, commands: &[Command]| function_note(function, commands, targets);
+        assert_eq!(note(Function::Deps, &[Command::Query]), ("function", None));
+        assert_eq!(
+            note(Function::Config, &[Command::Query, Command::Aquery]),
+            (
+                "function",
+                Some("config() is no query or aquery function; bviz evaluates it".to_owned())
+            )
+        );
+        assert_eq!(
+            note(Function::Inputs, &[Command::Query]),
+            ("function", Some("inputs() requires an aquery".to_owned()))
+        );
     }
 
     #[test]

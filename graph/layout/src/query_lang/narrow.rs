@@ -395,21 +395,6 @@ impl Universe {
         (files.filter_map(|file| self.facets.exec_path(file))).any(|path| matcher.matches(path))
     }
 
-    /// Why `function` cannot filter this graph's actions, if it cannot: the
-    /// graph holds none, or its inputs left out the files they read and write.
-    pub(super) fn filters_actions(&self, function: Function) -> Result<(), String> {
-        let name = function.name();
-        if !self.holds_actions {
-            return Err(format!("{name}() requires an aquery"));
-        }
-        match (function, self.artifacts) {
-            (Function::Inputs | Function::Outputs, Support::Unavailable { flag }) => {
-                Err(format!("{name}() requires an aquery with {flag}"))
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// The actions among `value` and among what its configured targets hold
     /// that `keeps`.
     fn retain_actions(

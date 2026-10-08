@@ -1795,9 +1795,7 @@ fn tool_configured_keeps_what_a_tool_configuration_builds() {
     let (universe, names) = tools(true);
     let mut everything = universe.empty();
     everything.insert_range(..);
-    let kept = universe
-        .tool_configured(Function::ToolConfigured, &everything)
-        .unwrap();
+    let kept = universe.tool_configured(&everything);
     assert_eq!(labels(&names, &kept), ["act:exec", "ct:exec", "out:exec"]);
     assert_eq!(
         configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap(),

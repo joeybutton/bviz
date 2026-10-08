@@ -6,6 +6,7 @@ use std::sync::Arc;
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
 
+use super::ast::Function;
 use super::config::Configurations;
 use super::declared::Declared;
 use super::narrow::Patterns;
@@ -33,17 +34,59 @@ pub struct Universe {
     pub(super) facets: Arc<Facets>,
     pub(super) declared: Declared,
     pub(super) configurations: Configurations,
-    /// How far the inputs state the configuration each configured target is
-    /// built in.
-    pub(super) configured: Support,
+    pub(super) readable: Readable,
     /// How far the inputs state each rule's tags.
     pub(super) tags: Support,
     /// How far the inputs state whether each rule is `testonly`.
     pub(super) testonly: Support,
-    /// How far the inputs state the files each action reads and writes.
-    pub(super) artifacts: Support,
-    pub(super) holds_actions: bool,
     pub(super) patterns: Patterns,
+}
+
+/// What a graph's inputs state of the data some functions read whatever they
+/// are called with.
+#[derive(Clone, Copy, Debug)]
+pub struct Readable {
+    holds_actions: bool,
+    /// How far the inputs state the configuration each configured target is
+    /// built in.
+    configured: Support,
+    /// How far the inputs state the files each action reads and writes.
+    artifacts: Support,
+}
+
+impl Readable {
+    pub fn of(graph: &Graph, capabilities: &Capabilities) -> Self {
+        Readable {
+            holds_actions: graph.nodes.iter().any(|node| node.kind == Kind::Action),
+            configured: capabilities.support(Axis::Configuration),
+            artifacts: capabilities.support(Axis::Artifacts),
+        }
+    }
+
+    /// Why `function` fails over the graph however it is called, if it does.
+    pub fn check(self, function: Function) -> Result<(), String> {
+        let name = function.name();
+        match function {
+            Function::Mnemonic
+            | Function::Inputs
+            | Function::Outputs
+            | Function::RunfilesPlumbing
+                if !self.holds_actions =>
+            {
+                Err(format!("{name}() requires an aquery"))
+            }
+            Function::Inputs | Function::Outputs => match self.artifacts {
+                Support::Unavailable { flag } => {
+                    Err(format!("{name}() requires an aquery with {flag}"))
+                }
+                Support::Available | Support::Partial { .. } => Ok(()),
+            },
+            Function::ToolConfigured if self.configured != Support::Available => Err(format!(
+                "{name}() requires every configured target's configuration"
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// How many nodes a query's value holds, and how many of them are of the kinds
@@ -85,9 +128,7 @@ impl Universe {
         at.extend((labels.entries().iter().enumerate()).map(|(at, (id, _))| (*id, at as u32)));
         let mut owner: Vec<u32> = vec![NO_LABEL; ids];
         let mut members = FixedBitSet::with_capacity(ids);
-        let mut holds_actions = false;
         for node in &graph.nodes {
-            holds_actions |= node.kind == Kind::Action;
             if let Some(&at) = facets.label(node.id).and_then(|label| at.get(&label)) {
                 owner[node.id.0 as usize] = at;
             }
@@ -103,11 +144,9 @@ impl Universe {
             targets,
             owner,
             members,
-            configured: capabilities.support(Axis::Configuration),
+            readable: Readable::of(graph, capabilities),
             tags: capabilities.support(Axis::Tags),
             testonly: capabilities.support(Axis::Testonly),
-            artifacts: capabilities.support(Axis::Artifacts),
-            holds_actions,
             patterns: Patterns::default(),
         }
     }
