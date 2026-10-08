@@ -103,11 +103,13 @@ pub enum Tri {
     Yes,
 }
 
-/// The strings every facet handle resolves through.
+/// The strings every facet handle resolves through, end to end in one buffer.
 #[derive(Default, Clone)]
 pub struct FacetStrings {
-    strings: Vec<String>,
-    lookup: HashMap<String, Sym>,
+    text: String,
+    /// Where each string ends in `text`, which is where the next one starts.
+    ends: Vec<u32>,
+    lookup: HashMap<Box<str>, Sym>,
 }
 
 impl FacetStrings {
@@ -115,9 +117,12 @@ impl FacetStrings {
         if let Some(&sym) = self.lookup.get(value) {
             return sym;
         }
-        let sym = Sym::at(self.strings.len());
-        self.strings.push(value.to_string());
-        self.lookup.insert(value.to_string(), sym);
+        let sym = Sym::at(self.ends.len());
+        self.text.push_str(value);
+        let end =
+            u32::try_from(self.text.len()).expect("more than u32::MAX bytes of facet strings");
+        self.ends.push(end);
+        self.lookup.insert(value.into(), sym);
         sym
     }
 
@@ -126,15 +131,27 @@ impl FacetStrings {
     }
 
     pub fn resolve(&self, sym: Sym) -> &str {
-        &self.strings[sym.index()]
+        let at = sym.index();
+        let start = match at {
+            0 => 0,
+            at => self.ends[at - 1] as usize,
+        };
+        &self.text[start..self.ends[at] as usize]
     }
 
     pub fn len(&self) -> usize {
-        self.strings.len()
+        self.ends.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.strings.is_empty()
+        self.ends.is_empty()
+    }
+
+    /// Releases the room kept for strings yet to be interned.
+    pub fn shrink_to_fit(&mut self) {
+        self.text.shrink_to_fit();
+        self.ends.shrink_to_fit();
+        self.lookup.shrink_to_fit();
     }
 }
 
@@ -1005,6 +1022,7 @@ impl FacetsBuilder {
         self.facets.set_tags(self.tags.values.seal());
         self.facets.set_aspects(self.aspects.values.seal());
         self.facets.exec_paths = self.exec_paths.seal();
+        self.facets.strings.shrink_to_fit();
         (self.facets, self.capabilities.seal())
     }
 }
