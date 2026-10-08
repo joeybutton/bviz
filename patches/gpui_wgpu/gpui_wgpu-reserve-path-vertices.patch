@@ -1,0 +1,14 @@
+Reserve a path batch's vertex staging buffer up front
+
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1575,7 +1575,8 @@
+         paths: &[Path<ScaledPixels>],
+         instance_offset: &mut u64,
+     ) -> bool {
+-        let mut vertices = Vec::new();
++        let mut vertices =
++            Vec::with_capacity(paths.iter().map(|path| path.vertices.len()).sum());
+         for path in paths {
+             let bounds = path.clipped_bounds();
+             vertices.extend(path.vertices.iter().map(|v| PathRasterizationVertex {
