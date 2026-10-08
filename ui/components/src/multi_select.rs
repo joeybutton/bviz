@@ -5,7 +5,7 @@ use crate::KeyScope;
 use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
-use crate::scrollbar::{SCROLLBAR_THICKNESS, ScrollbarColors};
+use crate::scrollbar::ScrollbarColors;
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -292,9 +292,8 @@ impl MultiSelect {
     /// The actions over every value the menu holds, kept as clear of the
     /// scroll bar as the rows are.
     fn header(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement + use<> {
-        menu_chrome::header(colors).child(
+        menu_chrome::clear_of_scrollbar(menu_chrome::header(colors)).child(
             div()
-                .pr(px(SCROLLBAR_THICKNESS))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -304,8 +303,8 @@ impl MultiSelect {
         )
     }
 
-    /// The scrollable rows with a scroll bar over their right edge, which the
-    /// list keeps clear of its labels.
+    /// The scrollable rows with a scroll bar over their right edge, which each
+    /// row keeps clear of its label.
     fn list(
         &self,
         colors: &ThemeColors,
@@ -321,7 +320,6 @@ impl MultiSelect {
             .flex()
             .flex_col()
             .w_full()
-            .pr(px(SCROLLBAR_THICKNESS))
             .max_h(menu_chrome::whole_rows(
                 menu_chrome::row_height(window),
                 MENU_MAX_HEIGHT,
@@ -353,11 +351,11 @@ impl MultiSelect {
         label_width: Pixels,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        menu_chrome::row(
+        menu_chrome::clear_of_scrollbar(menu_chrome::row(
             ("multi-select-option", index).into(),
             colors,
             option.checked,
-        )
+        ))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             if let Some(event) = this.rows.clicked(index) {
                 cx.emit(event);

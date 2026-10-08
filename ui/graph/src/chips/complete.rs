@@ -17,8 +17,7 @@ use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, key_text_within, list_scrollbar,
-    menu_chrome,
+    ListScroll, TextTooltip, TooltipColors, key_text_within, list_scrollbar, menu_chrome,
 };
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
@@ -670,7 +669,6 @@ pub(super) fn list(
     .flex_1()
     .min_h_0()
     .w_full()
-    .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(view.chips.completer.scroll.uniform_handle());
     let sheet = menu_chrome::sheet(&palette.colors)
         .w(LIST_WIDTH)
@@ -753,56 +751,60 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         None => colors.text,
     };
     let aimed = accepts == Some(Accepts::Aimed);
-    menu_chrome::aimed_row(("chip-completion", index).into(), colors, aimed)
-        .when_some(why, |row, why| {
-            row.tooltip(TextTooltip::builder(
-                why.into(),
-                TooltipColors::from_colors(colors),
-            ))
-        })
-        .w_full()
-        .on_click(move |event: &ClickEvent, window, cx| {
-            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
-                CompletionIntent::Accept => {
-                    entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
-                    true
-                }
-            });
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis_start()
-                .text_color(ink)
-                .child(fuzzy::highlighted(
-                    text.into(),
-                    &muted,
-                    &row.matched,
-                    colors.text_muted,
-                    palette.highlight.into(),
-                )),
-        )
-        .children(accepts_keys.map(|keys| {
-            div()
-                .flex_none()
-                .px_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(colors.text_muted)
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child(keys)
-        }))
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child(kind),
-        )
+    menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
+        ("chip-completion", index).into(),
+        colors,
+        aimed,
+    ))
+    .when_some(why, |row, why| {
+        row.tooltip(TextTooltip::builder(
+            why.into(),
+            TooltipColors::from_colors(colors),
+        ))
+    })
+    .w_full()
+    .on_click(move |event: &ClickEvent, window, cx| {
+        GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+            CompletionIntent::Accept => {
+                entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+                true
+            }
+        });
+    })
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis_start()
+            .text_color(ink)
+            .child(fuzzy::highlighted(
+                text.into(),
+                &muted,
+                &row.matched,
+                colors.text_muted,
+                palette.highlight.into(),
+            )),
+    )
+    .children(accepts_keys.map(|keys| {
+        div()
+            .flex_none()
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.text_muted)
+            .text_xs()
+            .text_color(colors.text_muted)
+            .child(keys)
+    }))
+    .child(
+        div()
+            .flex_none()
+            .text_xs()
+            .text_color(colors.text_muted)
+            .child(kind),
+    )
 }
 
 /// How a row reads `function`: its name and Bazel's signature for it, an

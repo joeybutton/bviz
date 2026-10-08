@@ -2,6 +2,7 @@
 //! the multi-select opening under a trigger, and the context menu standing over
 //! the window at a point — so they read alike wherever they sit.
 
+use crate::scrollbar::SCROLLBAR_THICKNESS;
 use crate::{CONTROL_HEIGHT, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
@@ -320,6 +321,13 @@ pub(crate) fn row(id: ElementId, colors: &ThemeColors, chosen: bool) -> Stateful
 /// cursor and the keys alike, so that the two never fill a row each.
 pub fn aimed_row(id: ElementId, colors: &ThemeColors, aimed: bool) -> Stateful<Div> {
     row_frame(id, colors).when(aimed, |row| row.bg(aimed_fill(colors)))
+}
+
+/// `row` keeping the strip a list's scroll bar is drawn over inside its own
+/// trailing padding, so its fill spans the sheet and the bar covers none of
+/// what it holds.
+pub fn clear_of_scrollbar<E: Styled>(row: E) -> E {
+    row.pr(ROW_INSET + px(SCROLLBAR_THICKNESS))
 }
 
 fn row_frame(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {

@@ -1427,7 +1427,6 @@ fn pick_list(
     })
     .flex_1()
     .w_full()
-    .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(scroll.uniform_handle());
     let header = menu_chrome::header(colors)
         .flex_none()
@@ -1551,49 +1550,53 @@ fn pick_row(
         ..mark.hue.color(palette)
     };
     let (aim, reveal) = (view.clone(), view.clone());
-    menu_chrome::aimed_row(("scatter-pick", index).into(), colors, aimed)
-        .w_full()
-        .h(style.row)
-        .gap(PICK_GAP)
-        .when(!style.reveals, |row| row.cursor_default())
-        .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
-        .on_click(move |e, _, cx| {
-            reveal.update(cx, |view, cx| {
-                GESTURES.dispatch(gesture::Pointer::click(e), |intent| match intent {
-                    ScatterIntent::RevealListed => {
-                        view.reveal_row(index, cx);
-                        true
-                    }
-                    _ => false,
-                });
+    menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
+        ("scatter-pick", index).into(),
+        colors,
+        aimed,
+    ))
+    .w_full()
+    .h(style.row)
+    .gap(PICK_GAP)
+    .when(!style.reveals, |row| row.cursor_default())
+    .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
+    .on_click(move |e, _, cx| {
+        reveal.update(cx, |view, cx| {
+            GESTURES.dispatch(gesture::Pointer::click(e), |intent| match intent {
+                ScatterIntent::RevealListed => {
+                    view.reveal_row(index, cx);
+                    true
+                }
+                _ => false,
             });
-        })
-        .child(
-            div()
-                .flex_none()
-                .size(px(SWATCH_DIAMETER))
-                .rounded_full()
-                .bg(swatch),
-        )
-        .children(
-            listed
-                .mnemonic
-                .clone()
-                .map(|mnemonic| div().flex_none().whitespace_nowrap().child(mnemonic)),
-        )
-        .child(pick_label(listed, colors.text_muted, style.line))
-        .children(listed.hint.clone().map(|hint| {
-            pick_part(hint)
-                .text_ellipsis_start()
-                .text_color(colors.text_muted)
-        }))
-        .child(
-            div()
-                .flex_none()
-                .whitespace_nowrap()
-                .text_color(colors.text_muted)
-                .child(listed.measures.clone()),
-        )
+        });
+    })
+    .child(
+        div()
+            .flex_none()
+            .size(px(SWATCH_DIAMETER))
+            .rounded_full()
+            .bg(swatch),
+    )
+    .children(
+        listed
+            .mnemonic
+            .clone()
+            .map(|mnemonic| div().flex_none().whitespace_nowrap().child(mnemonic)),
+    )
+    .child(pick_label(listed, colors.text_muted, style.line))
+    .children(listed.hint.clone().map(|hint| {
+        pick_part(hint)
+            .text_ellipsis_start()
+            .text_color(colors.text_muted)
+    }))
+    .child(
+        div()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_color(colors.text_muted)
+            .child(listed.measures.clone()),
+    )
 }
 
 /// Opacity of a legend swatch, firmer than a mark's so that a lone swatch still
