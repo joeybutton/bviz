@@ -1484,6 +1484,7 @@ mod tests {
         let loaded = Loaded::new(
             Shared {
                 base,
+                undrawn: Arc::default(),
                 reduced_base,
                 map: placement,
                 names: Arc::new(names),
@@ -2042,6 +2043,7 @@ mod tests {
     fn across(loaded: &Loaded) -> Arc<Paths> {
         let found = bviz_graph_layout::paths::between(
             &loaded.shared.base,
+            bviz_graph_layout::Walking::default(),
             id(loaded, "//a:t#link"),
             id(loaded, "//b:t#compile"),
         )

@@ -8,9 +8,9 @@ use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Reads every input's streamed_proto file and merges them into one joint graph,
-/// before any group quotienting, returned with its transitive reduction. Cached
-/// so toggling a group needn't re-read or re-parse.
-pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
+/// before any group quotienting. Cached so toggling a group needn't re-read or
+/// re-parse.
+pub(crate) fn build_graph(inputs: &[Input]) -> Result<Joint, String> {
     let mut aq = None;
     let mut cq = None;
     let mut q = None;
@@ -38,12 +38,12 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
             }
         }
     }
-    let joint = bviz_graph_layout::build_joint(aq.as_deref(), cq.as_deref(), q.as_deref(), false);
-    // Transitively reduce the whole base once: a collapsed box then draws the
-    // reduction of its hidden subtree's edges, so its edge count is stable under
-    // expansion rather than re-derived (differently) from each view.
-    let reduced = bviz_graph_layout::reduce::transitive_reduction(&joint.graph);
-    Ok((joint, reduced))
+    Ok(bviz_graph_layout::build_joint(
+        aq.as_deref(),
+        cq.as_deref(),
+        q.as_deref(),
+        false,
+    ))
 }
 
 /// The inputs `source` reads.

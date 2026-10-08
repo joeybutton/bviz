@@ -11,7 +11,7 @@
 
 use crate::graph::{Edge, EdgeKind, Graph, id_span};
 use crate::intern::Id;
-use crate::reach::{Bounds, Index, State, Toward};
+use crate::reach::{Bounds, Index, State, Toward, Walking};
 
 /// The nodes and edges lying on some dependency path.
 #[derive(Clone)]
@@ -66,15 +66,13 @@ pub struct Between {
     pub shortest: Vec<Id>,
 }
 
-/// Everything that depends on `dependency`, directly or not, with the edges it
-/// depends on it through.
-pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
-    let index = Index::new(graph, &[dependency]);
+/// Everything that depends on `dependency` in `graph` as `walking` reads it,
+/// directly or not, with the edges it depends on it through.
+pub fn dependents(graph: &Graph, walking: Walking<'_>, dependency: Id) -> Paths {
+    let index = Index::new(graph, walking, &[dependency]);
     let seeds = index.subtree(dependency);
     let reach = index.walk(&arrivals(&seeds), Toward::Dependents, Bounds::NONE);
-    let edges: Vec<Edge> = graph
-        .edges
-        .iter()
+    let edges: Vec<Edge> = (graph.edges.iter().chain(walking.undrawn))
         .filter(|e| walked(e) && reach.reached(e.from) && !within(&seeds, e))
         .cloned()
         .collect();
@@ -84,10 +82,15 @@ pub fn dependents(graph: &Graph, dependency: Id) -> Paths {
     }
 }
 
-/// The dependency paths from `dependent` down to `dependency`, `None` where
-/// `dependent` does not depend on it.
-pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> {
-    let index = Index::new(graph, &[dependency, dependent]);
+/// The dependency paths from `dependent` down to `dependency` in `graph` as
+/// `walking` reads it, `None` where `dependent` does not depend on it.
+pub fn between(
+    graph: &Graph,
+    walking: Walking<'_>,
+    dependency: Id,
+    dependent: Id,
+) -> Option<Between> {
+    let index = Index::new(graph, walking, &[dependency, dependent]);
     let from = index.subtree(dependency);
     let routed = index.routed(&arrivals(&from), Toward::Dependents, Bounds::NONE);
     let forward = &routed.walk;
@@ -99,9 +102,7 @@ pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> 
         Toward::Dependencies,
         Bounds::NONE,
     );
-    let edges: Vec<Edge> = graph
-        .edges
-        .iter()
+    let edges: Vec<Edge> = (graph.edges.iter().chain(walking.undrawn))
         .filter(|e| {
             walked(e)
                 && forward.reached(e.from)
@@ -111,7 +112,7 @@ pub fn between(graph: &Graph, dependency: Id, dependent: Id) -> Option<Between> 
         })
         .cloned()
         .collect();
-    let shortest = routed.chain(graph, end, dependency, dependent);
+    let shortest = routed.chain(&index, end, dependency, dependent);
     Some(Between {
         paths: Paths {
             nodes: spanned(&[dependency, dependent], &edges),
@@ -199,7 +200,7 @@ mod tests {
 
     #[test]
     fn both_sides_of_a_diamond_lie_between_its_ends() {
-        let found = between(&diamond(), Id(0), Id(3)).expect("a path");
+        let found = between(&diamond(), Walking::default(), Id(0), Id(3)).expect("a path");
         assert_eq!(nodes(&found.paths), [0, 1, 2, 3]);
         assert_eq!(edges(&found.paths), [(0, 1), (0, 2), (1, 3), (2, 3)]);
         assert_eq!(found.shortest.len(), 3);
@@ -209,20 +210,21 @@ mod tests {
 
     #[test]
     fn a_branch_off_the_paths_is_left_out() {
-        let found = between(&diamond(), Id(0), Id(3)).expect("a path");
+        let found = between(&diamond(), Walking::default(), Id(0), Id(3)).expect("a path");
         assert!(!found.paths.nodes.contains(&Id(4)), "another dependency");
         assert!(!found.paths.nodes.contains(&Id(5)), "a dependent beyond");
     }
 
     #[test]
     fn a_dependent_upstream_of_the_dependency_is_no_path() {
-        assert!(between(&diamond(), Id(3), Id(0)).is_none());
-        assert!(between(&diamond(), Id(4), Id(2)).is_none());
+        assert!(between(&diamond(), Walking::default(), Id(3), Id(0)).is_none());
+        assert!(between(&diamond(), Walking::default(), Id(4), Id(2)).is_none());
     }
 
     #[test]
     fn a_node_depends_on_itself_by_no_edge() {
-        let found = between(&diamond(), Id(1), Id(1)).expect("a node reaches itself");
+        let found =
+            between(&diamond(), Walking::default(), Id(1), Id(1)).expect("a node reaches itself");
         assert_eq!(nodes(&found.paths), [1]);
         assert!(found.paths.edges.is_empty());
         assert_eq!(chain(&found), [1]);
@@ -231,21 +233,21 @@ mod tests {
     #[test]
     fn a_cycle_on_the_way_is_kept_whole() {
         let cyclic = targets(4, &[(0, 1), (1, 2), (2, 1), (2, 3)]);
-        let found = between(&cyclic, Id(0), Id(3)).expect("a path");
+        let found = between(&cyclic, Walking::default(), Id(0), Id(3)).expect("a path");
         assert_eq!(edges(&found.paths), [(0, 1), (1, 2), (2, 1), (2, 3)]);
         assert_eq!(chain(&found), [0, 1, 2, 3]);
     }
 
     #[test]
     fn with_no_dependent_named_every_dependent_is_kept() {
-        let found = dependents(&diamond(), Id(1));
+        let found = dependents(&diamond(), Walking::default(), Id(1));
         assert_eq!(nodes(&found), [1, 3, 5]);
         assert_eq!(edges(&found), [(1, 3), (3, 5)]);
     }
 
     #[test]
     fn a_dependency_nothing_depends_on_stands_alone() {
-        let found = dependents(&diamond(), Id(5));
+        let found = dependents(&diamond(), Walking::default(), Id(5));
         assert_eq!(nodes(&found), [5]);
         assert!(found.edges.is_empty());
     }
@@ -270,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_path_crosses_between_label_and_configured_edges() {
-        let found = between(&levels(), Id(11), Id(13)).expect("a path");
+        let found = between(&levels(), Walking::default(), Id(11), Id(13)).expect("a path");
         assert_eq!(edges(&found.paths), [(1, 2), (12, 13)]);
         assert_eq!(nodes(&found.paths), [1, 2, 11, 12, 13]);
         assert_eq!(chain(&found), [11, 1, 2, 12, 13]);
@@ -278,10 +280,10 @@ mod tests {
 
     #[test]
     fn a_target_named_stands_for_its_configured_targets() {
-        let found = between(&levels(), Id(2), Id(13)).expect("a path");
+        let found = between(&levels(), Walking::default(), Id(2), Id(13)).expect("a path");
         assert_eq!(edges(&found.paths), [(12, 13)]);
         assert_eq!(chain(&found), [2, 12, 13]);
-        let found = between(&levels(), Id(1), Id(3)).expect("a path");
+        let found = between(&levels(), Walking::default(), Id(1), Id(3)).expect("a path");
         assert_eq!(edges(&found.paths), [(1, 2), (12, 13)]);
     }
 
@@ -317,7 +319,7 @@ mod tests {
             ],
             &[(3, 2), (1, 4)],
         );
-        let found = between(&graph, Id(3), Id(4)).expect("a path");
+        let found = between(&graph, Walking::default(), Id(3), Id(4)).expect("a path");
         assert_eq!(edges(&found.paths), [(1, 4), (3, 2)]);
         assert_eq!(chain(&found), [3, 2, 1, 4]);
         assert_chained(&graph, &found);
@@ -336,7 +338,7 @@ mod tests {
             ],
             &[(0, 1), (2, 3), (0, 3)],
         );
-        let found = between(&graph, Id(0), Id(3)).expect("a path");
+        let found = between(&graph, Walking::default(), Id(0), Id(3)).expect("a path");
         assert_eq!(edges(&found.paths), [(0, 3)]);
         assert_chained(&graph, &found);
     }
@@ -350,25 +352,25 @@ mod tests {
             (diamond(), Id(0), Id(5)),
         ];
         for (graph, dependency, dependent) in cases {
-            let found = between(&graph, dependency, dependent).expect("a path");
+            let found = between(&graph, Walking::default(), dependency, dependent).expect("a path");
             assert_chained(&graph, &found);
         }
     }
 
     #[test]
     fn a_dependent_inside_the_dependency_is_joined_by_containment_alone() {
-        let found = between(&levels(), Id(1), Id(11)).expect("held within");
+        let found = between(&levels(), Walking::default(), Id(1), Id(11)).expect("held within");
         assert!(found.paths.edges.is_empty());
         assert_eq!(chain(&found), [1, 11]);
-        let found = between(&levels(), Id(11), Id(1)).expect("held within");
+        let found = between(&levels(), Walking::default(), Id(11), Id(1)).expect("held within");
         assert!(found.paths.edges.is_empty());
         assert_eq!(chain(&found), [11, 1]);
     }
 
     #[test]
     fn a_package_joins_nothing_it_holds() {
-        assert!(between(&levels(), Id(12), Id(11)).is_none());
-        assert!(between(&levels(), Id(13), Id(1)).is_none());
+        assert!(between(&levels(), Walking::default(), Id(12), Id(11)).is_none());
+        assert!(between(&levels(), Walking::default(), Id(13), Id(1)).is_none());
     }
 
     /// An edge landing on a target reaches its configured targets, and no
@@ -379,7 +381,7 @@ mod tests {
         graph.add_node(Node::new(Id(20), "compile", Kind::Action, Some(Id(12))));
         graph.add_node(Node::new(Id(21), "t", Kind::Target, None));
         graph.add_edge(Id(20), Id(21), EdgeKind::Aquery);
-        let found = dependents(&graph, Id(1));
+        let found = dependents(&graph, Walking::default(), Id(1));
         assert!(!found.nodes.contains(&Id(21)), "{:?}", nodes(&found));
         assert_eq!(edges(&found), [(1, 2), (12, 13)]);
     }
@@ -390,8 +392,11 @@ mod tests {
         graph.add_node(Node::new(Id(20), "compile", Kind::Action, Some(Id(11))));
         graph.add_node(Node::new(Id(21), "link", Kind::Action, Some(Id(11))));
         graph.add_edge(Id(20), Id(21), EdgeKind::Aquery);
-        assert_eq!(edges(&dependents(&graph, Id(1))), [(1, 2), (12, 13)]);
-        let found = between(&graph, Id(1), Id(3)).expect("a path");
+        assert_eq!(
+            edges(&dependents(&graph, Walking::default(), Id(1))),
+            [(1, 2), (12, 13)]
+        );
+        let found = between(&graph, Walking::default(), Id(1), Id(3)).expect("a path");
         assert_eq!(edges(&found.paths), [(1, 2), (12, 13)]);
     }
 
@@ -399,7 +404,7 @@ mod tests {
     fn a_subgraph_keeps_the_frames_around_the_paths_and_their_edges_alone() {
         let mut graph = levels();
         graph.add_edge(Id(11), Id(12), EdgeKind::Cquery);
-        let found = between(&graph, Id(12), Id(13)).expect("a path");
+        let found = between(&graph, Walking::default(), Id(12), Id(13)).expect("a path");
         let drawn = found.paths.subgraph(&graph);
         let mut kept: Vec<(u32, Option<u32>)> = drawn
             .nodes
@@ -426,10 +431,10 @@ mod tests {
         let mut graph = diamond();
         graph.add_edge(Id(0), Id(5), EdgeKind::Transitive);
         assert_eq!(
-            edges(&dependents(&graph, Id(0))),
+            edges(&dependents(&graph, Walking::default(), Id(0))),
             [(0, 1), (0, 2), (1, 3), (2, 3), (3, 5)]
         );
-        let found = between(&graph, Id(0), Id(5)).expect("a path");
+        let found = between(&graph, Walking::default(), Id(0), Id(5)).expect("a path");
         assert_eq!(found.shortest.len(), 4);
         assert!(
             !found
@@ -442,8 +447,8 @@ mod tests {
 
     #[test]
     fn an_endpoint_the_graph_does_not_mention_stands_alone() {
-        let found = dependents(&diamond(), Id(40));
+        let found = dependents(&diamond(), Walking::default(), Id(40));
         assert_eq!(nodes(&found), [40]);
-        assert!(between(&diamond(), Id(0), Id(40)).is_none());
+        assert!(between(&diamond(), Walking::default(), Id(0), Id(40)).is_none());
     }
 }

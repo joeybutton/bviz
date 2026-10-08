@@ -321,6 +321,7 @@ pub(crate) mod tests {
         let labels = Arc::new(LabelIndex::of(&graph, &names, &facets));
         Shared {
             base: Arc::new(graph),
+            undrawn: Arc::default(),
             reduced_base: Arc::new(reduced_base),
             map: Placement::pending().0,
             config_names: Arc::new(ConfigNames::of(&facets)),

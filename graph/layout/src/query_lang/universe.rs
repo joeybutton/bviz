@@ -18,7 +18,7 @@ use crate::graph::{Graph, Kind, id_span};
 use crate::intern::{Id, Names};
 use crate::joint::Joint;
 use crate::provenance::{Input, InputSet};
-use crate::reach::{Index, Level};
+use crate::reach::{Index, Level, Walking};
 use crate::select::Scope;
 use crate::select::labels::LabelIndex;
 use crate::target_pattern::TargetIndex;
@@ -129,9 +129,22 @@ impl Universe {
         attributes: &Arc<Attributes>,
         capabilities: &Capabilities,
     ) -> Self {
+        let walking = Walking::default();
+        Universe::walking(graph, walking, names, facets, attributes, capabilities)
+    }
+
+    /// The universe of `graph` as `walking` reads it.
+    pub fn walking(
+        graph: &Graph,
+        walking: Walking<'_>,
+        names: &Names,
+        facets: &Arc<Facets>,
+        attributes: &Arc<Attributes>,
+        capabilities: &Capabilities,
+    ) -> Self {
         let labels = Arc::new(LabelIndex::of(graph, names, facets));
         let targets = Arc::new(TargetIndex::of(labels, graph, facets, capabilities));
-        Universe::with_targets(graph, targets, facets, attributes, capabilities)
+        Universe::with_targets(graph, walking, targets, facets, attributes, capabilities)
     }
 
     /// The universe of `joint`'s graph, with the names its node ids resolve
@@ -147,9 +160,11 @@ impl Universe {
         (universe, joint.names)
     }
 
-    /// The universe of `graph`, whose targets `targets` indexes.
+    /// The universe of `graph` as `walking` reads it, whose targets `targets`
+    /// indexes.
     pub fn with_targets(
         graph: &Graph,
+        walking: Walking<'_>,
         targets: Arc<TargetIndex>,
         facets: &Arc<Facets>,
         attributes: &Arc<Attributes>,
@@ -168,7 +183,7 @@ impl Universe {
             }
             members.set(node.id.0 as usize, !node.kind.is_frame());
         }
-        let index = Index::new(graph, &[]);
+        let index = Index::new(graph, walking, &[]);
         Universe {
             declared: Declared::new(labels.entries(), &index, facets),
             configurations: Configurations::new(graph, facets),

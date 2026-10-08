@@ -391,14 +391,15 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
         cx,
         move || match dependent {
             None => {
-                let base = &sourced.get().base;
-                let paths = paths::dependents(base, dependency);
+                let sourced = sourced.get();
+                let paths = paths::dependents(&sourced.base, sourced.walking(), dependency);
                 let nodes = paths.nodes.len();
                 Some((paths, Answer::Dependents { nodes }))
             }
             Some(dependent) => {
-                let base = &sourced.get().base;
-                let between = paths::between(base, dependency, dependent)?;
+                let sourced = sourced.get();
+                let between =
+                    paths::between(&sourced.base, sourced.walking(), dependency, dependent)?;
                 let shortest = between
                     .shortest
                     .iter()

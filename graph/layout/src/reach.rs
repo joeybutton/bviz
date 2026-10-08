@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use fixedbitset::FixedBitSet;
 
-use crate::graph::{EdgeKind, Graph, Kind, id_span};
+use crate::graph::{Edge, EdgeKind, Graph, Kind, id_span};
 use crate::intern::Id;
 
 /// How far down the containment of a build a node stands: a target or file
@@ -67,6 +67,15 @@ impl Bounds<'_> {
     };
 }
 
+/// What a walk over a graph reads beyond the graph itself.
+#[derive(Clone, Copy, Default)]
+pub struct Walking<'a> {
+    /// Edges between the graph's nodes that a walk follows and a drawing of
+    /// the graph leaves out, positioned after the graph's own in the walk's
+    /// edge list.
+    pub undrawn: &'a [Edge],
+}
+
 /// Which way along its edges a walk runs.
 #[derive(Clone, Copy)]
 pub(crate) enum Toward {
@@ -109,14 +118,14 @@ impl CompressedSparseRows {
 
 /// A graph's adjacency and containment, by node id.
 pub(crate) struct Index {
-    /// The ends of each edge, dependency first, by position in the graph's
-    /// edge list.
+    /// The ends of each edge, dependency first, by position in the walk's
+    /// edge list: the graph's own, then the undrawn ones.
     ends: Vec<[u32; 2]>,
     parent: Vec<Option<Id>>,
     kind: Vec<Option<Kind>>,
     level: Vec<Option<Level>>,
     children: CompressedSparseRows,
-    /// The edges leaving each node, by position in the graph's edge list, but
+    /// The edges leaving each node, by position in the walk's edge list, but
     /// for those standing in for a path through nodes a filter dropped, which
     /// a walk would cross twice.
     outgoing: CompressedSparseRows,
@@ -125,9 +134,10 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    /// The index of `graph`, spanning `named` too where the graph mentions none
-    /// of them, so that each stands as a node with nothing around it.
-    pub(crate) fn new(graph: &Graph, named: &[Id]) -> Self {
+    /// The index of `graph` as `walking` reads it, spanning `named` too where
+    /// the graph mentions none of them, so that each stands as a node with
+    /// nothing around it.
+    pub(crate) fn new(graph: &Graph, walking: Walking<'_>, named: &[Id]) -> Self {
         let ids = named
             .iter()
             .map(|id| id.0 as usize + 1)
@@ -151,24 +161,16 @@ impl Index {
                 .iter()
                 .filter_map(|n| Some((n.parent?.0 as usize, n.id.0)))
         });
-        let outgoing = CompressedSparseRows::new(ids, || {
-            graph
-                .edges
-                .iter()
-                .enumerate()
+        let edges = || {
+            (graph.edges.iter().chain(walking.undrawn).enumerate())
                 .filter(|(_, e)| e.kind != EdgeKind::Transitive)
-                .map(|(i, e)| (e.from.0 as usize, i as u32))
-        });
-        let incoming = CompressedSparseRows::new(ids, || {
-            graph
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.kind != EdgeKind::Transitive)
-                .map(|(i, e)| (e.to.0 as usize, i as u32))
-        });
-        let mut ends: Vec<[u32; 2]> = Vec::with_capacity(graph.edges.len());
-        ends.extend(graph.edges.iter().map(|e| [e.from.0, e.to.0]));
+        };
+        let outgoing =
+            CompressedSparseRows::new(ids, || edges().map(|(i, e)| (e.from.0 as usize, i as u32)));
+        let incoming =
+            CompressedSparseRows::new(ids, || edges().map(|(i, e)| (e.to.0 as usize, i as u32)));
+        let mut ends: Vec<[u32; 2]> = Vec::with_capacity(graph.edges.len() + walking.undrawn.len());
+        ends.extend((graph.edges.iter().chain(walking.undrawn)).map(|e| [e.from.0, e.to.0]));
         Index {
             ends,
             parent,
@@ -223,7 +225,7 @@ impl Index {
         edges.map(|&edge| Id(self.ends[edge as usize][0]))
     }
 
-    /// The dependency and the dependent the edge at `edge` of the graph's edge
+    /// The dependency and the dependent the edge at `edge` of the walk's edge
     /// list joins.
     pub(crate) fn ends(&self, edge: u32) -> [Id; 2] {
         self.ends[edge as usize].map(Id)
@@ -358,7 +360,7 @@ impl Index {
 #[derive(Clone, Copy)]
 struct Move {
     to: usize,
-    /// The edge taken, by position in the graph's edge list.
+    /// The edge taken, by position in the walk's edge list.
     over: Option<u32>,
     /// The node whose standing above a walk's ceiling holds the move back:
     /// the one an edge lands on, a lift leaves, or a descent leaves, read the
@@ -415,7 +417,7 @@ enum Step {
     Seed,
     /// A move to a parent or a child from the state given.
     Contain(usize),
-    /// A move over the edge at this position of the graph's edge list from the
+    /// A move over the edge at this position of the walk's edge list from the
     /// state given.
     Edge(usize, u32),
 }
@@ -460,7 +462,7 @@ impl Walk {
 
 impl Routed {
     /// The seed state the walk reached the state `end` from, and the edges it
-    /// took on the way, by position in the graph's edge list, the first taken
+    /// took on the way, by position in the walk's edge list, the first taken
     /// first.
     pub(crate) fn route(&self, end: usize) -> (usize, Vec<u32>) {
         let mut taken: Vec<u32> = Vec::with_capacity(self.walk.fewest[end] as usize);
@@ -482,14 +484,11 @@ impl Routed {
     /// The nodes the walk passed on its way from `start`'s subtree to `end`, a
     /// state of `finish`: `start`, the ends of each edge it took, and `finish`,
     /// each named once where consecutive.
-    pub(crate) fn chain(&self, graph: &Graph, end: usize, start: Id, finish: Id) -> Vec<Id> {
+    pub(crate) fn chain(&self, index: &Index, end: usize, start: Id, finish: Id) -> Vec<Id> {
         let (_, taken) = self.route(end);
         let mut chain: Vec<Id> = Vec::with_capacity(2 * taken.len() + 2);
         chain.push(start);
-        let ends = taken.iter().flat_map(|&edge| {
-            let edge = &graph.edges[edge as usize];
-            [edge.from, edge.to]
-        });
+        let ends = taken.iter().flat_map(|&edge| index.ends(edge));
         for id in ends.chain([finish]) {
             if chain.last() != Some(&id) {
                 chain.push(id);
@@ -554,7 +553,7 @@ mod tests {
     /// The nodes `walk` reached in either state at or below `ceiling`, frames
     /// aside, by id.
     fn covered(graph: &Graph, walk: &Walk, ceiling: Level) -> Vec<u32> {
-        let index = Index::new(graph, &[]);
+        let index = Index::new(graph, Walking::default(), &[]);
         let mut ids: Vec<u32> = (graph.nodes.iter())
             .filter(|node| walk.reached(node.id) && !node.kind.is_frame())
             .filter(|node| index.level[node.id.0 as usize].is_none_or(|level| level >= ceiling))
@@ -587,7 +586,7 @@ mod tests {
     #[test]
     fn a_walk_takes_no_more_edges_than_its_depth() {
         let graph = chain();
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         let bounded = |depth| Bounds {
             depth,
             ..Bounds::NONE
@@ -602,7 +601,7 @@ mod tests {
     #[test]
     fn a_containment_move_counts_against_no_depth() {
         let graph = levels();
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         let bounds = Bounds {
             depth: Some(1),
             ..Bounds::NONE
@@ -614,7 +613,7 @@ mod tests {
     #[test]
     fn a_walk_keeps_within_its_nodes() {
         let graph = chain();
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         let mut within = FixedBitSet::with_capacity(4);
         within.extend([0, 1, 3]);
         let bounds = Bounds {
@@ -630,7 +629,7 @@ mod tests {
     #[test]
     fn a_walk_from_configured_targets_covers_no_target_or_label_edge() {
         let graph = levels();
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         let configured = Level::ConfiguredTarget;
         let walk = index.walk(&both(13), Toward::Dependencies, ceiling(configured));
         assert_eq!(covered(&graph, &walk, configured), [11, 12, 13, 14, 22, 23]);
@@ -661,7 +660,7 @@ mod tests {
     #[test]
     fn a_walk_from_actions_covers_no_configured_target() {
         let graph = levels();
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         let action = Level::Action;
         let walk = index.walk(&[State::arrived(22)], Toward::Dependents, ceiling(action));
         assert_eq!(covered(&graph, &walk, action), [22, 23]);
@@ -684,7 +683,7 @@ mod tests {
         for (id, kind, parent) in nodes {
             graph.add_node(Node::new(Id(id), "n", kind, parent.map(Id)));
         }
-        let index = Index::new(&graph, &[]);
+        let index = Index::new(&graph, Walking::default(), &[]);
         assert_eq!(
             index.level[3],
             Some(Level::Action),

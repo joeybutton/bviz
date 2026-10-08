@@ -1,6 +1,8 @@
 //! Which of a joint graph's inputs make up the graph a view draws and walks.
 
-use crate::graph::{Graph, Node, id_span};
+use fixedbitset::FixedBitSet;
+
+use crate::graph::{Edge, Graph, Node, id_span};
 use crate::intern::Id;
 use crate::provenance::{Input, InputSet, Provenance};
 
@@ -100,11 +102,28 @@ impl Sources {
         masked.edges.reserve(graph.edges.len());
         masked.edges.extend(
             (graph.edges.iter())
-                .filter(|edge| edge.kind.input().is_some_and(|i| self.inputs.contains(i)))
+                .filter(|edge| self.keeps_edge(edge))
                 .filter(|edge| kept[edge.from.0 as usize] && kept[edge.to.0 as usize])
                 .cloned(),
         );
         masked
+    }
+
+    /// The edges of `edges` these sources keep between the nodes of `masked`,
+    /// a graph [`Self::mask`] left, as it keeps the graph's own.
+    pub fn mask_edges(self, edges: &[Edge], masked: &Graph) -> Vec<Edge> {
+        let mut held = FixedBitSet::with_capacity(id_span(masked));
+        held.extend(masked.nodes.iter().map(|node| node.id.0 as usize));
+        (edges.iter())
+            .filter(|edge| self.keeps_edge(edge))
+            .filter(|edge| held.contains(edge.from.0 as usize) && held.contains(edge.to.0 as usize))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether these sources keep `edge`, whatever they keep of its ends.
+    fn keeps_edge(self, edge: &Edge) -> bool {
+        edge.kind.input().is_some_and(|i| self.inputs.contains(i))
     }
 }
 

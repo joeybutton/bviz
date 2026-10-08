@@ -13,7 +13,7 @@ use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
 use bviz_graph_layout::attributes::Attributes;
 use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
-use bviz_graph_layout::graph::{Graph, id_span};
+use bviz_graph_layout::graph::{Edge, Graph, id_span};
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
 use bviz_graph_layout::query_lang::Universe;
@@ -21,7 +21,7 @@ use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
 use bviz_graph_layout::{
-    Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance, Sources,
+    Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance, Sources, Walking,
 };
 use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
@@ -39,9 +39,14 @@ use std::sync::{Arc, LazyLock, OnceLock, Weak};
 /// which restricts it to what that panel's filter draws.
 #[derive(Clone)]
 pub(crate) struct Shared {
-    /// The built (pre-quotient) graph, cached so toggling a group re-lays-out
-    /// without re-reading or re-parsing the proto.
+    /// The built (pre-quotient) graph as drawn, cached so toggling a group
+    /// re-lays-out without re-reading or re-parsing the proto.
     pub(crate) base: Arc<Graph>,
+    /// The edges between the base's nodes that a query walks and the drawing
+    /// leaves out: those to the package groups a visibility declaration
+    /// names, a box for each of which would bury the build's own
+    /// dependencies.
+    pub(crate) undrawn: Arc<[Edge]>,
     /// The base with its transitively-redundant edges removed, cached so the
     /// reduced view's edges are a stable projection of one fixed skeleton.
     pub(crate) reduced_base: Arc<Graph>,
@@ -118,6 +123,9 @@ pub(crate) struct Opening {
 pub(crate) struct Sourced {
     pub(crate) sources: Sources,
     pub(crate) base: Arc<Graph>,
+    /// The edges a query walks that the base leaves out, of those
+    /// [`Shared::undrawn`] holds the ones the sources keep.
+    pub(crate) undrawn: Arc<[Edge]>,
     /// The base with its transitively-redundant edges removed.
     pub(crate) reduced: Arc<Graph>,
     /// The multi-child containers of the base.
@@ -133,6 +141,7 @@ impl Sourced {
         Sourced {
             sources: Sources::reading(shared.inputs),
             base: Arc::clone(&shared.base),
+            undrawn: Arc::clone(&shared.undrawn),
             reduced: Arc::clone(&shared.reduced_base),
             containers: Arc::clone(&shared.containers),
             left_out: None,
@@ -144,6 +153,7 @@ impl Sourced {
             return Sourced::whole(shared);
         }
         let base = sources.mask(&shared.base, &shared.provenance);
+        let undrawn = sources.mask_edges(&shared.undrawn, &base);
         let span = id_span(&shared.base);
         let mut left_out = FixedBitSet::with_capacity(span);
         left_out.insert_range(..);
@@ -155,9 +165,17 @@ impl Sourced {
         Sourced {
             sources,
             base: Arc::new(base),
+            undrawn: undrawn.into(),
             reduced: Arc::new(reduced),
             containers: Arc::new(containers),
             left_out: Some(Arc::new(left_out)),
+        }
+    }
+
+    /// How a query walks the base.
+    pub(crate) fn walking(&self) -> Walking<'_> {
+        Walking {
+            undrawn: &self.undrawn,
         }
     }
 
@@ -200,8 +218,12 @@ impl Sourcing {
                 let indexed = targets.clone();
                 Prepared::new(shared, move |shared| {
                     let targets = Arc::clone(indexed.get());
+                    let walking = Walking {
+                        undrawn: &shared.undrawn,
+                    };
                     Universe::with_targets(
                         &shared.base,
+                        walking,
                         targets,
                         &shared.facets,
                         &shared.attributes,
@@ -213,8 +235,10 @@ impl Sourcing {
                 let sourced = graph.clone();
                 let capabilities = shared.capabilities.reading(sources.inputs());
                 Prepared::new(shared, move |shared| {
-                    Universe::new(
-                        &sourced.get().base,
+                    let sourced = sourced.get();
+                    Universe::walking(
+                        &sourced.base,
+                        sourced.walking(),
                         &shared.names,
                         &shared.facets,
                         &shared.attributes,
@@ -606,13 +630,12 @@ pub(crate) struct Read {
 /// Reads `source` and builds the graph, and starts placing its map.
 pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
     let inputs = loaded_inputs(&source);
-    let (joint, reduced_base) = build_graph(&source.inputs())?;
-    Ok(read(joint, reduced_base, inputs))
+    Ok(read(build_graph(&source.inputs())?, inputs))
 }
 
-/// The read of `joint`, which `inputs` were merged into and whose transitive
-/// reduction is `reduced_base`, starting to place its map.
-fn read(joint: Joint, reduced_base: Graph, inputs: InputSet) -> Read {
+/// The read of `joint`, which `inputs` were merged into, starting to place its
+/// map.
+fn read(joint: Joint, inputs: InputSet) -> Read {
     let Joint {
         graph,
         names,
@@ -621,9 +644,18 @@ fn read(joint: Joint, reduced_base: Graph, inputs: InputSet) -> Read {
         capabilities,
         provenance,
     } = joint;
+    let (undrawn, drawn): (Vec<Edge>, Vec<Edge>) =
+        (graph.edges.into_iter()).partition(|edge| edge.class.is_visibility());
+    let base = Arc::new(Graph {
+        nodes: graph.nodes,
+        edges: drawn,
+    });
+    // Transitively reduce the whole base once: a collapsed box then draws the
+    // reduction of its hidden subtree's edges, so its edge count is stable under
+    // expansion rather than re-derived (differently) from each view.
+    let reduced_base = Arc::new(bviz_graph_layout::reduce::transitive_reduction(&base));
     // The map derives each of its views against these, so it holds a share in
     // them rather than a copy.
-    let (base, reduced_base) = (Arc::new(graph), Arc::new(reduced_base));
     let (map, landing) = Placement::pending();
     let placing = {
         let (base, reduced_base) = (Arc::clone(&base), Arc::clone(&reduced_base));
@@ -647,6 +679,7 @@ fn read(joint: Joint, reduced_base: Graph, inputs: InputSet) -> Read {
         loaded: Loaded::new(
             Shared {
                 base,
+                undrawn: undrawn.into(),
                 reduced_base,
                 map,
                 names: Arc::new(names),
@@ -672,12 +705,11 @@ fn read(joint: Joint, reduced_base: Graph, inputs: InputSet) -> Read {
 /// The read of `joint`, which `inputs` were merged into, landed with its map.
 #[cfg(test)]
 pub(crate) fn landed(joint: Joint, inputs: InputSet) -> Loaded {
-    let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&joint.graph);
     let Read {
         loaded,
         placing,
         landing,
-    } = read(joint, reduced_base, inputs);
+    } = read(joint, inputs);
     landing.land(placing.join().expect("the map places"));
     loaded
 }
@@ -1259,6 +1291,7 @@ mod tests {
         Loaded::new(
             Shared {
                 base,
+                undrawn: Arc::default(),
                 reduced_base,
                 map: Placement::pending().0,
                 names: Arc::new(names),
@@ -1561,5 +1594,56 @@ mod tests {
         let mut kept: Vec<u32> = passes.by_key.keys().copied().collect();
         kept.sort_unstable();
         assert_eq!(kept, [0, 2, 3]);
+    }
+
+    /// A query, and the paths a panel explains, walk to the package group a
+    /// rule's visibility names, which the drawing leaves out.
+    #[test]
+    fn a_query_walks_the_visibility_edges_the_drawing_leaves_out() {
+        use bazel_query_proto::blaze_query::attribute::Discriminator as AttributeType;
+        use bazel_query_proto::blaze_query::{
+            Attribute, PackageGroup, Rule, Target, target::Discriminator,
+        };
+        let attribute = |name: &str, values: &[&str]| Attribute {
+            name: name.to_owned(),
+            r#type: AttributeType::StringList as i32,
+            string_list_value: values.iter().map(|value| value.to_string()).collect(),
+            nodep: Some(true),
+            ..Attribute::default()
+        };
+        let app = Target {
+            r#type: Discriminator::Rule as i32,
+            rule: Some(Rule {
+                name: "//a:app".to_owned(),
+                rule_class: "cc_library".to_owned(),
+                attribute: vec![attribute("visibility", &["//a:group"])],
+                ..Rule::default()
+            }),
+            ..Target::default()
+        };
+        let group = Target {
+            r#type: Discriminator::PackageGroup as i32,
+            package_group: Some(PackageGroup {
+                name: "//a:group".to_owned(),
+                ..PackageGroup::default()
+            }),
+            ..Target::default()
+        };
+        let joint = bviz_graph_layout::build_joint(None, None, Some(&[app, group]), false);
+        let loaded = landed(joint, Input::Query.into());
+
+        assert!(loaded.shared.base.edges.is_empty());
+        assert!(loaded.shared.reduced_base.edges.is_empty());
+        let universe = loaded.whole().universe().get();
+        let deps = universe
+            .evaluate(&bviz_graph_layout::query_lang::parse("deps(//a:app)").unwrap())
+            .expect("deps() evaluates");
+        let group = loaded.shared.names.get("target://a:group").unwrap();
+        assert!(deps.contains(group.0 as usize));
+        let app = loaded.shared.names.get("target://a:app").unwrap();
+        let whole = loaded.whole();
+        let sourced = whole.graph().get();
+        let why = bviz_graph_layout::paths::between(&sourced.base, sourced.walking(), group, app);
+        assert!(why.is_some(), "the paths a query walks");
     }
 }
