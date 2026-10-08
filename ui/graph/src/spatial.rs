@@ -2,7 +2,7 @@ use crate::GraphPanel;
 use crate::camera::Rect;
 use crate::derive::{Drawn, Shown, ViewKey};
 use crate::morph::Frame;
-use bviz_graph_layout::{Box, Connector, LaidOut};
+use bviz_graph_layout::{Box, Connector, Id, LaidOut};
 use fixedbitset::FixedBitSet;
 use gpui::{Context, Task};
 use std::ops::Range;
@@ -11,17 +11,14 @@ use std::sync::Arc;
 /// How many items a [`Grid`]'s finest level lays one cell per.
 const ITEMS_PER_CELL: f64 = 1.0;
 
-/// How many cells around a view's own a route query reaches into as well:
-/// [`Rect::crossed_by`] can admit a leg that the leg's own bounds miss the view
-/// by a rounding.
-const ROUTE_MARGIN: usize = 1;
-
 /// A drawing's boxes and connector routes bucketed by where they lie in layout
 /// space, so a frame reaches what lies near the part of the drawing it shows
 /// without walking all of it.
 pub(crate) struct Spatial {
     boxes: Grid,
     routes: Grid,
+    /// Each connector's index under each box it ends at, ascending by box.
+    ends: Vec<(Id, u32)>,
 }
 
 impl Spatial {
@@ -40,7 +37,24 @@ impl Spatial {
                         .map(move |leg| (i, Span::leg(leg[0], leg[1])))
                 })
             }),
+            ends: {
+                let mut ends = Vec::with_capacity(g.connectors.len() * 2);
+                for (i, c) in g.connectors.iter().enumerate() {
+                    ends.extend([(c.from, narrow(i)), (c.to, narrow(i))]);
+                }
+                ends.sort_unstable();
+                ends
+            },
         }
+    }
+
+    /// The connectors ending at box `id`.
+    fn ending_at(&self, id: Id) -> impl Iterator<Item = usize> + '_ {
+        let first = self.ends.partition_point(|&(end, _)| end < id);
+        self.ends[first..]
+            .iter()
+            .take_while(move |&&(end, _)| end == id)
+            .map(|&(_, i)| i as usize)
     }
 }
 
@@ -76,7 +90,7 @@ impl<'a> Indexed<'a> {
         morph: Option<&'m Frame>,
     ) -> impl Iterator<Item = (&'a Box, Rect, f32)> + use<'a, 'm> {
         let candidates = match (&self.spatial, morph) {
-            (Some(spatial), None) => Candidates::Near(spatial.boxes.near(r, 0).into_ones()),
+            (Some(spatial), None) => Candidates::Near(spatial.boxes.near(r).into_ones()),
             _ => Candidates::Every(0..self.g.boxes.len()),
         };
         let boxes = &self.g.boxes;
@@ -88,11 +102,24 @@ impl<'a> Indexed<'a> {
     }
 
     /// The connectors whose routes may cross `r`, in the drawing's order: every
-    /// one that does, and some that pass near it.
-    pub(crate) fn routes_near(&self, r: &Rect) -> impl Iterator<Item = &'a Connector> + use<'a> {
+    /// one that does and either ends at a box of `anchors` or a view the size
+    /// of `r` [could hold](Rect::could_hold), and some that pass near it.
+    pub(crate) fn routes_near<A: IntoIterator<Item = Id>>(
+        &self,
+        r: &Rect,
+        anchors: A,
+    ) -> impl Iterator<Item = &'a Connector> + use<'a, A> {
         let connectors = &self.g.connectors;
         let candidates = match &self.spatial {
-            Some(spatial) => Candidates::Near(spatial.routes.near(r, ROUTE_MARGIN).into_ones()),
+            Some(spatial) => {
+                let mut near = spatial.routes.near_no_larger(r);
+                for anchor in anchors {
+                    for i in spatial.ending_at(anchor) {
+                        near.insert(i);
+                    }
+                }
+                Candidates::Near(near.into_ones())
+            }
             None => Candidates::Every(0..connectors.len()),
         };
         candidates.map(move |i| &connectors[i])
@@ -264,24 +291,11 @@ impl Level {
         (offset / size).floor().clamp(0.0, (count - 1) as f64) as usize
     }
 
-    /// The cells of this level `s` meets, and `margin` cells around them, row by
-    /// row: each row's run of cells as a range of the grid's cell numbers.
-    fn cells(
-        &self,
-        s: &Span,
-        left: f64,
-        top: f64,
-        margin: usize,
-    ) -> impl Iterator<Item = Range<usize>> + use<> {
-        let reach = |near: usize, far: usize, count: usize| {
-            near.saturating_sub(margin)..(far + margin).min(count - 1) + 1
-        };
-        let columns = reach(
-            self.column(s.left, left),
-            self.column(s.right, left),
-            self.columns,
-        );
-        let rows = reach(self.row(s.top, top), self.row(s.bottom, top), self.rows);
+    /// The cells of this level `s` meets, row by row: each row's run of cells
+    /// as a range of the grid's cell numbers.
+    fn cells(&self, s: &Span, left: f64, top: f64) -> impl Iterator<Item = Range<usize>> + use<> {
+        let columns = self.column(s.left, left)..self.column(s.right, left) + 1;
+        let rows = self.row(s.top, top)..self.row(s.bottom, top) + 1;
         let (first, across) = (self.first, self.columns);
         rows.map(move |row| {
             let start = first + row * across;
@@ -406,7 +420,7 @@ impl Grid {
         mut visit: impl FnMut(usize, usize),
     ) {
         for (item, s) in spans {
-            for run in self.level_of(&s).cells(&s, self.left, self.top, 0) {
+            for run in self.level_of(&s).cells(&s, self.left, self.top) {
                 for cell in run {
                     if last[cell] != item {
                         last[cell] = item;
@@ -417,13 +431,30 @@ impl Grid {
         }
     }
 
-    /// Every item with a span in a cell `r` meets or within `margin` cells of
-    /// one.
-    fn near(&self, r: &Rect, margin: usize) -> FixedBitSet {
+    /// Every item with a span in a cell `r` meets.
+    fn near(&self, r: &Rect) -> FixedBitSet {
+        self.near_in(r, &self.levels)
+    }
+
+    /// Every item with a span no larger than `r` in a cell `r` meets, and some
+    /// others. A span that size is listed no coarser than the first level whose
+    /// cells are each at least the size of `r`, so only those levels are
+    /// visited.
+    fn near_no_larger(&self, r: &Rect) -> FixedBitSet {
+        let holding = self
+            .levels
+            .iter()
+            .position(|l| r.w <= l.cell_width && r.h <= l.cell_height)
+            .map_or(self.levels.len(), |level| level + 1);
+        self.near_in(r, &self.levels[..holding])
+    }
+
+    /// Every item listed in `levels` with a span in a cell `r` meets.
+    fn near_in(&self, r: &Rect, levels: &[Level]) -> FixedBitSet {
         let s = Span::of(r);
         let mut found = FixedBitSet::with_capacity(self.len);
-        for level in &self.levels {
-            for run in level.cells(&s, self.left, self.top, margin) {
+        for level in levels {
+            for run in level.cells(&s, self.left, self.top) {
                 let listed = self.starts[run.start] as usize..self.starts[run.end] as usize;
                 for &item in &self.items[listed] {
                     found.insert(item as usize);
@@ -442,11 +473,13 @@ fn narrow(n: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bviz_graph_layout::{Id, Kind};
+    use crate::paint::drawn_route;
+    use bviz_graph_layout::Kind;
+    use std::collections::HashSet;
 
     fn random_drawing(rng: &mut fastrand::Rng, boxes: usize, routes: usize) -> LaidOut {
         let coordinate = |rng: &mut fastrand::Rng| rng.f64() * 1000.0 - 100.0;
-        let boxes = (0..boxes)
+        let boxes: Vec<Box> = (0..boxes)
             .map(|i| {
                 let (x, y) = (coordinate(rng), coordinate(rng));
                 Box {
@@ -462,17 +495,19 @@ mod tests {
                 }
             })
             .collect();
+        let ends = boxes.len().max(1) as u32;
         let connectors = (0..routes)
             .map(|_| {
                 let legs = rng.usize(1..6);
-                let points = (0..=legs)
-                    .map(|_| (coordinate(rng), coordinate(rng)))
-                    .collect();
+                let (x, y) = (coordinate(rng), coordinate(rng));
+                let reach = [10.0, 100.0, 1000.0][rng.usize(..3)];
+                let mut step = || (rng.f64() - 0.5) * reach;
+                let points = (0..=legs).map(|_| (x + step(), y + step())).collect();
                 Connector {
                     points,
                     kinds: Vec::new(),
-                    from: Id(0),
-                    to: Id(1),
+                    from: Id(rng.u32(..ends)),
+                    to: Id(rng.u32(..ends)),
                     transition: None,
                 }
             })
@@ -482,6 +517,14 @@ mod tests {
             connectors,
             ..LaidOut::default()
         }
+    }
+
+    /// Some of the first `boxes` boxes, as a frame's drawn boxes anchor routes.
+    fn random_anchors(rng: &mut fastrand::Rng, boxes: usize) -> HashSet<Id> {
+        (0..boxes as u32)
+            .filter(|_| rng.u8(..10) == 0)
+            .map(Id)
+            .collect()
     }
 
     fn random_view(rng: &mut fastrand::Rng) -> Rect {
@@ -546,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_near_a_rect_hold_every_route_crossing_it_in_drawing_order() {
+    fn routes_near_a_rect_hold_every_route_drawn_over_it_in_drawing_order() {
         let mut rng = fastrand::Rng::with_seed(11);
         for size in [0, 1, 3, 50, 400] {
             let g = random_drawing(&mut rng, size, size * 2);
@@ -554,18 +597,19 @@ mod tests {
             let position = |c: &Connector| g.connectors.iter().position(|o| std::ptr::eq(o, c));
             for _ in 0..200 {
                 let view = random_view(&mut rng);
-                let crossing: Vec<_> = indexed
-                    .routes_near(&view)
-                    .filter(|c| view.crossed_by(&c.points))
+                let anchors = random_anchors(&mut rng, size);
+                let drawn: Vec<_> = indexed
+                    .routes_near(&view, anchors.iter().copied())
+                    .filter(|c| drawn_route(c, &view, &anchors))
                     .map(position)
                     .collect();
                 let scanned: Vec<_> = g
                     .connectors
                     .iter()
-                    .filter(|c| view.crossed_by(&c.points))
+                    .filter(|c| drawn_route(c, &view, &anchors))
                     .map(position)
                     .collect();
-                assert_eq!(crossing, scanned);
+                assert_eq!(drawn, scanned);
             }
         }
     }
@@ -582,19 +626,20 @@ mod tests {
                 .map(|(b, ..)| b.id)
                 .collect()
         };
-        let routes_crossing = |indexed: &Indexed, view: &Rect| -> Vec<*const Connector> {
+        let routes_drawn = |indexed: &Indexed, view: &Rect, anchors: &HashSet<Id>| {
             indexed
-                .routes_near(view)
-                .filter(|c| view.crossed_by(&c.points))
+                .routes_near(view, anchors.iter().copied())
+                .filter(|c| drawn_route(c, view, anchors))
                 .map(std::ptr::from_ref)
-                .collect()
+                .collect::<Vec<_>>()
         };
         for _ in 0..200 {
             let view = random_view(&mut rng);
+            let anchors = random_anchors(&mut rng, g.boxes.len());
             assert_eq!(boxes_over(&built, &view), boxes_over(&unbuilt, &view));
             assert_eq!(
-                routes_crossing(&built, &view),
-                routes_crossing(&unbuilt, &view)
+                routes_drawn(&built, &view, &anchors),
+                routes_drawn(&unbuilt, &view, &anchors)
             );
         }
     }
@@ -621,7 +666,7 @@ mod tests {
         };
         assert!(
             indexed
-                .routes_near(&touching)
+                .routes_near(&touching, [Id(0)])
                 .any(|c| c.points[0].1 == 50.0)
         );
     }

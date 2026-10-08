@@ -205,6 +205,11 @@ crate.annotation(
         "//patches/gpui_linux:gpui_linux-keymap-no-default-includes.patch",
     ],
 )
+crate.annotation(
+    crate = "gpui_wgpu",
+    patch_args = ["-p1"],
+    patches = ["//patches/gpui_wgpu:gpui_wgpu-reserve-path-vertices.patch"],
+)
 
 # gpui_macos's build script generates the C header its Metal shaders share with
 # Rust by running cbindgen over gpui's sources. rules_rs does not surface a git

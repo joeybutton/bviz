@@ -83,6 +83,9 @@ impl Rect {
     }
 
     /// Whether any leg of the polyline `points` runs through this rectangle.
+    /// A leg whose bounds miss the rectangle never does, however the clip
+    /// rounds, so an index that finds legs by their bounds finds every leg
+    /// this admits.
     pub(crate) fn crossed_by(&self, points: &[(f64, f64)]) -> bool {
         points
             .windows(2)
@@ -92,6 +95,13 @@ impl Rect {
     /// Liang–Barsky: the segment reaches the rectangle while the stretch of it
     /// all four edges admit is still non-empty.
     fn crossed_by_leg(&self, from: (f64, f64), to: (f64, f64)) -> bool {
+        if from.0.max(to.0) < self.x
+            || self.x + self.w < from.0.min(to.0)
+            || from.1.max(to.1) < self.y
+            || self.y + self.h < from.1.min(to.1)
+        {
+            return false;
+        }
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
         let (mut enter, mut leave) = (0.0f64, 1.0f64);
         let mut admits = |along: f64, room: f64| {

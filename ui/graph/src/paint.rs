@@ -491,7 +491,7 @@ pub(crate) fn canvas_body(
             .collect();
         pan_bench::tally(Tally::Boxes, drawn.len());
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
-        let mut connectors = 0;
+        let (mut candidates, mut connectors) = (0, 0);
         // Painted over the labels, which a badge at a route's middle can fall
         // under where the route crosses a container's title band.
         let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
@@ -500,7 +500,8 @@ pub(crate) fn canvas_body(
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
             let mut courses = Courses::default();
-            for c in indexed.routes_near(&visible) {
+            for c in indexed.routes_near(&visible, on_screen.iter().copied()) {
+                candidates += 1;
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let filtered = scene.edge_strength(c.from, c.to);
@@ -515,6 +516,7 @@ pub(crate) fn canvas_body(
             ink.paint(&scene.palette, window);
             order_fence(bounds, window);
         }
+        pan_bench::tally(Tally::RouteCandidates, candidates);
         pan_bench::tally(Tally::Connectors, connectors);
         for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
             paint_critical_halo(b, *rect, camera.zoom, &scene.palette, window);
@@ -594,7 +596,7 @@ fn order_fence(bounds: Bounds<Pixels>, window: &mut Window) {
 /// What a marking picks out has no bearing on it. A mark reaches routes whose
 /// boxes are both off screen, and exempting those would lay back over the view
 /// exactly the grid the reach test is here to take off it.
-fn drawn_route(c: &Connector, visible: &Rect, on_screen: &HashSet<Id>) -> bool {
+pub(crate) fn drawn_route(c: &Connector, visible: &Rect, on_screen: &HashSet<Id>) -> bool {
     visible.crossed_by(&c.points)
         && (visible.could_hold(&c.points)
             || on_screen.contains(&c.from)
