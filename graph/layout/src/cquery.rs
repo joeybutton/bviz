@@ -23,6 +23,7 @@ use bazel_query_proto::analysis::{Configuration, ConfiguredTarget, CqueryResult}
 use bazel_query_proto::blaze_query::target::Discriminator;
 use bazel_query_proto::blaze_query::{Rule, Target};
 
+use crate::attributes::AttributesBuilder;
 use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
@@ -38,7 +39,15 @@ fn build(results: &[CqueryResult]) -> (Graph, Names, Facets) {
     let packages = package_keys(results, &repos);
     let mut names = Names::default();
     let mut facets = FacetsBuilder::default();
-    let graph = build_with_packages(results, &packages, &repos, &mut names, &mut facets);
+    let mut attributes = AttributesBuilder::default();
+    let graph = build_with_packages(
+        results,
+        &packages,
+        &repos,
+        &mut names,
+        &mut facets,
+        &mut attributes,
+    );
     (graph, names, facets.seal().0)
 }
 
@@ -86,14 +95,18 @@ pub(crate) fn build_with_packages(
     repos: &RepoMapping,
     names: &mut Names,
     facets: &mut FacetsBuilder,
+    attributes: &mut AttributesBuilder,
 ) -> Graph {
     let cts: Vec<&ConfiguredTarget> = results.iter().flat_map(|r| r.results.iter()).collect();
+    let rules = (cts.iter()).filter_map(|ct| ct.target.as_ref()?.rule.as_ref());
+    attributes.reserve(rules.map(|rule| rule.attribute.len()).sum());
 
     let mut b = Builder {
         graph: Graph::new(),
         names,
         repos,
         facets,
+        attributes,
         configurations: configurations(results),
     };
     let index = build_nodes(&mut b, &cts, packages);
@@ -107,6 +120,7 @@ struct Builder<'a> {
     names: &'a mut Names,
     repos: &'a RepoMapping,
     facets: &'a mut FacetsBuilder,
+    attributes: &'a mut AttributesBuilder,
     configurations: HashMap<u32, &'a Configuration>,
 }
 
@@ -196,7 +210,7 @@ fn build_nodes(
             let Some(rule) = target.rule.as_ref() else {
                 continue;
             };
-            nodes.add_rule_nodes(target, &rule.name, ct.configuration_id);
+            nodes.add_rule_nodes(target, rule, ct.configuration_id);
         } else if let Some((label, kind)) = label_and_kind(target) {
             let leaf = nodes.add_leaf_node(target, label, kind);
             if kind == Kind::Artifact && ct.configuration_id != 0 {
@@ -217,9 +231,10 @@ struct Nodes<'a, 'n> {
 
 impl Nodes<'_, '_> {
     /// Creates the rule's target container the first time its label is seen, and
-    /// a configured-target leaf the first time it is built in `config_id`.
-    /// `written` is the label as the input printed it.
-    fn add_rule_nodes(&mut self, target: &Target, written: &str, config_id: u32) {
+    /// a configured-target leaf, holding the rule's attributes as configured,
+    /// the first time it is built in `config_id`.
+    fn add_rule_nodes(&mut self, target: &Target, rule: &Rule, config_id: u32) {
+        let written = rule.name.as_str();
         let label = self.b.canonical(written);
         if !self.index.target_box.contains_key(label.as_ref()) {
             let parent = self.hierarchy.package_box(&label);
@@ -234,25 +249,30 @@ impl Nodes<'_, '_> {
             self.index.target_box.insert(label.to_string(), id);
         }
         let container = self.index.target_box[label.as_ref()];
-        self.add_configured(written, container, config_id);
+        if let Some(configured) = self.add_configured(written, container, config_id) {
+            self.b.attributes.describe(configured, rule, self.b.repos);
+        }
     }
 
     /// Creates the configured-target box of the target `written` held by
-    /// `container` the first time it is seen built in `config_id`.
-    fn add_configured(&mut self, written: &str, container: Id, config_id: u32) {
+    /// `container` the first time it is seen built in `config_id`, returning
+    /// it then.
+    fn add_configured(&mut self, written: &str, container: Id, config_id: u32) -> Option<Id> {
         let label = self.b.canonical(written);
         let key = self.b.config_key(config_id);
-        if self.index.ct_ids.insert((label.to_string(), key.clone())) {
-            let mnemonic = self.b.config_mnemonic(config_id);
-            let id = self.b.names.intern(&label::ct_node_id(&label, &key));
-            self.b.graph.add_node(Node::new(
-                id,
-                mnemonic,
-                Kind::ConfiguredTarget,
-                Some(container),
-            ));
-            self.b.describe_configured(id, container, config_id);
+        if !self.index.ct_ids.insert((label.to_string(), key.clone())) {
+            return None;
         }
+        let mnemonic = self.b.config_mnemonic(config_id);
+        let id = self.b.names.intern(&label::ct_node_id(&label, &key));
+        self.b.graph.add_node(Node::new(
+            id,
+            mnemonic,
+            Kind::ConfiguredTarget,
+            Some(container),
+        ));
+        self.b.describe_configured(id, container, config_id);
+        Some(id)
     }
 
     /// The box a non-rule target becomes, created the first time its label is

@@ -441,6 +441,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
             graph,
             names,
             facets,
+            attributes: _,
             capabilities,
             provenance,
         },

@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{Attribute, Target, attribute::Tristate};
 
+use crate::attributes::AttributesBuilder;
 use crate::capability::Axis;
 #[cfg(test)]
 use crate::facets::Facets;
@@ -28,7 +29,15 @@ fn build_in(targets: &[Target], repos: &RepoMapping) -> (Graph, Names, Facets) {
     let packages = package_keys(targets, repos);
     let mut names = Names::default();
     let mut facets = FacetsBuilder::default();
-    let graph = build_with_packages(&refs, &packages, repos, &mut names, &mut facets);
+    let mut attributes = AttributesBuilder::default();
+    let graph = build_with_packages(
+        &refs,
+        &packages,
+        repos,
+        &mut names,
+        &mut facets,
+        &mut attributes,
+    );
     (graph, names, facets.seal().0)
 }
 
@@ -69,12 +78,15 @@ pub(crate) fn build_with_packages(
     repos: &RepoMapping,
     names: &mut Names,
     facets: &mut FacetsBuilder,
+    attributes: &mut AttributesBuilder,
 ) -> Graph {
     let mut graph = Graph::new();
     // Node id per label, so a label seen more than once maps to one node.
     let mut node_by_label: HashMap<String, Id> = HashMap::new();
 
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
+    let rules = targets.iter().filter_map(|target| target.rule.as_ref());
+    attributes.reserve(rules.map(|rule| rule.attribute.len()).sum());
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
@@ -94,6 +106,9 @@ pub(crate) fn build_with_packages(
             parent,
         ));
         describe_target(facets, target, node_id, parent, &label);
+        if let Some(rule) = &target.rule {
+            attributes.describe(node_id, rule, repos);
+        }
         node_by_label.insert(label.into_owned(), node_id);
     }
 

@@ -14,6 +14,7 @@ use std::collections::{BTreeSet, HashSet};
 use bazel_query_proto::analysis::{ActionGraphContainer, CqueryResult};
 use bazel_query_proto::blaze_query::Target;
 
+use crate::attributes::{Attributes, AttributesBuilder};
 use crate::capability::Capabilities;
 use crate::facets::{Facets, FacetsBuilder};
 use crate::graph::{Edge, Graph, Node};
@@ -31,6 +32,8 @@ pub struct Joint {
     pub facets: Facets,
     /// Which axes those facets let a filter select by.
     pub capabilities: Capabilities,
+    /// The attributes each rule's targets and configured targets state.
+    pub attributes: Attributes,
     pub provenance: Provenance,
 }
 
@@ -46,6 +49,7 @@ pub fn build_joint(
     let labeled_outputs = labeled_outputs(cquery, query, &repos);
     let mut names = Names::default();
     let mut facets = FacetsBuilder::default();
+    let mut attributes = AttributesBuilder::default();
     let graphs = build_inputs(
         aquery,
         cquery,
@@ -56,16 +60,22 @@ pub fn build_joint(
         &repos,
         &mut names,
         &mut facets,
+        &mut attributes,
     );
     let (facets, capabilities) = facets.seal();
-    let (mut graph, names, facets, provenance) =
-        canonicalize(merge(graphs, names.len()), &names, facets);
+    let (mut graph, names, facets, attributes, provenance) = canonicalize(
+        merge(graphs, names.len()),
+        &names,
+        facets,
+        attributes.seal(),
+    );
     label::show_written_repositories(&mut graph, &facets);
     Joint {
         graph,
         names,
         facets,
         capabilities,
+        attributes,
         provenance,
     }
 }
@@ -134,6 +144,7 @@ fn build_inputs(
     repos: &RepoMapping,
     names: &mut Names,
     facets: &mut FacetsBuilder,
+    attributes: &mut AttributesBuilder,
 ) -> Vec<(Input, Graph)> {
     let mut graphs: Vec<(Input, Graph)> = Vec::with_capacity(Input::ALL.len());
     if let Some(a) = aquery {
@@ -149,12 +160,12 @@ fn build_inputs(
         graphs.push((Input::Aquery, graph));
     }
     if let Some(c) = cquery {
-        let graph = cquery::build_with_packages(c, union, repos, names, facets);
+        let graph = cquery::build_with_packages(c, union, repos, names, facets, attributes);
         graphs.push((Input::Cquery, graph));
     }
     if let Some(q) = query {
         let refs: Vec<&Target> = q.iter().collect();
-        let graph = query::build_with_packages(&refs, union, repos, names, facets);
+        let graph = query::build_with_packages(&refs, union, repos, names, facets, attributes);
         graphs.push((Input::Query, graph));
     }
     graphs
@@ -170,7 +181,8 @@ fn canonicalize(
     merged: Merged,
     names: &Names,
     mut facets: Facets,
-) -> (Graph, Names, Facets, Provenance) {
+    mut attributes: Attributes,
+) -> (Graph, Names, Facets, Attributes, Provenance) {
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_by(|&a, &b| names.resolve(Id(a)).cmp(names.resolve(Id(b))));
     let mut remap = vec![Id(0); names.len()];
@@ -200,7 +212,8 @@ fn canonicalize(
         out.add_edge(map(edge.from), map(edge.to), edge.kind);
     }
     facets.renumber(&remap);
-    (out, canon, facets, Provenance::new(built_by))
+    attributes.renumber(&remap);
+    (out, canon, facets, attributes, Provenance::new(built_by))
 }
 
 /// The union of the inputs' graphs.
@@ -247,6 +260,7 @@ fn merge(graphs: Vec<(Input, Graph)>, ids: usize) -> Merged {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attributes::Stated;
     use crate::capability::{Axis, Support};
     use crate::graph::{EdgeKind, Kind};
     use crate::label::Resolver;
@@ -897,6 +911,45 @@ mod tests {
             }],
             configurations,
         }
+    }
+
+    /// A target holds what the query dump states of the rule, unconfigured,
+    /// and a configured target what the cquery dump states, configured.
+    #[test]
+    fn a_target_and_its_configured_target_each_hold_their_own_inputs_attributes() {
+        let query_targets = vec![attributed("//foo:app", vec![tags(&["unconfigured"])])];
+        let configured = attributed("//foo:app", vec![tags(&["configured"])]);
+        let cquery_results = vec![CqueryResult {
+            results: vec![ConfiguredTarget {
+                target: Some(configured),
+                configuration_id: 1,
+                ..Default::default()
+            }],
+            configurations: vec![Configuration {
+                id: 1,
+                checksum: "c0ffee".into(),
+                ..Default::default()
+            }],
+        }];
+
+        let Joint {
+            names, attributes, ..
+        } = build_joint(None, Some(&cquery_results), Some(&query_targets), false);
+
+        let tags_of = |node: &str| {
+            let name = attributes.name("tags").unwrap();
+            let Stated::Row(row) = attributes.stated(names.get(node).unwrap(), Some(name)) else {
+                panic!("{node} states no tags");
+            };
+            let mut printed = String::new();
+            attributes.any_printed(&attributes.row(row).value, |text| {
+                printed = text.to_string();
+                true
+            });
+            printed
+        };
+        assert_eq!(tags_of("target://foo:app"), "[unconfigured]");
+        assert_eq!(tags_of("ct://foo:app#c0ffee"), "[configured]");
     }
 
     #[test]

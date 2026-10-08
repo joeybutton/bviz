@@ -8,6 +8,7 @@
 //! from each dependency to the target that consumes it.
 pub mod actions;
 pub mod aquery;
+pub mod attributes;
 pub mod capability;
 pub mod cquery;
 pub mod dominators;
