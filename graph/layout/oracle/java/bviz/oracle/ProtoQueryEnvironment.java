@@ -108,6 +108,8 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
   private static final KeyExtractor<Node, String> KEY = Node::name;
 
   private final Map<PackageIdentifier, Map<String, Node>> packages = new LinkedHashMap<>();
+  /** Every node, by its canonical label. */
+  private final Map<String, Node> byName = new HashMap<>();
   private final TargetPattern.Parser parser;
   private final Resolver resolver = new Resolver();
 
@@ -135,7 +137,6 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
             PathFragment.EMPTY_FRAGMENT,
             RepositoryName.MAIN,
             RepositoryMapping.create(mapping, RepositoryName.MAIN));
-    Map<String, Node> byName = new HashMap<>();
     for (Build.Target target : targets) {
       Label label = Label.parseCanonical(nameOf(target));
       Node node = new Node(target, label);
@@ -581,28 +582,52 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
 
       @Override
       public boolean isTestRule(Node node) {
-        throw new UnsupportedOperationException();
+        return node.isRule() && TargetUtils.isTestRuleName(node.target.getRule().getRuleClass());
       }
 
       @Override
       public boolean isTestSuite(Node node) {
-        throw new UnsupportedOperationException();
+        return node.isRule()
+            && TargetUtils.isTestSuiteRuleName(node.target.getRule().getRuleClass());
       }
 
+      /**
+       * The targets {@code BlazeTargetAccessor.getPrerequisites} gives: those of the labels {@code
+       * AggregatingAttributeMapper.getReachableLabels} reaches without select keys, a label naming
+       * no target of the dump naming nothing, where Bazel would fail to load it. A visibility the
+       * BUILD file leaves unset is stored as none, whose default names nothing, where the proto
+       * writes the package's default.
+       */
       @Override
       public Iterable<Node> getPrerequisites(
           QueryExpression caller, Node node, String attrName, String errorMsgPrefix) {
-        throw new UnsupportedOperationException();
+        Set<Node> found = new LinkedHashSet<>();
+        Build.Attribute attribute = stated(node, attrName);
+        boolean unstored =
+            attribute != null
+                && attrName.equals("visibility")
+                && !attribute.getExplicitlySpecified();
+        if (attribute != null && !unstored) {
+          for (String label : reachableLabels(attribute)) {
+            Node target = byName.get(label);
+            if (target != null) {
+              found.add(target);
+            }
+          }
+        }
+        return found;
       }
 
       @Override
       public List<String> getStringListAttr(Node node, String attrName) {
-        throw new UnsupportedOperationException();
+        Build.Attribute attribute = stated(node, attrName);
+        return attribute == null ? List.of() : attribute.getStringListValueList();
       }
 
       @Override
       public String getStringAttr(Node node, String attrName) {
-        throw new UnsupportedOperationException();
+        Build.Attribute attribute = stated(node, attrName);
+        return attribute == null || !attribute.hasStringValue() ? null : attribute.getStringValue();
       }
 
       /**
@@ -614,12 +639,8 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
         if (attrName.equals("name")) {
           return List.of(node.label.getName());
         }
-        for (Build.Attribute attribute : node.target.getRule().getAttributeList()) {
-          if (attribute.getName().equals(attrName)) {
-            return printed(attribute);
-          }
-        }
-        return List.of();
+        Build.Attribute attribute = stated(node, attrName);
+        return attribute == null ? List.of() : printed(attribute);
       }
 
       @Override
@@ -627,6 +648,53 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
         throw new UnsupportedOperationException();
       }
     };
+  }
+
+  /** The attribute {@code name} the rule {@code node} states, or null. */
+  private static Build.Attribute stated(Node node, String name) {
+    for (Build.Attribute attribute : node.target.getRule().getAttributeList()) {
+      if (attribute.getName().equals(name)) {
+        return attribute;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The labels {@code AggregatingAttributeMapper.getReachableLabels} reaches of {@code attribute}
+   * without select keys: every label of its value, or of each branch of its selects set, through
+   * Bazel's own types. A branch of {@code None} takes the type's default, which names no label of
+   * any type drawn.
+   */
+  private static List<String> reachableLabels(Build.Attribute attribute) {
+    List<String> labels = new ArrayList<>();
+    Type.LabelVisitor visitor = (label, unused) -> labels.add(label.getCanonicalForm());
+    try {
+      if (attribute.getType() == Build.Attribute.Discriminator.SELECTOR_LIST) {
+        @SuppressWarnings("unchecked")
+        Type<Object> type =
+            (Type<Object>) type(attribute.getSelectorList().getType(), attribute.getNodep());
+        for (Object built : selectors(attribute, type)) {
+          @SuppressWarnings("unchecked")
+          BuildType.Selector<Object> selector = (BuildType.Selector<Object>) built;
+          selector.forEach(
+              (key, value) -> {
+                if (selector.isValueSet(key)) {
+                  type.visitLabels(visitor, value, null);
+                }
+              });
+        }
+      } else {
+        Type<?> type = type(attribute.getType(), attribute.getNodep());
+        Object value = stated(attribute.getType(), new AttributeFields(attribute));
+        if (value != null) {
+          visit(type, converting(type).convert(value, attribute.getName()), visitor);
+        }
+      }
+    } catch (ReflectiveOperationException | ConversionException | LabelSyntaxException e) {
+      throw new IllegalStateException(attribute.toString(), e);
+    }
+    return labels;
   }
 
   private static final Constructor<?> SELECTOR;

@@ -20,6 +20,12 @@
 //! `select` branches its `AggregatingAttributeMapper` visits, and its
 //! `TargetUtils.convertAttributeValue`.
 //!
+//! `labels` and `tests` read a rule's attributes through Bazel's own
+//! `LabelsFunction` and `TestsFunction`, over the prerequisites, string lists
+//! and test roles the oracle's accessor reads off the proto. The graphs drawn
+//! hold tests of drawn tags and sizes, and test suites of drawn filtering tags
+//! naming tests, suites, other targets and themselves, nested and in cycles.
+//!
 //! `somepath` and `some` may each answer any of several sets. Drawn only at
 //! the top of an expression, where nothing reads their answer further, each is
 //! checked for being one Bazel's engine could give: a path of fewest edges
@@ -81,7 +87,19 @@ const PACKAGES: &[(&str, &str)] = &[
 
 const RULE_NAMES: &[&str] = &["lib", "app", "test", "tool", "all", "a", "b"];
 const SOURCE_NAMES: &[&str] = &["s.txt", "x/y.txt", "data.json"];
-const RULE_CLASSES: &[&str] = &["cc_library", "genrule", "java_binary", "sh_test"];
+const RULE_CLASSES: &[&str] = &[
+    "cc_library",
+    "genrule",
+    "java_binary",
+    "sh_test",
+    "cc_test",
+    "test_suite",
+];
+const TEST_TAGS: &[&str] = &["manual", "local", "flaky", "x"];
+const TEST_SIZES: &[&str] = &["small", "medium", "large"];
+const SUITE_TAGS: &[&str] = &[
+    "manual", "-flaky", "+x", "x", "-local", "small", "-small", "+large",
+];
 
 /// Patterns naming what no graph holds, or that no graph can resolve.
 const MISSING: &[&str] = &[
@@ -260,8 +278,20 @@ impl Graph {
         let mut explicit_deps: HashMap<String, Vec<String>> = HashMap::new();
         // By rule, the package groups its visibility names.
         let mut visibilities: HashMap<String, Vec<String>> = HashMap::new();
-        for (name, outputs, tags) in &rules {
-            let class = RULE_CLASSES[rng.usize(..RULE_CLASSES.len())];
+        let classes: Vec<&str> = (rules.iter())
+            .map(|_| RULE_CLASSES[rng.usize(..RULE_CLASSES.len())])
+            .collect();
+        // The tests and suites, which a suite mostly names.
+        let tested: Vec<String> = (rules.iter().zip(&classes))
+            .filter(|(_, class)| class.ends_with("_test") || **class == "test_suite")
+            .map(|((name, _, _), _)| name.clone())
+            .collect();
+        for ((name, outputs, tags), &class) in rules.iter().zip(&classes) {
+            let tags = match class {
+                "test_suite" => many(rng, |rng| pick(rng, SUITE_TAGS)),
+                class if class.ends_with("_test") => many(rng, |rng| pick(rng, TEST_TAGS)),
+                _ => tags.clone(),
+            };
             let (_, short) = name.split_once(':').unwrap();
             let mut attributes = vec![
                 Attribute {
@@ -271,10 +301,18 @@ impl Graph {
                     explicitly_specified: Some(true),
                     ..Default::default()
                 },
-                string_list("tags", tags),
+                string_list("tags", &tags),
             ];
             if rng.u8(..3) == 0 {
                 attributes.push(boolean("testonly", rng.bool()));
+            }
+            match class {
+                "test_suite" => attributes.extend(suite_attributes(rng, &tested, &labels)),
+                class if class.ends_with("_test") => attributes.push(Attribute {
+                    explicitly_specified: Some(rng.bool()),
+                    ..Value::String(pick(rng, TEST_SIZES)).attribute("size")
+                }),
+                _ => {}
             }
             attributes.extend(typed_attributes(rng, &labels, &groups));
             attributes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -393,6 +431,36 @@ impl Graph {
             _ => self.labels[rng.usize(..self.labels.len())].clone(),
         }
     }
+}
+
+/// The `tests` a drawn test suite names, mostly among `tested`, and its
+/// `$implicit_tests`.
+fn suite_attributes(rng: &mut Rng, tested: &[String], labels: &[String]) -> [Attribute; 2] {
+    let named = |rng: &mut Rng| {
+        let count = rng.usize(..4);
+        (0..count)
+            .map(|_| match rng.u8(..4) {
+                0 => label(rng, labels),
+                _ => label(rng, tested),
+            })
+            .collect::<Vec<String>>()
+    };
+    let tests = named(rng);
+    let implicit = match tests.is_empty() {
+        true => named(rng),
+        false => Vec::new(),
+    };
+    let implicit_written = tests.is_empty();
+    [
+        Attribute {
+            explicitly_specified: Some(true),
+            ..Value::Labels(tests).attribute("tests")
+        },
+        Attribute {
+            explicitly_specified: Some(implicit_written),
+            ..Value::Labels(implicit).attribute("$implicit_tests")
+        },
+    ]
 }
 
 /// The package groups a drawn rule's visibility names, as Bazel's
@@ -1074,6 +1142,26 @@ const ATTRIBUTE_PATTERNS: &[(&str, &[&str])] = &[
     ("no_such_attribute", &["", "x"]),
 ];
 
+/// The attributes `labels` is drawn for: those of every type the graphs
+/// drawn state, and one no rule states.
+const LABEL_ATTRIBUTES: &[&str] = &[
+    "srcs",
+    "src",
+    "out",
+    "outs",
+    "aliases",
+    "args_by_label",
+    "deps_by_key",
+    "compatible_with_one",
+    "visibility",
+    "licenses",
+    "tests",
+    "$implicit_tests",
+    "cmd",
+    "tags",
+    "no_such_attribute",
+];
+
 /// The variables a drawn `let` binds; a reference to one may fall outside it.
 const VARIABLES: &[&str] = &["v", "w"];
 
@@ -1135,7 +1223,7 @@ impl Drawer<'_> {
         let (one, two) = (arg(), arg());
         let bounded = self.rng.bool();
         let depth = self.depth();
-        match self.rng.u8(..9) {
+        match self.rng.u8(..11) {
             0 if bounded => format!("deps({one}, {depth})"),
             0 => format!("deps({one})"),
             1 if bounded => format!("allrdeps({one}, {depth})"),
@@ -1147,11 +1235,19 @@ impl Drawer<'_> {
             5 => format!("same_pkg_direct_rdeps({one})"),
             6 => format!("kind({}, {one})", self.pick(KIND_PATTERNS)),
             7 => format!("filter({}, {one})", self.pick(LABEL_PATTERNS)),
-            _ => {
+            8 => {
                 let (attribute, patterns) =
                     ATTRIBUTE_PATTERNS[self.rng.usize(..ATTRIBUTE_PATTERNS.len())];
                 format!("attr({attribute}, {}, {one})", self.pick(patterns))
             }
+            9 => format!("labels({}, {one})", self.pick(LABEL_ATTRIBUTES)),
+            // Over the suites of a wide pattern, now and then, so that what
+            // suites admit is often what names a test.
+            _ if self.rng.bool() => {
+                let wide = WIDE[self.rng.usize(..WIDE.len())];
+                format!("tests(kind(test_suite, {wide}))")
+            }
+            _ => format!("tests({one})"),
         }
     }
 }
