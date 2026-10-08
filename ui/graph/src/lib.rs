@@ -484,8 +484,7 @@ impl GraphPanel {
             })
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
-            derive::opened(view, cx);
-            boxes::adopt(view, cx);
+            view.take_up_source(cx)
         });
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
@@ -501,7 +500,7 @@ impl GraphPanel {
         let derived = Derived::new();
         let (panel, filter) = (cx.entity(), derived.filter().clone());
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
-        Self {
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             model,
             derived,
@@ -549,7 +548,18 @@ impl GraphPanel {
             _chrome_follows: chrome_follows,
             legend: Legend::default(),
             bench: pan_bench::Bench::from_env(),
-        }
+        };
+        // A panel minted over a graph its document has already read, as a
+        // closed view reopened is, sees no read land.
+        view.take_up_source(cx);
+        view
+    }
+
+    /// Draws the graph the document holds, once it is read, and offers the box
+    /// classes it carries.
+    fn take_up_source(&mut self, cx: &mut Context<Self>) {
+        derive::opened(self, cx);
+        boxes::adopt(self, cx);
     }
 
     /// Rebuilds the graph scene along with the chrome around it; every change to
