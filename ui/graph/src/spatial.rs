@@ -11,11 +11,6 @@ use std::sync::Arc;
 /// How many items a [`Grid`]'s finest level lays one cell per.
 const ITEMS_PER_CELL: f64 = 1.0;
 
-/// How many cells around a view's own a route query reaches into as well:
-/// [`Rect::crossed_by`] can admit a leg that the leg's own bounds miss the view
-/// by a rounding.
-const ROUTE_MARGIN: usize = 1;
-
 /// A drawing's boxes and connector routes bucketed by where they lie in layout
 /// space, so a frame reaches what lies near the part of the drawing it shows
 /// without walking all of it.
@@ -76,7 +71,7 @@ impl<'a> Indexed<'a> {
         morph: Option<&'m Frame>,
     ) -> impl Iterator<Item = (&'a Box, Rect, f32)> + use<'a, 'm> {
         let candidates = match (&self.spatial, morph) {
-            (Some(spatial), None) => Candidates::Near(spatial.boxes.near(r, 0).into_ones()),
+            (Some(spatial), None) => Candidates::Near(spatial.boxes.near(r).into_ones()),
             _ => Candidates::Every(0..self.g.boxes.len()),
         };
         let boxes = &self.g.boxes;
@@ -92,7 +87,7 @@ impl<'a> Indexed<'a> {
     pub(crate) fn routes_near(&self, r: &Rect) -> impl Iterator<Item = &'a Connector> + use<'a> {
         let connectors = &self.g.connectors;
         let candidates = match &self.spatial {
-            Some(spatial) => Candidates::Near(spatial.routes.near(r, ROUTE_MARGIN).into_ones()),
+            Some(spatial) => Candidates::Near(spatial.routes.near(r).into_ones()),
             None => Candidates::Every(0..connectors.len()),
         };
         candidates.map(move |i| &connectors[i])
@@ -264,24 +259,11 @@ impl Level {
         (offset / size).floor().clamp(0.0, (count - 1) as f64) as usize
     }
 
-    /// The cells of this level `s` meets, and `margin` cells around them, row by
-    /// row: each row's run of cells as a range of the grid's cell numbers.
-    fn cells(
-        &self,
-        s: &Span,
-        left: f64,
-        top: f64,
-        margin: usize,
-    ) -> impl Iterator<Item = Range<usize>> + use<> {
-        let reach = |near: usize, far: usize, count: usize| {
-            near.saturating_sub(margin)..(far + margin).min(count - 1) + 1
-        };
-        let columns = reach(
-            self.column(s.left, left),
-            self.column(s.right, left),
-            self.columns,
-        );
-        let rows = reach(self.row(s.top, top), self.row(s.bottom, top), self.rows);
+    /// The cells of this level `s` meets, row by row: each row's run of cells
+    /// as a range of the grid's cell numbers.
+    fn cells(&self, s: &Span, left: f64, top: f64) -> impl Iterator<Item = Range<usize>> + use<> {
+        let columns = self.column(s.left, left)..self.column(s.right, left) + 1;
+        let rows = self.row(s.top, top)..self.row(s.bottom, top) + 1;
         let (first, across) = (self.first, self.columns);
         rows.map(move |row| {
             let start = first + row * across;
@@ -406,7 +388,7 @@ impl Grid {
         mut visit: impl FnMut(usize, usize),
     ) {
         for (item, s) in spans {
-            for run in self.level_of(&s).cells(&s, self.left, self.top, 0) {
+            for run in self.level_of(&s).cells(&s, self.left, self.top) {
                 for cell in run {
                     if last[cell] != item {
                         last[cell] = item;
@@ -417,13 +399,12 @@ impl Grid {
         }
     }
 
-    /// Every item with a span in a cell `r` meets or within `margin` cells of
-    /// one.
-    fn near(&self, r: &Rect, margin: usize) -> FixedBitSet {
+    /// Every item with a span in a cell `r` meets.
+    fn near(&self, r: &Rect) -> FixedBitSet {
         let s = Span::of(r);
         let mut found = FixedBitSet::with_capacity(self.len);
         for level in &self.levels {
-            for run in level.cells(&s, self.left, self.top, margin) {
+            for run in level.cells(&s, self.left, self.top) {
                 let listed = self.starts[run.start] as usize..self.starts[run.end] as usize;
                 for &item in &self.items[listed] {
                     found.insert(item as usize);
