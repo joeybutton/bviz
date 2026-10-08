@@ -500,7 +500,7 @@ pub(crate) fn canvas_body(
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
             let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
             let mut courses = Courses::default();
-            for c in indexed.routes_near(&visible) {
+            for c in indexed.routes_near(&visible, on_screen.iter().copied()) {
                 candidates += 1;
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
@@ -596,7 +596,7 @@ fn order_fence(bounds: Bounds<Pixels>, window: &mut Window) {
 /// What a marking picks out has no bearing on it. A mark reaches routes whose
 /// boxes are both off screen, and exempting those would lay back over the view
 /// exactly the grid the reach test is here to take off it.
-fn drawn_route(c: &Connector, visible: &Rect, on_screen: &HashSet<Id>) -> bool {
+pub(crate) fn drawn_route(c: &Connector, visible: &Rect, on_screen: &HashSet<Id>) -> bool {
     visible.crossed_by(&c.points)
         && (visible.could_hold(&c.points)
             || on_screen.contains(&c.from)
