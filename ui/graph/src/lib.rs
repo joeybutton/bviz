@@ -348,9 +348,8 @@ pub struct GraphPanel {
     relation_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_relation`].
     _relation_choices: Subscription,
-    /// Whether hovering a box marks its neighborhood; flipped by the `h` key or
-    /// the toolbar toggle so the marking can be turned off when it is more noise
-    /// than help.
+    /// Whether hovering a box marks its neighborhood; off until the `h` key or
+    /// the toolbar toggle turns it on.
     neighborhood_enabled: bool,
     /// Whether the boxes standing for the invocation's critical path wear its
     /// halo.
@@ -569,7 +568,7 @@ impl GraphPanel {
             selection,
             relation_picker,
             _relation_choices: relations,
-            neighborhood_enabled: true,
+            neighborhood_enabled: false,
             critical_path_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
