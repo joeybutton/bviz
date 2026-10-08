@@ -59,10 +59,29 @@ pub(crate) enum ViewKey {
 }
 
 impl ViewKey {
-    fn drawing(self) -> u64 {
+    pub(crate) fn drawing(self) -> u64 {
         match self {
             Self::Layered(drawing) | Self::Map { drawing, .. } => drawing,
         }
+    }
+}
+
+/// A view a [`Drawn`] resolves to, with the key identifying it. Both come from
+/// one reading of which map levels are derived, which a background thread
+/// advances, so work cached under the key is always derived from this view.
+#[derive(Clone, Copy)]
+pub(crate) struct Shown<'a> {
+    key: ViewKey,
+    view: &'a LaidOut,
+}
+
+impl<'a> Shown<'a> {
+    pub(crate) fn key(self) -> ViewKey {
+        self.key
+    }
+
+    pub(crate) fn view(self) -> &'a LaidOut {
+        self.view
     }
 }
 
@@ -82,9 +101,26 @@ impl Drawn {
     /// deriving one costs a fold of the whole graph, which [`derive_view`]
     /// leaves to a background thread.
     pub(crate) fn view(&self, zoom: f32) -> Option<&LaidOut> {
+        self.shown(zoom).map(Shown::view)
+    }
+
+    /// [`view`](Self::view) at `zoom`, identified.
+    pub(crate) fn shown(&self, zoom: f32) -> Option<Shown<'_>> {
         match self {
-            Self::Layered { view, .. } => Some(view),
-            Self::Map { map, .. } => map.derived(shown_level(map, zoom)),
+            Self::Layered { view, drawing } => Some(Shown {
+                key: ViewKey::Layered(*drawing),
+                view,
+            }),
+            Self::Map { map, drawing } => {
+                let level = shown_level(map, zoom);
+                map.derived(level).map(|view| Shown {
+                    key: ViewKey::Map {
+                        drawing: *drawing,
+                        level,
+                    },
+                    view,
+                })
+            }
         }
     }
 
@@ -99,7 +135,7 @@ impl Drawn {
 
     /// Identifies the view a frame at `zoom` calls for, where that is a map's
     /// level yet to be derived.
-    fn underived(&self, zoom: f32) -> Option<ViewKey> {
+    pub(crate) fn underived(&self, zoom: f32) -> Option<ViewKey> {
         match self {
             Self::Layered { .. } => None,
             Self::Map { map, drawing } => {
@@ -109,17 +145,6 @@ impl Drawn {
                     level,
                 })
             }
-        }
-    }
-
-    /// Identifies the view [`view`](Self::view) returns at `zoom`.
-    pub(crate) fn view_key(&self, zoom: f32) -> ViewKey {
-        match self {
-            Self::Layered { drawing, .. } => ViewKey::Layered(*drawing),
-            Self::Map { map, drawing } => ViewKey::Map {
-                drawing: *drawing,
-                level: shown_level(map, zoom),
-            },
         }
     }
 
@@ -826,6 +851,21 @@ pub(crate) fn toggle_expansion(view: &mut GraphPanel, id: Id, cx: &mut Context<G
         view.derived.expanded.insert(id);
     }
     request(view, cx);
+}
+
+/// Expands every one of `ids`, laying the graph out once for all of them.
+pub(crate) fn expand(
+    view: &mut GraphPanel,
+    ids: impl IntoIterator<Item = Id>,
+    cx: &mut Context<GraphPanel>,
+) {
+    view.derived.expanded.extend(ids);
+    request(view, cx);
+}
+
+/// Whether the layered layout last requested draws `id` expanded.
+pub(crate) fn is_expanded(view: &GraphPanel, id: Id) -> bool {
+    view.derived.expanded.contains(&id)
 }
 
 /// Opens the layered layout onto `id`: every container holding it, and the
@@ -1968,17 +2008,24 @@ mod tests {
         assert_eq!(drawn.view(1.0).map(|g| g.width), Some(10.0));
     }
 
+    /// Identifies the view `derived`'s map draws, deriving it first.
+    fn map_key(derived: &Derived) -> ViewKey {
+        let drawn = derived.drawn(LayoutMode::Map).expect("a map");
+        drawn.derive_view(1.0);
+        drawn.shown(1.0).expect("a derived view").key()
+    }
+
     /// A graph opened in place of another is told from it even where no
     /// derivation has landed on either, so work keyed on the old graph's view
     /// is not taken for the new one's.
     #[test]
     fn a_document_opened_into_a_panel_identifies_the_drawing_it_leaves() {
         let mut derived = opened(&document());
-        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let first = map_key(&derived);
 
         derived.opened_on(&document());
 
-        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let second = map_key(&derived);
         assert_ne!(first, second);
     }
 
@@ -1988,11 +2035,11 @@ mod tests {
     fn each_derivation_adopted_identifies_the_drawing_it_leaves() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        let first = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let first = map_key(&derived);
 
         derived.adopt(landed(&loaded, 10.0));
 
-        let second = derived.drawn(LayoutMode::Map).expect("a map").view_key(1.0);
+        let second = map_key(&derived);
         assert_ne!(first, second);
     }
 
@@ -2055,7 +2102,10 @@ mod tests {
             described()
         );
         assert!(map.derived(finest).is_none());
-        assert_eq!(drawn.view_key(f32::MAX), drawn.view_key(0.0));
+        assert_eq!(
+            drawn.shown(f32::MAX).map(Shown::key),
+            drawn.shown(0.0).map(Shown::key)
+        );
         assert!(drawn.underived(f32::MAX).is_some());
     }
 

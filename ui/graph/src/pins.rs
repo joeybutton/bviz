@@ -185,7 +185,7 @@ fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 /// The override offered on the box a secondary click has selected: dropping it
 /// from the drawing, which is what a reader reaches for on a box in front of
 /// them. `None` while no box is selected.
-pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option<Button> {
+pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
     let node = view.selection.node()?;
     Some(
         Button::new(
@@ -200,11 +200,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option
 
 /// The overrides in force, for the caller to place over the drawing; `None`
 /// while there are none.
-pub(crate) fn panel(
-    view: &GraphPanel,
-    palette: &Palette,
-    cx: &mut Context<GraphPanel>,
-) -> Option<Div> {
+pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel>) -> Option<Div> {
     let loaded = view.model.read(cx).loaded()?;
     let held = held(
         view.derived.filter(),
@@ -283,7 +279,7 @@ fn listed(
     view: &GraphPanel,
     held: Vec<Held>,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> impl IntoElement {
     let rows = div()
         .id("pins-list")
@@ -310,7 +306,7 @@ fn listed(
 }
 
 /// One listed override, which a click takes back off.
-fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<Div> {
+fn row(held: Held, palette: &Palette, cx: &Context<GraphPanel>) -> Stateful<Div> {
     let node = held.node;
     div()
         .id(("pinned", node.0 as usize))

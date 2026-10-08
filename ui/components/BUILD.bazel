@@ -39,4 +39,5 @@ rust_test(
     name = "components_test",
     size = "small",
     crate = ":components",
+    deps = ["@crates//:gpui_platform"],
 )

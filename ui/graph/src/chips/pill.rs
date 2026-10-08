@@ -58,7 +58,7 @@ pub(super) fn pill(
     selected: bool,
     editing: bool,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Stateful<Div> {
     let id = chip.id();
     let colors = &palette.colors;

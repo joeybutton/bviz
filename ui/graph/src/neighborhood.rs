@@ -1,6 +1,8 @@
+use crate::derive::{Shown, ViewKey};
 use crate::relation::{Direction, Relation};
 use bviz_graph_layout::{Id, LaidOut};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 /// What a marking picks out of the graph, empty where nothing is marked.
 pub(crate) struct Neighborhood {
@@ -20,17 +22,51 @@ impl Neighborhood {
     }
 }
 
+/// The marking a holder last asked for, so a view redrawn frame after frame
+/// under an unchanged mark walks the graph once.
+#[derive(Default)]
+pub(crate) struct MarkingMemo(Option<Memoised>);
+
+/// A marking together with everything it was derived from, so it is recomputed
+/// exactly when one of those moves.
+struct Memoised {
+    view: ViewKey,
+    of: Id,
+    relation: Relation,
+    neighborhood: Rc<Neighborhood>,
+}
+
+impl MarkingMemo {
+    /// What marking `of` under `relation` picks out of `shown`; empty where `of`
+    /// is `None`.
+    pub(crate) fn marking(
+        &mut self,
+        shown: Shown<'_>,
+        of: Option<Id>,
+        relation: Relation,
+    ) -> Rc<Neighborhood> {
+        let Some(of) = of else {
+            self.0 = None;
+            return Rc::new(Neighborhood::none());
+        };
+        let view = shown.key();
+        let memoised = match self.0.take() {
+            Some(m) if m.view == view && m.of == of && m.relation == relation => m,
+            _ => Memoised {
+                view,
+                of,
+                relation,
+                neighborhood: Rc::new(compute_neighborhood(shown.view(), of, relation)),
+            },
+        };
+        Rc::clone(&self.0.insert(memoised).neighborhood)
+    }
+}
+
 /// What marking `of` under `relation` picks out. Its subtree is derived
 /// geometrically, the layout nesting a box's children within its own rect, so the
 /// boxes falling inside it are exactly its descendants.
-pub(crate) fn compute_neighborhood(
-    g: &LaidOut,
-    of: Option<Id>,
-    relation: Relation,
-) -> Neighborhood {
-    let Some(of) = of else {
-        return Neighborhood::none();
-    };
+fn compute_neighborhood(g: &LaidOut, of: Id, relation: Relation) -> Neighborhood {
     let Some(h) = g.boxes.iter().find(|b| b.id == of) else {
         return Neighborhood::none();
     };
@@ -237,7 +273,11 @@ fn trace_paths(
 mod tests {
     use super::*;
     use crate::camera::Rect;
-    use bviz_graph_layout::{Box, Connector, EdgeKind, Kind};
+    use crate::derive::Drawn;
+    use bviz_graph_layout::graph::Node;
+    use bviz_graph_layout::reduce::transitive_reduction;
+    use bviz_graph_layout::{Box, Connector, EdgeKind, Graph, Kind, map_layout};
+    use std::sync::Arc;
 
     const LEAF_WIDTH: f64 = 100.0;
     const LEAF_HEIGHT: f64 = 40.0;
@@ -307,7 +347,7 @@ mod tests {
 
     /// What hovering `id` marks.
     fn hover(g: &LaidOut, id: u32) -> Neighborhood {
-        compute_neighborhood(g, Some(Id(id)), Relation::Direct(Direction::Both))
+        compute_neighborhood(g, Id(id), Relation::Direct(Direction::Both))
     }
 
     fn ids(of: &[u32]) -> HashSet<Id> {
@@ -404,13 +444,6 @@ mod tests {
         assert!(n.edges.is_empty());
     }
 
-    #[test]
-    fn no_hover_marks_nothing() {
-        let n = compute_neighborhood(&reduced_chain(2), None, Relation::Direct(Direction::Both));
-        assert!(n.boxes.is_empty());
-        assert!(n.edges.is_empty());
-    }
-
     /// A row of leaves the middle one has an input and an output in, so a
     /// directed marking from it takes one and leaves the other.
     fn one_in_one_out() -> LaidOut {
@@ -423,7 +456,7 @@ mod tests {
 
     #[test]
     fn marking_no_relation_marks_the_selected_node_alone() {
-        let n = compute_neighborhood(&one_in_one_out(), Some(Id(1)), Relation::None);
+        let n = compute_neighborhood(&one_in_one_out(), Id(1), Relation::None);
         assert_eq!(n.boxes, ids(&[1]));
         assert!(n.edges.is_empty());
     }
@@ -431,10 +464,10 @@ mod tests {
     #[test]
     fn a_direct_marking_takes_only_the_direction_it_runs_in() {
         let g = one_in_one_out();
-        let inputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::In));
+        let inputs = compute_neighborhood(&g, Id(1), Relation::Direct(Direction::In));
         assert_eq!(inputs.boxes, ids(&[0, 1]));
         assert_eq!(inputs.edges, pairs(&[(0, 1)]));
-        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Direct(Direction::Out));
+        let outputs = compute_neighborhood(&g, Id(1), Relation::Direct(Direction::Out));
         assert_eq!(outputs.boxes, ids(&[1, 2]));
         assert_eq!(outputs.edges, pairs(&[(1, 2)]));
     }
@@ -447,7 +480,7 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3)],
             &[(0, 1), (1, 2), (2, 3)],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        let n = compute_neighborhood(&g, Id(0), Relation::Direct(Direction::Out));
         assert_eq!(n.boxes, ids(&[0, 1]));
         assert_eq!(n.edges, pairs(&[(0, 1)]));
     }
@@ -459,13 +492,13 @@ mod tests {
             &[(0, 1), (1, 2), (2, 3)],
             &[(0, 1), (1, 2), (2, 3)],
         );
-        let outputs = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Out));
+        let outputs = compute_neighborhood(&g, Id(1), Relation::Transitive(Direction::Out));
         assert_eq!(outputs.boxes, ids(&[1, 2, 3]));
         assert_eq!(outputs.edges, pairs(&[(1, 2), (2, 3)]));
-        let inputs = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::In));
+        let inputs = compute_neighborhood(&g, Id(2), Relation::Transitive(Direction::In));
         assert_eq!(inputs.boxes, ids(&[0, 1, 2]));
         assert_eq!(inputs.edges, pairs(&[(0, 1), (1, 2)]));
-        let both = compute_neighborhood(&g, Some(Id(1)), Relation::Transitive(Direction::Both));
+        let both = compute_neighborhood(&g, Id(1), Relation::Transitive(Direction::Both));
         assert_eq!(both.boxes, ids(&[0, 1, 2, 3]));
         assert_eq!(both.edges, pairs(&[(0, 1), (1, 2), (2, 3)]));
     }
@@ -479,7 +512,7 @@ mod tests {
             &[(0, 1), (0, 2), (2, 3)],
             &[(0, 1), (0, 2), (2, 3)],
         );
-        let n = compute_neighborhood(&g, Some(Id(2)), Relation::Transitive(Direction::Out));
+        let n = compute_neighborhood(&g, Id(2), Relation::Transitive(Direction::Out));
         assert_eq!(n.boxes, ids(&[2, 3]));
         assert_eq!(n.edges, pairs(&[(2, 3)]));
     }
@@ -490,7 +523,7 @@ mod tests {
     fn a_transitive_marking_needs_no_path_traced_to_a_reduced_neighbor() {
         let n = compute_neighborhood(
             &reduced_chain(3),
-            Some(Id(0)),
+            Id(0),
             Relation::Transitive(Direction::Out),
         );
         assert_eq!(n.boxes, ids(&[0, 1, 2, 3]));
@@ -512,8 +545,89 @@ mod tests {
             &[(1, 2), (3, 1), (2, 4)],
             &[(1, 2), (3, 1), (2, 4)],
         );
-        let n = compute_neighborhood(&g, Some(Id(0)), Relation::Direct(Direction::Out));
+        let n = compute_neighborhood(&g, Id(0), Relation::Direct(Direction::Out));
         assert_eq!(n.boxes, ids(&[0, 1, 2, 4]));
         assert_eq!(n.edges, pairs(&[(1, 2), (2, 4)]));
+    }
+
+    #[test]
+    fn a_memoised_marking_is_reused_until_what_it_was_derived_from_moves() {
+        /// Any zoom: a layered drawing shows the one view at every zoom.
+        const ZOOM: f32 = 1.0;
+        fn shown(drawn: &Drawn) -> Shown<'_> {
+            drawn.shown(ZOOM).expect("a layered view")
+        }
+        let layered = |number| Drawn::Layered {
+            view: Arc::new(drawing(vec![leaf(0), leaf(1)], &[(0, 1)], &[(0, 1)])),
+            drawing: number,
+        };
+        let (first, next) = (layered(0), layered(1));
+        let direct = Relation::Direct(Direction::Both);
+        let mut memo = MarkingMemo::default();
+        let marked = memo.marking(shown(&first), Some(Id(0)), direct);
+        assert!(Rc::ptr_eq(
+            &marked,
+            &memo.marking(shown(&first), Some(Id(0)), direct)
+        ));
+        let moved = [
+            (&next, Id(0), direct),
+            (&first, Id(1), direct),
+            (&first, Id(0), Relation::None),
+        ];
+        for (drawn, of, relation) in moved {
+            let marked = memo.marking(shown(&first), Some(Id(0)), direct);
+            assert!(!Rc::ptr_eq(
+                &marked,
+                &memo.marking(shown(drawn), Some(of), relation)
+            ));
+        }
+        assert!(memo.marking(shown(&first), None, direct).boxes.is_empty());
+    }
+
+    /// A map draws the derived level nearest the one its zoom calls for, so a
+    /// level landing under a steady zoom changes the view marked.
+    #[test]
+    fn a_memoised_marking_is_recomputed_when_a_finer_map_level_lands() {
+        /// A zoom far enough in that a map calls for its finest level.
+        const FINEST: f32 = f32::MAX;
+        let mut base = Graph::new();
+        let mut ids = (0..).map(Id);
+        let mut actions = Vec::new();
+        for package in ["a", "b"] {
+            let package_id = ids.next().expect("an id");
+            base.add_node(Node::new(package_id, package, Kind::Package, None));
+            let target = ids.next().expect("an id");
+            base.add_node(Node::new(target, "t", Kind::Target, Some(package_id)));
+            for action in ["compile", "link"] {
+                let id = ids.next().expect("an id");
+                base.add_node(Node::new(id, action, Kind::Action, Some(target)));
+                actions.push(id);
+            }
+        }
+        for pair in actions.windows(2) {
+            base.add_edge(pair[0], pair[1], EdgeKind::Query);
+        }
+        let reduced = transitive_reduction(&base);
+        let map = Arc::new(map_layout(Arc::new(base), Arc::new(reduced)));
+        assert!(map.level_count() > 1, "a level finer than the coarsest");
+        map.level(0);
+        let drawn = Drawn::Map {
+            map: Arc::clone(&map),
+            drawing: 0,
+        };
+        let direct = Relation::Direct(Direction::Both);
+        let shown = || drawn.shown(FINEST).expect("a derived level");
+        let mut memo = MarkingMemo::default();
+        let coarse = memo.marking(shown(), Some(Id(0)), direct);
+
+        let finest = map.level(map.level_count() - 1);
+        let fine = memo.marking(shown(), Some(Id(0)), direct);
+
+        assert!(!Rc::ptr_eq(&coarse, &fine));
+        assert_eq!(
+            fine.boxes,
+            compute_neighborhood(finest, Id(0), direct).boxes
+        );
+        assert_ne!(coarse.boxes, fine.boxes);
     }
 }

@@ -308,7 +308,8 @@ impl Legend {
         coloured: Coloured,
         haloed: Haloed,
     ) -> Option<&Found> {
-        let view = drawn.view_key(zoom);
+        let shown = drawn.shown(zoom)?;
+        let view = shown.key();
         let halo_key = (haloed.traced, haloed.nodes.is_some());
         let found = match self.found.take() {
             Some(found)
@@ -322,7 +323,7 @@ impl Legend {
                 found
             }
             _ => {
-                let g = drawn.view(zoom)?;
+                let g = shown.view();
                 Found {
                     view,
                     resolved,
@@ -487,6 +488,7 @@ fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::derive::Shown;
     use crate::playback::tests::attempt;
     use crate::playback::{Running, Stage};
     use crate::status::Nodes;
@@ -978,7 +980,10 @@ mod tests {
     fn a_map_is_scanned_again_at_another_level() {
         let query = map(1, EdgeKind::Query);
         let aquery = map(1, EdgeKind::Aquery);
-        assert_ne!(aquery.view_key(COARSEST), aquery.view_key(FINEST));
+        assert_ne!(
+            aquery.shown(COARSEST).map(Shown::key),
+            aquery.shown(FINEST).map(Shown::key)
+        );
         let mut legend = Legend::default();
         let before = kinds(&mut legend, &query, COARSEST).map(<[_]>::to_vec);
 

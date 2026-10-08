@@ -1021,6 +1021,7 @@ dependencies = [
  "bviz_ui_assets",
  "bviz_ui_theme",
  "gpui",
+ "gpui_platform",
 ]
 
 [[package]]
@@ -1085,7 +1086,10 @@ dependencies = [
  "bviz_ui_theme",
  "bviz_ui_workspace",
  "clap",
+ "fastrand 2.5.0",
+ "fixedbitset",
  "gpui",
+ "lyon_tessellation",
  "nucleo",
  "rustc-hash 2.1.3",
 ]

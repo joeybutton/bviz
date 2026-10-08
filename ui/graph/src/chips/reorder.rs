@@ -155,7 +155,7 @@ fn group_of(view: &GraphPanel, chip: ChipId) -> &[Chip] {
 
 /// The window-global handlers carrying a press past its pill, installed for as
 /// long as one is held.
-pub(super) fn handlers(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option<Canvas<()>> {
+pub(super) fn handlers(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Canvas<()>> {
     if !matches!(view.chips.gesture, Gesture::Pressed(_)) {
         return None;
     }

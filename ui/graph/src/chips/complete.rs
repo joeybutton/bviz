@@ -573,7 +573,7 @@ pub(super) fn list(
     view: &GraphPanel,
     palette: &Palette,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &Context<GraphPanel>,
 ) -> Option<Deferred> {
     let offered = shown(view, window, cx)?;
     let count = offered.rows();

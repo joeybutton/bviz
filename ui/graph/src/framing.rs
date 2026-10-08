@@ -3,6 +3,7 @@ use crate::camera::{
     settle_view, visible_rect,
 };
 use crate::derive::Drawn;
+use crate::pan_bench::{self, Phase};
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use bviz_graph_layout::Id;
 use gpui::{App, Bounds, Entity, Pixels, Window, px};
@@ -384,6 +385,7 @@ pub(crate) fn build_prepaint(
     recenter_target: Target,
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
+        let _span = pan_bench::span(Phase::CanvasPrepaint);
         let redraw = parent.update(cx, |view, _| {
             let stale = view.framing.fit_or_rescale(bounds, content);
             let target = frame_target(view);

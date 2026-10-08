@@ -21,10 +21,10 @@ use bviz_ui_workspace::{
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription,
-    WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
+    AnyElement, AnyView, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString,
+    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,7 @@ mod model;
 mod morph;
 mod neighborhood;
 mod paint;
+mod pan_bench;
 mod pins;
 mod playback;
 mod point;
@@ -66,6 +67,7 @@ mod rules;
 mod scatter;
 mod scroll;
 mod selection;
+mod spatial;
 mod status;
 mod timecard;
 mod timing;
@@ -85,11 +87,13 @@ use legend::Legend;
 use mode::LayoutMode;
 use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
+use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
+use spatial::{Indexed, SpatialMemo};
 
 actions!(
     bviz_graph,
@@ -334,6 +338,8 @@ pub struct GraphPanel {
     _reveal_requested: Subscription,
     /// Box under the cursor.
     hovered: Option<Id>,
+    hover_marking: MarkingMemo,
+    spatial: SpatialMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
     /// set by a secondary click and offered by the toolbar's relation picker.
     selection: Selection,
@@ -342,9 +348,8 @@ pub struct GraphPanel {
     relation_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_relation`].
     _relation_choices: Subscription,
-    /// Whether hovering a box marks its neighborhood; flipped by the `h` key or
-    /// the toolbar toggle so the marking can be turned off when it is more noise
-    /// than help.
+    /// Whether hovering a box marks its neighborhood; off until the `h` key or
+    /// the toolbar toggle turns it on.
     neighborhood_enabled: bool,
     /// Whether the boxes standing for the invocation's critical path wear its
     /// halo.
@@ -364,10 +369,15 @@ pub struct GraphPanel {
     /// The titles the canvas drew, rewritten by every paint and resolved against
     /// a pointer by [`box_at`].
     titles: Vec<TitleTarget>,
-    /// The layer drawing the graph; notified through
-    /// [`GraphPanel::invalidate_canvas`].
+    /// The layer drawing the graph; notified only through `invalidate_canvas`
+    /// and `invalidate_canvas_only`.
     canvas: Entity<GraphCanvas>,
+    toolbar: Entity<ChromeLayer>,
+    overlays: Entity<ChromeLayer>,
+    _chrome_follows: Subscription,
     legend: Legend,
+    /// Taken by the first render, which starts it.
+    bench: Option<pan_bench::Bench>,
 }
 
 impl GraphPanel {
@@ -475,7 +485,21 @@ impl GraphPanel {
             });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
-        let canvas = cx.new(|_| GraphCanvas { parent });
+        let canvas = cx.new(|_| GraphCanvas {
+            parent: parent.clone(),
+        });
+        let toolbar = cx.new(|_| ChromeLayer {
+            parent: parent.clone(),
+            draw: GraphPanel::draw_toolbar,
+        });
+        let overlays = cx.new(|_| ChromeLayer {
+            parent,
+            draw: GraphPanel::draw_overlays,
+        });
+        let chrome_follows = cx.observe_self(|view, cx| {
+            view.toolbar.update(cx, |_, cx| cx.notify());
+            view.overlays.update(cx, |_, cx| cx.notify());
+        });
         let changed = cx.observe(&model, |view, _, cx| {
             colour::sync(view, cx);
             view.invalidate_canvas(cx);
@@ -483,7 +507,7 @@ impl GraphPanel {
         let clock_moved = model.read(cx).clock().cloned().map(|clock| {
             cx.observe(&clock, |view, _, cx| {
                 if view.colouring == Colouring::Playback {
-                    view.canvas.update(cx, |_, cx| cx.notify());
+                    view.invalidate_canvas_only(cx);
                 }
             })
         });
@@ -539,10 +563,12 @@ impl GraphPanel {
             _map_placed: map_placed,
             _reveal_requested: reveal_requested,
             hovered: None,
+            hover_marking: MarkingMemo::default(),
+            spatial: SpatialMemo::default(),
             selection,
             relation_picker,
             _relation_choices: relations,
-            neighborhood_enabled: true,
+            neighborhood_enabled: false,
             critical_path_enabled: true,
             missing_open: false,
             pins: pins::Pins::new(),
@@ -553,16 +579,38 @@ impl GraphPanel {
             why: why::Why::new(),
             titles: Vec::new(),
             canvas,
+            toolbar,
+            overlays,
+            _chrome_follows: chrome_follows,
             legend: Legend::default(),
+            bench: pan_bench::Bench::from_env(),
         }
     }
 
-    /// Rebuilds the graph scene along with the frame around it; every change to
-    /// what the canvas draws routes through here, and a change that leaves the
-    /// drawing alone notifies alone, so the scene replays from its cache.
+    /// Rebuilds the graph scene along with the chrome around it; every change to
+    /// what the canvas draws routes through here or
+    /// [`invalidate_canvas_only`](Self::invalidate_canvas_only), and a change
+    /// that leaves the drawing alone notifies alone, so the scene replays from
+    /// its cache.
     pub(crate) fn invalidate_canvas(&self, cx: &mut Context<Self>) {
         self.canvas.update(cx, |_, cx| cx.notify());
         cx.notify();
+    }
+
+    /// Rebuilds the graph scene alone, for a change nothing a [`ChromeLayer`]
+    /// draws depends on.
+    pub(crate) fn invalidate_canvas_only(&self, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |_, cx| cx.notify());
+    }
+
+    /// Moves the camera by `step`, repainting only if the camera changed, so a
+    /// gesture the content's bounds hold in place draws no frame.
+    pub(crate) fn steer(&mut self, step: impl FnOnce(&mut Framing), cx: &mut Context<Self>) {
+        let before = self.camera();
+        step(&mut self.framing);
+        if self.camera() != before {
+            self.invalidate_canvas_only(cx);
+        }
     }
 
     /// Brings this drawing onto a layered layout the graph has landed.
@@ -643,17 +691,8 @@ impl GraphPanel {
                     .children(missing::card(self, &palette, cx))
                     .children(legend),
             )
-            .child(
-                column::Column::new()
-                    .held(reveal::card(self, &palette, cx))
-                    .held(pins::panel(self, &palette, cx))
-                    .folding(report::card(self, &palette, cx))
-                    .folding(timecard::card(self, &palette, cx))
-                    .foot(why::card(self, &palette, cx)),
-            )
-            .children(jump::overlay(self, &palette, window, cx))
+            .child(cached_layer(self.overlays.clone()))
             .children(chips::menu(self, window))
-            .children(chips::notice(self, &palette))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -672,6 +711,59 @@ impl GraphPanel {
             // here from whichever control last took it. Key events bubble from
             // here up through the strip's own bindings to the chrome's.
             .track_focus(&self.focus_handle)
+            .into_any_element()
+    }
+
+    fn draw_toolbar(
+        &self,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let traced = self
+            .model
+            .read(cx)
+            .loaded()
+            .is_some_and(|loaded| loaded.critical().any());
+        let controls = Controls {
+            mode: self.mode,
+            chips: chips::bar(self, palette, window, cx),
+            picker: self.mode_picker.clone(),
+            class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
+            origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
+            preset_filter: self.preset_filter.clone(),
+            relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
+            pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
+            why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
+            colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
+            report_control: report::control(self, cx).map(IntoElement::into_any_element),
+            timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
+            neighborhood_enabled: self.neighborhood_enabled,
+            critical_path: traced.then_some(self.critical_path_enabled),
+            reduced: self.derived.reduced(),
+            relaying: self.derived.deriving(),
+        };
+        toolbar::toolbar(controls, palette, &self.focus_handle, cx).into_any_element()
+    }
+
+    fn draw_overlays(
+        &self,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size_full()
+            .child(
+                column::Column::new()
+                    .held(reveal::card(self, palette, cx))
+                    .held(pins::panel(self, palette, cx))
+                    .folding(report::card(self, palette, cx))
+                    .folding(timecard::card(self, palette, cx))
+                    .foot(why::card(self, palette, cx)),
+            )
+            .children(jump::overlay(self, palette, window, cx))
+            .children(chips::notice(self, palette))
             .into_any_element()
     }
 
@@ -711,7 +803,7 @@ impl GraphPanel {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
         jump::dismiss(self, cx);
-        let clear = self.box_id_at(e.position).is_none();
+        let clear = self.box_id_at(e.position, cx).is_none();
         let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
@@ -735,7 +827,7 @@ impl GraphPanel {
     /// Eases the view onto the whole of what the panel draws.
     fn show_whole(&mut self, cx: &mut Context<Self>) {
         self.framing.request_frame(framing::Frame::Drawing);
-        self.invalidate_canvas(cx);
+        self.invalidate_canvas_only(cx);
     }
 
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -797,14 +889,14 @@ impl GraphPanel {
     }
 
     /// The box drawn under the window-space `position`, if any.
-    fn box_id_at(&self, position: Point<Pixels>) -> Option<Id> {
+    fn box_id_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> Option<Id> {
         let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        drawn
-            .view(camera.zoom)
-            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, position))
+        self.spatial
+            .indexed(&drawn, camera.zoom, cx)
+            .and_then(|(_, g)| box_at(&self.titles, &g, morph.as_ref(), vp, camera, position))
             .map(|b| b.id)
     }
 
@@ -812,10 +904,10 @@ impl GraphPanel {
         if self.drawn().is_none() {
             return;
         }
-        let hit = self.box_id_at(position);
+        let hit = self.box_id_at(position, cx);
         if hit != self.hovered {
             self.hovered = hit;
-            self.invalidate_canvas(cx);
+            self.invalidate_canvas_only(cx);
         }
     }
 
@@ -826,7 +918,7 @@ impl GraphPanel {
     /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
-            self.invalidate_canvas(cx);
+            self.invalidate_canvas_only(cx);
         }
     }
 
@@ -865,9 +957,8 @@ impl GraphPanel {
             return;
         };
         let viewport = self.framing.viewport();
-        self.framing
-            .move_to(scale_about(at, self.camera(), factor, viewport, content));
-        self.invalidate_canvas(cx);
+        let scaled = scale_about(at, self.camera(), factor, viewport, content);
+        self.steer(|framing| framing.move_to(scaled), cx);
     }
 
     /// Puts away the innermost thing the reader set up: a reveal pending, then
@@ -961,6 +1052,10 @@ impl Panel for GraphPanel {
 
 impl Render for GraphPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = pan_bench::span(pan_bench::Phase::PanelRender);
+        if let Some(bench) = self.bench.take() {
+            bench.start(cx.entity(), window);
+        }
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let chrome = div()
             .key_context(Self::kind().key_context)
@@ -1001,42 +1096,45 @@ impl Render for GraphPanel {
         let placeholder = self.model.read(cx).source().placeholder(&palette.colors);
         match placeholder {
             Some(placeholder) => chrome.child(placeholder),
-            None => {
-                let traced = self
-                    .model
-                    .read(cx)
-                    .loaded()
-                    .is_some_and(|loaded| loaded.critical().any());
-                let controls = Controls {
-                    mode: self.mode,
-                    chips: chips::bar(self, &palette, window, cx),
-                    picker: self.mode_picker.clone(),
-                    class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
-                    origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
-                    preset_filter: self.preset_filter.clone(),
-                    relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
-                    pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
-                    why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
-                    colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
-                    report_control: report::control(self, cx).map(IntoElement::into_any_element),
-                    timecard_control: timecard::control(self, cx)
-                        .map(IntoElement::into_any_element),
-                    neighborhood_enabled: self.neighborhood_enabled,
-                    critical_path: traced.then_some(self.critical_path_enabled),
-                    reduced: self.derived.reduced(),
-                    relaying: self.derived.deriving(),
-                };
-                chrome
-                    .child(toolbar::toolbar(controls, &palette, &self.focus_handle, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .overflow_hidden()
-                            .child(self.viewport(palette, window, cx)),
-                    )
-            }
+            None => chrome
+                .child(
+                    AnyView::from(self.toolbar.clone()).cached(
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(toolbar::height())
+                            .flex_none(),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .overflow_hidden()
+                        .child(self.viewport(palette, window, cx)),
+                ),
         }
+    }
+}
+
+/// A part of the panel's chrome, drawn in a layer of its own so that a frame
+/// drawn for a change only the canvas shows replays it. Every notify of the
+/// panel's own notifies each such layer through an observer, which gpui does
+/// not run for a notify issued while a frame is drawn, so nothing the panel
+/// renders, prepaints or paints may notify it.
+struct ChromeLayer {
+    parent: WeakEntity<GraphPanel>,
+    draw: fn(&GraphPanel, &Palette, &mut Window, &Context<GraphPanel>) -> AnyElement,
+}
+
+impl Render for ChromeLayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = pan_bench::span(pan_bench::Phase::ChromeRender);
+        let Some(parent) = self.parent.upgrade() else {
+            return div().into_any_element();
+        };
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let draw = self.draw;
+        parent.update(cx, |view, cx| draw(view, &palette, window, cx))
     }
 }
 
@@ -1134,23 +1232,24 @@ struct Controls {
 /// boxes inside it: there the innermost box under the cursor is one of those,
 /// and the opaque title covering it is both what the user sees and what the
 /// user is aiming at. A title is taken only where the box it names is drawn over
-/// the cursor in `g` under `camera` and `morph`. Since a title is always painted
-/// within its own box, that leaves a set recorded from a frame the view has moved
-/// on from — a relayout, a mode switch, a camera step — resolving to the box
-/// under the cursor instead.
+/// the cursor in `indexed` under `camera` and `morph`. Since a title is always
+/// painted within its own box, that leaves a set recorded from a frame the view
+/// has moved on from — a relayout, a mode switch, a camera step — resolving to
+/// the box under the cursor instead.
 fn box_at<'a>(
     titles: &[TitleTarget],
-    g: &'a bviz_graph_layout::LaidOut,
+    indexed: &Indexed<'a>,
     morph: Option<&Frame>,
     viewport: Bounds<Pixels>,
     camera: Camera,
     pos: Point<Pixels>,
 ) -> Option<&'a bviz_graph_layout::Box> {
     let (gx, gy) = from_screen(pos, viewport.origin, camera);
+    let over: Vec<_> = boxes_over(indexed, morph, gx, gy).collect();
     let titled = paint::title_at(titles, pos)
-        .and_then(|id| g.boxes.iter().find(|b| b.id == id))
-        .filter(|b| placed_rect(b, morph).covers(gx, gy));
-    titled.or_else(|| hit_box(&g.boxes, morph, gx, gy))
+        .and_then(|id| over.iter().find(|(b, _)| b.id == id))
+        .map(|&(b, _)| b);
+    titled.or_else(|| innermost(over))
 }
 
 /// Opens or closes the box under `pos` (window px) and settles the view to keep
@@ -1165,13 +1264,13 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     let Some(drawn) = view.drawn() else {
         return;
     };
-    let Some(g) = drawn.view(camera.zoom) else {
+    let Some((_, g)) = view.spatial.indexed(&drawn, camera.zoom, cx) else {
         return;
     };
     let morph = view.morph_frame();
     let expandable = view.expandable();
     let hit =
-        box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
+        box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).filter(|b| expandable.holds(b));
     let Some(id) = hit.map(|b| b.id) else {
         return;
     };
@@ -1194,8 +1293,8 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
         .drawn()
         .filter(|_| vp.contains(&pos))
         .and_then(|drawn| {
-            let g = drawn.view(camera.zoom)?;
-            box_at(&view.titles, g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
+            let (_, g) = view.spatial.indexed(&drawn, camera.zoom, cx)?;
+            box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
         });
     match hit {
         Some(id) => view.selection.toggle(id),
@@ -1204,28 +1303,36 @@ fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Gra
     view.invalidate_canvas(cx);
 }
 
-/// Where `b` is drawn: its own layout rect at rest, and the rect `morph` has
-/// eased it to while one drawing settles onto another.
-fn placed_rect(b: &bviz_graph_layout::Box, morph: Option<&Frame>) -> Rect {
-    morph.map_or(Rect::of(b), |frame| frame.place(b).0)
+/// The smallest-area (in layout space) of the boxes `over` draws, so an inner
+/// member or header wins over its enclosing container; the first of equals.
+fn innermost<'a>(
+    over: impl IntoIterator<Item = (&'a bviz_graph_layout::Box, Rect)>,
+) -> Option<&'a bviz_graph_layout::Box> {
+    over.into_iter()
+        .min_by(|(_, a), (_, b)| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .map(|(b, _)| b)
 }
 
-/// The smallest-area box (in layout space) drawn over `(gx, gy)`, so an inner
-/// member or header wins over its enclosing container; `None` if outside all.
-/// The boxes a morph is fading out are absent from `boxes`, so a gesture passes
-/// through them to whatever the new drawing puts there.
-fn hit_box<'a>(
-    boxes: &'a [bviz_graph_layout::Box],
+/// The boxes drawn over `(gx, gy)` under `morph`, in the drawing's order, each
+/// with the rect it is drawn at. The boxes a morph is fading out are absent from
+/// the drawing, so a gesture passes through them to whatever the new drawing
+/// puts there.
+fn boxes_over<'a>(
+    indexed: &Indexed<'a>,
     morph: Option<&Frame>,
     gx: f32,
     gy: f32,
-) -> Option<&'a bviz_graph_layout::Box> {
-    boxes
-        .iter()
-        .map(|b| (b, placed_rect(b, morph)))
-        .filter(|(_, rect)| rect.covers(gx, gy))
-        .min_by(|(_, a), (_, b)| (a.w * a.h).total_cmp(&(b.w * b.h)))
-        .map(|(b, _)| b)
+) -> impl Iterator<Item = (&'a bviz_graph_layout::Box, Rect)> {
+    let at = Rect {
+        x: gx as f64,
+        y: gy as f64,
+        w: 0.0,
+        h: 0.0,
+    };
+    indexed
+        .boxes_near(&at, morph)
+        .filter(move |(_, rect, _)| rect.covers(gx, gy))
+        .map(|(b, rect, _)| (b, rect))
 }
 
 /// A joint graph being read and laid out.
@@ -1642,29 +1749,34 @@ mod tests {
     #[test]
     fn hit_box_picks_innermost_and_none_outside() {
         // An outer container (id 0) with a small inner box (id 1) nested in it.
-        let boxes = vec![
-            lbox(0, 0.0, 0.0, 100.0, 100.0),
-            lbox(1, 20.0, 20.0, 30.0, 30.0),
-        ];
+        let g = bviz_graph_layout::LaidOut {
+            boxes: vec![
+                lbox(0, 0.0, 0.0, 100.0, 100.0),
+                lbox(1, 20.0, 20.0, 30.0, 30.0),
+            ],
+            ..Default::default()
+        };
+        let boxes = Indexed::of(&g);
         // Inside both rects: the smaller (inner) wins.
         assert_eq!(
-            hit_box(&boxes, None, 30.0, 30.0).unwrap().id,
+            innermost(boxes_over(&boxes, None, 30.0, 30.0)).unwrap().id,
             bviz_graph_layout::Id(1)
         );
         // Inside only the container.
         assert_eq!(
-            hit_box(&boxes, None, 5.0, 5.0).unwrap().id,
+            innermost(boxes_over(&boxes, None, 5.0, 5.0)).unwrap().id,
             bviz_graph_layout::Id(0)
         );
         // Outside everything.
-        assert!(hit_box(&boxes, None, 200.0, 200.0).is_none());
-        assert!(hit_box(&boxes, None, -1.0, 50.0).is_none());
+        assert!(innermost(boxes_over(&boxes, None, 200.0, 200.0)).is_none());
+        assert!(innermost(boxes_over(&boxes, None, -1.0, 50.0)).is_none());
     }
 
     #[test]
     fn lane_polyline_offsets_every_vertex_in_parallel() {
         // An L route: right to (100,0), then down to (100,100).
-        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0);
+        let mut out = Vec::new();
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 4.0, &mut out);
         // Endpoints are pushed perpendicular too (not anchored), so the first and
         // last segments stay parallel to the route and meet the node offset.
         assert!(
@@ -1692,14 +1804,14 @@ mod tests {
     #[test]
     fn lane_polyline_zero_offset_is_identity() {
         let route = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
-        assert_eq!(lane_polyline(&route, 0.0), route);
+        assert_eq!(lane_polyline(&route, 0.0, &mut Vec::new()), route);
     }
 
     #[test]
     fn lane_polyline_opposite_signs_nest_on_opposite_sides() {
         let route = vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
-        let plus = lane_polyline(&route, 4.0)[1];
-        let minus = lane_polyline(&route, -4.0)[1];
+        let plus = lane_polyline(&route, 4.0, &mut Vec::new())[1];
+        let minus = lane_polyline(&route, -4.0, &mut Vec::new())[1];
         // The two lanes never cross: their corners fall on opposite sides.
         assert_ne!(plus.1.signum(), minus.1.signum(), "{plus:?} {minus:?}");
     }
@@ -1707,7 +1819,8 @@ mod tests {
     #[test]
     fn lane_polyline_parallel_shifts_a_straight_run() {
         // A straight two-point edge shifts whole, both ends offset perpendicular.
-        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0);
+        let mut out = Vec::new();
+        let lane = lane_polyline(&[(0.0, 0.0), (100.0, 0.0)], 4.0, &mut out);
         assert_eq!(lane.len(), 2);
         assert!(
             (lane[0].0).abs() < 0.01 && (lane[0].1 - 4.0).abs() < 0.5,

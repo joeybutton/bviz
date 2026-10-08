@@ -55,7 +55,7 @@ pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
 pub use sort::{Sort, sort_gesture, sort_header};
 pub use spinner::spinner;
 pub use text_input::TextInput;
-pub use toolbar::Toolbar;
+pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
     TextTooltip, TooltipColors, beside_anchor, paint_tooltip, paint_tooltip_box, room_beside,
     tooltip_extent,

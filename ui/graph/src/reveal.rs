@@ -307,11 +307,7 @@ pub(crate) fn reset(view: &mut GraphPanel) {
 
 /// The offer to reveal a node the drawing leaves out, naming what hides it, for
 /// the caller to place over the drawing; `None` while none is offered.
-pub(crate) fn card(
-    view: &GraphPanel,
-    palette: &Palette,
-    cx: &mut Context<GraphPanel>,
-) -> Option<Div> {
+pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel>) -> Option<Div> {
     let Reveal::Offered(node, by) = view.reveal else {
         return None;
     };

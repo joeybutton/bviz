@@ -344,11 +344,11 @@ pub(crate) fn begin(
             let done = this.update(cx, |this, cx| match this.morph.tick(generation) {
                 Step::Superseded => true,
                 Step::Travelling => {
-                    this.invalidate_canvas(cx);
+                    this.invalidate_canvas_only(cx);
                     false
                 }
                 Step::Landed => {
-                    this.invalidate_canvas(cx);
+                    this.invalidate_canvas_only(cx);
                     true
                 }
             });
@@ -763,12 +763,12 @@ mod tests {
              against either would answer the same",
         );
         let hit = |r: Rect| {
-            crate::hit_box(
-                &after.boxes,
+            crate::innermost(crate::boxes_over(
+                &crate::spatial::Indexed::of(&after),
                 Some(&frame),
                 r.x as f32 + 1.0,
                 r.y as f32 + 1.0,
-            )
+            ))
             .map(|b| b.id)
         };
         assert_eq!(

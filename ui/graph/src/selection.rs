@@ -1,7 +1,7 @@
-use crate::derive::ViewKey;
-use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::derive::Shown;
+use crate::neighborhood::{MarkingMemo, Neighborhood};
 use crate::relation::Relation;
-use bviz_graph_layout::{Id, LaidOut};
+use bviz_graph_layout::Id;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -10,24 +10,7 @@ use std::rc::Rc;
 pub(crate) struct Selection {
     node: Option<Id>,
     relation: Relation,
-    /// The marking last computed, kept so redrawing one view under an unchanged
-    /// selection walks the graph once rather than once a frame.
-    marked: Option<Marked>,
-}
-
-/// A marking together with everything it was derived from, so it is recomputed
-/// exactly when one of those moves.
-struct Marked {
-    view: ViewKey,
-    node: Id,
-    relation: Relation,
-    neighborhood: Rc<Neighborhood>,
-}
-
-impl Marked {
-    fn stands_for(&self, view: ViewKey, node: Id, relation: Relation) -> bool {
-        self.view == view && self.node == node && self.relation == relation
-    }
+    marked: MarkingMemo,
 }
 
 impl Selection {
@@ -35,7 +18,7 @@ impl Selection {
         Self {
             node: None,
             relation: Relation::default(),
-            marked: None,
+            marked: MarkingMemo::default(),
         }
     }
 
@@ -74,35 +57,24 @@ impl Selection {
         self.relation = relation;
     }
 
-    /// What the selection marks in `g`, the view `view` identifies. Empty while
-    /// nothing is selected, and while the selected node is folded away into a
-    /// container this view draws in its place.
-    pub(crate) fn marking(&mut self, g: &LaidOut, view: ViewKey) -> Rc<Neighborhood> {
-        let Some(node) = self.node else {
-            self.marked = None;
-            return Rc::new(Neighborhood::none());
-        };
-        let relation = self.relation;
-        let marked = match self.marked.take() {
-            Some(marked) if marked.stands_for(view, node, relation) => marked,
-            _ => Marked {
-                view,
-                node,
-                relation,
-                neighborhood: Rc::new(compute_neighborhood(g, Some(node), relation)),
-            },
-        };
-        let neighborhood = Rc::clone(&marked.neighborhood);
-        self.marked = Some(marked);
-        neighborhood
+    /// What the selection marks in `shown`. Empty while nothing is selected,
+    /// and while the selected node is folded away into a container this view
+    /// draws in its place.
+    pub(crate) fn marking(&mut self, shown: Shown<'_>) -> Rc<Neighborhood> {
+        self.marked.marking(shown, self.node, self.relation)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::derive::Drawn;
     use crate::relation::Direction;
-    use bviz_graph_layout::{Box, Connector, EdgeKind, Kind};
+    use bviz_graph_layout::{Box, Connector, EdgeKind, Kind, LaidOut};
+    use std::sync::Arc;
+
+    /// Any zoom: a layered drawing shows the one view at every zoom.
+    const ZOOM: f32 = 1.0;
 
     fn leaf(id: u32) -> Box {
         Box {
@@ -118,9 +90,13 @@ mod tests {
         }
     }
 
+    fn shown(drawn: &Drawn) -> Shown<'_> {
+        drawn.shown(ZOOM).expect("a layered view")
+    }
+
     /// Two leaves, the first an input of the second.
-    fn pair() -> LaidOut {
-        LaidOut {
+    fn pair() -> Drawn {
+        let view = LaidOut {
             boxes: vec![leaf(0), leaf(1)],
             connectors: vec![Connector {
                 points: Vec::new(),
@@ -131,22 +107,17 @@ mod tests {
             }],
             full_edges: vec![(Id(0), Id(1))],
             ..Default::default()
+        };
+        Drawn::Layered {
+            view: Arc::new(view),
+            drawing: 0,
         }
     }
-
-    const VIEW: ViewKey = ViewKey::Map {
-        drawing: 0,
-        level: 0,
-    };
-    const NEXT_LEVEL: ViewKey = ViewKey::Map {
-        drawing: 0,
-        level: 1,
-    };
 
     #[test]
     fn nothing_selected_marks_nothing() {
         let mut selection = Selection::none();
-        assert!(selection.marking(&pair(), VIEW).boxes.is_empty());
+        assert!(selection.marking(shown(&pair())).boxes.is_empty());
     }
 
     #[test]
@@ -168,22 +139,6 @@ mod tests {
         assert_eq!(selection.node(), Some(Id(0)));
         selection.select(Id(1));
         assert_eq!(selection.node(), Some(Id(1)));
-    }
-
-    #[test]
-    fn a_marking_is_reused_until_what_it_was_derived_from_moves() {
-        let g = pair();
-        let mut selection = Selection::none();
-        selection.toggle(Id(0));
-        let first = selection.marking(&g, VIEW);
-        assert!(Rc::ptr_eq(&first, &selection.marking(&g, VIEW)));
-        // Each of the three things a marking is derived from retires it.
-        assert!(!Rc::ptr_eq(&first, &selection.marking(&g, NEXT_LEVEL)));
-        selection.set_relation(Relation::Transitive(Direction::Out));
-        let widened = selection.marking(&g, VIEW);
-        assert!(!Rc::ptr_eq(&first, &widened));
-        selection.toggle(Id(1));
-        assert!(!Rc::ptr_eq(&widened, &selection.marking(&g, VIEW)));
     }
 
     /// A node the drawing no longer holds has nothing to mark, so a filter that
@@ -219,10 +174,10 @@ mod tests {
         let mut selection = Selection::none();
         selection.toggle(Id(0));
         selection.set_relation(Relation::None);
-        assert_eq!(selection.marking(&g, VIEW).boxes.len(), 1);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
         selection.set_relation(Relation::Direct(Direction::Out));
-        assert_eq!(selection.marking(&g, VIEW).boxes.len(), 2);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 2);
         selection.set_relation(Relation::Direct(Direction::In));
-        assert_eq!(selection.marking(&g, VIEW).boxes.len(), 1);
+        assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
     }
 }

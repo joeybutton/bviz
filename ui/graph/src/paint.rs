@@ -3,7 +3,8 @@ use crate::colour::Colouring;
 use crate::critical::CriticalNodes;
 use crate::derive::{self, Drawn, Expandable};
 use crate::morph::Frame;
-use crate::neighborhood::{Neighborhood, compute_neighborhood};
+use crate::neighborhood::Neighborhood;
+use crate::pan_bench::{self, Phase, Tally};
 use crate::playback::{NodeState, NodeStates, Running, Stage};
 use crate::relation::{Direction, Relation};
 use crate::scroll::paint_scrollbars;
@@ -15,8 +16,13 @@ use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{Connector, EdgeKind, Id, Kind};
 use bviz_invocation::{Done, EpochMicros, Runner, Venue};
 use gpui::{
-    App, BorderStyle, Bounds, Entity, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window,
-    point, px, quad, size,
+    App, Background, BorderStyle, Bounds, Entity, Hsla, Path, PathBuilder, Pixels, Point, Rgba,
+    Size, TextAlign, Window, point, px, quad, size,
+};
+use lyon_tessellation::math::Point as LyonPoint;
+use lyon_tessellation::path::builder::NoAttributes;
+use lyon_tessellation::{
+    BuffersBuilder, StrokeBuilder, StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
 };
 use rustc_hash::FxHashMap;
 use std::cmp::Reverse;
@@ -31,6 +37,12 @@ const LABEL_SIZE: f64 = 13.0;
 /// the box down to this floor and no further, so a box wide enough to hold its
 /// name shows it rather than fading to a blank rectangle.
 const LABEL_FLOOR: f32 = 11.0;
+
+/// Screen-pixel step a label's font size is snapped to above the floor. Text is
+/// shaped and its glyphs rasterized per distinct size, so on the snapped sizes
+/// successive zoom frames, and a zoom back to an earlier size, reuse both. A
+/// label is drawn within half a step of its zoomed size.
+const LABEL_SIZE_STEP: f32 = 0.25;
 
 /// Screen-pixel clearance held between a label and its box's edges, so a label
 /// held at the floor is not painted flush against the border.
@@ -349,7 +361,7 @@ impl Scene {
 /// out is drawn marked, so a selection holds its marks under a hover passing
 /// over another part of the graph.
 struct Marks {
-    hover: Neighborhood,
+    hover: Rc<Neighborhood>,
     selection: Rc<Neighborhood>,
 }
 
@@ -423,43 +435,40 @@ pub(crate) fn canvas_body(
     entity: Entity<GraphPanel>,
 ) -> impl FnOnce(Bounds<Pixels>, (), &mut Window, &mut App) {
     move |bounds, _, window, cx| {
+        let _span = pan_bench::span(Phase::CanvasPaint);
         let (camera, morph) = {
             let view = entity.read(cx);
             (view.camera(), view.morph_frame())
         };
-        entity.update(cx, |view, cx| {
+        let Some((indexed, marks)) = entity.update(cx, |view, cx| {
             derive::derive_view(view, &scene.drawn, camera.zoom, cx);
-        });
-        let Some(g) = scene.drawn.view(camera.zoom) else {
+            let (shown, indexed) = view.spatial.indexed(&scene.drawn, camera.zoom, cx)?;
+            let marks = Marks {
+                hover: view.hover_marking.marking(
+                    shown,
+                    scene.hovered,
+                    Relation::Direct(Direction::Both),
+                ),
+                selection: view.selection.marking(shown),
+            };
+            Some((indexed, marks))
+        }) else {
             return;
         };
         let visible = visible_rect(bounds, camera);
-        // A hover is gone the moment the pointer moves, so its marking is derived
-        // afresh; a selection outlives the frames that draw it, so it holds its
-        // own and hands out a share in it.
-        let marks = Marks {
-            hover: compute_neighborhood(g, scene.hovered, Relation::Direct(Direction::Both)),
-            selection: entity.update(cx, |view, _| {
-                view.selection.marking(g, scene.drawn.view_key(camera.zoom))
-            }),
-        };
         let Some(loaded) = entity.read(cx).model.read(cx).loaded() else {
             return;
         };
         let statuses = loaded.statuses();
         let fills = Fills::of(scene.colouring, loaded.times().ok(), loaded.states());
         let critical = scene.critical_path.then(|| loaded.critical());
-        let drawn: Vec<(PaintBox, Bounds<Pixels>)> = g
-            .boxes
-            .iter()
-            .map(|b| {
-                let (rect, alpha) = morph.as_ref().map_or((Rect::of(b), 1.0), |m| m.place(b));
-                Placed {
-                    b,
-                    rect,
-                    alpha,
-                    leaving: false,
-                }
+        let drawn: Vec<(PaintBox, Bounds<Pixels>)> = indexed
+            .boxes_near(&visible, morph.as_ref())
+            .map(|(b, rect, alpha)| Placed {
+                b,
+                rect,
+                alpha,
+                leaving: false,
             })
             .chain(
                 morph
@@ -480,29 +489,39 @@ pub(crate) fn canvas_body(
                 (b, rect)
             })
             .collect();
+        pan_bench::tally(Tally::Boxes, drawn.len());
         let edges = morph.as_ref().map_or(1.0, |m| m.connectors);
+        let mut connectors = 0;
         // Painted over the labels, which a badge at a route's middle can fall
         // under where the route crosses a container's title band.
         let mut badges: Vec<(&Connector, Transition, f32)> = Vec::new();
         if edges > 0.0 {
+            order_fence(bounds, window);
             let on_screen: HashSet<Id> = drawn.iter().map(|(b, _)| b.id).collect();
-            for c in &g.connectors {
+            let mut ink = ConnectorInk::new(camera.zoom, window.viewport_size());
+            let mut courses = Courses::default();
+            for c in indexed.routes_near(&visible) {
                 if drawn_route(c, &visible, &on_screen) {
                     let marked = marks.marks_edge((c.from, c.to));
                     let filtered = scene.edge_strength(c.from, c.to);
                     let alpha = marks.connector_alpha(marked, filtered, edges, camera.zoom);
-                    paint_lanes(c, marked, alpha, bounds, camera, &scene.palette, window);
+                    ink_lanes(c, marked, alpha, bounds, camera, &mut courses, &mut ink);
+                    connectors += 1;
                     if let Some(transition) = c.transition {
                         badges.push((c, transition, marks.badge_alpha(marked, filtered, edges)));
                     }
                 }
             }
+            ink.paint(&scene.palette, window);
+            order_fence(bounds, window);
         }
+        pan_bench::tally(Tally::Connectors, connectors);
         for (b, rect) in drawn.iter().filter(|(b, _)| b.critical) {
             paint_critical_halo(b, *rect, camera.zoom, &scene.palette, window);
         }
         let mut floated: Vec<Bounds<Pixels>> = Vec::new();
         let mut titles: Vec<TitleTarget> = Vec::new();
+        let mut carets: Vec<Caret> = Vec::with_capacity(drawn.len());
         // Painted once every label is, so that no plate lands on a badge.
         let mut statuses: Vec<StatusBadge> = Vec::with_capacity(drawn.len());
         let mut bare: Vec<BareBadge> = Vec::with_capacity(drawn.len());
@@ -519,6 +538,7 @@ pub(crate) fn canvas_body(
             match label {
                 Some(label) => {
                     titles.extend(label.title);
+                    carets.extend(label.caret);
                     statuses.extend(label.badge);
                 }
                 None => bare.extend(b.bare_badge(*rect, camera.zoom)),
@@ -526,10 +546,20 @@ pub(crate) fn canvas_body(
         }
         place_bare(bare, &floated, &mut statuses);
         entity.update(cx, |view, _| view.titles = titles);
+        // The marks over the labels: those drawn as paths in one fenced run,
+        // then the statuses drawn in quads, which would split the run's batch.
+        order_fence(bounds, window);
+        for caret in carets {
+            caret.paint(window);
+        }
         for (c, transition, alpha) in badges {
             paint_badge(c, transition, alpha, bounds, camera, &scene.palette, window);
         }
-        for badge in statuses {
+        for badge in statuses.iter().filter(|b| b.traced()) {
+            badge.paint(&scene.palette, window);
+        }
+        order_fence(bounds, window);
+        for badge in statuses.iter().filter(|b| !b.traced()) {
             badge.paint(&scene.palette, window);
         }
         paint_scrollbars(
@@ -540,6 +570,16 @@ pub(crate) fn canvas_body(
             window,
         );
     }
+}
+
+/// Draws everything painted after it within `bounds` over everything painted
+/// before it. gpui's wgpu renderer draws a run of paths as one batch, a single
+/// offscreen multisampled pass, only while no other primitive's draw order
+/// falls among theirs, and a primitive otherwise takes its order from whatever
+/// it overlaps; fencing a run of paths on both sides keeps it one batch however
+/// its members interleave on screen with the primitives around them.
+fn order_fence(bounds: Bounds<Pixels>, window: &mut Window) {
+    window.paint_layer(bounds, |_| {});
 }
 
 /// Whether a frame draws the route `c`: it crosses the view, and either the
@@ -992,31 +1032,42 @@ impl<'a> PaintBox<'a> {
     }
 }
 
-/// Paints a connector's provenances as evenly spaced parallel lanes centered on
+/// The screen polylines of the connector being inked and of the lane being
+/// drawn off it, which every connector of a frame reuses.
+#[derive(Default)]
+struct Courses {
+    route: Vec<(f32, f32)>,
+    lane: Vec<(f32, f32)>,
+}
+
+/// Inks a connector's provenances as evenly spaced parallel lanes centered on
 /// its route, `marked` where a marking has picked the connector out.
-fn paint_lanes(
+fn ink_lanes(
     c: &Connector,
     marked: bool,
     alpha: f32,
     bounds: Bounds<Pixels>,
     camera: Camera,
-    palette: &Palette,
-    window: &mut Window,
+    courses: &mut Courses,
+    ink: &mut ConnectorInk,
 ) {
     let z = camera.zoom;
-    let screen: Vec<(f32, f32)> = c
-        .points
-        .iter()
-        .map(|(x, y)| {
-            let s = to_screen(*x, *y, bounds, camera);
-            (f32::from(s.x), f32::from(s.y))
-        })
-        .collect();
+    let Courses { route, lane } = courses;
+    route.clear();
+    route.extend(c.points.iter().map(|(x, y)| {
+        let s = to_screen(*x, *y, bounds, camera);
+        (f32::from(s.x), f32::from(s.y))
+    }));
     let n = c.kinds.len() as f32;
     for (i, kind) in c.kinds.iter().enumerate() {
         let slot = i as f32 - (n - 1.0) / 2.0;
-        let lane = lane_polyline(&screen, slot * PARALLEL_SPACING * z);
-        paint_connector(&lane, *kind, marked, alpha, z, palette, window);
+        let course = lane_polyline(route, slot * PARALLEL_SPACING * z, lane);
+        let style = Ink {
+            kind: *kind,
+            marked,
+            alpha,
+        };
+        ink.add_lane(course, style);
     }
 }
 
@@ -1052,7 +1103,7 @@ pub(crate) fn paint_diamond(center: Point<Pixels>, half: f32, color: Rgba, windo
     let mut diamond = PathBuilder::fill();
     diamond.add_polygon(&corners, true);
     if let Ok(path) = diamond.build() {
-        window.paint_path(path, color);
+        paint_path(path, color, window);
     }
 }
 
@@ -1081,6 +1132,14 @@ impl Glyph {
             Status::TestFailed => Glyph::Square,
             Status::Failed => Glyph::TriangleDown,
             Status::RootCause => Glyph::Cross,
+        }
+    }
+
+    /// Whether [`paint_status`] draws the glyph as paths rather than quads.
+    fn traced(self) -> bool {
+        match self {
+            Glyph::TriangleUp | Glyph::TriangleDown | Glyph::Cross => true,
+            Glyph::Disc | Glyph::Bar | Glyph::Ring | Glyph::Square => false,
         }
     }
 }
@@ -1158,6 +1217,10 @@ impl StatusBadge {
             point(self.center.x - reach, self.center.y - reach),
             size(reach * 2., reach * 2.),
         )
+    }
+
+    fn traced(&self) -> bool {
+        Glyph::of(self.status).traced()
     }
 
     fn paint(&self, palette: &Palette, window: &mut Window) {
@@ -1345,7 +1408,7 @@ fn paint_rimmed<const N: usize>(
         let mut shape = PathBuilder::fill();
         shape.add_polygon(&corners, true);
         if let Ok(path) = shape.build() {
-            window.paint_path(path, color);
+            paint_path(path, color, window);
         }
     }
 }
@@ -1526,7 +1589,8 @@ impl LabelPlacement {
     /// truncation in a narrower one names nothing, so the box is left bare.
     fn of(b: &PaintBox, rect: Bounds<Pixels>, zoom: f32) -> Option<Self> {
         let (w, h) = (f32::from(rect.size.width), f32::from(rect.size.height));
-        let size = (LABEL_SIZE as f32 * zoom).max(LABEL_FLOOR);
+        let size = ((LABEL_SIZE as f32 * zoom / LABEL_SIZE_STEP).round() * LABEL_SIZE_STEP)
+            .max(LABEL_FLOOR);
         let needed = size + 2. * LABEL_PAD;
         if h < needed {
             return None;
@@ -1629,13 +1693,14 @@ pub(crate) fn title_at(titles: &[TitleTarget], pos: Point<Pixels>) -> Option<Id>
 /// What a painted label leaves for the passes after it.
 struct PaintedLabel {
     title: Option<TitleTarget>,
+    caret: Option<Caret>,
     badge: Option<StatusBadge>,
 }
 
-/// Paints a box's label, truncated to the width there is room for, with a
-/// disclosure caret for an expandable box, and reports the title a click on it
-/// toggles and the status badge the label holds room for; `None` where no
-/// label is painted. The font is the window's inherited UI text style so the
+/// Paints a box's label, truncated to the width there is room for, and reports
+/// the title a click on it toggles, the disclosure caret of an expandable box,
+/// and the status badge the label holds room for; `None` where no label is
+/// painted. The font is the window's inherited UI text style so the
 /// views stay visually coherent, and a container's title is bold.
 ///
 /// `floated` collects what the floating titles have taken, and a label that
@@ -1656,6 +1721,7 @@ fn paint_box_label(
     let label_color = faded(bviz_ui_theme::label_on(b.fill).into(), b.alpha);
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
+    pan_bench::tally(Tally::ShapedLabels, 1);
     let line = bviz_ui_components::shape_truncated(
         b.label,
         placement.avail,
@@ -1692,62 +1758,75 @@ fn paint_box_label(
         cx,
     );
 
-    if let Some(caret) = placement.caret {
-        // Phosphor icons render as `svg()` elements, which cannot be painted
-        // inside this canvas, so the caret is a small filled triangle.
-        paint_caret(
-            placement.caret_at(plate),
-            px(caret),
-            px(fs),
-            b.compound,
-            label_color,
-            window,
-        );
-    }
     Some(PaintedLabel {
         title: placement.title(plate, b.id),
+        caret: placement.caret.map(|footprint| Caret {
+            at: placement.caret_at(plate),
+            footprint: px(footprint),
+            fs: px(fs),
+            down: b.compound,
+            color: label_color,
+        }),
         badge: placement.badge(plate, b.alpha),
     })
 }
 
-/// Paints a small filled-triangle disclosure caret inside the reserved
-/// `footprint` whose left edge is `at.x`, centered vertically at `at.y`. The
-/// triangle width fills the footprint less a trailing gap before the label; its
-/// height scales with the font size `fs`. `down` points it downward (expanded),
-/// otherwise rightward (collapsed).
-fn paint_caret(
+fn paint_path(path: Path<Pixels>, color: impl Into<Background>, window: &mut Window) {
+    pan_bench::tally(Tally::PaintPaths, 1);
+    window.paint_path(path, color);
+}
+
+/// The disclosure caret a label holds room for, a small filled triangle.
+/// Phosphor icons render as `svg()` elements, which cannot be painted inside
+/// this canvas, so the caret is a path.
+struct Caret {
+    /// The left edge of the footprint, at the caret's vertical centre.
     at: Point<Pixels>,
+    /// The width held for the caret, which the triangle fills less a trailing
+    /// gap before the label.
     footprint: Pixels,
+    /// The label's font size, which the triangle's height scales with.
     fs: Pixels,
+    /// Points the caret downward, for an expanded box; otherwise rightward.
     down: bool,
     color: Rgba,
-    window: &mut Window,
-) {
-    let s = f32::from(footprint) * 0.6; // triangle width within the footprint
-    let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
-    let left = at.x;
-    let right = left + px(s);
-    let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
-    let mut tri = PathBuilder::fill();
-    if down {
-        // Apex down, base along the top.
-        tri.add_polygon(
-            &[
-                point(left, top),
-                point(right, top),
-                point(left + px(s / 2.), bottom),
-            ],
-            true,
-        );
-    } else {
-        // Apex right, base along the left.
-        tri.add_polygon(
-            &[point(left, top), point(right, at.y), point(left, bottom)],
-            true,
-        );
-    }
-    if let Ok(path) = tri.build() {
-        window.paint_path(path, color);
+}
+
+impl Caret {
+    fn paint(self, window: &mut Window) {
+        let Caret {
+            at,
+            footprint,
+            fs,
+            down,
+            color,
+        } = self;
+        let s = f32::from(footprint) * 0.6; // triangle width within the footprint
+        let height = f32::from(fs) * 0.5; // triangle height, scaling with the label
+        let left = at.x;
+        let right = left + px(s);
+        let (top, bottom) = (at.y - px(height / 2.), at.y + px(height / 2.));
+        let mut tri = PathBuilder::fill();
+        if down {
+            // Apex down, base along the top.
+            tri.add_polygon(
+                &[
+                    point(left, top),
+                    point(right, top),
+                    point(left + px(s / 2.), bottom),
+                ],
+                true,
+            );
+        } else {
+            // Apex right, base along the left.
+            tri.add_polygon(
+                &[point(left, top), point(right, at.y), point(left, bottom)],
+                true,
+            );
+        }
+        if let Ok(path) = tri.build() {
+            paint_path(path, color, window);
+        }
     }
 }
 
@@ -1756,10 +1835,15 @@ fn paint_caret(
 /// Every vertex is pushed off its segments' normals — the endpoints perpendicular
 /// to their one segment, the interior mitered at the corners — so a lane stays
 /// parallel to the route along its whole length and meets each node offset
-/// alongside its siblings rather than converging to a single point.
-pub(crate) fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
+/// alongside its siblings rather than converging to a single point. An offset
+/// lane is laid out in `out`.
+pub(crate) fn lane_polyline<'a>(
+    pts: &'a [(f32, f32)],
+    d: f32,
+    out: &'a mut Vec<(f32, f32)>,
+) -> &'a [(f32, f32)] {
     if d == 0.0 || pts.len() < 2 {
-        return pts.to_vec();
+        return pts;
     }
     let left_normal = |from: (f32, f32), to: (f32, f32)| {
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1767,7 +1851,8 @@ pub(crate) fn lane_polyline(pts: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
         (-dy / l, dx / l)
     };
     let n = pts.len();
-    let mut out = Vec::with_capacity(n);
+    out.clear();
+    out.reserve(n);
     let ns = left_normal(pts[0], pts[1]);
     out.push((pts[0].0 + ns.0 * d, pts[0].1 + ns.1 * d));
     for i in 1..n - 1 {
@@ -1801,47 +1886,321 @@ fn miter_vertex(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: f32) -> (f32, f3
     (b.0 + mdir.0 * scale, b.1 + mdir.1 * scale)
 }
 
-/// Strokes a connector polyline (screen coordinates) and caps its end with a
-/// filled arrowhead pointing along the final segment.
-fn paint_connector(
-    points: &[(f32, f32)],
+/// What a connector lane is drawn in: its provenance's line, heavier and lifted
+/// where `marked`, at `alpha` of its own opacity.
+#[derive(Clone, Copy, PartialEq)]
+struct Ink {
     kind: EdgeKind,
     marked: bool,
     alpha: f32,
+}
+
+impl Ink {
+    fn color(self, palette: &Palette) -> Rgba {
+        faded(palette.edge_color(self.kind, self.marked), self.alpha)
+    }
+
+    fn width(self) -> f32 {
+        match self.marked {
+            true => MARKED_WIDTH,
+            false => CONNECTOR_WIDTH,
+        }
+    }
+}
+
+/// One path of lanes, all in the `ink`th ink a frame draws. Batches are painted
+/// in their order: by `layer`, then by ink.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Batch {
+    layer: u32,
+    ink: u32,
+}
+
+/// The batches a frame has drawn over one cell of the window.
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    /// The last batch drawn here.
+    top: Option<Batch>,
+    /// The last batch drawn here in an ink other than `top`'s.
+    under: Option<Batch>,
+}
+
+impl Cell {
+    /// The last batch drawn here in an ink other than `ink`.
+    fn last_unlike(self, ink: u32) -> Option<Batch> {
+        match self.top {
+            Some(top) if top.ink == ink => self.under,
+            top => top,
+        }
+    }
+
+    /// Records `batch` drawn here, which lies over every batch here of another
+    /// ink.
+    fn draw(&mut self, batch: Batch) {
+        match self.top {
+            Some(top) if top.ink == batch.ink => self.top = Some(top.max(batch)),
+            top => {
+                self.under = top;
+                self.top = Some(batch);
+            }
+        }
+    }
+}
+
+/// Screen side of the square cells a frame tracks which batches cover.
+const FOOTPRINT_CELL: f32 = 32.0;
+
+/// The window, cut into cells that each know the batches drawn over them.
+struct Footprints {
+    columns: usize,
+    rows: usize,
+    cells: Vec<Cell>,
+}
+
+impl Footprints {
+    fn new(window: Size<Pixels>) -> Self {
+        let count = |extent: Pixels| (f32::from(extent) / FOOTPRINT_CELL).ceil() as usize;
+        let (columns, rows) = (count(window.width), count(window.height));
+        Self {
+            columns,
+            rows,
+            cells: vec![Cell::default(); columns * rows],
+        }
+    }
+
+    /// Adds to `out` the cells of the window that the box bounding `corners`,
+    /// grown by `reach`, covers.
+    fn cover(&self, corners: &[(f32, f32)], reach: f32, out: &mut Vec<usize>) {
+        let (min, max) = corners.iter().fold(
+            ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN)),
+            |(min, max), &(x, y)| ((min.0.min(x), min.1.min(y)), (max.0.max(x), max.1.max(y))),
+        );
+        let span = |lo: f32, hi: f32, cells: usize| {
+            let first = ((lo - reach) / FOOTPRINT_CELL).floor().max(0.0) as usize;
+            let past = (((hi + reach) / FOOTPRINT_CELL).floor() + 1.0).max(0.0) as usize;
+            first..past.min(cells)
+        };
+        for row in span(min.1, max.1, self.rows) {
+            out.extend(span(min.0, max.0, self.columns).map(|column| row * self.columns + column));
+        }
+    }
+}
+
+/// A frame's connector lanes, gathered into as few paths as keep their stack:
+/// a lane is drawn over every lane of another ink that it overlaps and that was
+/// added before it. The order connectors are added in thus sets the stack, so
+/// where lanes of several provenances crowd one bundle they interleave and no
+/// provenance buries another. Lanes of one ink composite alike in either order,
+/// since the path rasterizer blends every triangle on its own, so they share a
+/// batch wherever no other ink comes between them.
+struct ConnectorInk {
     zoom: f32,
-    palette: &Palette,
+    inks: Vec<Ink>,
+    batches: FxHashMap<Batch, VertexBuffers<LyonPoint, u32>>,
+    footprints: Footprints,
+    /// The cells of the lane being added.
+    footprint: Vec<usize>,
+    tessellator: StrokeTessellator,
+}
+
+impl ConnectorInk {
+    fn new(zoom: f32, window: Size<Pixels>) -> Self {
+        Self {
+            zoom,
+            inks: Vec::new(),
+            batches: FxHashMap::default(),
+            footprints: Footprints::new(window),
+            footprint: Vec::new(),
+            tessellator: StrokeTessellator::new(),
+        }
+    }
+
+    /// Strokes a connector lane (screen coordinates) and caps its end with a
+    /// filled arrowhead pointing along the final segment.
+    fn add_lane(&mut self, points: &[(f32, f32)], ink: Ink) {
+        let [.., before, last] = points else {
+            return;
+        };
+        let zoom = self.zoom;
+        let tip = point(px(last.0), px(last.1));
+        let (dir, seg) = direction(point(px(before.0), px(before.1)), tip);
+        let trim = stem_trim(zoom).min(seg);
+        let line_end = LyonPoint::new(last.0 - dir.0 * trim, last.1 - dir.1 * trim);
+        let head = arrowhead(tip, dir, zoom);
+        let width = f32::from(stroke_width(ink.width(), zoom));
+        let options = StrokeOptions::default().with_line_width(width);
+
+        self.footprint.clear();
+        // A miter reaches no further from its corner than the limit allows.
+        let reach = width / 2.0 * options.miter_limit;
+        for segment in points.windows(2) {
+            self.footprints.cover(segment, reach, &mut self.footprint);
+        }
+        let corners = head.map(|p| (f32::from(p.x), f32::from(p.y)));
+        self.footprints.cover(&corners, 0.0, &mut self.footprint);
+
+        let rank = match self.inks.iter().position(|i| *i == ink) {
+            Some(rank) => rank,
+            None => {
+                self.inks.push(ink);
+                self.inks.len() - 1
+            }
+        } as u32;
+        let cells = &mut self.footprints.cells;
+        let under = self
+            .footprint
+            .iter()
+            .filter_map(|&c| cells[c].last_unlike(rank))
+            .max();
+        let batch = match under {
+            None => Batch {
+                layer: 0,
+                ink: rank,
+            },
+            Some(under) if under.ink < rank => Batch {
+                layer: under.layer,
+                ink: rank,
+            },
+            Some(under) => Batch {
+                layer: under.layer + 1,
+                ink: rank,
+            },
+        };
+        for &c in &self.footprint {
+            cells[c].draw(batch);
+        }
+
+        let buffers = self.batches.entry(batch).or_default();
+        let mut output = BuffersBuilder::new(buffers, |v: StrokeVertex| v.position());
+        let mut stroke = self.tessellator.builder(&options, &mut output);
+        let course = points[..points.len() - 1]
+            .iter()
+            .map(|&(x, y)| LyonPoint::new(x, y))
+            .chain(std::iter::once(line_end));
+        match ink.kind {
+            EdgeKind::Transitive => {
+                let (dash, gap) = bridge_pattern(zoom);
+                add_dashed(course, f32::from(dash), f32::from(gap), &mut stroke);
+            }
+            _ => add_solid(course, &mut stroke),
+        }
+        // A lane the tessellator rejects is left out.
+        let _ = stroke.build();
+
+        let first = buffers.vertices.len() as u32;
+        let corners = head.map(|p| LyonPoint::new(f32::from(p.x), f32::from(p.y)));
+        buffers.vertices.extend(corners);
+        buffers.indices.extend(first..first + 3);
+    }
+
+    /// Every batch's ink and geometry, in the order they are painted.
+    fn into_batches(self) -> impl Iterator<Item = (Ink, VertexBuffers<LyonPoint, u32>)> {
+        let mut batches: Vec<_> = self.batches.into_iter().collect();
+        batches.sort_unstable_by_key(|(batch, _)| *batch);
+        let inks = self.inks;
+        batches
+            .into_iter()
+            .map(move |(batch, buffers)| (inks[batch.ink as usize], buffers))
+    }
+
+    /// Paints every batch, in order.
+    fn paint(self, palette: &Palette, window: &mut Window) {
+        for (ink, buffers) in self.into_batches() {
+            paint_triangles(triangles(&buffers), ink.color(palette), window);
+        }
+    }
+}
+
+/// The triangles `buffers` holds, by their corners.
+fn triangles(
+    buffers: &VertexBuffers<LyonPoint, u32>,
+) -> impl ExactSizeIterator<Item = [Point<Pixels>; 3]> {
+    let at = |i: u32| {
+        let v = buffers.vertices[i as usize];
+        point(px(v.x), px(v.y))
+    };
+    let corners = buffers.indices.chunks_exact(3);
+    corners.map(move |t| [at(t[0]), at(t[1]), at(t[2])])
+}
+
+/// The texture coordinate gpui's path rasterizer reads as a solid fill.
+const SOLID: Point<f32> = Point { x: 0.0, y: 1.0 };
+
+/// Fills `triangles` in `color` as one path.
+fn paint_triangles(
+    mut triangles: impl ExactSizeIterator<Item = [Point<Pixels>; 3]>,
+    color: Rgba,
     window: &mut Window,
 ) {
-    if points.len() < 2 {
+    let vertices = 3 * triangles.len();
+    let Some([a, b, c]) = triangles.next() else {
         return;
-    }
-    let color = faded(palette.edge_color(kind, marked), alpha);
-    let pts: Vec<Point<Pixels>> = points.iter().map(|(x, y)| point(px(*x), px(*y))).collect();
-
-    let n = pts.len();
-    let tip = pts[n - 1];
-    let (dir, seg) = direction(pts[n - 2], tip);
-    let trim = stem_trim(zoom).min(seg);
-    let line_end = point(tip.x - px(dir.0 * trim), tip.y - px(dir.1 * trim));
-
-    let width = match marked {
-        true => MARKED_WIDTH,
-        false => CONNECTOR_WIDTH,
     };
-    let mut line = PathBuilder::stroke(stroke_width(width, zoom));
-    if kind == EdgeKind::Transitive {
-        let (dash, gap) = bridge_pattern(zoom);
-        line = line.dash_array(&[dash, gap]);
+    let mut path = Path::new(a);
+    path.vertices.reserve_exact(vertices);
+    path.push_triangle((a, b, c), (SOLID, SOLID, SOLID));
+    for [a, b, c] in triangles {
+        path.push_triangle((a, b, c), (SOLID, SOLID, SOLID));
     }
-    line.move_to(pts[0]);
-    for p in &pts[1..n - 1] {
-        line.line_to(*p);
+    paint_path(path, color, window);
+}
+
+/// Adds the polyline `course` to `stroke` as one open subpath.
+fn add_solid(
+    mut course: impl Iterator<Item = LyonPoint>,
+    stroke: &mut NoAttributes<StrokeBuilder<'_>>,
+) {
+    let Some(first) = course.next() else {
+        return;
+    };
+    stroke.begin(first);
+    for p in course {
+        stroke.line_to(p);
     }
-    line.line_to(line_end);
-    if let Ok(path) = line.build() {
-        window.paint_path(path, color);
+    stroke.end(false);
+}
+
+/// Adds the polyline `course` to `stroke` as dashes `dash` long, `gap` apart,
+/// the first starting at its first point and the last cut short at its end.
+fn add_dashed(
+    mut course: impl Iterator<Item = LyonPoint>,
+    dash: f32,
+    gap: f32,
+    stroke: &mut NoAttributes<StrokeBuilder<'_>>,
+) {
+    let Some(mut from) = course.next() else {
+        return;
+    };
+    stroke.begin(from);
+    let mut drawing = true;
+    let mut left = dash;
+    for to in course {
+        let length = (to - from).length();
+        let mut done = 0.0;
+        while length - done > left {
+            done += left;
+            let at = from.lerp(to, done / length);
+            match drawing {
+                true => {
+                    stroke.line_to(at);
+                    stroke.end(false);
+                }
+                false => {
+                    stroke.begin(at);
+                }
+            }
+            drawing = !drawing;
+            left = if drawing { dash } else { gap };
+        }
+        left -= length - done;
+        if drawing {
+            stroke.line_to(to);
+        }
+        from = to;
     }
-    paint_arrowhead(tip, dir, zoom, color, window);
+    if drawing {
+        stroke.end(false);
+    }
 }
 
 /// The screen width a line of pre-zoom `width` is stroked at under `zoom`. The
@@ -1885,21 +2244,6 @@ fn stem_trim(zoom: f32) -> f32 {
     (ARROW_LENGTH - ARROW_OVERDRAW) as f32 * zoom
 }
 
-/// Paints the triangle [`arrowhead`] describes.
-fn paint_arrowhead(
-    tip: Point<Pixels>,
-    dir: (f32, f32),
-    zoom: f32,
-    color: Rgba,
-    window: &mut Window,
-) {
-    let mut head = PathBuilder::fill();
-    head.add_polygon(&arrowhead(tip, dir, zoom), true);
-    if let Ok(path) = head.build() {
-        window.paint_path(path, color);
-    }
-}
-
 /// The triangle capping a connector at `tip` and pointing along the unit vector
 /// `dir`, sized as [`ARROW_LENGTH`] and [`ARROW_HALF_WIDTH`] give it at `zoom`.
 fn arrowhead(tip: Point<Pixels>, dir: (f32, f32), zoom: f32) -> [Point<Pixels>; 3] {
@@ -1933,6 +2277,122 @@ mod tests {
             to: Id(1),
             transition: None,
         }
+    }
+
+    /// Each triangle of `vertices` (taken three at a time) with its corners
+    /// rounded to a hundredth of a pixel and put in order, the triangles sorted.
+    fn triangle_set(vertices: &[Point<Pixels>]) -> Vec<[(i64, i64); 3]> {
+        let round = |p: &Point<Pixels>| {
+            let at = |v: Pixels| (f32::from(v) * 100.0).round() as i64;
+            (at(p.x), at(p.y))
+        };
+        let mut set: Vec<[(i64, i64); 3]> = vertices
+            .chunks_exact(3)
+            .map(|t| {
+                let mut corners = [round(&t[0]), round(&t[1]), round(&t[2])];
+                corners.sort();
+                corners
+            })
+            .collect();
+        set.sort();
+        set
+    }
+
+    /// A window wide enough for every lane a test draws.
+    const WINDOW: Size<Pixels> = Size {
+        width: px(1000.0),
+        height: px(1000.0),
+    };
+
+    /// The ink of an unmarked line of `kind`.
+    fn plain(kind: EdgeKind) -> Ink {
+        Ink {
+            kind,
+            marked: false,
+            alpha: 1.0,
+        }
+    }
+
+    /// The batches `inked` holds, in the order they are painted, each as its
+    /// triangles' corners.
+    fn painted(inked: ConnectorInk) -> Vec<Vec<Point<Pixels>>> {
+        inked
+            .into_batches()
+            .map(|(_, buffers)| triangles(&buffers).flatten().collect())
+            .collect()
+    }
+
+    /// A lane is inked as the very triangles gpui's own stroke and fill give the
+    /// line and the head it stands for, its dashes included: a dash may run
+    /// around a bend.
+    #[test]
+    fn a_lane_is_inked_as_gpui_draws_it() {
+        let zoom = 1.0;
+        let lane = [(0.0, 0.0), (37.0, 0.0), (37.0, 30.0), (100.0, 30.0)];
+        let tip = point(px(100.0), px(30.0));
+        let stem_end = point(px(100.0 - stem_trim(zoom)), px(30.0));
+        for kind in [EdgeKind::Query, EdgeKind::Transitive] {
+            let mut inked = ConnectorInk::new(zoom, WINDOW);
+            inked.add_lane(&lane, plain(kind));
+            let ours = painted(inked).concat();
+
+            let mut line = PathBuilder::stroke(stroke_width(CONNECTOR_WIDTH, zoom));
+            if kind == EdgeKind::Transitive {
+                let (dash, gap) = bridge_pattern(zoom);
+                line = line.dash_array(&[dash, gap]);
+            }
+            line.move_to(point(px(0.0), px(0.0)));
+            line.line_to(point(px(37.0), px(0.0)));
+            line.line_to(point(px(37.0), px(30.0)));
+            line.line_to(stem_end);
+            let mut head = PathBuilder::fill();
+            head.add_polygon(&arrowhead(tip, (1.0, 0.0), zoom), true);
+            let theirs: Vec<Point<Pixels>> = [line, head]
+                .into_iter()
+                .flat_map(|path| path.build().expect("a polyline tessellates").vertices)
+                .map(|v| v.xy_position)
+                .collect();
+            assert_eq!(triangle_set(&ours), triangle_set(&theirs), "{kind:?}");
+        }
+    }
+
+    /// Lanes that cross no lane of another ink share their ink's one path, however
+    /// many a frame draws.
+    #[test]
+    fn lanes_apart_from_other_inks_share_their_paths() {
+        let mut inked = ConnectorInk::new(1.0, WINDOW);
+        for row in 0..5 {
+            let y = row as f32 * 200.0;
+            inked.add_lane(&[(0.0, y), (300.0, y)], plain(EdgeKind::Query));
+            inked.add_lane(&[(0.0, y), (300.0, y)], plain(EdgeKind::Aquery));
+            inked.add_lane(&[(600.0, y), (900.0, y)], plain(EdgeKind::Query));
+        }
+        assert_eq!(painted(inked).len(), 2);
+    }
+
+    /// A lane goes over every lane of another ink it was added after and
+    /// overlaps, so batching leaves the stack as the lanes were added.
+    #[test]
+    fn a_lane_goes_over_the_lanes_of_other_inks_before_it() {
+        let mut inked = ConnectorInk::new(1.0, WINDOW);
+        let (a, b, c) = (
+            [(0.0, 10.0), (300.0, 10.0)],
+            [(100.0, 0.0), (100.0, 300.0)],
+            [(0.0, 100.0), (300.0, 100.0)],
+        );
+        inked.add_lane(&a, plain(EdgeKind::Query));
+        inked.add_lane(&b, plain(EdgeKind::Aquery));
+        inked.add_lane(&c, plain(EdgeKind::Query));
+        let reach = |batch: &Vec<Point<Pixels>>| {
+            let ys = batch.iter().map(|p| f32::from(p.y));
+            ys.fold(f32::MIN, f32::max)
+        };
+        let order: Vec<f32> = painted(inked).iter().map(reach).collect();
+        assert_eq!(order.len(), 3, "{order:?}");
+        assert!(
+            order[0] < 50.0 && order[1] > 250.0 && order[2] < 250.0,
+            "{order:?}"
+        );
     }
 
     /// A badge sits halfway along a route by length, whatever its bends, so a
@@ -2010,6 +2470,7 @@ mod tests {
     use super::*;
     use crate::camera::from_screen;
     use crate::morph::Transition;
+    use crate::spatial::Indexed;
     use bviz_graph_layout::LaidOut;
     use gpui::rgb;
     use std::collections::HashSet;
@@ -2183,7 +2644,8 @@ mod tests {
                     true => floating += 1,
                     false => banded += 1,
                 }
-                let resolved = crate::box_at(&titles, &g, None, viewport(), camera, at);
+                let resolved =
+                    crate::box_at(&titles, &Indexed::of(&g), None, viewport(), camera, at);
                 assert_eq!(
                     resolved.map(|b| b.id),
                     Some(id),
@@ -2197,8 +2659,9 @@ mod tests {
                     "zoom {zoom}: the caret drawn for {id:?} toggles nothing"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered +=
-                    (crate::hit_box(&g.boxes, None, gx, gy).map(|b| b.id) != Some(id)) as u32;
+                covered += (crate::innermost(crate::boxes_over(&Indexed::of(&g), None, gx, gy))
+                    .map(|b| b.id)
+                    != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
@@ -2238,13 +2701,23 @@ mod tests {
             for DrawnCaret { id, at, floats } in carets {
                 floating += floats as u32;
                 assert_eq!(
-                    crate::box_at(&titles, &g, Some(&frame), viewport(), camera, at).map(|b| b.id),
+                    crate::box_at(
+                        &titles,
+                        &Indexed::of(&g),
+                        Some(&frame),
+                        viewport(),
+                        camera,
+                        at
+                    )
+                    .map(|b| b.id),
                     Some(id),
                     "zoom {zoom}: the caret a morph drew for {id:?} resolves to another box"
                 );
                 let (gx, gy) = from_screen(at, viewport().origin, camera);
-                covered += (crate::hit_box(&g.boxes, Some(&frame), gx, gy).map(|b| b.id)
-                    != Some(id)) as u32;
+                covered +=
+                    (crate::innermost(crate::boxes_over(&Indexed::of(&g), Some(&frame), gx, gy))
+                        .map(|b| b.id)
+                        != Some(id)) as u32;
             }
         }
         assert!(floating > 0, "no zoom floated a title out of its band");
@@ -2733,7 +3206,7 @@ mod tests {
         let left = carets.iter().find(|c| c.id == Id(0));
         let at = left.expect("the left container drew no title").at;
         assert_eq!(
-            crate::box_at(&titles, &g, None, viewport(), camera, at).map(|b| b.id),
+            crate::box_at(&titles, &Indexed::of(&g), None, viewport(), camera, at).map(|b| b.id),
             Some(Id(0))
         );
 
@@ -2744,12 +3217,13 @@ mod tests {
         let moved = slid(&g, -CONTAINER_WIDTH);
         let (gx, gy) = from_screen(at, viewport().origin, camera);
         assert_eq!(
-            crate::hit_box(&moved.boxes, None, gx, gy).map(|b| b.id),
+            crate::innermost(crate::boxes_over(&Indexed::of(&moved), None, gx, gy)).map(|b| b.id),
             Some(Id(1)),
             "the slide left the caret over no other container, so nothing was displaced"
         );
         assert_eq!(
-            crate::box_at(&titles, &moved, None, viewport(), camera, at).map(|b| b.id),
+            crate::box_at(&titles, &Indexed::of(&moved), None, viewport(), camera, at)
+                .map(|b| b.id),
             Some(Id(1)),
             "a title from a frame the layout has moved on from still answered for it"
         );
@@ -3441,7 +3915,7 @@ mod colors {
     #[test]
     fn a_selection_stands_a_connector_off_the_graph_by_as_much_at_every_zoom() {
         let marks = Marks {
-            hover: Neighborhood::none(),
+            hover: Rc::new(Neighborhood::none()),
             selection: Rc::new(Neighborhood {
                 boxes: HashSet::from([Id(0)]),
                 edges: HashSet::new(),
@@ -3461,7 +3935,7 @@ mod colors {
     #[test]
     fn a_morph_takes_its_routes_all_the_way_out_at_every_zoom() {
         let marks = Marks {
-            hover: Neighborhood::none(),
+            hover: Rc::new(Neighborhood::none()),
             selection: Rc::new(Neighborhood::none()),
         };
         for zoom in STROKE_ZOOMS {

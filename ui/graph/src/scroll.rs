@@ -160,8 +160,8 @@ fn scroll_to(view: &mut GraphPanel, axis: Axis, offset: f32, cx: &mut Context<Gr
         Axis::Vertical => (px, panc),
         Axis::Horizontal => (panc, py),
     };
-    view.framing.pan_to(clamp_pan(pan, zoom, vp, content));
-    view.invalidate_canvas(cx);
+    let pan = clamp_pan(pan, zoom, vp, content);
+    view.steer(|framing| framing.pan_to(pan), cx);
 }
 
 /// Begin a scroll-bar drag, recording which thumb is held and where along it the
@@ -179,11 +179,10 @@ pub(crate) fn start_scroll_drag(
     };
     let grab = bar.grab(position);
     view.drag = Drag::Scrollbar(ScrollDrag { axis, grab });
-    if bar.thumb_hit(position) {
-        // Moving nothing, the press still needs the frame whose paint installs the
-        // window-global handlers that carry the drag.
-        cx.notify();
-    } else {
+    // Whether or not it moves the view, the press needs the frame whose paint
+    // installs the window-global handlers that carry the drag.
+    cx.notify();
+    if !bar.thumb_hit(position) {
         scroll_to(view, axis, bar.offset_at(position, grab), cx);
     }
 }
