@@ -47,6 +47,7 @@ fn axis_label(axis: Axis) -> &'static str {
         Axis::Tags => "target tags",
         Axis::Testonly => "testonly targets",
         Axis::Attributes => "rule attributes",
+        Axis::DependencyClass => "implicit dependencies",
         Axis::Artifacts => "action inputs and outputs",
     }
 }
@@ -170,7 +171,7 @@ mod tests {
     fn the_folded_reading_counts_the_axes_rather_than_the_flags() {
         assert_eq!(
             unavailable(&gaps(&observed(false, 4))),
-            "6 filters unavailable"
+            "7 filters unavailable"
         );
         assert_eq!(
             unavailable(&[Gap {
@@ -190,7 +191,8 @@ mod tests {
             [
                 "repository origins — run the query with --consistent_labels",
                 "per-dependency configurations — run the query with --transitions=lite",
-                "target tags, testonly targets — run the query with --proto:output_rule_attrs",
+                "target tags, testonly targets, implicit dependencies — run the query with \
+                 --proto:output_rule_attrs",
                 "rule attributes — run the query with --proto:output_rule_attrs=all \
                  --proto:default_values",
                 "action inputs and outputs — run the query with --include_artifacts",
@@ -206,7 +208,7 @@ mod tests {
                 .into_iter()
                 .find(|gap| gap.flag == "--proto:output_rule_attrs")
                 .map(|gap| gap.axes),
-            Some(vec![Axis::Tags, Axis::Testonly])
+            Some(vec![Axis::Tags, Axis::Testonly, Axis::DependencyClass])
         );
     }
 

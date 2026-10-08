@@ -13,6 +13,7 @@ pub mod capability;
 pub mod cquery;
 pub mod dominators;
 pub mod exec_path;
+mod explicit;
 pub mod facets;
 pub mod filter;
 pub mod graph;

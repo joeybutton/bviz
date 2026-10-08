@@ -77,7 +77,7 @@ pub fn filter<S: BuildHasher>(graph: &Graph, reduced: &Graph, keep: &HashSet<Id,
     for edge in &graph.edges {
         if keep.contains(&edge.from) && keep.contains(&edge.to) {
             direct.insert((edge.from, edge.to));
-            out.add_edge(edge.from, edge.to, edge.kind);
+            out.edges.push(edge.clone());
         }
     }
 

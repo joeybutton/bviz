@@ -46,12 +46,15 @@ pub enum Axis {
     Testonly,
     /// Every attribute of a rule, whether written in its BUILD file or not.
     Attributes,
+    /// Whether a rule's dependency is one its BUILD file names, which only the
+    /// attributes it sets tell.
+    DependencyClass,
     /// The files an action reads and writes.
     Artifacts,
 }
 
 impl Axis {
-    pub const ALL: [Axis; 13] = [
+    pub const ALL: [Axis; 14] = [
         Axis::Repo,
         Axis::Package,
         Axis::Label,
@@ -64,6 +67,7 @@ impl Axis {
         Axis::Tags,
         Axis::Testonly,
         Axis::Attributes,
+        Axis::DependencyClass,
         Axis::Artifacts,
     ];
 
@@ -84,7 +88,9 @@ impl Axis {
             // instead, which is no longer cquery output at all.
             Axis::Configuration => None,
             Axis::ExecConfiguration => Some(TRANSITIONS_FLAG),
-            Axis::Tags | Axis::Testonly => Some("--proto:output_rule_attrs"),
+            Axis::Tags | Axis::Testonly | Axis::DependencyClass => {
+                Some("--proto:output_rule_attrs")
+            }
             Axis::Attributes => Some(ALL_ATTRIBUTES_FLAGS),
             Axis::Artifacts => Some("--include_artifacts"),
         }

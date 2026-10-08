@@ -10,7 +10,7 @@ use bazel_query_proto::blaze_query::{
     target::Discriminator,
 };
 
-use crate::graph::{Graph, Node};
+use crate::graph::{DepClass, Graph, Node};
 use crate::intern::Names;
 use std::collections::HashSet;
 
@@ -32,6 +32,13 @@ pub(crate) fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'
         .iter()
         .map(|e| (names.resolve(e.from), names.resolve(e.to)))
         .collect()
+}
+
+/// The class of the edge from the node named `from` to the one named `to`.
+pub(crate) fn edge_class(graph: &Graph, names: &Names, from: &str, to: &str) -> DepClass {
+    let ends = (names.get(from), names.get(to));
+    let edge = (graph.edges.iter()).find(|edge| (Some(edge.from), Some(edge.to)) == ends);
+    edge.expect("an edge").class
 }
 
 /// A rule of class `class` as `bazel query --output=proto` writes it, its

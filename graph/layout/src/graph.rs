@@ -5,6 +5,9 @@
 //! between node ids and may cross containment levels; the layout engine places
 //! each edge in the lowest common ancestor of its endpoints.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use crate::intern::Id;
 use crate::provenance::Input;
 
@@ -97,6 +100,61 @@ impl EdgeKind {
     }
 }
 
+/// Whether a dependency is one its dependent's BUILD file writes, as Bazel's
+/// `--noimplicit_deps` tells them apart (`DependencyFilter.NO_IMPLICIT_DEPS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Declared {
+    /// Some attribute the BUILD file sets names the dependency.
+    Explicit = 0,
+    /// Only a default value, a hidden attribute or an aspect names it.
+    Implicit = 1,
+    /// The input states too little of the dependent's attributes to tell.
+    Unknown = 2,
+    /// No attribute stands behind the dependency, so no filter reading
+    /// attributes drops it: `LabelVisitationUtils` visits a generating rule, a
+    /// file's visibility and a package group's includes through none, and an
+    /// action graph's edges and the edges derived from others read none.
+    Unattributed = 3,
+}
+
+/// What kind of dependency an edge stands for, as Bazel's query flags filter
+/// them: whether it is [`Declared`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DepClass(u8);
+
+impl DepClass {
+    /// The bits holding the [`Declared`] value.
+    const DECLARED: u8 = 0b11;
+
+    /// A dependency declared as `declared` says.
+    pub fn new(declared: Declared) -> Self {
+        DepClass(declared as u8)
+    }
+
+    pub fn declaration(self) -> Declared {
+        match self.0 & Self::DECLARED {
+            0 => Declared::Explicit,
+            1 => Declared::Implicit,
+            2 => Declared::Unknown,
+            _ => Declared::Unattributed,
+        }
+    }
+
+    /// The class of one edge standing for two dependencies between the same
+    /// nodes, which a filter drops only where it drops both.
+    pub fn either(self, other: Self) -> Self {
+        use Declared::*;
+        let declared = match (self.declaration(), other.declaration()) {
+            (Explicit, _) | (_, Explicit) => Explicit,
+            (Unattributed, _) | (_, Unattributed) => Unattributed,
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Implicit, Implicit) => Implicit,
+        };
+        DepClass::new(declared)
+    }
+}
+
 /// A directed dependency from one node to another, both by id, tagged with the
 /// query it came from.
 #[derive(Clone)]
@@ -104,6 +162,7 @@ pub struct Edge {
     pub from: Id,
     pub to: Id,
     pub kind: EdgeKind,
+    pub class: DepClass,
 }
 
 #[derive(Clone, Default)]
@@ -121,8 +180,50 @@ impl Graph {
         self.nodes.push(node);
     }
 
+    /// Adds an edge no attribute stands behind.
     pub fn add_edge(&mut self, from: Id, to: Id, kind: EdgeKind) {
-        self.edges.push(Edge { from, to, kind });
+        self.add_classified_edge(from, to, kind, DepClass::new(Declared::Unattributed));
+    }
+
+    pub fn add_classified_edge(&mut self, from: Id, to: Id, kind: EdgeKind, class: DepClass) {
+        self.edges.push(Edge {
+            from,
+            to,
+            kind,
+            class,
+        });
+    }
+}
+
+/// The edges of one kind a builder gives a graph, one per pair of nodes.
+pub(crate) struct UniqueEdges {
+    kind: EdgeKind,
+    /// By its ends, the position of each edge in the graph's edge list.
+    at: HashMap<(Id, Id), usize>,
+}
+
+impl UniqueEdges {
+    /// Room for `capacity` edges before the table grows.
+    pub(crate) fn with_capacity(kind: EdgeKind, capacity: usize) -> Self {
+        UniqueEdges {
+            kind,
+            at: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// Adds to `graph` the dependency of `to` on `from` of `class`, folding it
+    /// into the edge already joining the two where there is one.
+    pub(crate) fn add(&mut self, graph: &mut Graph, from: Id, to: Id, class: DepClass) {
+        match self.at.entry((from, to)) {
+            Entry::Occupied(at) => {
+                let edge = &mut graph.edges[*at.get()];
+                edge.class = edge.class.either(class);
+            }
+            Entry::Vacant(at) => {
+                at.insert(graph.edges.len());
+                graph.add_classified_edge(from, to, self.kind, class);
+            }
+        }
     }
 }
 

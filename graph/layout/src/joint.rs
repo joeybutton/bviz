@@ -215,7 +215,7 @@ fn canonicalize(
         built_by.push(inputs);
     }
     for edge in &merged.edges {
-        out.add_edge(map(edge.from), map(edge.to), edge.kind);
+        out.add_classified_edge(map(edge.from), map(edge.to), edge.kind, edge.class);
     }
     facets.renumber(&remap);
     attributes.renumber(&remap);

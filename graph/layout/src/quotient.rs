@@ -220,7 +220,7 @@ fn emit_edges(out: &mut Graph, graph: &Graph, remap: &BTreeMap<Id, Id>) {
         out.edges.push(Edge {
             from,
             to,
-            kind: edge.kind,
+            ..edge.clone()
         });
     }
 }

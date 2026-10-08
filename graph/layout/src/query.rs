@@ -7,14 +7,15 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bazel_query_proto::blaze_query::{Attribute, Target, attribute::Tristate};
+use bazel_query_proto::blaze_query::{Attribute, Rule, Target, attribute::Tristate};
 
 use crate::attributes::AttributesBuilder;
 use crate::capability::Axis;
+use crate::explicit::{self, Explicit};
 #[cfg(test)]
 use crate::facets::Facets;
 use crate::facets::{FacetsBuilder, Tri};
-use crate::graph::{EdgeKind, Graph, Kind, Node};
+use crate::graph::{Declared, DepClass, EdgeKind, Graph, Kind, Node, UniqueEdges};
 use crate::intern::{Id, Names};
 use crate::label::{self, PackageHierarchy, RepoMapping, label_and_kind};
 use crate::provenance::Input;
@@ -108,35 +109,53 @@ pub(crate) fn build_with_packages(
         ));
         describe_target(facets, Input::Query, target, node_id, parent, &label);
         if let Some(rule) = &target.rule {
-            let complete = attributes.describe(node_id, rule, repos);
-            facets.observe(Input::Query, Axis::Attributes, complete);
+            describe_rule(attributes, facets, Input::Query, node_id, rule, repos);
         }
         node_by_label.insert(label.into_owned(), node_id);
     }
 
     // Pass 2: edges from each target's dependencies (dependency -> dependent).
     let node = |label: &str| node_by_label.get(repos.canonicalize_label(label).as_ref());
-    let mut seen_edge: HashSet<(Id, Id)> = HashSet::new();
+    let dependencies = (targets.iter())
+        .map(|target| target.rule.as_ref().map_or(1, |rule| rule.rule_input.len()))
+        .sum();
+    let mut edges = UniqueEdges::with_capacity(EdgeKind::Query, dependencies);
     for target in targets {
-        let (name, dependencies): (&str, &[String]) = match (&target.rule, &target.generated_file) {
-            (Some(rule), _) => (&rule.name, &rule.rule_input),
-            (None, Some(file)) => (&file.name, std::slice::from_ref(&file.generating_rule)),
-            (None, None) => continue,
-        };
-        let Some(&to) = node(name) else {
-            continue;
-        };
-        for dependency in dependencies {
-            let Some(&from) = node(dependency) else {
+        if let Some(rule) = &target.rule {
+            let Some(&to) = node(&rule.name) else {
                 continue;
             };
-            if seen_edge.insert((from, to)) {
-                graph.add_edge(from, to, EdgeKind::Query);
+            let explicit = Explicit::of(rule, repos);
+            for dependency in &rule.rule_input {
+                let dependency = repos.canonicalize_label(dependency);
+                if let Some(&from) = node_by_label.get(dependency.as_ref()) {
+                    edges.add(&mut graph, from, to, explicit.class(&dependency));
+                }
             }
+        } else if let Some(file) = &target.generated_file
+            && let (Some(&to), Some(&from)) = (node(&file.name), node(&file.generating_rule))
+        {
+            edges.add(&mut graph, from, to, DepClass::new(Declared::Unattributed));
         }
     }
 
     graph
+}
+
+/// Records `rule`'s attributes, as `input` describes it, as those of `node`,
+/// and counts whether they read as every attribute and tell its dependencies'
+/// classes.
+pub(crate) fn describe_rule(
+    attributes: &mut AttributesBuilder,
+    facets: &mut FacetsBuilder,
+    input: Input,
+    node: Id,
+    rule: &Rule,
+    repos: &RepoMapping,
+) {
+    let complete = attributes.describe(node, rule, repos);
+    facets.observe(input, Axis::Attributes, complete);
+    facets.observe(input, Axis::DependencyClass, explicit::classifies(rule));
 }
 
 /// Records what `target`, as `input` describes it, states about the node it
@@ -207,7 +226,7 @@ mod tests {
     use crate::facets::{Origin, RuleCategory};
     use crate::repo::RepoName;
     use crate::select::Filter;
-    use crate::test_support::{edges, find, parent_of};
+    use crate::test_support::{self, edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
         GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
         target::Discriminator,
@@ -701,5 +720,141 @@ mod tests {
         let external = parent_of(&graph, &names, "target:@somerepo//foo:y").unwrap();
         assert_ne!(external, "pkg:foo");
         assert_eq!(find(&graph, &names, external).label, "@somerepo//foo");
+    }
+
+    /// How the edge from `from` to `to` is declared.
+    fn declaration(graph: &Graph, names: &Names, from: &str, to: &str) -> Declared {
+        test_support::edge_class(graph, names, from, to).declaration()
+    }
+
+    /// `//foo:app` depending on `inputs`, its attributes `attributes` beside
+    /// its name.
+    fn app(inputs: &[&str], mut attributes: Vec<Attribute>) -> Target {
+        attributes.push(test_support::name_attribute("//foo:app"));
+        test_support::rule("//foo:app", "cc_library", inputs, attributes)
+    }
+
+    #[test]
+    fn a_dependency_is_explicit_where_any_attribute_the_build_file_sets_names_it() {
+        use test_support::{explicit, label, label_list};
+        let (graph, names, _) = build(&[
+            app(
+                &["//foo:a", "//foo:b", "//foo:c"],
+                vec![
+                    label_list("deps", &["//foo:a", "//foo:b"]),
+                    explicit(label_list("srcs", &["//foo:a"])),
+                    explicit(label("src", "@@//foo:c")),
+                ],
+            ),
+            source("//foo:a"),
+            source("//foo:b"),
+            source("//foo:c"),
+        ]);
+
+        let declared = |from| declaration(&graph, &names, from, "target://foo:app");
+        assert_eq!(declared("target://foo:a"), Declared::Explicit);
+        assert_eq!(declared("target://foo:b"), Declared::Implicit);
+        assert_eq!(declared("target://foo:c"), Declared::Explicit);
+        assert_eq!(graph.edges.len(), 3);
+    }
+
+    /// `AggregatingAttributeMapper.visitLabels` visits every branch of a
+    /// `select` and every condition but the default, of an attribute of any
+    /// type.
+    #[test]
+    fn a_select_names_its_branches_and_its_conditions() {
+        use test_support::{explicit, label_list, selector_list, string_list};
+        let deps = explicit(selector_list(
+            "deps",
+            &label_list("", &[]),
+            &[&[
+                ("//foo:on", Some(label_list("", &["//foo:a"]))),
+                ("//conditions:default", Some(label_list("", &["//foo:b"]))),
+            ]],
+        ));
+        let copts = explicit(selector_list(
+            "copts",
+            &string_list("", &[]),
+            &[&[("//foo:other", Some(string_list("", &["-x"])))]],
+        ));
+        let (graph, names, _) = build(&[
+            app(
+                &[
+                    "//foo:a",
+                    "//foo:b",
+                    "//foo:on",
+                    "//foo:other",
+                    "//conditions:default",
+                ],
+                vec![deps, copts],
+            ),
+            source("//foo:a"),
+            source("//foo:b"),
+            rule("//foo:on", &[]),
+            rule("//foo:other", &[]),
+            rule("//conditions:default", &[]),
+        ]);
+
+        let declared = |from| declaration(&graph, &names, from, "target://foo:app");
+        assert_eq!(declared("target://foo:a"), Declared::Explicit);
+        assert_eq!(declared("target://foo:b"), Declared::Explicit);
+        assert_eq!(declared("target://foo:on"), Declared::Explicit);
+        assert_eq!(declared("target://foo:other"), Declared::Explicit);
+        assert_eq!(declared("target://conditions:default"), Declared::Implicit);
+    }
+
+    /// A rule input no attribute names is an aspect's dependency, and an
+    /// attribute naming no dependency, an output or a `nodep` one, makes none
+    /// explicit.
+    #[test]
+    fn a_dependency_no_dependency_attribute_names_is_implicit() {
+        use test_support::{explicit, label, nodep_label_list};
+        let output = Attribute {
+            r#type: AttributeType::Output as i32,
+            ..label("out", "//foo:b")
+        };
+        let (graph, names, _) = build(&[
+            app(
+                &["//foo:a", "//foo:b", "//foo:c"],
+                vec![
+                    explicit(output),
+                    explicit(nodep_label_list("compatible_with", &["//foo:c"])),
+                ],
+            ),
+            source("//foo:a"),
+            source("//foo:b"),
+            source("//foo:c"),
+        ]);
+
+        for from in ["target://foo:a", "target://foo:b", "target://foo:c"] {
+            assert_eq!(
+                declaration(&graph, &names, from, "target://foo:app"),
+                Declared::Implicit,
+                "{from}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_stating_no_name_leaves_its_dependencies_unclassified() {
+        let (graph, names, _) = build(&[rule("//foo:app", &["//foo:a"]), source("//foo:a")]);
+
+        assert_eq!(
+            declaration(&graph, &names, "target://foo:a", "target://foo:app"),
+            Declared::Unknown
+        );
+    }
+
+    #[test]
+    fn a_generated_files_dependency_on_its_rule_is_unattributed() {
+        let (graph, names, _) = build(&[
+            rule("//foo:gen", &[]),
+            generated_by("//foo:out.o", "//foo:gen"),
+        ]);
+
+        assert_eq!(
+            declaration(&graph, &names, "target://foo:gen", "target://foo:out.o"),
+            Declared::Unattributed
+        );
     }
 }
