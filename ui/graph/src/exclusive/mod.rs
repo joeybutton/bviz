@@ -32,7 +32,7 @@ use bviz_ui_components::{
     TooltipColors, beside_anchor, cached_layer, centered_notice, centered_spinner, key_text_in,
     load_in_background, paint_tooltip,
 };
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
 use gpui::{
     Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
@@ -1683,6 +1683,7 @@ impl Panel for ExclusivePanel {
         PanelKind {
             view: ViewKind::new("graph-exclusive"),
             key_context: KEY_CONTEXT,
+            role: Role::Canvas,
         }
     }
 

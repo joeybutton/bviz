@@ -16,8 +16,7 @@ use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
-    Member, Panel, PanelEvent, PanelGroup, PanelKind, Titled, ViewKind, ViewSpec, Weight,
-    document_label,
+    Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -1009,6 +1008,7 @@ impl Panel for GraphPanel {
         PanelKind {
             view: ViewKind::new("graph"),
             key_context: KEY_CONTEXT,
+            role: Role::Canvas,
         }
     }
 
@@ -1379,10 +1379,7 @@ pub fn open(
         move |cx| cx.new(|cx| ScatterPanel::new(model.clone(), cx))
     });
     let exclusive = ViewSpec::new(move |cx| cx.new(|cx| ExclusivePanel::new(model.clone(), cx)));
-    Member::new(
-        label,
-        PanelGroup::tabs(graph, vec![scatter, exclusive]).with_weight(Weight::CHART),
-    )
+    Member::new(label, graph, vec![scatter, exclusive])
 }
 
 /// Renders a Bazel build graph from one or more `--output=streamed_proto`

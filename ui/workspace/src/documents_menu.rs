@@ -200,8 +200,7 @@ impl DocumentsMenu {
         }
     }
 
-    /// Lays this menu's own window out as the files it holds described when they
-    /// opened, closing the menu over it.
+    /// Lays this menu's own window out as it opened, closing the menu over it.
     fn reset_arrangement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close(cx);
         let Some(workspace) = self.workspace.upgrade() else {
@@ -413,7 +412,7 @@ impl Render for DocumentsMenu {
 mod tests {
     use super::*;
     use crate::documents::OpenView;
-    use crate::{Document, Member, PanelGroup, ViewKind, ViewSpec};
+    use crate::{Document, Member, Role, ViewKind, ViewSpec};
     use bviz_ui_theme::{
         MIN_SECONDARY_CONTRAST, MIN_TEXT_CONTRAST, MIN_VISIBLE_STEP, built_in_themes,
         contrast_ratio, level_step,
@@ -465,12 +464,11 @@ mod tests {
     }
 
     fn file(label: &'static str, first: ViewKind, rest: Vec<ViewKind>) -> Member {
+        let spec = |kind| ViewSpec::for_test(kind, Role::Analysis);
         Member::new(
             label.into(),
-            PanelGroup::tabs(
-                ViewSpec::for_test(first),
-                rest.into_iter().map(ViewSpec::for_test).collect(),
-            ),
+            spec(first),
+            rest.into_iter().map(spec).collect(),
         )
     }
 

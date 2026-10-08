@@ -19,7 +19,7 @@ use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::Pending;
 use bviz_ui_console_args::{ConsoleArgs, ConsoleSource};
 use bviz_ui_playback::DocumentClock;
-use bviz_ui_workspace::{Document, Member, PanelGroup, ViewSpec, Weight, document_label};
+use bviz_ui_workspace::{Document, Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
@@ -66,7 +66,7 @@ pub fn open(
     let label = load.title;
     let model = cx.new(|cx| ConsoleModel::reading(load.stream, session, clock, cx));
     let console = ViewSpec::new(move |cx| cx.new(|cx| ConsolePanel::new(model.clone(), cx)));
-    Member::new(label, PanelGroup::one(console).with_weight(Weight::LOG))
+    Member::new(label, console, Vec::new())
 }
 
 /// Replays the console output of a Bazel build. Each file given opens a replay

@@ -105,8 +105,8 @@ fn only_invocation<T>(files: &[File<T>]) -> Option<&InvocationId> {
     named.all(|id| id == first).then_some(first)
 }
 
-/// What `given` names as the documents a window opens, each standing where its
-/// first file was given.
+/// What `given` names as the documents a window opens, in the order their first
+/// files were given.
 ///
 /// Files carrying one invocation id form one document, which takes one file of
 /// each [`Kind`]; a further file of a kind the document holds opens alone, as
@@ -347,8 +347,8 @@ mod tests {
         assert_eq!(with_graph(vec![profile("p", None)]), [["g"], ["p"]]);
     }
 
-    /// Two builds given together are two documents, each standing where its first
-    /// file was given.
+    /// Two builds given together are two documents, in the order their first
+    /// files were given.
     #[test]
     fn documents_keep_the_order_of_their_first_file() {
         assert_eq!(

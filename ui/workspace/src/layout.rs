@@ -173,8 +173,8 @@ impl<P> Split<P> {
     /// Each side in the order it is laid out. A side's share is what it asks for
     /// out of what every side asks for between them, floored at
     /// [`Split::floor`], and the floors come out of what the sides above them
-    /// divide — so the shares add up to the whole extent however far a drag or a
-    /// weight has pushed one side.
+    /// divide — so the shares add up to the whole extent however far a drag has
+    /// pushed one side.
     pub fn sides(&self) -> Vec<SplitSide<'_, P>> {
         let flexes: Vec<f32> = self
             .children

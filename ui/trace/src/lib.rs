@@ -48,8 +48,7 @@ use bviz_ui_components::{
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
 use bviz_ui_workspace::{
-    Member, Panel, PanelEvent, PanelGroup, PanelKind, Titled, ViewKind, ViewSpec, Weight,
-    document_label,
+    Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
@@ -202,10 +201,6 @@ const FLAME_MIN_HEIGHT: f32 = 60.0;
 /// so sized for a handful of counter lanes; the divider resizes it, and a
 /// profile with more lanes than fit is scrolled through.
 const DEFAULT_COUNTERS_HEIGHT: f32 = 160.0;
-
-/// Share of the trace window the timeline takes, the flame graph and stats
-/// sharing the pane below it.
-const TIMELINE_SHARE: f32 = 0.65;
 
 /// How far a press must travel before it is read as a drag rather than a click.
 const MIN_DRAG_PX: f32 = 3.0;
@@ -620,6 +615,7 @@ impl Panel for TracePanel {
         PanelKind {
             view: ViewKind::new("trace"),
             key_context: TRACE_KEY_CONTEXT,
+            role: Role::Timeline,
         }
     }
 
@@ -1737,9 +1733,9 @@ impl From<TraceSource> for Load {
     }
 }
 
-/// The views rendering the profile `load` reads, as the timeline above the
-/// flame graph and stats that aggregate whatever tracks it has selected, and
-/// the critical path. Where it is opened as part of an invocation's `session`,
+/// The views rendering the profile `load` reads: the timeline, the flame graph
+/// and stats that aggregate whatever tracks it has selected, and the critical
+/// path. Where it is opened as part of an invocation's `session`,
 /// it names what the profile holds an id of by what the session knows, and
 /// plays on `clock` where its document plays back.
 pub fn open(
@@ -1752,29 +1748,21 @@ pub fn open(
     let load = load.into();
     let label = load.title;
     let model = cx.new(|cx| TraceModel::reading(load.profile, session, clock, cx));
-    let views = PanelGroup::split(
-        gpui::Axis::Vertical,
-        TIMELINE_SHARE,
-        PanelGroup::one(ViewSpec::new({
-            let model = model.clone();
-            move |cx| cx.new(|cx| TracePanel::new(model.clone(), cx))
-        })),
-        PanelGroup::tabs(
-            ViewSpec::new({
-                let model = model.clone();
-                move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
-            }),
-            vec![
-                ViewSpec::new({
-                    let model = model.clone();
-                    move |cx| cx.new(|cx| StatsPanel::new(model.clone(), cx))
-                }),
-                ViewSpec::new(move |cx| cx.new(|cx| CriticalPathPanel::new(model.clone(), cx))),
-            ],
-        ),
-    )
-    .with_weight(Weight::CHART);
-    Member::new(label, views)
+    let timeline = ViewSpec::new({
+        let model = model.clone();
+        move |cx| cx.new(|cx| TracePanel::new(model.clone(), cx))
+    });
+    let flame = ViewSpec::new({
+        let model = model.clone();
+        move |cx| cx.new(|cx| FlamePanel::new(model.clone(), cx))
+    });
+    let stats = ViewSpec::new({
+        let model = model.clone();
+        move |cx| cx.new(|cx| StatsPanel::new(model.clone(), cx))
+    });
+    let critical_path =
+        ViewSpec::new(move |cx| cx.new(|cx| CriticalPathPanel::new(model.clone(), cx)));
+    Member::new(label, timeline, vec![flame, stats, critical_path])
 }
 
 /// Renders a Bazel `--profile` trace as a flame-chart timeline. Each profile

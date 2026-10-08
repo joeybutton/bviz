@@ -15,7 +15,7 @@ use bviz_execlog::ExecLog;
 use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::{Pending, declare_scopes};
 use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
-use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, document_label};
+use bviz_ui_workspace::{Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
@@ -67,7 +67,7 @@ pub fn open(
     let session = session.as_ref().map(Entity::downgrade);
     let model = cx.new(|cx| ExecLogModel::reading(load.log, session, cx));
     let view = ViewSpec::new(move |cx| cx.new(|cx| SpawnTimePanel::new(model.clone(), cx)));
-    Member::new(load.title, PanelGroup::one(view))
+    Member::new(load.title, view, Vec::new())
 }
 
 /// Shows the spawn time of Bazel builds by phase. Each file given opens a view

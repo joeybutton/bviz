@@ -14,7 +14,7 @@ use bviz_ui_components::{
 };
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
-use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Titled, ViewKind};
+use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, Titled, ViewKind};
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
@@ -649,6 +649,7 @@ impl Panel for ConsolePanel {
         PanelKind {
             view: ViewKind::new("console"),
             key_context: CONSOLE_KEY_CONTEXT,
+            role: Role::Log,
         }
     }
 
