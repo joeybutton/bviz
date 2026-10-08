@@ -9,7 +9,7 @@ use crate::column::{Folding, line};
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::{GraphPanel, Palette, derive};
-use bviz_graph_layout::capability::TRANSITIONS_FLAG;
+use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::facets::{ConfigRef, Sym};
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::{carried_label, package_label};
@@ -224,7 +224,7 @@ impl Spelling {
 fn unmarked_transitions(capabilities: &Capabilities, configured: bool) -> Option<SharedString> {
     if !configured {
         return Some(
-            format!("transitions unmarked — they need a cquery run with {TRANSITIONS_FLAG}").into(),
+            format!("transitions unmarked — they need a cquery run with {TRANSITIONS}").into(),
         );
     }
     let unmarked = match capabilities.support(Axis::ExecConfiguration) {
@@ -232,7 +232,7 @@ fn unmarked_transitions(capabilities: &Capabilities, configured: bool) -> Option
         Support::Partial { .. } => "some transitions unmarked",
         Support::Unavailable { .. } => "transitions unmarked",
     };
-    Some(format!("{unmarked} — run the cquery with {TRANSITIONS_FLAG}").into())
+    Some(format!("{unmarked} — run the cquery with {TRANSITIONS}").into())
 }
 
 /// How many changed options a link's hover names before it counts the rest.

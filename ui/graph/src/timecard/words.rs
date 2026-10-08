@@ -1,9 +1,9 @@
 //! The words the card says where a profile's action time went in.
 
 use super::{Shown, Slow, Timecard};
-use crate::colour::PRIMARY_OUTPUT_FLAG;
 use crate::duration::lasted;
 use crate::timing::{Ran, Slowest, Timed};
+use bviz_bazel_flags::PROFILE_PRIMARY_OUTPUT;
 use bviz_graph_layout::Id;
 use bviz_invocation::{Share, Spent};
 
@@ -68,7 +68,7 @@ impl Timecard {
         match self.slowest.is_empty() {
             true => format!(
                 "The profile names no action by its primary output to list; \
-                 record one with {PRIMARY_OUTPUT_FLAG}"
+                 record one with {PROFILE_PRIMARY_OUTPUT}"
             ),
             false => "slowest actions".to_owned(),
         }
@@ -188,7 +188,10 @@ mod tests {
 
         assert_eq!(card.line(), "4 actions profiled, 10.0s of action time");
         let listless = card.list_line();
-        assert!(listless.contains(PRIMARY_OUTPUT_FLAG), "{listless}");
+        assert!(
+            listless.contains(PROFILE_PRIMARY_OUTPUT.as_str()),
+            "{listless}"
+        );
         let lines: Vec<(Ran, String)> = card.runner_lines().collect();
         assert_eq!(
             lines,

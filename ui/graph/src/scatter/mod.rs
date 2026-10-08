@@ -22,7 +22,7 @@ use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
 use axis::{Axes, Axis, Clocks};
-use bviz_graph_layout::capability::TRANSITIONS_FLAG;
+use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
@@ -1683,9 +1683,7 @@ fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
         Support::Partial { .. } => "some cquery edges left out",
         Support::Unavailable { .. } => "cquery edges left out",
     };
-    Some(format!(
-        "{dropped} — run the cquery with {TRANSITIONS_FLAG}"
-    ))
+    Some(format!("{dropped} — run the cquery with {TRANSITIONS}"))
 }
 
 /// Turns the loaded `input`'s share in the measure in `scope` on and off, and

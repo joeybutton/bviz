@@ -5,6 +5,10 @@ rust_library(
     name = "bazel_flags",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_bazel_flags",
+    visibility = [
+        "//graph/layout:__pkg__",
+        "//ui/graph:__pkg__",
+    ],
 )
 
 rust_test(

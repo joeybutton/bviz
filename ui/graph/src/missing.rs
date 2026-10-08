@@ -8,6 +8,7 @@
 //! pass when the dump is regenerated.
 
 use crate::{GraphPanel, Palette};
+use bviz_bazel_flags::Flag;
 use bviz_graph_layout::{Axis, Capabilities, Support};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
@@ -54,7 +55,7 @@ fn axis_label(axis: Axis) -> &'static str {
 /// filter on.
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Gap {
-    flag: &'static str,
+    flag: Flag,
     axes: Vec<Axis>,
 }
 
@@ -172,7 +173,7 @@ mod tests {
         );
         assert_eq!(
             unavailable(&[Gap {
-                flag: "--transitions=lite",
+                flag: bviz_bazel_flags::TRANSITIONS,
                 axes: vec![Axis::ExecConfiguration],
             }]),
             "1 filter unavailable"
@@ -200,7 +201,7 @@ mod tests {
         assert_eq!(
             gaps(&observed(false, 1))
                 .into_iter()
-                .find(|gap| gap.flag == "--proto:output_rule_attrs=all")
+                .find(|gap| gap.flag == bviz_bazel_flags::OUTPUT_RULE_ATTRS)
                 .map(|gap| gap.axes),
             Some(vec![Axis::Tags, Axis::Testonly])
         );

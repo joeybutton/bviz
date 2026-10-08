@@ -3,6 +3,7 @@
 use crate::GraphPanel;
 use crate::model::GraphModel;
 use crate::timing::{NodeTimes, Untimed};
+use bviz_bazel_flags::{PROFILE_PRIMARY_OUTPUT, PROFILE_TARGET_LABEL};
 use bviz_ui_components::{Dropdown, TextTooltip, TooltipColors};
 use bviz_ui_theme::ThemeColors;
 use gpui::{Context, IntoElement, SharedString, div, prelude::*};
@@ -76,11 +77,6 @@ impl Offered {
     }
 }
 
-/// The profile flag naming each action's primary output.
-pub(crate) const PRIMARY_OUTPUT_FLAG: &str = "--experimental_profile_include_primary_output";
-/// The profile flag naming each action's owning target.
-const TARGET_LABEL_FLAG: &str = "--experimental_profile_include_target_label";
-
 /// What a control reading the graph's action times says of them: how much of
 /// the profile the graph places, or why it places none, and where no profile
 /// is open, that one opened with the graph lets it `read` them.
@@ -93,7 +89,7 @@ pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedStri
         Err(Untimed::NoActions) => "The build's profile records no actions".to_owned(),
         Err(Untimed::Unnamed) => format!(
             "The build's profile names no action; record one with \
-             {PRIMARY_OUTPUT_FLAG} or {TARGET_LABEL_FLAG}"
+             {PROFILE_PRIMARY_OUTPUT} or {PROFILE_TARGET_LABEL}"
         ),
         Err(Untimed::Unplaced) => {
             "None of the actions the build's profile names is in this graph".to_owned()
@@ -169,7 +165,7 @@ mod tests {
     #[test]
     fn a_profile_naming_no_action_says_which_flags_name_them() {
         let said = note(Err(Untimed::Unnamed), "read them");
-        assert!(said.contains(PRIMARY_OUTPUT_FLAG), "{said}");
-        assert!(said.contains(TARGET_LABEL_FLAG), "{said}");
+        assert!(said.contains(PROFILE_PRIMARY_OUTPUT.as_str()), "{said}");
+        assert!(said.contains(PROFILE_TARGET_LABEL.as_str()), "{said}");
     }
 }

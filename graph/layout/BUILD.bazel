@@ -24,6 +24,7 @@ rust_library(
         "//ui/graph:__pkg__",
     ],
     deps = [
+        "//bazel_flags",
         "//util/parallel",
         "@bazel_query_proto//:bazel_query_rust_proto",
         "@crates//:fixedbitset",

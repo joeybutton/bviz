@@ -391,7 +391,9 @@ mod tests {
             relevant: 2,
             flag: None,
         };
-        let unavailable = Support::Unavailable { flag: "--output" };
+        let unavailable = Support::Unavailable {
+            flag: bviz_bazel_flags::OUTPUT_RULE_ATTRS,
+        };
         assert_eq!(noted("//...", Support::Available), None);
         assert_eq!(noted("//...", partial), Some(MANUAL_PARTLY_TOLD));
         assert_eq!(noted("//...", unavailable), Some(MANUAL_UNTOLD));

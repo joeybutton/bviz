@@ -259,6 +259,7 @@ mod tests {
         Attribute, GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
         target::Discriminator,
     };
+    use bviz_bazel_flags::OUTPUT_RULE_ATTRS;
 
     fn rule(name: &str, inputs: &[&str]) -> Target {
         Target {
@@ -980,7 +981,7 @@ mod tests {
         let Joint { capabilities, .. } = build_joint(None, None, Some(&query_targets), false);
 
         let missing = Support::Unavailable {
-            flag: "--proto:output_rule_attrs=all",
+            flag: OUTPUT_RULE_ATTRS,
         };
         assert_eq!(capabilities.support(Axis::Tags), missing);
         assert_eq!(capabilities.support(Axis::Testonly), missing);
@@ -1000,7 +1001,7 @@ mod tests {
         assert_eq!(
             capabilities.support(Axis::Testonly),
             Support::Unavailable {
-                flag: "--proto:output_rule_attrs=all"
+                flag: OUTPUT_RULE_ATTRS
             }
         );
     }
@@ -1019,7 +1020,7 @@ mod tests {
             Support::Partial {
                 covered: 1,
                 relevant: 2,
-                flag: Some("--proto:output_rule_attrs=all"),
+                flag: Some(OUTPUT_RULE_ATTRS),
             }
         );
     }

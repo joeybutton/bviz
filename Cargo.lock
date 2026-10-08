@@ -919,6 +919,7 @@ dependencies = [
 name = "bviz_graph_layout"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags",
  "bviz_parallel",
  "fastrand 2.5.0",
  "fixedbitset",
@@ -1080,6 +1081,7 @@ dependencies = [
 name = "bviz_ui_graph"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags",
  "bviz_graph_layout",
  "bviz_invocation",
  "bviz_parallel",
