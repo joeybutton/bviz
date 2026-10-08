@@ -9,9 +9,10 @@
 use fixedbitset::FixedBitSet;
 
 use super::ast::Function;
+use super::declared::TestRole;
 use super::narrow::left_out;
 use super::universe::Universe;
-use crate::attributes::{RowId, Stated};
+use crate::attributes::{RowId, Stated, Value};
 use crate::facets::Sym;
 use crate::graph::Kind;
 use crate::intern::Id;
@@ -24,6 +25,45 @@ struct Prerequisites {
     targets: Vec<Id>,
     /// Nodes standing for themselves alone.
     nodes: Vec<Id>,
+}
+
+/// The tags a test suite admits a test by (`TestsFunction.sortTagsBySense`):
+/// `-x` excludes a test tagged `x`, `+x` and `x` require it, and `manual`,
+/// marking the suite itself, does neither.
+struct TagFilter<'a> {
+    required: Vec<&'a str>,
+    excluded: Vec<&'a str>,
+}
+
+impl<'a> TagFilter<'a> {
+    fn of(tags: &[&'a str]) -> Self {
+        let excluded = tags.iter().filter(|tag| tag.starts_with('-')).count();
+        let mut filter = TagFilter {
+            required: Vec::with_capacity(tags.len() - excluded),
+            excluded: Vec::with_capacity(excluded),
+        };
+        for &tag in tags {
+            if let Some(excluded) = tag.strip_prefix('-') {
+                filter.excluded.push(excluded);
+            } else if let Some(required) = tag.strip_prefix('+') {
+                filter.required.push(required);
+            } else if tag != "manual" {
+                filter.required.push(tag);
+            }
+        }
+        filter
+    }
+
+    /// Whether every test passes, whatever its tags.
+    fn admits_all(&self) -> bool {
+        self.required.is_empty() && self.excluded.is_empty()
+    }
+
+    /// Whether a test whose tags and size are `tags` passes.
+    fn admits(&self, tags: &[&str]) -> bool {
+        !self.excluded.iter().any(|tag| tags.contains(tag))
+            && self.required.iter().all(|tag| tags.contains(tag))
+    }
 }
 
 /// An attribute by name, and its handle where some rule states it.
@@ -56,6 +96,128 @@ impl Universe {
             )?;
         }
         Ok(self.joined(named))
+    }
+
+    /// The tests among `value` and those the test suites among it name, as
+    /// `TestsFunction` reads them outside `--strict_test_suite`: each suite
+    /// keeps of the tests its `tests` and `$implicit_tests` name those its
+    /// own tags admit, and takes in the suites its `tests` name, each once.
+    pub(super) fn tests(&self, value: &FixedBitSet) -> Result<FixedBitSet, String> {
+        let [listed, implicit, tags, size] =
+            ["tests", "$implicit_tests", "tags", "size"].map(|name| self.attribute(name));
+        let mut tests = self.empty();
+        let mut expanded = self.empty();
+        let mut open: Vec<Id> = Vec::new();
+        for id in value.ones().map(|id| Id(id as u32)) {
+            match self.test_role(id) {
+                Some(TestRole::Test) => tests.insert(id.0 as usize),
+                Some(TestRole::Suite) if !expanded.put(id.0 as usize) => open.push(id),
+                Some(TestRole::Suite) | None => {}
+            }
+        }
+        let mut admitted = Prerequisites::default();
+        let (mut named, mut positions, mut strings) =
+            (Prerequisites::default(), Vec::new(), Vec::new());
+        while let Some(suite) = open.pop() {
+            let mut filter = None;
+            // `$implicit_tests` names tests alone.
+            for (attribute, names_suites) in [(listed, true), (implicit, false)] {
+                let name = attribute.name;
+                let context = |label: &str| {
+                    format!("couldn't expand '{name}' attribute of test_suite {label}: ")
+                };
+                self.prerequisites(
+                    Function::Tests,
+                    suite,
+                    attribute,
+                    &context,
+                    &mut positions,
+                    &mut named,
+                )?;
+                for (found, kept) in [
+                    (&mut named.targets, &mut admitted.targets),
+                    (&mut named.nodes, &mut admitted.nodes),
+                ] {
+                    for id in found.drain(..) {
+                        match self.test_role(id) {
+                            Some(TestRole::Test) => {
+                                let filter = match &mut filter {
+                                    Some(filter) => filter,
+                                    None => {
+                                        strings.clear();
+                                        self.strings(suite, tags, &mut strings)?;
+                                        filter.insert(TagFilter::of(&strings))
+                                    }
+                                };
+                                if self.admits(filter, id, [tags, size], &mut strings)? {
+                                    kept.push(id);
+                                }
+                            }
+                            Some(TestRole::Suite) if names_suites => {
+                                if !expanded.put(id.0 as usize) {
+                                    open.push(id);
+                                }
+                            }
+                            Some(TestRole::Suite) | None => {}
+                        }
+                    }
+                }
+            }
+        }
+        tests.union_with(&self.joined(admitted));
+        Ok(tests)
+    }
+
+    /// Whether `filter` admits the test `id` by the attributes holding its
+    /// tags and size, read only where the filter asks for any; `strings` is a
+    /// buffer the call reuses.
+    fn admits<'a>(
+        &'a self,
+        filter: &TagFilter<'_>,
+        id: Id,
+        tags_and_size: [Attribute<'_>; 2],
+        strings: &mut Vec<&'a str>,
+    ) -> Result<bool, String> {
+        if filter.admits_all() {
+            return Ok(true);
+        }
+        strings.clear();
+        for attribute in tags_and_size {
+            self.strings(id, attribute, strings)?;
+        }
+        Ok(filter.admits(strings))
+    }
+
+    /// What `id` is to `tests`, where it stands for a rule.
+    fn test_role(&self, id: Id) -> Option<TestRole> {
+        match self.index.kind(id) {
+            Some(Kind::Target | Kind::ConfiguredTarget) => {
+                self.declared.test_role(self.position(id)?)
+            }
+            _ => None,
+        }
+    }
+
+    /// Adds to `into` the strings the string or string list `attribute` of
+    /// `id` holds, none where the rule lacks it.
+    fn strings<'a>(
+        &'a self,
+        id: Id,
+        attribute: Attribute<'_>,
+        into: &mut Vec<&'a str>,
+    ) -> Result<(), String> {
+        let row = match self.attribute_of(id, attribute.handle) {
+            Stated::Row(row) => row,
+            Stated::Absent | Stated::Undescribed => return Ok(()),
+            Stated::LeftOut => return Err(left_out(Function::Tests, attribute.name)),
+        };
+        let resolve = |sym: &Sym| self.attributes.resolve(*sym);
+        match &self.attributes.row(row).value {
+            Value::String(string) => into.push(resolve(string)),
+            Value::Strings(strings) => into.extend(strings.iter().map(resolve)),
+            _ => {}
+        }
+        Ok(())
     }
 
     fn attribute<'a>(&self, name: &'a str) -> Attribute<'a> {

@@ -949,11 +949,11 @@ impl Command {
     /// `siblings`); query adds `SkyQueryEnvironment`'s `allrdeps` and
     /// `rbuildfiles`, read under `--universe_scope`; cquery adds
     /// `CQUERY_FUNCTIONS` and aquery `AQUERY_FUNCTIONS`. aquery's target
-    /// accessor reads no rule's prerequisites, failing `labels`
-    /// (`ConfiguredTargetValueAccessor.getPrerequisites`).
+    /// accessor reads no rule's prerequisites, failing `labels` and `tests`
+    /// of a test suite (`ConfiguredTargetValueAccessor.getPrerequisites`).
     pub fn reads(self, function: Function) -> bool {
         match function {
-            Function::Labels => self != Command::Aquery,
+            Function::Labels | Function::Tests => self != Command::Aquery,
             Function::AllRdeps
             | Function::RBuildFiles
             | Function::BuildFiles
@@ -971,7 +971,6 @@ impl Command {
             | Function::SamePkgDirectRdeps
             | Function::Some
             | Function::SomePath
-            | Function::Tests
             | Function::Visible => true,
             Function::RepoCategory
             | Function::RuleCategory

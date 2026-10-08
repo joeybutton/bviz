@@ -9,9 +9,9 @@ use crate::joint::{Joint, build_joint};
 use crate::provenance::{Input, InputSet};
 use crate::sources::{Deps, Sources};
 use crate::test_support::{
-    configuration, configured, configured_inputs, explicit, generated, label, label_list,
+    boolean, configuration, configured, configured_inputs, explicit, generated, label, label_list,
     name_attribute, nodep_label_list, package_group, rule, selector_list, source, string,
-    string_list, through,
+    string_list, suite_tests, through,
 };
 
 /// `attributes` with the `name` of `label` and the tags it leaves to their
@@ -336,4 +336,139 @@ fn generating_without_attributes() -> Joint {
         vec![name_attribute("//a:gen")],
     )];
     build_joint(None, None, Some(&targets), false)
+}
+
+/// A test rule `name` of `tags` and `size`, stating every attribute.
+fn test_rule(name: &str, tags: &[&str], size: &str) -> Target {
+    let attributes = vec![
+        name_attribute(name),
+        explicit(string_list("tags", tags)),
+        string("size", size),
+    ];
+    rule(name, "sh_test", &[], attributes)
+}
+
+/// A test suite `name` of `tags`, naming `tests` and, where those are none,
+/// `implicit` as its package's tests, stating every attribute.
+fn suite(name: &str, tags: &[&str], tests: &[&str], implicit: &[&str]) -> Target {
+    let mut attributes = vec![
+        name_attribute(name),
+        explicit(string_list("tags", tags)),
+        boolean("testonly", false),
+    ];
+    attributes.extend(suite_tests(tests, implicit));
+    let inputs: Vec<&str> = tests.iter().chain(implicit).copied().collect();
+    rule(name, "test_suite", &inputs, attributes)
+}
+
+/// A query of the tests and suites of packages `t` and `u`: `//t:all_tests`
+/// names `//t:fast` and `//u:suite`, which names `//u:slow` and, closing a
+/// cycle, `//t:all_tests`, both suites filtering by tags.
+fn suites() -> Joint {
+    let targets = [
+        suite(
+            "//t:all_tests",
+            &["-flaky", "manual"],
+            &["//t:fast", "//t:flaky", "//t:bin", "//u:suite"],
+            &[],
+        ),
+        suite("//t:implicit", &["small"], &[], &["//t:fast"]),
+        suite(
+            "//u:suite",
+            &["+large"],
+            &["//u:slow", "//u:small", "//t:all_tests"],
+            &[],
+        ),
+        test_rule("//t:fast", &[], "small"),
+        test_rule("//t:flaky", &["flaky"], "small"),
+        test_rule("//u:slow", &[], "large"),
+        test_rule("//u:small", &["manual"], "small"),
+        rule(
+            "//t:bin",
+            "cc_binary",
+            &[],
+            stating_every_attribute("//t:bin", Vec::new()),
+        ),
+    ];
+    build_joint(None, None, Some(&targets), false)
+}
+
+#[test]
+fn tests_expands_suites_by_their_tags() {
+    let joint = suites();
+    let universe = every(&joint);
+    let tests = |expr| query(&universe, &joint.names, expr).unwrap();
+
+    assert_eq!(tests("tests(//t:fast + //t:bin)"), ["//t:fast"]);
+    assert_eq!(
+        tests("tests(//t:all_tests)"),
+        ["//t:fast", "//u:slow"],
+        "a suite excludes a test tagged as it excludes, and a nested suite admits by its own tags \
+         alone"
+    );
+    assert_eq!(tests("tests(//u:suite)"), ["//t:fast", "//u:slow"]);
+    assert_eq!(
+        tests("tests(//t:implicit)"),
+        ["//t:fast"],
+        "a test's size passes as a tag"
+    );
+}
+
+/// A test's tags are read only by a suite filtering by some, and a suite's
+/// own only where it names a test.
+#[test]
+fn tests_fails_by_a_tag_the_dump_leaves_out_only_where_a_suite_reads_it() {
+    let targets = [
+        suite("//t:filtering", &["small"], &["//t:a"], &[]),
+        suite("//t:every", &[], &["//t:a"], &[]),
+        rule("//t:a", "sh_test", &[], vec![name_attribute("//t:a")]),
+        rule(
+            "//t:empty",
+            "test_suite",
+            &[],
+            [name_attribute("//t:empty")]
+                .into_iter()
+                .chain(suite_tests(&[], &[]))
+                .collect(),
+        ),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = every(&joint);
+
+    assert_eq!(
+        query(&universe, &joint.names, "tests(//t:every)").unwrap(),
+        ["//t:a"]
+    );
+    assert!((query(&universe, &joint.names, "tests(//t:empty)").unwrap()).is_empty());
+    assert_eq!(
+        query(&universe, &joint.names, "tests(//t:filtering)").unwrap_err(),
+        "tests() needs each rule's 'tags' attribute, which the graph's inputs state only \
+         under --proto:output_rule_attrs=all --proto:default_values"
+    );
+}
+
+/// A cquery of `//t:s`, a suite whose `tests` resolve to `//t:a` in its
+/// configuration, which is also built in an exec configuration.
+#[test]
+fn tests_of_a_configured_suite_are_its_configured_tests() {
+    let mut s = suite("//t:s", &[], &["//t:a"], &[]);
+    s.rule.as_mut().unwrap().configured_rule_input = configured_inputs(&[("//t:a", Some(1))]);
+    let cquery = [CqueryResult {
+        results: vec![
+            configured(s, 1),
+            configured(test_rule("//t:a", &[], "small"), 1),
+            configured(test_rule("//t:a", &[], "small"), 2),
+        ],
+        configurations: vec![
+            configuration(1, "aa11", "k8-fastbuild", false),
+            configuration(2, "bb22", "k8-opt-exec-ST-1", true),
+        ],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = every(&joint);
+
+    assert_eq!(
+        query(&universe, &joint.names, "tests(//t:s)").unwrap(),
+        ["ct://t:a#aa11"]
+    );
 }

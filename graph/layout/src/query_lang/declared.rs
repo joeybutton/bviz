@@ -30,6 +30,25 @@ pub(super) fn file_kind(kind: Kind) -> Option<&'static str> {
 pub(super) struct Declared {
     kinds: Column,
     rules: FixedBitSet,
+    test_roles: Vec<Option<TestRole>>,
+}
+
+/// What a rule is to `tests`: a test, by a rule class ending in `_test`, or
+/// a test suite (`TargetUtils.isTestRule`, `isTestSuiteRule`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum TestRole {
+    Test,
+    Suite,
+}
+
+impl TestRole {
+    fn of_class(class: &str) -> Option<TestRole> {
+        match class {
+            "test_suite" => Some(TestRole::Suite),
+            class if class.ends_with("_test") => Some(TestRole::Test),
+            _ => None,
+        }
+    }
 }
 
 impl Declared {
@@ -39,15 +58,19 @@ impl Declared {
         let strings = facets.strings();
         let mut kind_column = ColumnBuilder::with_capacity(targets.len());
         let mut rules = FixedBitSet::with_capacity(targets.len());
+        let mut test_roles = Vec::with_capacity(targets.len());
         let mut kind = String::new();
         for (at, &(id, _)) in targets.iter().enumerate() {
             let node_kind = index.kind(id);
             rules.set(at, node_kind == Some(Kind::Target));
             kind.clear();
+            let mut test_role = None;
             match node_kind {
                 Some(Kind::Target) => {
                     if let Some(class) = facets.rule_class(id) {
-                        kind.push_str(strings.resolve(class.sym()));
+                        let class = strings.resolve(class.sym());
+                        test_role = TestRole::of_class(class);
+                        kind.push_str(class);
                         kind.push(' ');
                     }
                     kind.push_str("rule");
@@ -61,10 +84,12 @@ impl Declared {
                 None => {}
             }
             kind_column.push((!kind.is_empty()).then_some(kind.as_str()));
+            test_roles.push(test_role);
         }
         Declared {
             kinds: kind_column.column,
             rules,
+            test_roles,
         }
     }
 
@@ -72,6 +97,10 @@ impl Declared {
     /// `source file`, `generated file` or `package group`.
     pub(super) fn kind(&self, at: usize) -> Option<&str> {
         self.kinds.get(at)
+    }
+
+    pub(super) fn test_role(&self, at: usize) -> Option<TestRole> {
+        self.test_roles[at]
     }
 
     /// The `name` attribute of the rule at `at`, the part of its `label`

@@ -109,7 +109,7 @@ impl Readable {
             Function::ToolConfigured if self.configured != Support::Available => Err(format!(
                 "{name}() requires every configured target's configuration"
             )),
-            Function::Labels => match self.rule_attributes {
+            Function::Labels | Function::Tests => match self.rule_attributes {
                 None => Err(format!("{name}() requires a query or a cquery")),
                 Some(Support::Unavailable { flag }) => {
                     Err(format!("{name}() requires a query or a cquery with {flag}"))

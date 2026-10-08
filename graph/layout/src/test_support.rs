@@ -230,6 +230,25 @@ pub(crate) fn explicit(attribute: Attribute) -> Attribute {
     }
 }
 
+/// `attribute` as one written in the BUILD file where `written`, and as one
+/// left to its default otherwise.
+pub(crate) fn explicit_where(written: bool, attribute: Attribute) -> Attribute {
+    match written {
+        true => explicit(attribute),
+        false => attribute,
+    }
+}
+
+/// A test suite's `tests`, written in its BUILD file where they name any, and
+/// its `$implicit_tests`, which Bazel sets as written in the BUILD file where
+/// `tests` is empty and leaves to its default otherwise.
+pub(crate) fn suite_tests(tests: &[&str], implicit: &[&str]) -> [Attribute; 2] {
+    [
+        explicit_where(!tests.is_empty(), label_list("tests", tests)),
+        explicit_where(tests.is_empty(), label_list("$implicit_tests", implicit)),
+    ]
+}
+
 /// The attribute `name` written as the concatenation of `selects`, each a
 /// list of branches: a condition label and the attribute whose value the
 /// branch takes. A branch of `None` takes `none`'s value, the default of the

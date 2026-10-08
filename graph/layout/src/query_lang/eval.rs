@@ -230,6 +230,11 @@ impl Universe {
                 let (values, _) = arguments()?;
                 self.labels(words(args)[0], &values[0]).map_err(fail)
             }
+            Evaluable::Tests => {
+                self.readable.check(function).map_err(fail)?;
+                let (values, _) = arguments()?;
+                self.tests(&values[0]).map_err(fail)
+            }
             Evaluable::RepoCategory => {
                 let regex = self.whole_regex(function, words(args)[0]).map_err(fail)?;
                 let (values, _) = arguments()?;
