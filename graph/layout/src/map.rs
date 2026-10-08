@@ -76,7 +76,15 @@ pub fn map_layout(base: Arc<Graph>, reduced: Arc<Graph>) -> MapLayout {
 /// itself is held by the [`MapLayout`] around it.
 struct Level {
     open: Arc<HashSet<Id>>,
-    view: OnceLock<LaidOut>,
+    view: OnceLock<Sighted>,
+}
+
+/// What deriving a level yields.
+struct Sighted {
+    view: LaidOut,
+    /// The closed containers a restriction drops whose contents the view
+    /// leaves out; none for a map of the whole placed graph.
+    withheld: usize,
 }
 
 impl Level {
@@ -139,28 +147,29 @@ impl Restriction {
 
     /// Takes out of `visible`, a level opening `open`, every node whose
     /// outermost placed container left closed is one this restriction drops,
-    /// and the edges meeting them.
+    /// and the edges meeting them; returns how many such containers held a
+    /// node taken out.
     fn sight(
         &self,
         visible: &mut Graph,
         containment: &Containment,
         open: &HashSet<Id>,
         expandable: &HashSet<Id>,
-    ) {
+    ) -> usize {
         let closed = |id: &Id| expandable.contains(id) && !open.contains(id);
         let mut unseen = vec![false; id_span(visible)];
+        let mut withheld: FxHashSet<Id> = FxHashSet::default();
         visible.nodes.retain(|node| {
-            let folded_into =
-                std::iter::successors(containment.parent(node.id), |&at| containment.parent(at))
-                    .filter(closed)
-                    .last();
-            let seen = folded_into.is_none_or(|container| self.keeps(container));
-            unseen[node.id.0 as usize] = !seen;
-            seen
+            let folded_into = ancestors(containment, node.id).filter(closed).last();
+            let dropped = folded_into.filter(|&container| !self.keeps(container));
+            withheld.extend(dropped);
+            unseen[node.id.0 as usize] = dropped.is_some();
+            dropped.is_none()
         });
         visible
             .edges
             .retain(|edge| !unseen[edge.from.0 as usize] && !unseen[edge.to.0 as usize]);
+        withheld.len()
     }
 }
 
@@ -174,12 +183,12 @@ impl MapLayout {
     /// The view at `index`, deriving it if this is the first call for it.
     pub fn level(&self, index: usize) -> &LaidOut {
         let level = self.level_at(index);
-        level.view.get_or_init(|| self.view_of(&level.open))
+        &level.view.get_or_init(|| self.view_of(&level.open)).view
     }
 
     /// The view at `index`, where it has been derived.
     pub fn derived(&self, index: usize) -> Option<&LaidOut> {
-        self.level_at(index).view.get()
+        Some(&self.level_at(index).view.get()?.view)
     }
 
     /// The derived level nearest `index`, the coarser of two equally near;
@@ -199,6 +208,13 @@ impl MapLayout {
 
     pub fn level_count(&self) -> usize {
         1 + self.finer.len()
+    }
+
+    /// How many closed containers the level at `index` leaves out what they
+    /// hold of, as a restriction drops them; `None` while that level is
+    /// underived.
+    pub fn withheld(&self, index: usize) -> Option<usize> {
+        Some(self.level_at(index).view.get()?.withheld)
     }
 
     /// The levels `base` leaves of this map, each drawn at the positions this
@@ -289,11 +305,11 @@ impl MapLayout {
 
     /// The view of `base` with `open` opened, drawn at its nodes' global
     /// positions.
-    fn view_of(&self, open: &HashSet<Id>) -> LaidOut {
+    fn view_of(&self, open: &HashSet<Id>) -> Sighted {
         let (mut visible, folding) = lod::collapse_folded(&self.base, open);
-        if let Some(restriction) = &self.restriction {
-            restriction.sight(&mut visible, &self.containment, open, &self.expandable);
-        }
+        let withheld = self.restriction.as_ref().map_or(0, |restriction| {
+            restriction.sight(&mut visible, &self.containment, open, &self.expandable)
+        });
         let mut connected: FxHashSet<(Id, Id)> =
             FxHashSet::with_capacity_and_hasher(visible.edges.len(), Default::default());
         connected.extend(visible.edges.iter().map(|e| (e.from, e.to)));
@@ -303,7 +319,7 @@ impl MapLayout {
         let mut connectors = connectors(&drawn, placed);
         self.transitions
             .mark(&mut connectors, |from, to| folding.pair(from, to));
-        LaidOut {
+        let view = LaidOut {
             boxes,
             connectors,
             // The frames are laid out by layout_flat, which numbers no node.
@@ -311,8 +327,14 @@ impl MapLayout {
             full_edges: connected.into_iter().collect(),
             width: self.drawing.width,
             height: self.drawing.height,
-        }
+        };
+        Sighted { view, withheld }
     }
+}
+
+/// The containers holding `id`, innermost first.
+fn ancestors(containment: &Containment, id: Id) -> impl Iterator<Item = Id> + '_ {
+    std::iter::successors(containment.parent(id), |&at| containment.parent(at))
 }
 
 /// A node's box in the one absolute frame every level draws in.
@@ -1300,6 +1322,24 @@ mod tests {
                 && drawn_pairs(finest, &names).contains(&("wide.5", "narrow.0")),
             "the finest level leaves out what the dropped container held",
         );
+    }
+
+    /// A level counts the dropped containers it leaves closed with what they
+    /// hold, of which the finest level, opening them all, leaves none.
+    #[test]
+    fn a_level_counts_the_dropped_containers_it_withholds() {
+        let (base, names) = towers();
+        let map = mapped(&base);
+        let sliced = restrict(&map, &base, &names, &["wide", "mid", "narrow"]);
+        let finest = sliced.level_count() - 1;
+
+        assert_eq!(sliced.withheld(0), None);
+        assert!(box_of(sliced.level(0), &names, "lone").is_some());
+        assert_eq!(sliced.withheld(0), Some(3));
+        sliced.level(finest);
+        assert_eq!(sliced.withheld(finest), Some(0));
+        map.level(0);
+        assert_eq!(map.withheld(0), Some(0));
     }
 
     #[test]

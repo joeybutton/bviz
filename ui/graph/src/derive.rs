@@ -149,6 +149,20 @@ impl Drawn {
         }
     }
 
+    /// Whether [`view`](Self::view) at `zoom` is a map level leaving out what
+    /// more closed containers hold than it draws boxes.
+    pub(crate) fn withholds_most(&self, zoom: f32) -> bool {
+        match self {
+            Self::Layered { .. } => false,
+            Self::Map { map, .. } => {
+                let level = shown_level(map, zoom);
+                map.withheld(level)
+                    .zip(map.derived(level))
+                    .is_some_and(|(withheld, view)| withheld > view.boxes.len())
+            }
+        }
+    }
+
     /// Which of a map's levels [`view`](Self::view) draws at `zoom`; `None` for a
     /// layered layout, which has no pyramid.
     pub(crate) fn level(&self, zoom: f32) -> Option<Level> {

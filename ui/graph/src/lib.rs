@@ -655,6 +655,17 @@ impl GraphPanel {
                     .flex()
                     .child(bviz_ui_components::centered_notice(notice, &palette.colors))
             }))
+            .children(
+                boxes::every_class_hidden(self.derived.filter(), &self.box_classes)
+                    .filter(|_| zoom.is_some_and(|zoom| drawn.withholds_most(zoom)))
+                    .map(|notice| {
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .child(bviz_ui_components::centered_notice(notice, &palette.colors))
+                    }),
+            )
             .child(
                 // What the drawing itself cannot state, held clear of the graph
                 // at the foot of the canvas.

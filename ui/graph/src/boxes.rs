@@ -50,6 +50,22 @@ pub(crate) fn box_options(filter: &Filter, classes: &[BoxClass]) -> Vec<MultiOpt
         .collect()
 }
 
+/// What a map level leaving out most of what it would draw says, where
+/// `filter` hides every box class of `classes`. Showing the outermost class
+/// gives the coarsest levels their boxes back.
+pub(crate) fn every_class_hidden(filter: &Filter, classes: &[BoxClass]) -> Option<String> {
+    let hidden = rules::hidden(filter);
+    let outermost = *classes.first()?;
+    let all = classes.iter().all(|class| hidden.contains(class));
+    all.then(|| {
+        format!(
+            "Every box type is hidden, so most of this zoom is left out. Show {} in the \
+             boxes menu, or zoom in.",
+            box_label(outermost)
+        )
+    })
+}
+
 /// Takes up the box classes a freshly read graph carries and states the menu
 /// over them.
 pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
@@ -225,6 +241,28 @@ mod tests {
                 "{class:?}"
             );
         }
+    }
+
+    /// The map explains an empty level only while every class is hidden, and
+    /// points at the outermost one.
+    #[test]
+    fn only_hiding_every_class_explains_an_empty_level() {
+        let classes = carried_boxes(&graph());
+        let hiding_all = boxes_chosen(
+            &Filter::default(),
+            &classes,
+            &set_all(0..classes.len(), false),
+        );
+        let notice = every_class_hidden(&hiding_all, &classes).expect("every class is hidden");
+        assert!(
+            notice.contains("Show packages in the boxes menu"),
+            "{notice}"
+        );
+
+        let showing_one = rules::set_hidden(&hiding_all, BoxClass::ConfiguredTarget, false);
+        assert_eq!(every_class_hidden(&showing_one, &classes), None);
+        assert_eq!(every_class_hidden(&Filter::default(), &classes), None);
+        assert_eq!(every_class_hidden(&hiding_all, &[]), None);
     }
 
     /// A rule the control did not write is none of its business, so a click
