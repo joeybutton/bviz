@@ -1,21 +1,23 @@
 //! Completion of the word typed into the query field: the graph's target
-//! labels, its packages in both wildcard forms, its repositories, and the
-//! query functions where one can stand, matched against the word under the
-//! cursor and listed under the field.
+//! labels, its packages in both wildcard forms, its repositories, the query
+//! functions where one can stand, and the words of a function's argument
+//! that is one of a vocabulary, matched against the word under the cursor and
+//! listed under the field.
 
 use super::{AcceptCompletion, GraphPanel, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
-use crate::model::{Prepared, Shared};
-use bviz_graph_layout::query_lang::{ArgType, Function, Params, Place, word_at, written_word};
+use crate::model::Prepared;
+use bviz_graph_layout::query_lang::{
+    ArgType, Command, Function, Params, Place, Readable, Vocabulary, word_at, written_word,
+};
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, key_text_within, list_scrollbar,
-    menu_chrome,
+    ListScroll, TextTooltip, TooltipColors, key_text_within, list_scrollbar, menu_chrome,
 };
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
@@ -59,6 +61,7 @@ enum Named {
     Package,
     Repository,
     Function(Function),
+    Word(Vocabulary),
 }
 
 impl Named {
@@ -68,6 +71,9 @@ impl Named {
             Named::Package => "package",
             Named::Repository => "repository",
             Named::Function(_) => "function",
+            Named::Word(Vocabulary::RepoCategory) => "repository origin",
+            Named::Word(Vocabulary::RuleCategory) => "rule category",
+            Named::Word(Vocabulary::Configuration) => "configuration",
         }
     }
 }
@@ -75,21 +81,26 @@ impl Named {
 /// What a word standing at a place is offered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Offers {
-    functions: bool,
+    ahead: Option<Ahead>,
     patterns: bool,
+}
+
+/// What a word is offered ahead of the graph's patterns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ahead {
+    Functions,
+    Words(Vocabulary),
 }
 
 impl Offers {
     fn at(place: Place) -> Offers {
-        let (functions, patterns) = match place {
-            Place::Pattern => (false, true),
-            Place::Operand => (true, true),
-            Place::Callee => (true, false),
+        let (ahead, patterns) = match place {
+            Place::Pattern => (None, true),
+            Place::Operand => (Some(Ahead::Functions), true),
+            Place::Callee => (Some(Ahead::Functions), false),
+            Place::Word(vocabulary) => (Some(Ahead::Words(vocabulary)), false),
         };
-        Offers {
-            functions,
-            patterns,
-        }
+        Offers { ahead, patterns }
     }
 }
 
@@ -105,27 +116,88 @@ fn function_completion(index: u32) -> Completion<'static> {
 }
 
 /// The rows of the functions `word` matches, ranked as the graph's patterns
-/// are; few enough to match on the UI thread as the word changes.
+/// are.
 fn function_rows(word: &str) -> Vec<Row> {
-    let names = (0u32..).zip(Function::ALL.map(Function::name));
-    fuzzy::rank_few(names, word, |_| Standing {
+    rank_few(Function::ALL.map(Function::name), word)
+}
+
+/// `candidates` ranked for `word` as the graph's patterns are, each row
+/// holding its index among them; few enough to match on the UI thread as the
+/// word changes.
+fn rank_few<'a>(candidates: impl IntoIterator<Item = &'a str>, word: &str) -> Vec<Row> {
+    fuzzy::rank_few((0u32..).zip(candidates), word, |_| Standing {
         path: 0..0,
         drawn: false,
         weight: 0,
     })
 }
 
-/// Whether a command the graph `shared` was read from reads `function`; one
-/// none reads is bviz's own extension over that graph.
-fn read_by_graph(shared: &Shared, function: Function) -> bool {
-    let inputs = shared.inputs;
-    inputs.inputs().any(|input| command(input).reads(function))
+/// The completions ranked on the UI thread as the word changes.
+enum Few {
+    /// Each row's candidate is an index into [`Function::ALL`].
+    Functions(Vec<Row>),
+    /// Each row's candidate is an index into the vocabulary's words.
+    Words(Vocabulary, Vec<Row>),
 }
 
-/// One pattern or function the field offers to complete a word with.
+impl Few {
+    fn rows(&self) -> &[Row] {
+        match self {
+            Few::Functions(rows) | Few::Words(_, rows) => rows,
+        }
+    }
+
+    /// The completion `row`, one of [`Few::rows`], offers.
+    fn completion(&self, row: &Row) -> Completion<'static> {
+        match self {
+            Few::Functions(_) => function_completion(row.candidate),
+            Few::Words(vocabulary, _) => Completion {
+                text: vocabulary.words()[row.candidate as usize],
+                path: 0..0,
+                named: Named::Word(*vocabulary),
+                weight: 0,
+            },
+        }
+    }
+}
+
+/// The tooltip of every row offering one of [`Function::EXTENSIONS`] that
+/// evaluates over the graph.
+const EXTENSION_NOTE: &str = "bviz extension, not part of Bazel's query language";
+
+/// The kind a row offering `function` names, and its tooltip, if any, over a
+/// graph `commands` were read from whose data `readable` states.
+fn function_note(
+    function: Function,
+    commands: &[Command],
+    readable: Readable,
+) -> (&'static str, Option<String>) {
+    let kind = match function.is_extension() {
+        true => "bviz extension",
+        false => "function",
+    };
+    let note = (function.unevaluable())
+        .or_else(|| readable.check(function).err())
+        .or_else(|| function.is_extension().then(|| EXTENSION_NOTE.to_owned()))
+        .or_else(|| {
+            if commands.iter().any(|command| command.reads(function)) {
+                return None;
+            }
+            let commands: Vec<&str> = commands.iter().map(|command| command.name()).collect();
+            Some(format!(
+                "{}() is no {} function; bviz evaluates it",
+                function.name(),
+                commands.join(" or ")
+            ))
+        });
+    (kind, note)
+}
+
+/// One pattern, function or word of a vocabulary the field offers to complete
+/// a word with.
 struct Completion<'a> {
-    /// The pattern unquoted, or the function's name, which a word is matched
-    /// against.
+    /// The pattern unquoted, the function's name or the vocabulary's word,
+    /// which a word is matched against.
     text: &'a str,
     /// The chars of `text` leading up to the name of what it names.
     path: Range<u32>,
@@ -152,6 +224,7 @@ pub(crate) struct Completions {
     /// The targets, as their indices among `candidates`.
     targets: Vec<u32>,
     patterns: Vec<Pattern>,
+    readable: Readable,
 }
 
 impl Completions {
@@ -169,10 +242,12 @@ impl Completions {
             .collect();
         let labels = targets.iter().map(|&index| &*held.get(index).text);
         let patterns = patterns(labels);
+        let readable = Readable::of(&shared.base, &shared.capabilities);
         Completions {
             candidates,
             targets,
             patterns,
+            readable,
         }
     }
 
@@ -277,14 +352,13 @@ pub(super) struct Completer {
     closed_at: Option<(SharedString, Option<Range<usize>>)>,
 }
 
-/// What the field offers, listed functions first, then the graph's
+/// What the field offers, listed [`Few`] rows first, then the graph's
 /// patterns.
 struct Offered {
     completions: Prepared<Completions>,
     /// Matches the word against the graph's patterns.
     matching: Matching,
-    /// The functions the word matches, as indices into [`Function::ALL`].
-    functions: Vec<Row>,
+    few: Few,
     /// Where the word the rows complete stood in the field as it was matched.
     word: Option<Range<usize>>,
     /// What the word is offered.
@@ -304,17 +378,18 @@ impl Offered {
     }
 
     fn rows(&self) -> usize {
-        self.functions.len() + self.pattern_rows().len()
+        self.few.rows().len() + self.pattern_rows().len()
     }
 
     /// The row at `at`, with what it completes the word as. A pattern's row
     /// is listed only once the patterns are prepared, so reading one never
-    /// waits on their preparation; a function's needs none.
+    /// waits on their preparation; a [`Few`] row needs none.
     fn row(&self, at: usize) -> Option<(Completion<'_>, &Row)> {
-        match self.functions.get(at) {
-            Some(row) => Some((function_completion(row.candidate), row)),
+        let few = self.few.rows();
+        match few.get(at) {
+            Some(row) => Some((self.few.completion(row), row)),
             None => {
-                let row = self.pattern_rows().get(at - self.functions.len())?;
+                let row = self.pattern_rows().get(at - few.len())?;
                 Some((self.completions.get().get(row.candidate), row))
             }
         }
@@ -322,7 +397,7 @@ impl Offered {
 
     /// Whether the row at `at` was ranked for the word as it stands.
     fn current(&self, at: usize) -> bool {
-        at < self.functions.len() || self.matching.current()
+        at < self.few.rows().len() || self.matching.current()
     }
 }
 
@@ -349,7 +424,7 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         view.chips.completer.offered = Some(Offered {
             completions: completions.clone(),
             matching: view.matchers.take(),
-            functions: Vec::new(),
+            few: Few::Functions(Vec::new()),
             word: None,
             offers: Offers::at(Place::Pattern),
             aimed: None,
@@ -368,9 +443,13 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let text = field.text(cx);
     let typed = word_at(&text, field.cursor(cx));
     let offers = typed.as_ref().map(|word| Offers::at(word.place));
-    let functions = match &typed {
-        Some(word) if offers.is_some_and(|offers| offers.functions) => function_rows(word.text),
-        _ => Vec::new(),
+    let few = match (&typed, offers.and_then(|offers| offers.ahead)) {
+        (Some(word), Some(Ahead::Functions)) => Few::Functions(function_rows(word.text)),
+        (Some(word), Some(Ahead::Words(vocabulary))) => Few::Words(
+            vocabulary,
+            rank_few(vocabulary.words().iter().copied(), word.text),
+        ),
+        _ => Few::Functions(Vec::new()),
     };
     let query = match &typed {
         Some(word) if offers.is_some_and(|offers| offers.patterns) => word.text.to_owned(),
@@ -381,7 +460,7 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     offered.word = word;
-    offered.functions = functions;
+    offered.few = few;
     offered.offers = offers.unwrap_or(Offers::at(Place::Pattern));
     offered.aimed = None;
     view.chips.completer.scroll.to_top();
@@ -591,13 +670,15 @@ pub(super) fn list(
         let Some(offered) = view.chips.completer.offered.as_ref() else {
             return Vec::new();
         };
-        let shared = offered.completions.shared();
+        let inputs = offered.completions.shared().inputs.inputs();
+        let commands: Vec<Command> = inputs.map(command).collect();
+        let readable = offered.completions.get().readable;
         range
             .filter_map(|index| {
                 let (completion, row) = offered.row(index)?;
-                let read = match completion.named {
-                    Named::Function(function) => read_by_graph(shared, function),
-                    _ => true,
+                let (kind, note) = match completion.named {
+                    Named::Function(function) => function_note(function, &commands, readable),
+                    named => (named.name(), None),
                 };
                 let accepts = match offered.aimed {
                     Some(aimed) => (aimed == index).then_some(Accepts::Aimed),
@@ -607,7 +688,8 @@ pub(super) fn list(
                     completion: &completion,
                     row,
                     index,
-                    read,
+                    kind,
+                    note,
                     accepts,
                     accepts_keys: accepts.and_then(|accepts| accepts.keys(cx)),
                 };
@@ -618,7 +700,6 @@ pub(super) fn list(
     .flex_1()
     .min_h_0()
     .w_full()
-    .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(view.chips.completer.scroll.uniform_handle());
     let sheet = menu_chrome::sheet(&palette.colors)
         .w(LIST_WIDTH)
@@ -650,9 +731,9 @@ struct Listed<'a> {
     completion: &'a Completion<'a>,
     row: &'a Row,
     index: usize,
-    /// Whether a command the graph was read from reads the row's function;
-    /// true for a pattern.
-    read: bool,
+    kind: &'static str,
+    /// The row's tooltip.
+    note: Option<String>,
     accepts: Option<Accepts>,
     /// The keys that accept the row, where any do.
     accepts_keys: Option<SharedString>,
@@ -660,14 +741,14 @@ struct Listed<'a> {
 
 /// One row: the pattern or the function's signature with the characters the
 /// word matched picked out, and what it names. A function no graph
-/// evaluates is dimmed, and one no command of this graph reads is marked as
-/// bviz's own; the tooltip says why.
+/// evaluates is dimmed.
 fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Stateful<Div> {
     let Listed {
         completion,
         row,
         index,
-        read,
+        kind,
+        note,
         accepts,
         accepts_keys,
     } = listed;
@@ -685,72 +766,65 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         }
         None => (completion.text.to_string(), completion.path.clone()),
     };
-    let unevaluable = function.and_then(Function::unevaluable);
-    let kind = match read {
-        true => completion.named.name(),
-        false => "bviz function",
-    };
-    let why = unevaluable.clone().or_else(|| {
-        let name = function.filter(|_| !read)?.name();
-        Some(format!(
-            "no Bazel command this graph was read from has {name}(); bviz evaluates it"
-        ))
-    });
-    let ink = match unevaluable {
+    let ink = match function.and_then(Function::unevaluable) {
         Some(_) => colors.text_disabled,
         None => colors.text,
     };
     let aimed = accepts == Some(Accepts::Aimed);
-    menu_chrome::aimed_row(("chip-completion", index).into(), colors, aimed)
-        .when_some(why, |row, why| {
-            row.tooltip(TextTooltip::builder(
-                why.into(),
-                TooltipColors::from_colors(colors),
-            ))
-        })
-        .w_full()
-        .on_click(move |event: &ClickEvent, window, cx| {
-            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
-                CompletionIntent::Accept => {
-                    entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
-                    true
-                }
-            });
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis_start()
-                .text_color(ink)
-                .child(fuzzy::highlighted(
-                    text.into(),
-                    &muted,
-                    &row.matched,
-                    colors.text_muted,
-                    palette.highlight.into(),
-                )),
-        )
-        .children(accepts_keys.map(|keys| {
-            div()
-                .flex_none()
-                .px_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(colors.text_muted)
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child(keys)
-        }))
-        .child(
-            div()
-                .flex_none()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child(kind),
-        )
+    menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
+        ("chip-completion", index).into(),
+        colors,
+        aimed,
+    ))
+    .when_some(note, |row, note| {
+        row.tooltip(TextTooltip::builder(
+            note.into(),
+            TooltipColors::from_colors(colors),
+        ))
+    })
+    .w_full()
+    .on_click(move |event: &ClickEvent, window, cx| {
+        GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+            CompletionIntent::Accept => {
+                entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+                true
+            }
+        });
+    })
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis_start()
+            .text_color(ink)
+            .child(fuzzy::highlighted(
+                text.into(),
+                &muted,
+                &row.matched,
+                colors.text_muted,
+                palette.highlight.into(),
+            )),
+    )
+    .children(accepts_keys.map(|keys| {
+        div()
+            .flex_none()
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.text_muted)
+            .text_xs()
+            .text_color(colors.text_muted)
+            .child(keys)
+    }))
+    .child(
+        div()
+            .flex_none()
+            .text_xs()
+            .text_color(colors.text_muted)
+            .child(kind),
+    )
 }
 
 /// How a row reads `function`: its name and Bazel's signature for it, an
@@ -813,6 +887,67 @@ mod tests {
         };
         assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
         assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+    }
+
+    /// What a graph `holding` nodes of those kinds states, every axis
+    /// available.
+    fn readable(holding: &[Kind]) -> Readable {
+        let nodes =
+            (holding.iter().enumerate()).map(|(at, &kind)| bviz_graph_layout::graph::Node {
+                id: Id(at as u32),
+                label: format!("n{at}"),
+                kind,
+                group: false,
+                parent: None,
+            });
+        let graph = bviz_graph_layout::graph::Graph {
+            nodes: nodes.collect(),
+            edges: Vec::new(),
+        };
+        let capabilities = bviz_graph_layout::capability::CapabilitiesBuilder::default().seal();
+        Readable::of(&graph, &capabilities)
+    }
+
+    /// An extension says it is bviz's own whatever commands the graph was
+    /// read from, unless the graph lacks what it reads.
+    #[test]
+    fn an_extension_is_noted_as_bviz_own_unless_the_graph_lacks_its_data() {
+        let with_actions = readable(&[Kind::ConfiguredTarget, Kind::Action]);
+        let note = |commands: &[Command], readable| {
+            function_note(Function::RunfilesPlumbing, commands, readable)
+        };
+        let own = ("bviz extension", Some(EXTENSION_NOTE.to_owned()));
+        assert_eq!(note(&[Command::Aquery], with_actions), own);
+        assert_eq!(note(&[Command::Cquery, Command::Aquery], with_actions), own);
+        let without_actions = readable(&[Kind::ConfiguredTarget]);
+        assert_eq!(
+            note(&[Command::Cquery], without_actions),
+            (
+                "bviz extension",
+                Some("runfiles_plumbing() requires an aquery".to_owned())
+            )
+        );
+    }
+
+    /// A Bazel function the graph's commands read carries no note; one they
+    /// do not is noted as evaluated by bviz, or as needing what the graph
+    /// lacks.
+    #[test]
+    fn a_bazel_function_is_noted_only_off_the_graph_commands() {
+        let targets = readable(&[Kind::Target]);
+        let note = |function, commands: &[Command]| function_note(function, commands, targets);
+        assert_eq!(note(Function::Deps, &[Command::Query]), ("function", None));
+        assert_eq!(
+            note(Function::Config, &[Command::Query, Command::Aquery]),
+            (
+                "function",
+                Some("config() is no query or aquery function; bviz evaluates it".to_owned())
+            )
+        );
+        assert_eq!(
+            note(Function::Inputs, &[Command::Query]),
+            ("function", Some("inputs() requires an aquery".to_owned()))
+        );
     }
 
     #[test]
@@ -960,20 +1095,53 @@ mod tests {
         );
     }
 
-    /// A function is offered only where a function can stand, and only a
-    /// function before a `(`.
+    /// A function is offered only where a function can stand, only a
+    /// function before a `(`, and only a vocabulary's words where an argument
+    /// is one of them.
     #[test]
     fn what_a_word_is_offered_follows_where_it_stands() {
         let offers = |place| {
-            let Offers {
-                functions,
-                patterns,
-            } = Offers::at(place);
-            (functions, patterns)
+            let Offers { ahead, patterns } = Offers::at(place);
+            (ahead, patterns)
         };
-        assert_eq!(offers(Place::Operand), (true, true));
-        assert_eq!(offers(Place::Callee), (true, false));
-        assert_eq!(offers(Place::Pattern), (false, true));
+        let functions = Some(Ahead::Functions);
+        assert_eq!(offers(Place::Operand), (functions, true));
+        assert_eq!(offers(Place::Callee), (functions, false));
+        assert_eq!(offers(Place::Pattern), (None, true));
+        let origins = Place::Word(Vocabulary::RepoCategory);
+        assert_eq!(
+            offers(origins),
+            (Some(Ahead::Words(Vocabulary::RepoCategory)), false)
+        );
+    }
+
+    /// A word of a vocabulary is offered as itself, written in place of the
+    /// word typed.
+    #[test]
+    fn a_vocabularys_words_are_ranked_and_written_out() {
+        let few = |vocabulary: Vocabulary, word: &str| {
+            Few::Words(
+                vocabulary,
+                rank_few(vocabulary.words().iter().copied(), word),
+            )
+        };
+        let texts = |few: &Few| -> Vec<&str> {
+            (few.rows().iter())
+                .map(|row| few.completion(row).text)
+                .collect()
+        };
+        assert_eq!(texts(&few(Vocabulary::RepoCategory, "mod"))[0], "module");
+        assert_eq!(texts(&few(Vocabulary::RuleCategory, "plu")), ["plumbing"]);
+        assert_eq!(texts(&few(Vocabulary::Configuration, "any")), ["anyexec"]);
+        let module = few(Vocabulary::RepoCategory, "mod");
+        let completion = module.completion(&module.rows()[0]);
+        let inserted = insertion("repo_category(mod", 17, &completion).unwrap();
+        assert_eq!((inserted.span, &*inserted.text), (14..17, "module"));
+        let every = few(Vocabulary::RepoCategory, "");
+        assert_eq!(texts(&every).len(), Vocabulary::RepoCategory.words().len());
+        let completion = every.completion(&every.rows()[0]);
+        let inserted = insertion("repo_category()", 14, &completion).unwrap();
+        assert_eq!(inserted.span, 14..14);
     }
 
     /// The functions a word matches are ranked as patterns are, a name the

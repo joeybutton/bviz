@@ -3,12 +3,12 @@
 
 use std::ops::Range;
 
-use super::ast::{ArgType, Function, quoted};
+use super::ast::{ArgType, Function, Vocabulary, quoted};
 use super::lex::{self, Lone, TokenKind};
 use std::borrow::Cow;
 
-/// A word being typed where a target pattern or a function's name can
-/// stand.
+/// A word being typed where a target pattern, a function's name or a word of
+/// a vocabulary can stand.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TypedWord<'a> {
     /// Where the word is written, its quotes and all.
@@ -29,18 +29,22 @@ pub enum Place {
     Operand,
     /// The name of a function, followed by its `(`.
     Callee,
+    /// An argument a function reads as one of the words of a vocabulary.
+    Word(Vocabulary),
 }
 
 /// The word of `input` the cursor at byte `cursor` stands in or just past,
-/// and what it can be there; `None` where it can be neither a pattern nor a
-/// function's name.
+/// and what it can be there; `None` where it can be none of a pattern, a
+/// function's name or a word of a vocabulary. Where no word stands there yet,
+/// the empty word at the cursor where an argument of a vocabulary opens, so
+/// that the vocabulary is offered before its first letter is typed.
 ///
 /// Words are scanned as the lexer scans them, but for a quotation still open,
 /// which runs on from the cursor only as far as an unquoted word would, so
-/// that what follows it is no part of the word. A word is neither where it
-/// stands for an argument a function reads as a word or a number, nor
-/// unquoted where it is a keyword, a variable (`$x`, or the name `let`
-/// binds), or a number; within `set(…)` it is a pattern alone.
+/// that what follows it is no part of the word. A word is none of them where
+/// it stands for an argument a function reads as a number or as a word of no
+/// vocabulary, nor unquoted where it is a keyword, a variable (`$x`, or the
+/// name `let` binds), or a number; within `set(…)` it is a pattern alone.
 pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
     let bytes = input.as_bytes();
     let cursor = cursor.min(bytes.len());
@@ -51,6 +55,8 @@ pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
     // before the next one, which names what a `(` opens.
     let mut frames: Vec<Frame> = Vec::new();
     let mut callee: Option<&str> = None;
+    // Whether no word stands since the last `(` or `,`.
+    let mut argument_open = false;
     while pos < bytes.len() && pos < cursor {
         let start = pos;
         let byte = bytes[pos];
@@ -60,6 +66,7 @@ pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
                 if let Lone::Token(kind) = lone {
                     after_let = false;
                     operand = opens_operand(kind);
+                    argument_open = matches!(kind, TokenKind::LParen | TokenKind::Comma);
                     enclose(&mut frames, kind, callee.take());
                 }
                 continue;
@@ -82,6 +89,7 @@ pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
             }
         };
         pos = span.end;
+        argument_open = false;
         let (bound, at_operand) = (after_let, operand);
         after_let = !quoted && text == "let";
         operand = !quoted && OPERATOR_WORDS.contains(&text);
@@ -91,6 +99,8 @@ pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
         }
         let place = match (frames.last().map_or(Slot::Expr, Frame::slot), quoted) {
             (Slot::Other, _) => None,
+            (Slot::Word(_), false) if lex::is_reserved(text) || text.starts_with('$') => None,
+            (Slot::Word(vocabulary), _) => Some(Place::Word(vocabulary)),
             (Slot::Expr, false) => unquoted_place(text, &input[span.end..], bound, at_operand),
             (Slot::Expr, true) => Some(Place::Pattern),
             (Slot::Pattern, false) => unquoted_place(text, &input[span.end..], bound, false)
@@ -99,7 +109,17 @@ pub fn word_at(input: &str, cursor: usize) -> Option<TypedWord<'_>> {
         };
         return place.map(|place| TypedWord { span, text, place });
     }
-    None
+    let word_follows = bytes
+        .get(cursor)
+        .is_some_and(|&byte| lex::lone(byte).is_none());
+    match frames.last().map(Frame::slot) {
+        Some(Slot::Word(vocabulary)) if argument_open && !word_follows => Some(TypedWord {
+            span: cursor..cursor,
+            text: "",
+            place: Place::Word(vocabulary),
+        }),
+        _ => None,
+    }
 }
 
 /// What a `(` opens.
@@ -117,8 +137,11 @@ enum Slot {
     Expr,
     /// A target pattern alone.
     Pattern,
-    /// Something completed by neither a pattern nor a function: a word or a
-    /// number a function reads, or an argument past its last.
+    /// A word a function reads as one of a vocabulary.
+    Word(Vocabulary),
+    /// Something completed by none of a pattern, a function or a vocabulary:
+    /// a number or a word of no vocabulary a function reads, or an argument
+    /// past its last.
     Other,
 }
 
@@ -130,7 +153,11 @@ impl Frame {
             Frame::Set => Slot::Pattern,
             Frame::Call { function, argument } => match function.signature().param(*argument) {
                 Some(ArgType::Expr) => Slot::Expr,
-                Some(ArgType::Word | ArgType::Int) | None => Slot::Other,
+                Some(ArgType::Word) => match function.vocabulary(*argument) {
+                    Some(vocabulary) => Slot::Word(vocabulary),
+                    None => Slot::Other,
+                },
+                Some(ArgType::Int) | None => Slot::Other,
             },
         }
     }
@@ -318,6 +345,47 @@ mod tests {
         assert_eq!(place("rd|eps(x)"), Some(Place::Callee));
         assert_eq!(place("deps(rd|eps(x))"), Some(Place::Callee));
         assert_eq!(place("kind(rd|eps(x)"), None);
+    }
+
+    /// A word a function reads as one of a vocabulary is completed by its
+    /// words, quoted or not.
+    #[test]
+    fn a_word_of_a_vocabulary_is_completed_by_it() {
+        assert_eq!(
+            place("repo_category(ma|"),
+            Some(Place::Word(Vocabulary::RepoCategory))
+        );
+        assert_eq!(
+            place("rule_category('te|"),
+            Some(Place::Word(Vocabulary::RuleCategory))
+        );
+        assert_eq!(
+            place("config(//a, ta|"),
+            Some(Place::Word(Vocabulary::Configuration))
+        );
+        assert_eq!(place("config(ta|"), Some(Place::Operand));
+        assert_eq!(place("repo_category(main, ma|"), Some(Place::Operand));
+        assert_eq!(place("repo_category($v|"), None);
+    }
+
+    /// An argument of a vocabulary opened and still empty is completed by
+    /// it; no other empty place is.
+    #[test]
+    fn an_empty_argument_of_a_vocabulary_is_completed_by_it() {
+        assert_eq!(at("repo_category(|"), word("", ""));
+        assert_eq!(
+            place("repo_category( |)"),
+            Some(Place::Word(Vocabulary::RepoCategory))
+        );
+        assert_eq!(
+            place("config(//a, |"),
+            Some(Place::Word(Vocabulary::Configuration))
+        );
+        assert_eq!(place("repo_category(main |"), None);
+        assert_eq!(place("repo_category(|main)"), None);
+        assert_eq!(place("deps(|"), None);
+        assert_eq!(place("kind(|"), None);
+        assert_eq!(place("|"), None);
     }
 
     /// A canonical repository name holds `+`, which continues a word that

@@ -87,11 +87,24 @@ fn reduce_view(
     bviz_graph_layout::reduce::transitive_reduction(&view)
 }
 
+/// The most connectors a layered layout is attempted with. ELK's layered layout
+/// grows about quadratically in the connectors it routes, so well past this it
+/// runs for minutes and outgrows a desktop machine's memory.
+pub(crate) const MAX_LAID_OUT_CONNECTORS: usize = 20_000;
+
+/// A view [`relayout`] leaves unlaid, past [`MAX_LAID_OUT_CONNECTORS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TooDense {
+    pub(crate) connectors: usize,
+}
+
 /// Builds the display graph with the given ids expanded and lays it out: fold
 /// every unexpanded container away, merge interchangeable leaves, then lay out
 /// only the resulting visible view, transitively reduced when `reduced`. The
 /// result's `full_edges` is the visible view's unreduced connectivity, for
 /// hover. Returned beside it is the remap [`quotient::quotient`] returns.
+/// A view with more connectors to route than [`MAX_LAID_OUT_CONNECTORS`] is
+/// [`TooDense`] and is not laid out.
 ///
 /// Each connector carries the transition of `transitions`, found over `base`,
 /// that the edges folded into it cross.
@@ -109,7 +122,7 @@ pub(crate) fn relayout(
     reduced: bool,
     transitions: &Transitions,
     pinned: Option<&HashMap<Id, Anchor>>,
-) -> (LaidOut, BTreeMap<Id, Id>) {
+) -> Result<(LaidOut, BTreeMap<Id, Id>), TooDense> {
     let (visible, folding) = bviz_graph_layout::lod::collapse_folded(base, expanded);
     let (mut view, remap) = quotient::quotient(&visible, expanded, names);
     let full_edges: Vec<(Id, Id)> = view
@@ -122,6 +135,15 @@ pub(crate) fn relayout(
     if reduced {
         view = reduce_view(view, reduced_base, expanded, &remap);
     }
+    let connectors = view
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to))
+        .collect::<FxHashSet<_>>()
+        .len();
+    if connectors > MAX_LAID_OUT_CONNECTORS {
+        return Err(TooDense { connectors });
+    }
     let mut laid = match pinned {
         Some(anchors) => layout::layout_pinned(&view, anchors),
         None => layout::layout(&view),
@@ -132,7 +154,7 @@ pub(crate) fn relayout(
         let (from, to) = folding.pair(from, to)?;
         Some((box_of(from), box_of(to)))
     });
-    (laid, remap)
+    Ok((laid, remap))
 }
 
 #[cfg(test)]
@@ -183,7 +205,8 @@ mod tests {
                 false,
                 &transitions,
                 None,
-            );
+            )
+            .expect("a view this sparse lays out");
             let crossed: Vec<(Id, Id, Option<Transition>)> = laid
                 .connectors
                 .iter()
@@ -269,6 +292,7 @@ mod tests {
                 &Transitions::default(),
                 pinned,
             )
+            .expect("a view this sparse lays out")
             .0
         }
 
@@ -410,6 +434,48 @@ mod tests {
         assert_eq!(
             by_label(&fixture, &free_again.anchors),
             by_label(&fixture, &free.anchors)
+        );
+    }
+
+    /// Two rows of leaves with every one of the first depending on every one of
+    /// the second, which no reduction thins, are past the connectors a layout
+    /// is attempted with and come back unlaid.
+    #[test]
+    fn a_view_with_more_connectors_than_a_layout_takes_is_not_laid_out() {
+        let side = MAX_LAID_OUT_CONNECTORS.isqrt() + 1;
+        let mut names = Names::default();
+        let mut base = Graph::new();
+        let mut row = |row: &str| -> Vec<Id> {
+            (0..side)
+                .map(|i| {
+                    let id = names.intern(&format!("{row}{i}"));
+                    base.add_node(Node::new(id, "leaf", Kind::Action, None));
+                    id
+                })
+                .collect()
+        };
+        let (dependents, dependencies) = (row("a"), row("b"));
+        for &from in &dependents {
+            for &to in &dependencies {
+                base.add_edge(from, to, EdgeKind::Aquery);
+            }
+        }
+        let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&base);
+
+        let laid = relayout(
+            &base,
+            &reduced_base,
+            &HashSet::new(),
+            &mut names,
+            true,
+            &Transitions::default(),
+            None,
+        );
+        assert_eq!(
+            laid.err(),
+            Some(TooDense {
+                connectors: side * side
+            })
         );
     }
 }

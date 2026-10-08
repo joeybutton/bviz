@@ -13,7 +13,11 @@
 /// its dependency is built in.
 pub const TRANSITIONS_FLAG: &str = "--transitions=lite";
 
-/// A property a filter predicate selects nodes by.
+/// The query and cquery flag under which each label carries its repository's
+/// canonical name.
+pub const CONSISTENT_LABELS_FLAG: &str = "--consistent_labels";
+
+/// A property a query selects nodes by.
 ///
 /// The discriminants index [`Axis::ALL`], which lists them in that same order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -62,7 +66,7 @@ impl Axis {
             // query and cquery print apparent repository names unless asked for
             // canonical ones, and only a canonical name states where its
             // repository comes from.
-            Axis::Repo => Some("--consistent_labels"),
+            Axis::Repo => Some(CONSISTENT_LABELS_FLAG),
             Axis::Package | Axis::Label | Axis::Mnemonic | Axis::Aspect => None,
             // Every query writes the class a rule was declared by whatever else
             // it is asked for.

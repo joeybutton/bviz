@@ -6,7 +6,9 @@
 //! (`+ //foo` is `$_ + //foo`); a call short only of its last expression
 //! argument takes `$_` there (`kind(cc_.*)` is `kind(cc_.*, $_)`); and an
 //! empty call whose first argument is an expression takes `$_` as it
-//! (`deps()` is `deps($_)`). A chip reading no `$_` is a source, unless it is
+//! (`deps()` is `deps($_)`). The call shorthands apply as well to a call
+//! that is all of what a leading operator applies to (`except kind(test)` is
+//! `$_ except kind(test, $_)`). A chip reading no `$_` is a source, unless it is
 //! negated: a negated chip is a refinement taking what it names out of the set
 //! before it. The stack holds its sources ahead of its refinements and is the
 //! expression `let _ = (s1 + … + sm) in let _ = r1 in … rn` over its enabled
@@ -84,13 +86,16 @@ impl ChipExpr {
 #[derive(Clone, Debug)]
 struct Written {
     source: String,
-    inserted: Option<Range<usize>>,
+    /// Each insertion as the position in the chip's text it was made at and
+    /// the length it inserted, by increasing position.
+    insertions: Vec<(usize, usize)>,
+    leading_operator: Option<Range<usize>>,
 }
 
 impl Written {
     fn of(text: &str) -> Self {
         let Ok(tokens) = lex::scan(text) else {
-            return Written::verbatim(text);
+            return Written::inserting(text, &[]);
         };
         let opens_with_operator = matches!(
             tokens[0].kind,
@@ -101,40 +106,57 @@ impl Written {
                 | TokenKind::Except
                 | TokenKind::Union
         );
-        if opens_with_operator {
-            return Written::inserting(text, 0, "$_ ");
-        }
-        match continued_argument(&tokens) {
-            Some((at, insert)) => Written::inserting(text, at, insert),
-            None => Written::verbatim(text),
-        }
-    }
-
-    fn verbatim(text: &str) -> Self {
+        let (leading, call) = match opens_with_operator {
+            true => (Some((0, "$_ ")), &tokens[1..]),
+            false => (None, &tokens[..]),
+        };
+        let inserts: Vec<(usize, &str)> = leading
+            .into_iter()
+            .chain(continued_argument(call))
+            .collect();
         Written {
-            source: text.to_string(),
-            inserted: None,
+            leading_operator: opens_with_operator.then(|| tokens[0].span.clone()),
+            ..Written::inserting(text, &inserts)
         }
     }
 
-    fn inserting(text: &str, at: usize, insert: &str) -> Self {
-        let mut source = String::with_capacity(text.len() + insert.len());
-        source.push_str(&text[..at]);
-        source.push_str(insert);
-        source.push_str(&text[at..]);
+    /// `text` with each of `inserts`, by increasing position, inserted at its
+    /// position.
+    fn inserting(text: &str, inserts: &[(usize, &str)]) -> Self {
+        let added: usize = inserts.iter().map(|(_, insert)| insert.len()).sum();
+        let mut source = String::with_capacity(text.len() + added);
+        let mut insertions = Vec::with_capacity(inserts.len());
+        let mut copied = 0;
+        for &(at, insert) in inserts {
+            source.push_str(&text[copied..at]);
+            source.push_str(insert);
+            insertions.push((at, insert.len()));
+            copied = at;
+        }
+        source.push_str(&text[copied..]);
         Written {
             source,
-            inserted: Some(at..at + insert.len()),
+            insertions,
+            leading_operator: None,
         }
     }
 
     /// The span of the chip's text that `span` of the source covers; a span
-    /// within the inserted text covers the point it was inserted at.
+    /// within an inserted text covers the point it was inserted at.
     fn span_in_text(&self, span: &Range<usize>) -> Range<usize> {
-        let at = |position: usize| match &self.inserted {
-            Some(inserted) if position >= inserted.end => position - inserted.len(),
-            Some(inserted) if position > inserted.start => inserted.start,
-            _ => position,
+        let at = |position: usize| {
+            let mut inserted_before = 0;
+            for &(at, len) in &self.insertions {
+                let start = at + inserted_before;
+                if position >= start + len {
+                    inserted_before += len;
+                } else if position > start {
+                    return at;
+                } else {
+                    break;
+                }
+            }
+            position - inserted_before
         };
         at(span.start)..at(span.end)
     }
@@ -214,6 +236,11 @@ impl Chip {
 
     pub fn parsed(&self) -> Result<&ChipExpr, &SyntaxError> {
         self.parsed.as_ref()
+    }
+
+    /// The span of the chip's text holding the set operator it opens with.
+    pub fn leading_operator(&self) -> Option<Range<usize>> {
+        self.written.leading_operator.clone()
     }
 
     /// The chip's text with its shorthand written out.
@@ -654,6 +681,9 @@ impl Stack {
         let expr = (refinements.iter()).fold(start, continued);
         let mut calls = Calls::default();
         calls.gather(&expr);
+        if let Some(&extension) = (calls.functions.iter()).find(|f| f.is_extension()) {
+            return Err(Unportable::Extension(Extension::Function(extension)));
+        }
         if calls.any_exec {
             return Err(Unportable::Extension(Extension::AnyExec));
         }
@@ -692,14 +722,37 @@ impl Stack {
                     let step = chip.step(parsed, first);
                     fingerprint = chip.fingerprint(fingerprint, first);
                     let named = prefixes.get_or_insert(fingerprint, || {
-                        let from = (before.as_ref()).map_or_else(
-                            || Named::new(universe.members().clone()),
-                            |before| before.named.clone(),
-                        );
-                        let named = universe.evaluate_with(&step, CONTINUED, from)?;
+                        let (from, denied) = match before.as_ref() {
+                            None => (
+                                Named::new(universe.members().clone()),
+                                Arc::new(universe.empty()),
+                            ),
+                            Some(before) => (before.named.clone(), Arc::clone(&before.denied)),
+                        };
+                        let (named, denied) = match subtrahends(&step) {
+                            None => {
+                                let read = Arc::clone(from.set());
+                                let named = universe.evaluate_with(&step, CONTINUED, from)?;
+                                let denied = readmitted(universe, denied, &read, named.set());
+                                (named, denied)
+                            }
+                            Some(operands) => {
+                                let mut taken = universe.empty();
+                                for operand in operands {
+                                    let named =
+                                        universe.evaluate_with(operand, CONTINUED, from.clone())?;
+                                    taken.union_with(&universe.with_held(named.set()));
+                                }
+                                let mut kept = from.set().as_ref().clone();
+                                kept.difference_with(&taken);
+                                taken.union_with(&denied);
+                                (Named::new(kept), Arc::new(taken))
+                            }
+                        };
                         Ok(Evaluated {
                             counts: universe.counts(named.set()),
                             named,
+                            denied,
                         })
                     });
                     match named {
@@ -722,9 +775,48 @@ impl Stack {
         }
         Evaluation {
             chips,
-            value: (before.filter(|_| !broken)).map(|before| before.named.set().clone()),
+            value: (before.filter(|_| !broken)).map(|before| Value {
+                set: Arc::clone(before.named.set()),
+                denied: before.denied,
+            }),
         }
     }
+}
+
+/// The operands `step` takes out of the set before it, where it is `$_`
+/// followed by a run of `except` and `-` operands.
+fn subtrahends(step: &Expr) -> Option<Vec<&Expr>> {
+    let ExprKind::Binary {
+        op: BinaryOp::Except | BinaryOp::Minus,
+        first,
+        rest,
+    } = &step.kind
+    else {
+        return None;
+    };
+    let mut operands = match &first.kind {
+        ExprKind::Literal(word) if word.text == CONTINUED_REF => Vec::new(),
+        _ => subtrahends(first)?,
+    };
+    operands.extend(rest);
+    Some(operands)
+}
+
+/// `denied` without what a step reading `read` and naming `named` adds.
+fn readmitted(
+    universe: &Universe,
+    denied: Arc<FixedBitSet>,
+    read: &FixedBitSet,
+    named: &FixedBitSet,
+) -> Arc<FixedBitSet> {
+    let mut added = named.clone();
+    added.difference_with(read);
+    if denied.is_clear() || added.is_clear() {
+        return denied;
+    }
+    let mut readmitted = denied.as_ref().clone();
+    readmitted.difference_with(&universe.with_held(&added));
+    Arc::new(readmitted)
 }
 
 /// The functions an expression calls, and whether it names [`ANY_EXEC`].
@@ -848,7 +940,23 @@ impl Command {
             | Function::Siblings => self == Command::Query,
             Function::Config => self == Command::Cquery,
             Function::Mnemonic | Function::Inputs | Function::Outputs => self == Command::Aquery,
-            _ => true,
+            Function::AllPaths
+            | Function::Attr
+            | Function::Deps
+            | Function::Executables
+            | Function::Filter
+            | Function::Kind
+            | Function::Labels
+            | Function::Rdeps
+            | Function::SamePkgDirectRdeps
+            | Function::Some
+            | Function::SomePath
+            | Function::Tests
+            | Function::Visible => true,
+            Function::RepoCategory
+            | Function::RuleCategory
+            | Function::RunfilesPlumbing
+            | Function::ToolConfigured => false,
         }
     }
 
@@ -876,6 +984,8 @@ pub enum Extension {
     /// No source is enabled, so the first refinement reads every node of the
     /// graph.
     FromEverything,
+    /// The stack calls one of bviz's [`Function::EXTENSIONS`].
+    Function(Function),
     /// `config()` names [`ANY_EXEC`].
     AnyExec,
     /// An aquery filter stands off the chain of calls aquery filters by.
@@ -891,6 +1001,13 @@ impl fmt::Display for Unportable {
             Unportable::Invalid => f.write_str("a chip does not parse"),
             Unportable::Extension(Extension::FromEverything) => {
                 f.write_str("no source is enabled, so the first refinement reads every node")
+            }
+            Unportable::Extension(Extension::Function(function)) => {
+                write!(
+                    f,
+                    "{}() is a bviz function, which no Bazel query command has",
+                    function.name()
+                )
             }
             Unportable::Extension(Extension::AnyExec) => {
                 write!(f, "config() names '{ANY_EXEC}'")
@@ -911,6 +1028,8 @@ impl fmt::Display for Unportable {
 struct Evaluated {
     named: Named,
     counts: Counts,
+    /// [`Value::denied`] of the chips up to this one.
+    denied: Arc<FixedBitSet>,
 }
 
 /// The values of the chip prefixes a stack has evaluated, by fingerprint,
@@ -971,8 +1090,24 @@ pub enum Outcome {
 pub struct Evaluation {
     /// Each chip, in the stack's order.
     pub chips: Vec<(ChipId, Outcome)>,
-    /// The set the stack names; `None` where no chip is enabled, or one fails.
-    pub value: Option<Arc<FixedBitSet>>,
+    /// `None` where no chip is enabled, or one fails.
+    pub value: Option<Value>,
+}
+
+/// What a stack names, and what its scope is not to draw back.
+#[derive(Clone, Debug)]
+pub struct Value {
+    pub set: Arc<FixedBitSet>,
+    /// The nodes the stack's chips take out with `except`, which a scope over
+    /// `set` draws only where `set` holds them. A refinement chip standing for
+    /// `$_ except E1 … except En` (a negated chip, or one led by `except` or
+    /// `-`, the two spellings of one operator) denies each `E` with every node
+    /// it holds, the nodes it takes out of the set before it; an `except`
+    /// within an argument or joined with any other operator in the chip's
+    /// expression denies nothing. A later chip adding a node to the set before
+    /// it lifts the denial of that node and every node it holds, as a set
+    /// holding a node stands for what the node holds.
+    pub denied: Arc<FixedBitSet>,
 }
 
 impl Evaluation {

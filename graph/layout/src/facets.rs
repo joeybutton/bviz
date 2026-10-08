@@ -1,10 +1,10 @@
-//! The per-node metadata a graph filter selects on, held as interned handles.
+//! The per-node metadata a graph query selects on, held as interned handles.
 //!
 //! Facet values — a configuration key, a rule class — are strings shared by
 //! many nodes, so they are interned once into a [`FacetStrings`] table and
 //! carried per node as a four-byte handle; a repository is carried the same
 //! way, by a handle into the table of repositories the inputs named. The tables
-//! are the filter's own; node ids keep theirs, whose indices double as positions
+//! are the facets' own; node ids keep theirs, whose indices double as positions
 //! in the node arrays.
 
 use std::borrow::Cow;
@@ -270,7 +270,7 @@ impl ConfigOptions {
     }
 }
 
-/// The role a rule class plays, so that a filter can offer the tests, the
+/// The role a rule class plays, so that a query can name the tests, the
 /// aliases, or the build's own plumbing without naming each rule class that
 /// qualifies.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -298,6 +298,25 @@ const PLUMBING_RULES: [&str; 6] = [
 const TEST_SUFFIX: &str = "_test";
 
 impl RuleCategory {
+    pub const ALL: [RuleCategory; 5] = [
+        RuleCategory::Test,
+        RuleCategory::Alias,
+        RuleCategory::Filegroup,
+        RuleCategory::Plumbing,
+        RuleCategory::Other,
+    ];
+
+    /// The word a query names the category by.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            RuleCategory::Test => "test",
+            RuleCategory::Alias => "alias",
+            RuleCategory::Filegroup => "filegroup",
+            RuleCategory::Plumbing => "plumbing",
+            RuleCategory::Other => "other",
+        }
+    }
+
     /// The category the rule class `name` falls in. A rule class bviz knows no
     /// role for is [`RuleCategory::Other`], so a Starlark rule and an unfamiliar
     /// native one land there rather than being mistaken for a category.
@@ -725,8 +744,7 @@ impl Facets {
         &self.repos[repo.index()]
     }
 
-    /// Where `repo` comes from, at the grain a checklist groups repositories
-    /// by and a filter selects them at.
+    /// Where `repo` comes from.
     ///
     /// A canonical name states its origin outright. An apparent name states
     /// none, so it is placed with the repositories of a module some canonical
@@ -777,13 +795,6 @@ impl Facets {
     /// Every configuration the nodes are built in, in no particular order.
     pub fn configs(&self) -> impl Iterator<Item = (ConfigRef, &ConfigEntry)> {
         self.configs.iter().map(|(&config, entry)| (config, entry))
-    }
-
-    /// Every rule class the nodes were declared by, in no particular order.
-    pub fn rule_classes(&self) -> impl Iterator<Item = (RuleClassRef, RuleCategory)> {
-        self.rule_classes
-            .iter()
-            .map(|(&rule_class, &category)| (rule_class, category))
     }
 
     /// Moves every facet to the node id `remap` gives its node, which must map
@@ -892,7 +903,7 @@ impl WrittenRepos {
     }
 
     /// The canonical label `label` as a reader writes it, which is by the
-    /// repository name the same graph's boxes and checklists read.
+    /// repository name the same graph's boxes read.
     pub fn written_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
         let Some((repo, rest)) = label.split_once("//") else {
             return Cow::Borrowed(label);

@@ -4,8 +4,10 @@ use bazel_query_proto::blaze_query::Target;
 use fixedbitset::FixedBitSet;
 
 use super::super::parse;
+use super::super::stack::{Prefixes, Stack, Value};
 use super::*;
-use crate::facets::FacetsBuilder;
+use crate::capability::Axis;
+use crate::facets::{FacetsBuilder, Tri};
 use crate::graph::{EdgeKind, Graph, Kind, Node};
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
@@ -721,12 +723,20 @@ fn an_aquery_filter_keeps_the_actions_matching_in_full() {
 
 /// A scope over an action holds the files it writes, which stand beside it in
 /// its configured target, and a scope over a target holds all it holds.
+/// What a scope over `set` holds where no chip denies anything.
+fn undenied_scope(universe: &Universe, set: FixedBitSet) -> FixedBitSet {
+    universe.scope_nodes(&Value {
+        set: Arc::new(set),
+        denied: Arc::new(universe.empty()),
+    })
+}
+
 #[test]
 fn a_scope_holds_what_a_node_holds_and_what_an_action_writes() {
     let (universe, names) = actions();
     let scope = |expr: &str| {
         let value = universe.evaluate(&parse(expr).unwrap()).unwrap();
-        labels(&names, &universe.scope_nodes(&value))
+        labels(&names, &undenied_scope(&universe, value))
     };
     let genrule = scope("mnemonic(Genrule, //p:gen)");
     assert_eq!(genrule.len(), 3, "{genrule:?}");
@@ -901,7 +911,7 @@ fn an_aquery_filter_names_the_data_a_graph_lacks() {
     let fixture = Fixture::new();
     assert_eq!(
         fixture.error("mnemonic(Genrule, //a:lib)"),
-        "mnemonic() needs the actions of an aquery, which the graph's inputs do not include"
+        "mnemonic() requires an aquery"
     );
     let aquery = [bazel_query_proto::analysis::ActionGraphContainer {
         targets: vec![bazel_query_proto::analysis::Target {
@@ -927,8 +937,7 @@ fn an_aquery_filter_names_the_data_a_graph_lacks() {
     assert_eq!(query("mnemonic(Genrule, //p:all)").unwrap().len(), 1);
     assert_eq!(
         query("outputs('.*', //p:all)").unwrap_err(),
-        "outputs() needs the files each action reads and writes, which the graph's inputs \
-         state only under --include_artifacts"
+        "outputs() requires an aquery with --include_artifacts"
     );
 }
 
@@ -1512,4 +1521,525 @@ fn a_union_takes_in_no_more_than_its_operands_name() {
         .evaluate(&parse("//a:in.c + //a:gen").unwrap())
         .unwrap();
     assert_eq!(labels(&names, &named), ["//a:gen", "//a:in.c", "ct:gen"]);
+}
+
+/// A query graph of `targets`.
+fn query_graph(targets: &[Target]) -> Fixture {
+    let joint = build_joint(None, None, Some(targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    Fixture {
+        universe,
+        names: joint.names,
+    }
+}
+
+/// A query graph of `//a:app`, depending on `@@m+//m:lib` of a module and on
+/// `@@m++ext+gen//e:lib` of that module's extension.
+fn repositories() -> Fixture {
+    query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@@m++ext+gen//e:lib"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@@m++ext+gen//e:lib", &[], &[]),
+    ])
+}
+
+#[test]
+fn repo_category_matches_the_whole_spelling_of_each_origin() {
+    let fixture = repositories();
+    assert_eq!(
+        fixture.ok("repo_category(main, deps(//a:app))"),
+        ["//a:app"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category('module|extension', deps(//a:app))"),
+        ["@@m++ext+gen//e:lib", "@@m+//m:lib"]
+    );
+    assert!(fixture.ok("repo_category(mod, deps(//a:app))").is_empty());
+    assert_eq!(
+        fixture.error("repo_category('a)(b', //a:app)"),
+        "Illegal 'repo_category' pattern regexp 'a)(b': unopened group"
+    );
+}
+
+#[test]
+fn a_repository_is_dropped_by_its_pattern_under_either_name() {
+    assert_eq!(
+        repositories().ok("deps(//a:app) except @@m+//...:*"),
+        ["//a:app", "@@m++ext+gen//e:lib"]
+    );
+    assert_eq!(
+        apparent_repositories().ok("deps(//a:app) except @r//...:*"),
+        ["//a:app", "@@m+//m:lib", "@m//m:api"]
+    );
+}
+
+#[test]
+fn repo_category_keeps_what_a_matching_target_holds() {
+    let (universe, names) = held();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(
+        query("repo_category(main, deps(//a:app))"),
+        query("deps(//a:app)")
+    );
+    assert!(query("repo_category(module, deps(//a:app))").is_empty());
+}
+
+/// A query graph of `//a:app`, depending on `@@m+//m:lib` of a module, on
+/// `@m//m:api`, whose apparent name that module places, and on `@r//r:lib`,
+/// whose apparent name nothing places.
+fn apparent_repositories() -> Fixture {
+    query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@m//m:api", "@r//r:lib"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@m//m:api", &[], &[]),
+        rule("@r//r:lib", &[], &[]),
+    ])
+}
+
+#[test]
+fn repo_category_fails_where_an_apparent_name_may_hide_a_matched_origin() {
+    let fixture = apparent_repositories();
+    let message = "repo_category() requires --consistent_labels to tell where @r comes from";
+    assert_eq!(
+        fixture.error("repo_category(module, deps(//a:app))"),
+        message
+    );
+    assert_eq!(
+        fixture.error("repo_category('extension|main', deps(//a:app))"),
+        message
+    );
+    assert_eq!(
+        fixture.ok("repo_category(main, deps(//a:app))"),
+        ["//a:app"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category(unknown, deps(//a:app))"),
+        ["@r//r:lib"]
+    );
+    assert_eq!(
+        fixture.ok("repo_category('.*', deps(//a:app))").len(),
+        fixture.ok("deps(//a:app)").len()
+    );
+}
+
+#[test]
+fn repo_category_answers_where_module_evidence_places_every_apparent_name() {
+    let fixture = query_graph(&[
+        rule("//a:app", &["@@m+//m:lib", "@m//m:api"], &[]),
+        rule("@@m+//m:lib", &[], &[]),
+        rule("@m//m:api", &[], &[]),
+    ]);
+    assert_eq!(
+        fixture.ok("repo_category(module, deps(//a:app))"),
+        ["@@m+//m:lib", "@m//m:api"]
+    );
+}
+
+#[test]
+fn rule_category_matches_the_whole_spelling_of_a_rules_category() {
+    use crate::test_support::rule;
+    let targets = [
+        rule("//r:test", "cc_test", &[], Vec::new()),
+        rule("//r:alias", "alias", &[], Vec::new()),
+        rule("//r:files", "filegroup", &[], Vec::new()),
+        rule("//r:setting", "config_setting", &[], Vec::new()),
+        rule("//r:lib", "cc_library", &["//r:lib.cc"], Vec::new()),
+        source("//r:lib.cc"),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    let query = |expr| configured_query(&universe, &joint.names, expr).unwrap();
+    assert_eq!(query("rule_category(test, //r:*)"), ["//r:test"]);
+    assert_eq!(
+        query("rule_category('alias|filegroup', //r:*)"),
+        ["//r:alias", "//r:files"]
+    );
+    assert_eq!(query("rule_category(plumbing, //r:*)"), ["//r:setting"]);
+    assert_eq!(
+        query("rule_category(other, //r:*)"),
+        ["//r:lib"],
+        "a file is no rule"
+    );
+    assert!(query("rule_category(tes, //r:*)").is_empty());
+}
+
+#[test]
+fn rule_category_keeps_what_a_matching_rule_holds() {
+    let (universe, names) = configured(true);
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    assert_eq!(query("rule_category(other, //c:lib)"), query("//c:lib"));
+    assert!(query("rule_category(test, //c:lib)").is_empty());
+}
+
+/// The output path of `name` in `//p`.
+fn out(name: &str) -> String {
+    format!("bazel-out/k8-fastbuild/bin/p/{name}")
+}
+
+/// An aquery of `//p:bin`, whose CppLink action links `bin` and whose
+/// SourceSymlinkManifest and SymlinkTree actions wire its runfiles.
+fn runfiles() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let (binary, manifest, tree) = (
+        out("bin"),
+        out("bin.runfiles_manifest"),
+        out("bin.runfiles"),
+    );
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &["p/main.o"],
+            outputs: &[&binary],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "SourceSymlinkManifest",
+            inputs: &[],
+            outputs: &[&manifest],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "SymlinkTree",
+            inputs: &[&manifest],
+            outputs: &[&tree],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, None, false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+#[test]
+fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
+    let (universe, names) = runfiles();
+    let (manifest, tree) = (out("bin.runfiles_manifest"), out("bin.runfiles"));
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    let plumbing = [format!("action:{tree}"), format!("action:{manifest}")];
+    assert_eq!(query("runfiles_plumbing(//p:bin)"), plumbing);
+    assert_eq!(
+        query("runfiles_plumbing(mnemonic(SymlinkTree, //p:bin))"),
+        [format!("action:{tree}")]
+    );
+    assert!(query("runfiles_plumbing(mnemonic(CppLink, //p:bin))").is_empty());
+    assert_eq!(
+        Fixture::new().error("runfiles_plumbing(//a:lib)"),
+        "runfiles_plumbing() requires an aquery"
+    );
+}
+
+/// `//t:gen`, configured as `ct:target` in a target configuration and as
+/// `ct:exec` in a tool one, each running an action that writes a file; with
+/// `stated` false, an input left the tool configuration unstated.
+fn tools(stated: bool) -> (Universe, Names) {
+    let mut graph = Graph::new();
+    let mut names = Names::default();
+    let mut builder = FacetsBuilder::default();
+    let package = names.intern("pkg:t");
+    graph.add_node(Node::new(package, "//t", Kind::Package, None));
+    let mut node = |name: &str, kind, parent: Id| {
+        let id = names.intern(name);
+        graph.add_node(Node::new(id, name, kind, Some(parent)));
+        id
+    };
+    let target = node("target://t:gen", Kind::Target, package);
+    let held = [
+        ("ct:target", "act:target", "out:target", false),
+        ("ct:exec", "act:exec", "out:exec", true),
+    ];
+    builder.describe_label(target, Some(package), "//t:gen");
+    let mut writes = Vec::with_capacity(held.len());
+    for (configured, action, output, tool) in held {
+        let configured = node(configured, Kind::ConfiguredTarget, target);
+        let action = node(action, Kind::Action, configured);
+        let output = node(output, Kind::Artifact, configured);
+        builder.facets().inherit(configured, target);
+        let is_tool = if tool { Tri::Yes } else { Tri::No };
+        let checksum = if tool { "exec" } else { "target" };
+        let config = builder.facets().intern_config(checksum, None, is_tool);
+        let config = Some(config).filter(|_| stated || !tool);
+        builder.facets().set_config(configured, config);
+        builder.observe(Axis::Configuration, config.is_some());
+        for child in [action, output] {
+            builder.facets().inherit(child, configured);
+        }
+        writes.push((action, output));
+    }
+    for (action, output) in writes {
+        graph.add_edge(action, output, EdgeKind::Aquery);
+    }
+    let (facets, capabilities) = builder.seal();
+    (
+        Universe::new(&graph, &names, &Arc::new(facets), &capabilities),
+        names,
+    )
+}
+
+#[test]
+fn tool_configured_keeps_what_a_tool_configuration_builds() {
+    let (universe, names) = tools(true);
+    let mut everything = universe.empty();
+    everything.insert_range(..);
+    let kept = universe.tool_configured(&everything);
+    assert_eq!(labels(&names, &kept), ["act:exec", "ct:exec", "out:exec"]);
+    assert_eq!(
+        configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap(),
+        ["ct:exec"]
+    );
+    assert_eq!(
+        configured_query(&universe, &names, "//t:gen except tool_configured(//t:gen)").unwrap(),
+        ["//t:gen", "ct:target"]
+    );
+}
+
+#[test]
+fn tool_configured_keeps_nothing_of_a_graph_without_configurations() {
+    assert!(Fixture::new().ok("tool_configured(//...)").is_empty());
+}
+
+#[test]
+fn tool_configured_needs_every_configured_targets_configuration() {
+    let (universe, names) = tools(false);
+    assert_eq!(
+        configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap_err(),
+        "tool_configured() requires every configured target's configuration"
+    );
+}
+
+/// What the stack of `chips` scopes `universe` to, the chips at `negated`
+/// negated and those at `disabled` disabled.
+fn scoped(
+    (universe, names): &(Universe, Names),
+    chips: &[&str],
+    negated: &[usize],
+    disabled: &[usize],
+) -> Vec<String> {
+    let mut stack = Stack::default();
+    let ids: Vec<_> = chips.iter().map(|chip| stack.push(chip)).collect();
+    negated.iter().for_each(|&at| stack.toggle_negated(ids[at]));
+    disabled
+        .iter()
+        .for_each(|&at| stack.toggle_enabled(ids[at]));
+    let evaluation = stack.evaluate(universe, &Prefixes::default());
+    let value = evaluation.value.expect("a stack naming a set");
+    labels(names, &universe.scope_nodes(&value))
+}
+
+#[test]
+fn a_chip_taking_out_the_tool_configurations_leaves_them_undrawn() {
+    let tools = tools(true);
+    let everything = scoped(&tools, &["//..."], &[], &[]);
+    assert_eq!(
+        everything,
+        [
+            "//t:gen",
+            "act:exec",
+            "act:target",
+            "ct:exec",
+            "ct:target",
+            "out:exec",
+            "out:target"
+        ]
+    );
+    let built = ["//t:gen", "act:target", "ct:target", "out:target"];
+    assert_eq!(
+        scoped(&tools, &["//...", "tool_configured()"], &[1], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "except tool_configured()"], &[], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "- tool_configured()"], &[], &[]),
+        built
+    );
+    assert_eq!(
+        scoped(
+            &tools,
+            &[
+                "//...",
+                "$_ - mnemonic(NoSuch, $_) except tool_configured($_)"
+            ],
+            &[],
+            &[]
+        ),
+        built,
+        "a run of except and - is one operator"
+    );
+    assert_eq!(
+        scoped(&tools, &["//...", "except tool_configured()"], &[], &[1]),
+        everything,
+        "a disabled chip denies nothing"
+    );
+}
+
+/// A chip adding a target back adds it and its configured targets, which a
+/// pattern names, and each of those stands for what it holds, so the scope
+/// draws what a chip below took out of them.
+#[test]
+fn a_node_added_back_draws_what_it_holds_that_a_chip_below_took_out() {
+    let tools = tools(true);
+    assert_eq!(
+        scoped(
+            &tools,
+            &["//...", "except tool_configured()", "+ //t:gen"],
+            &[],
+            &[]
+        ),
+        scoped(&tools, &["//..."], &[], &[])
+    );
+}
+
+/// An `except` within a chip's expression narrows its value alone, so the
+/// scope draws what the nodes it keeps hold.
+#[test]
+fn an_except_within_a_chip_denies_nothing() {
+    let tools = tools(true);
+    let drawn = scoped(
+        &tools,
+        &["//...", "deps($_ except tool_configured($_))"],
+        &[],
+        &[],
+    );
+    assert!(drawn.contains(&"act:exec".to_string()), "{drawn:?}");
+    let drawn = scoped(
+        &tools,
+        &["//...", "$_ except tool_configured($_) + //t:gen"],
+        &[],
+        &[],
+    );
+    assert!(drawn.contains(&"act:exec".to_string()), "{drawn:?}");
+}
+
+#[test]
+fn a_chip_taking_out_runfiles_plumbing_leaves_its_actions_undrawn() {
+    let runfiles = runfiles();
+    let drawn = scoped(
+        &runfiles,
+        &["//p:bin", "except runfiles_plumbing()"],
+        &[],
+        &[],
+    );
+    let actions: Vec<&String> = drawn.iter().filter(|n| n.starts_with("action:")).collect();
+    assert_eq!(actions, [&format!("action:{}", out("bin"))]);
+}
+
+#[test]
+fn a_chip_taking_out_every_mnemonic_leaves_no_action_drawn() {
+    let runfiles = runfiles();
+    let all = scoped(&runfiles, &["//p:bin"], &[], &[]);
+    assert_eq!(all.iter().filter(|n| n.starts_with("action:")).count(), 3);
+    let drawn = scoped(&runfiles, &["//p:bin", "except mnemonic('.*')"], &[], &[]);
+    assert!(!drawn.iter().any(|n| n.starts_with("action:")), "{drawn:?}");
+    assert!(drawn.iter().any(|n| n.starts_with("artifact")), "{drawn:?}");
+}
+
+/// `//p:bin`, a `cc_binary` compiling the source `//p:main.cc` to `main.o`
+/// and linking that into `bin`, as query and aquery describe it.
+fn linked() -> (Universe, Names) {
+    use crate::test_support::{ActionSpec, action_graph};
+    let (object, binary) = (out("main.o"), out("bin"));
+    let targets = [
+        crate::test_support::rule("//p:bin", "cc_binary", &["//p:main.cc"], Vec::new()),
+        source("//p:main.cc"),
+    ];
+    let aquery = [action_graph(&[
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppCompile",
+            inputs: &["p/main.cc"],
+            outputs: &[&object],
+        },
+        ActionSpec {
+            label: "//p:bin",
+            mnemonic: "CppLink",
+            inputs: &[&object],
+            outputs: &[&binary],
+        },
+    ])];
+    let joint = build_joint(Some(&aquery), None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &joint.capabilities,
+    );
+    (universe, joint.names)
+}
+
+/// Whether `name` is the name of an output with no label of its own.
+fn unlabeled_output(name: &str) -> bool {
+    name.starts_with("artifact")
+}
+
+#[test]
+fn kind_matches_a_file_by_its_own_class() {
+    let (universe, names) = linked();
+    let query = |expr| configured_query(&universe, &names, expr).unwrap();
+    let outputs = query("kind('generated file', //p:bin)");
+    assert_eq!(outputs.len(), 2, "{outputs:?}");
+    assert!(
+        outputs.iter().all(|name| unlabeled_output(name)),
+        "{outputs:?}"
+    );
+    assert_eq!(query("kind('source file', deps(//p:bin))"), ["//p:main.cc"]);
+    let rule = query("kind('cc_binary rule', deps(//p:bin))");
+    assert!(!rule.iter().any(|name| unlabeled_output(name)), "{rule:?}");
+    assert_eq!(query("rule_category(other, deps(//p:bin))"), rule);
+}
+
+#[test]
+fn a_scope_over_a_rule_draws_the_files_it_writes() {
+    let (universe, names) = linked();
+    let value = universe
+        .evaluate(&parse("kind('cc_binary rule', //p:bin)").unwrap())
+        .unwrap();
+    let drawn = labels(&names, &undenied_scope(&universe, value));
+    assert_eq!(
+        drawn.iter().filter(|&name| unlabeled_output(name)).count(),
+        2
+    );
+}
+
+#[test]
+fn a_chip_taking_out_a_file_class_leaves_its_files_undrawn() {
+    let linked = linked();
+    let drawn = scoped(
+        &linked,
+        &["//...", "except kind('generated file')"],
+        &[],
+        &[],
+    );
+    assert!(
+        !drawn.iter().any(|name| unlabeled_output(name)),
+        "{drawn:?}"
+    );
+    assert!(drawn.contains(&"//p:bin".to_string()));
+    let drawn = scoped(
+        &linked,
+        &["//...:*", "except kind('source file')"],
+        &[],
+        &[],
+    );
+    assert!(!drawn.contains(&"//p:main.cc".to_string()), "{drawn:?}");
+    assert_eq!(
+        drawn.iter().filter(|&name| unlabeled_output(name)).count(),
+        2
+    );
 }

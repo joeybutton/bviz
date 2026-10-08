@@ -69,7 +69,7 @@ pub enum RepoOrigin<'a> {
 }
 
 /// A [`RepoOrigin`] with what it says about the one repository dropped, which
-/// is the grain a filter selects repositories at.
+/// is the grain `repo_category()` selects repositories at.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum RepoCategory {
     Main,
@@ -77,6 +77,27 @@ pub enum RepoCategory {
     ModuleExtension,
     Builtin,
     WorkspaceOrUnknown,
+}
+
+impl RepoCategory {
+    pub const ALL: [RepoCategory; 5] = [
+        RepoCategory::Main,
+        RepoCategory::Module,
+        RepoCategory::ModuleExtension,
+        RepoCategory::Builtin,
+        RepoCategory::WorkspaceOrUnknown,
+    ];
+
+    /// The word a query names the category by.
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            RepoCategory::Main => "main",
+            RepoCategory::Module => "module",
+            RepoCategory::ModuleExtension => "extension",
+            RepoCategory::Builtin => "builtin",
+            RepoCategory::WorkspaceOrUnknown => "unknown",
+        }
+    }
 }
 
 /// The modules Bazel gives a bare canonical name, carrying neither separator

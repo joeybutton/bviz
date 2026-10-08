@@ -21,16 +21,18 @@ mod bazel_goldens;
 use std::fmt;
 use std::ops::Range;
 
-pub use ast::{Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Word};
+pub use ast::{
+    Arg, ArgType, BinaryOp, Expr, ExprKind, Function, Params, Signature, Vocabulary, Word,
+};
 pub use config::ANY_EXEC;
 pub use cursor::{Place, TypedWord, word_at, written_word};
 pub use eval::EvalError;
 pub use parse::parse;
 pub use stack::{
     BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,
-    Prefixes, Stack, Unportable,
+    Prefixes, Stack, Unportable, Value,
 };
-pub use universe::{Counts, Universe};
+pub use universe::{Counts, Readable, Universe};
 
 /// Where an expression fails to scan or parse, with the message Bazel gives for
 /// it word for word, but for two cases. A long expression Bazel quotes cut

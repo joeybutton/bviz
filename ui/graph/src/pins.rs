@@ -6,7 +6,7 @@
 //! be taken back, or an override would be a state a reader could reach and not
 //! leave.
 
-use crate::{GraphPanel, Palette, checklist};
+use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
@@ -157,29 +157,29 @@ fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
 /// Pins `node` to `pin`, or takes that override back off.
 pub(crate) fn set(view: &mut GraphPanel, node: Id, pin: Visibility, cx: &mut Context<GraphPanel>) {
     let filter = toggle(view.derived.filter(), node, pin);
-    checklist::set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 /// Shows `node` whatever the rules say, as [`revealing`] pins it.
 pub(crate) fn reveal(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
     let filter = revealing(view.derived.filter(), node);
-    checklist::set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 /// Drops the pin `node` carries, leaving it to the rules.
 pub(crate) fn unpin(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
     let filter = unpinned(view.derived.filter(), node);
-    checklist::set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 fn clear_all(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let filter = cleared(view.derived.filter());
-    checklist::set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let filter = unrevealed(view.derived.filter());
-    checklist::set_filter(view, filter, cx);
+    derive::set_filter(view, filter, cx);
 }
 
 /// The override offered on the box a secondary click has selected: dropping it
@@ -389,14 +389,11 @@ mod tests {
         }
 
         fn verdict(&self, filter: &Filter, name: &str) -> Verdict {
-            filter
-                .evaluate(&self.graph, &self.facets)
-                .get(self.id(name))
+            filter.evaluate(&self.graph).get(self.id(name))
         }
     }
 
-    /// A filter hiding every action, which is the sort of reduction a checklist
-    /// writes and a pin has to stand against.
+    /// A filter hiding every action, which a pin has to stand against.
     fn hiding_actions() -> Filter {
         Filter {
             rules: vec![Rule {

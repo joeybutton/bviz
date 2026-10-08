@@ -10,10 +10,11 @@
 //! selection and the layout's pinning anchors go on naming what they named and
 //! carry across a filter change.
 
+use crate::build::{self, TooDense};
 use crate::framing::Frame;
 use crate::mode::LayoutMode;
 use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
-use crate::{GraphPanel, MARGIN, build};
+use crate::{GraphPanel, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::paths::Paths;
@@ -144,6 +145,20 @@ impl Drawn {
                     drawing: *drawing,
                     level,
                 })
+            }
+        }
+    }
+
+    /// Whether [`view`](Self::view) at `zoom` is a map level leaving out what
+    /// more closed containers hold than it draws boxes.
+    pub(crate) fn withholds_most(&self, zoom: f32) -> bool {
+        match self {
+            Self::Layered { .. } => false,
+            Self::Map { map, .. } => {
+                let level = shown_level(map, zoom);
+                map.withheld(level)
+                    .zip(map.derived(level))
+                    .is_some_and(|(withheld, view)| withheld > view.boxes.len())
             }
         }
     }
@@ -378,16 +393,30 @@ enum Relaid {
 /// A layered drawing and what it was laid out from.
 #[derive(Clone)]
 struct Layered {
-    view: Arc<LaidOut>,
-    /// The remap of [`bviz_graph_layout::quotient::quotient`] `view` was laid out
-    /// through.
-    groups: Arc<BTreeMap<Id, Id>>,
+    laid: Result<Laid, TooDense>,
     base: Arc<Graph>,
     expanded: HashSet<Id>,
     reduced: bool,
 }
 
+/// A view laid out.
+#[derive(Clone)]
+struct Laid {
+    view: Arc<LaidOut>,
+    /// The remap of [`bviz_graph_layout::quotient::quotient`] `view` was laid out
+    /// through.
+    groups: Arc<BTreeMap<Id, Id>>,
+}
+
 impl Layered {
+    /// What this draws: nothing, where the view was too dense to lay out.
+    fn view(&self) -> Arc<LaidOut> {
+        match &self.laid {
+            Ok(laid) => Arc::clone(&laid.view),
+            Err(TooDense { .. }) => Arc::default(),
+        }
+    }
+
     /// Whether laying `base` out at `expanded`, over the reduced edge set where
     /// `reduced`, is what drew this.
     fn draws(&self, base: &Arc<Graph>, expanded: &HashSet<Id>, reduced: bool) -> bool {
@@ -398,9 +427,10 @@ impl Layered {
     /// of the merge group it is merged into, else that of the innermost
     /// container holding it.
     fn holder(&self, id: Id) -> Option<Id> {
-        let boxes: HashSet<Id> = self.view.boxes.iter().map(|b| b.id).collect();
+        let laid = self.laid.as_ref().ok()?;
+        let boxes: HashSet<Id> = laid.view.boxes.iter().map(|b| b.id).collect();
         std::iter::once(id)
-            .chain(self.groups.get(&id).copied())
+            .chain(laid.groups.get(&id).copied())
             .chain(holders(&self.base, id))
             .find(|candidate| boxes.contains(candidate))
     }
@@ -515,11 +545,9 @@ impl Derived {
     /// Draws `loaded`'s graph whole, at the expansion its read sized, through no
     /// filter.
     ///
-    /// A filter selects within one graph — its rules over that graph's
-    /// repositories, classes and labels, its pins over that graph's node ids —
-    /// so it does not carry to the graph that takes its place. Every drawing of
-    /// the graph left behind goes with it, and so does the derivation that was
-    /// producing one.
+    /// A filter's scope and pins name nodes of one graph by id, so it does not
+    /// carry to the graph that takes its place. Every drawing of the graph left
+    /// behind goes with it, and so does the derivation that was producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
         self.filter = Filter::default();
         self.paths = None;
@@ -543,7 +571,7 @@ impl Derived {
                 drawing: self.drawings,
             }),
             LayoutMode::Layered => self.layered.as_ref().map(|layered| Drawn::Layered {
-                view: Arc::clone(&layered.view),
+                view: layered.view(),
                 drawing: self.drawings,
             }),
         }
@@ -702,6 +730,15 @@ impl Derived {
             .is_some_and(|slice| !self.draws_through(&slice.lens))
     }
 
+    /// Why `mode` draws nothing, where that is the view being too dense to lay
+    /// out.
+    pub(crate) fn too_dense(&self, mode: LayoutMode) -> Option<TooDense> {
+        match mode {
+            LayoutMode::Map => None,
+            LayoutMode::Layered => self.layered.as_ref()?.laid.as_ref().err().copied(),
+        }
+    }
+
     pub(crate) fn over_budget(&self) -> Option<Overflow> {
         self.over_budget
     }
@@ -725,11 +762,11 @@ impl Derived {
             Relaid::Nothing => None,
             Relaid::Held => self.layered.as_ref().map(|held| LayoutLanded {
                 replaced: None,
-                current: Arc::clone(&held.view),
+                current: held.view(),
             }),
             Relaid::Fresh(layered) => {
-                let current = Arc::clone(&layered.view);
-                let replaced = self.layered.replace(layered).map(|held| held.view);
+                let current = layered.view();
+                let replaced = self.layered.replace(layered).map(|held| held.view());
                 Some(LayoutLanded { replaced, current })
             }
         };
@@ -877,7 +914,8 @@ pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPan
     let drawn = derived
         .layered
         .as_ref()
-        .is_some_and(|layered| layered.view.boxes.iter().any(|b| b.id == id));
+        .and_then(|layered| layered.laid.as_ref().ok())
+        .is_some_and(|laid| laid.view.boxes.iter().any(|b| b.id == id));
     if drawn && !derived.deriving() && !derived.restricting() {
         return;
     }
@@ -975,6 +1013,7 @@ fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Con
     crate::why::put_away(view, cx);
     view.derived.show_paths(None);
     view.derived.filter = filter;
+    crate::boxes::restate(view, cx);
     publish_filter(view, cx);
     view.derived.frame_on_landing = frame;
     request(view, cx);
@@ -1050,18 +1089,22 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                 false => Relaid::Nothing,
                 true if keeps_held(&slice.base, &expanded) => Relaid::Held,
                 true => {
-                    let (laid, groups) = build::relayout(
+                    let laid = build::relayout(
                         &slice.base,
                         &slice.reduced,
                         &expanded,
                         &mut slice.names,
                         reduced,
                         &slice.transitions,
-                        held.as_ref().map(|held| &held.view.anchors),
+                        held.as_ref()
+                            .and_then(|held| held.laid.as_ref().ok())
+                            .map(|laid| &laid.view.anchors),
                     );
                     Relaid::Fresh(Layered {
-                        view: Arc::new(laid),
-                        groups: Arc::new(groups),
+                        laid: laid.map(|(view, groups)| Laid {
+                            view: Arc::new(view),
+                            groups: Arc::new(groups),
+                        }),
                         base: Arc::clone(&slice.base),
                         expanded: expanded.clone(),
                         reduced,
@@ -1113,7 +1156,7 @@ fn restrict(
     expanded: &HashSet<Id>,
     reduced: bool,
 ) -> (Slice, Restricted) {
-    let verdicts = Arc::new(filter.evaluate(&shared.base, &shared.facets));
+    let verdicts = Arc::new(filter.evaluate(&shared.base));
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();
@@ -1827,7 +1870,7 @@ mod tests {
         /// The drawing laid out at `expanded`, over every edge.
         fn layered(&mut self, expanded: HashSet<Id>) -> Layered {
             let reduced_base = bviz_graph_layout::reduce::transitive_reduction(&self.base);
-            let (laid, groups) = build::relayout(
+            let (view, groups) = build::relayout(
                 &self.base,
                 &reduced_base,
                 &expanded,
@@ -1835,10 +1878,13 @@ mod tests {
                 false,
                 &Transitions::default(),
                 None,
-            );
+            )
+            .expect("the fixture is sparse enough to lay out");
             Layered {
-                view: Arc::new(laid),
-                groups: Arc::new(groups),
+                laid: Ok(Laid {
+                    view: Arc::new(view),
+                    groups: Arc::new(groups),
+                }),
                 base: Arc::new(self.base.clone()),
                 expanded,
                 reduced: false,
@@ -1949,8 +1995,10 @@ mod tests {
     /// reduced edge set.
     fn layered(loaded: &Loaded, width: f64) -> Layered {
         Layered {
-            view: drawing(width),
-            groups: Arc::default(),
+            laid: Ok(Laid {
+                view: drawing(width),
+                groups: Arc::default(),
+            }),
             base: Arc::clone(&loaded.shared.base),
             expanded: HashSet::new(),
             reduced: true,
@@ -1990,7 +2038,7 @@ mod tests {
         let loaded = document();
         let mut derived = opened(&loaded);
         derived.adopt(landed(&loaded, 10.0));
-        let held = Arc::clone(&derived.layered.as_ref().expect("a drawing held").view);
+        let held = derived.layered.as_ref().expect("a drawing held").view();
 
         let adopted = derived.adopt(Landed {
             slice: Slice::whole(&loaded.shared),

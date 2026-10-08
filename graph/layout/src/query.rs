@@ -188,7 +188,7 @@ mod tests {
     use super::*;
     use crate::facets::{Origin, RuleCategory};
     use crate::repo::RepoName;
-    use crate::select::{Filter, Visibility};
+    use crate::select::Filter;
     use crate::test_support::{edges, find, parent_of};
     use bazel_query_proto::blaze_query::{
         GeneratedFile, Rule, SourceFile, attribute::Discriminator as AttributeType,
@@ -405,12 +405,11 @@ mod tests {
     }
 
     #[test]
-    fn a_rule_stating_no_class_offers_the_filter_no_rule_class() {
+    fn a_rule_stating_no_class_carries_none() {
         let (_, names, facets) = build(&[declared("//foo:app", "", vec![])]);
 
         let node = names.get("target://foo:app").unwrap();
         assert_eq!(facets.rule_class(node), None);
-        assert_eq!(facets.rule_classes().count(), 0);
     }
 
     #[test]
@@ -512,46 +511,9 @@ mod tests {
         assert_eq!(facets.repos().count(), 1);
     }
 
-    /// A box belongs to its repository as much as the targets inside it do, so a
-    /// rule over repositories takes the whole of one away rather than leaving an
-    /// empty box where its packages were.
-    #[test]
-    fn a_repository_rule_hides_that_repositorys_package_boxes() {
-        use crate::select::{Predicate, Values};
-
-        let (graph, names, facets) = build(&[
-            rule("//foo:app", &[]),
-            rule("@@somerepo+//bar/deep:lib", &[]),
-        ]);
-        let filter = Filter {
-            rules: vec![crate::select::Rule {
-                predicate: Predicate {
-                    repos: Values::new([RepoName::Canonical("somerepo+".to_string())]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Hidden,
-            }],
-            ..Filter::default()
-        };
-
-        let verdicts = filter.evaluate(&graph, &facets);
-        let drawn: BTreeSet<&str> = graph
-            .nodes
-            .iter()
-            .filter(|node| verdicts.get(node.id).drawn())
-            .map(|node| names.resolve(node.id))
-            .collect();
-        assert_eq!(drawn, ["pkg:foo", "target://foo:app"].into_iter().collect());
-    }
-
     /// The nodes `filter` draws a box for, by name.
-    fn drawn<'a>(
-        filter: &Filter,
-        graph: &Graph,
-        names: &'a Names,
-        facets: &Facets,
-    ) -> BTreeSet<&'a str> {
-        let verdicts = filter.evaluate(graph, facets);
+    fn drawn<'a>(filter: &Filter, graph: &Graph, names: &'a Names) -> BTreeSet<&'a str> {
+        let verdicts = filter.evaluate(graph);
         graph
             .nodes
             .iter()
@@ -599,7 +561,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//...", false),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:@@somerepo+//baz", "target:@@somerepo+//baz:lib"]
                 .into_iter()
@@ -620,7 +581,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo/...", false),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:foobar", "target://foobar:lib"].into_iter().collect()
         );
@@ -638,7 +598,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo:all", false),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:foo", "pkg:foo/bar", "target://foo/bar:lib"]
                 .into_iter()
@@ -657,7 +616,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo/...", false),
                 &graph,
                 &names,
-                &facets
             )
             .is_empty()
         );
@@ -674,7 +632,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo:app", false),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:foo", "target://foo:lib"].into_iter().collect()
         );
@@ -692,7 +649,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo:lib", false),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:bar", "target://bar:app"].into_iter().collect(),
         );
@@ -710,7 +666,6 @@ mod tests {
                 &scoped(&graph, &names, &facets, "//foo/...", true),
                 &graph,
                 &names,
-                &facets
             ),
             ["pkg:foo/bar", "target://foo/bar:app"]
                 .into_iter()

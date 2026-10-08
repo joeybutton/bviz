@@ -44,7 +44,7 @@ impl Fixture {
         let evaluation = stack.evaluate(&self.universe, &Prefixes::default());
         let value = evaluation.value.expect("a stack naming a set");
         let name = |id: usize| self.names.resolve(Id(id as u32));
-        let mut labels: Vec<String> = (value.ones())
+        let mut labels: Vec<String> = (value.set.ones())
             .map(|id| name(id).trim_start_matches("target:").to_string())
             .collect();
         labels.sort();
@@ -88,6 +88,127 @@ fn the_shorthand_writes_out_the_set_a_chip_reads() {
     assert_eq!(
         written("mnemonic(Javac)"),
         continuing("mnemonic(Javac, $_)")
+    );
+    assert_eq!(
+        written("repo_category(main)"),
+        continuing("repo_category(main, $_)")
+    );
+    assert_eq!(
+        written("runfiles_plumbing()"),
+        continuing("runfiles_plumbing($_)")
+    );
+    assert_eq!(
+        written("except tool_configured()"),
+        continuing("$_ except tool_configured($_)")
+    );
+}
+
+#[test]
+fn a_chip_calling_an_extension_narrows_the_set_before_it() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.named(&stack(&["//b:all", "repo_category(main)"])),
+        ["//b:app", "//b:test"]
+    );
+    assert_eq!(
+        fixture.named(&stack(&["//b:all", "rule_category(test)"])),
+        ["//b:test"]
+    );
+}
+
+#[test]
+fn the_call_a_leading_operator_applies_to_reads_the_set_before_it() {
+    let continuing = |text: &str| (text.to_string(), true);
+    assert_eq!(
+        written("except kind('source file')"),
+        continuing("$_ except kind('source file', $_)")
+    );
+    assert_eq!(written("- deps()"), continuing("$_ - deps($_)"));
+    assert_eq!(
+        written("except mnemonic(Javac)"),
+        continuing("$_ except mnemonic(Javac, $_)")
+    );
+    assert_eq!(
+        written("except kind(rule, //a:all)"),
+        continuing("$_ except kind(rule, //a:all)")
+    );
+    let fixture = Fixture::new();
+    assert_eq!(
+        fixture.named(&stack(&["//a:*", "except kind('source file')"])),
+        ["//a:gen", "//a:gen.out", "//a:lib"]
+    );
+}
+
+#[test]
+fn a_span_past_both_insertions_maps_back_onto_the_chip_as_typed() {
+    let written = Written::of("except kind(x)");
+    assert_eq!(written.source, "$_ except kind(x, $_)");
+    let in_text = |span: Range<usize>| written.span_in_text(&span);
+    assert_eq!(in_text(0..2), 0..0, "the leading `$_`");
+    assert_eq!(in_text(15..16), 12..13, "the word as typed");
+    assert_eq!(in_text(18..20), 13..13, "the continued `$_`");
+    assert_eq!(in_text(10..21), 7..14, "the call as typed");
+}
+
+#[test]
+fn a_leading_operator_applies_to_an_extension_call_reading_the_set_before_it() {
+    let fixture = Fixture::new();
+    let named = |chips: &[&str]| fixture.named(&stack(chips));
+    let all = named(&["//b:all"]);
+    assert_eq!(
+        named(&["//b:all", "except rule_category(test)"]),
+        ["//b:app"]
+    );
+    assert_eq!(named(&["//b:all", "except rule_category(plumbing)"]), all);
+    assert_eq!(named(&["//b:all", "except repo_category(extension)"]), all);
+    assert_eq!(
+        named(&["//a:*", "except kind('generated file')"]),
+        ["//a:gen", "//a:lib", "//a:lib.cc"]
+    );
+}
+
+/// bviz reads a package group and an environment group as one kind of
+/// target, so one chip takes both out.
+#[test]
+fn a_leading_except_takes_out_package_and_environment_groups_by_kind() {
+    use bazel_query_proto::blaze_query::{EnvironmentGroup, PackageGroup, target::Discriminator};
+    let targets = [
+        rule("//a:lib", "cc_library", &[]),
+        Target {
+            r#type: Discriminator::PackageGroup as i32,
+            package_group: Some(PackageGroup {
+                name: "//a:visible".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Target {
+            r#type: Discriminator::EnvironmentGroup as i32,
+            environment_group: Some(EnvironmentGroup {
+                name: "//a:platforms".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let fixture = Fixture {
+        universe: Universe::new(
+            &joint.graph,
+            &joint.names,
+            &Arc::new(joint.facets),
+            &joint.capabilities,
+        ),
+        names: joint.names,
+    };
+
+    assert_eq!(
+        fixture.named(&stack(&["//a:*"])),
+        ["//a:lib", "//a:platforms", "//a:visible"]
+    );
+    assert_eq!(
+        fixture.named(&stack(&["//a:*", "except kind('package group')"])),
+        ["//a:lib"]
     );
 }
 
@@ -338,6 +459,18 @@ fn chained_aquery_filters_filter_as_their_bazel_query_does() {
     );
 }
 
+/// A chip naming the set before it unchanged leaves the filter run standing,
+/// so the chips around it filter as one.
+#[test]
+fn a_chip_naming_the_set_before_it_keeps_the_filter_run() {
+    let fixture = java();
+    let chips = ["//p:all", "inputs('.*foo.*')", "$_", "inputs('.*java')"];
+    assert_eq!(
+        fixture.named(&stack(&chips)),
+        ["action:bazel-out/k8-fastbuild/bin/p/b.class"]
+    );
+}
+
 /// A negated filter chip joins the run before it, and takes what the joined
 /// run keeps out of what that run named.
 #[test]
@@ -468,6 +601,26 @@ fn a_stack_using_an_extension_has_no_bazel_query() {
         extension(Extension::AnyExec)
     );
     assert_eq!(
+        bazel(&["//a:all", "repo_category(main)"]),
+        extension(Extension::Function(Function::RepoCategory))
+    );
+    assert_eq!(
+        bazel(&["//a:all", "rule_category(test)"]),
+        extension(Extension::Function(Function::RuleCategory))
+    );
+    assert_eq!(
+        bazel(&["//p:all", "runfiles_plumbing()"]),
+        extension(Extension::Function(Function::RunfilesPlumbing))
+    );
+    assert_eq!(
+        bazel(&["//a:all", "except tool_configured()"]),
+        extension(Extension::Function(Function::ToolConfigured))
+    );
+    assert_eq!(
+        Unportable::Extension(Extension::Function(Function::RepoCategory)).to_string(),
+        "repo_category() is a bviz function, which no Bazel query command has"
+    );
+    assert_eq!(
         bazel(&["//p:all", "mnemonic(Genrule)", "deps()"]),
         extension(Extension::ActionFilterOffChain)
     );
@@ -519,4 +672,11 @@ fn a_chip_keeps_its_id_and_switches_through_edits_and_moves() {
     assert_eq!(chips.position(c), Some(1), "held to the sources");
     assert_eq!(chips.remove(a), Some(0));
     assert_eq!(chips.position(b), Some(1));
+}
+
+#[test]
+fn a_chip_names_the_set_operator_it_opens_with() {
+    let chips = stack(&["except kind(test)", "kind(test)", "  - //a:all"]);
+    let operators: Vec<_> = chips.chips().map(Chip::leading_operator).collect();
+    assert_eq!(operators, [Some(0..6), None, Some(2..3)]);
 }

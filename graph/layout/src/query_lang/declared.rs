@@ -28,6 +28,21 @@ impl Attribute {
     }
 }
 
+/// The node kinds of a file, each with the kind Bazel names a file target of
+/// it by.
+pub(super) const FILE_KINDS: [(Kind, &str); 2] = [
+    (Kind::Source, "source file"),
+    (Kind::Artifact, "generated file"),
+];
+
+/// The kind Bazel names a file target of `kind` by; `None` for a node kind
+/// that is no file.
+pub(super) fn file_kind(kind: Kind) -> Option<&'static str> {
+    (FILE_KINDS.iter())
+        .find(|&&(file, _)| file == kind)
+        .map(|&(_, name)| name)
+}
+
 /// The declarations of a graph's targets, by each target's position among the
 /// labels.
 pub(super) struct Declared {
@@ -63,10 +78,13 @@ impl Declared {
                     }
                     kind.push_str("rule");
                 }
-                Some(Kind::Source) => kind.push_str("source file"),
-                Some(Kind::Artifact) => kind.push_str("generated file"),
                 Some(Kind::TargetGroup) => kind.push_str("package group"),
-                _ => {}
+                Some(node_kind) => {
+                    if let Some(name) = file_kind(node_kind) {
+                        kind.push_str(name);
+                    }
+                }
+                None => {}
             }
             if rule {
                 printed.clear();

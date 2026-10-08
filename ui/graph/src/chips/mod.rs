@@ -12,7 +12,7 @@ mod reorder;
 pub(crate) use complete::Completions;
 
 use crate::menu::over_window;
-use crate::{GraphPanel, Palette, checklist};
+use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::Input;
 use bviz_graph_layout::query_lang::{
     ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
@@ -443,7 +443,7 @@ fn scope_landed(
         scope,
         ..view.derived.filter().clone()
     };
-    checklist::set_filter_framed(view, filter, cx);
+    derive::set_filter_framed(view, filter, cx);
     cx.notify();
 }
 

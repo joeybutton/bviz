@@ -2,7 +2,7 @@
 //! through `bviz_graph_layout`, lays the graph out, and opens a window
 //! rendering the result.
 
-use bviz_graph_layout::{Id, Kind};
+use bviz_graph_layout::Id;
 use bviz_invocation::Session;
 use bviz_ui_components::gesture::{
     GestureRow, Pointer, pinch_factor, scroll_pixels, wheel_zoom_factor,
@@ -29,9 +29,9 @@ use gpui::{
 use std::time::{Duration, Instant};
 
 mod actions;
+mod boxes;
 mod build;
 mod camera;
-mod checklist;
 mod chips;
 mod colour;
 mod column;
@@ -59,7 +59,6 @@ mod pan_bench;
 mod pins;
 mod playback;
 mod point;
-mod preset;
 mod relation;
 mod report;
 mod reveal;
@@ -76,7 +75,6 @@ mod unit_picker;
 mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, scale_about};
-use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
 use drag::{CanvasIntent, Drag, GESTURES, end_drag, pan_by, start_pan, track_gesture};
@@ -90,6 +88,7 @@ use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
 use relation::Relation;
+use rules::BoxClass;
 pub use scatter::ScatterPanel;
 use scroll::{scrollbar_hit, start_scroll_drag};
 use selection::Selection;
@@ -299,24 +298,12 @@ pub struct GraphPanel {
     colour_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`colour::set`].
     _colour_choices: Subscription,
-    /// The node classes the loaded graph holds boxes for, in the order the class
-    /// checklist's rows stand.
-    classes: Vec<Kind>,
-    class_filter: Entity<MultiSelect>,
-    /// Carries a toggled class row into the panel's filter.
-    _class_choices: Subscription,
-    /// The repository origins and repositories the loaded graph names, in the
-    /// order the repository checklist's rows stand.
-    origins: Vec<OriginRow>,
-    origin_filter: Entity<MultiSelect>,
-    /// Carries a toggled repository row into the panel's filter.
-    _origin_choices: Subscription,
-    /// The reductions the loaded inputs can answer, in the order the preset
-    /// checklist's rows stand.
-    presets: Vec<preset::Offer>,
-    preset_filter: Entity<MultiSelect>,
-    /// Carries a toggled preset row into the panel's filter.
-    _preset_choices: Subscription,
+    /// The box classes the loaded graph carries, in the order the boxes menu's
+    /// rows stand.
+    box_classes: Vec<BoxClass>,
+    boxes: Entity<MultiSelect>,
+    /// Carries a toggled boxes-menu row into the panel's filter.
+    _box_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
     jump: jump::Finder,
@@ -464,23 +451,10 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
-        let class_filter =
-            cx.new(|cx| MultiSelect::new("graph-classes", "classes", Vec::new(), cx));
-        let class_choices = cx.subscribe(&class_filter, |view, _, event: &MultiSelectEvent, cx| {
-            checklist::choose_classes(view, event, cx);
+        let boxes = cx.new(|cx| MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx));
+        let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
+            boxes::choose_boxes(view, event, cx);
         });
-        let origin_filter =
-            cx.new(|cx| MultiSelect::new("graph-origins", "repositories", Vec::new(), cx));
-        let origin_choices =
-            cx.subscribe(&origin_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::choose_origins(view, event, cx);
-            });
-        let preset_filter =
-            cx.new(|cx| MultiSelect::new("graph-presets", "presets", Vec::new(), cx));
-        let preset_choices =
-            cx.subscribe(&preset_filter, |view, _, event: &MultiSelectEvent, cx| {
-                checklist::choose_presets(view, event, cx);
-            });
         let chips = chips::Chips::new(cx);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
@@ -510,8 +484,7 @@ impl GraphPanel {
             })
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
-            derive::opened(view, cx);
-            checklist::adopt(view, cx);
+            view.take_up_source(cx)
         });
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
@@ -527,7 +500,7 @@ impl GraphPanel {
         let derived = Derived::new();
         let (panel, filter) = (cx.entity(), derived.filter().clone());
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
-        Self {
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             model,
             derived,
@@ -542,15 +515,9 @@ impl GraphPanel {
             colouring,
             colour_picker,
             _colour_choices: colour_choices,
-            classes: Vec::new(),
-            class_filter,
-            _class_choices: class_choices,
-            origins: Vec::new(),
-            origin_filter,
-            _origin_choices: origin_choices,
-            presets: Vec::new(),
-            preset_filter,
-            _preset_choices: preset_choices,
+            box_classes: Vec::new(),
+            boxes,
+            _box_choices: box_choices,
             chips,
             jump: jump::Finder::default(),
             matchers: fuzzy::Pool::default(),
@@ -581,7 +548,18 @@ impl GraphPanel {
             _chrome_follows: chrome_follows,
             legend: Legend::default(),
             bench: pan_bench::Bench::from_env(),
-        }
+        };
+        // A panel minted over a graph its document has already read, as a
+        // closed view reopened is, sees no read land.
+        view.take_up_source(cx);
+        view
+    }
+
+    /// Draws the graph the document holds, once it is read, and offers the box
+    /// classes it carries.
+    fn take_up_source(&mut self, cx: &mut Context<Self>) {
+        derive::opened(self, cx);
+        boxes::adopt(self, cx);
     }
 
     /// Rebuilds the graph scene along with the chrome around it; every change to
@@ -674,6 +652,30 @@ impl GraphPanel {
             .overflow_hidden()
             .child(cached_layer(self.canvas.clone()))
             .children(underived.then(|| div().absolute().size_full().flex().child(laying_out())))
+            .children(self.derived.too_dense(self.mode).map(|too_dense| {
+                let notice = format!(
+                    "{} connectors are more than a layered layout takes on ({}). \
+                     Filter the graph further, or draw it as a map.",
+                    too_dense.connectors,
+                    build::MAX_LAID_OUT_CONNECTORS,
+                );
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .child(bviz_ui_components::centered_notice(notice, &palette.colors))
+            }))
+            .children(
+                boxes::every_class_hidden(self.derived.filter(), &self.box_classes)
+                    .filter(|_| zoom.is_some_and(|zoom| drawn.withholds_most(zoom)))
+                    .map(|notice| {
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .child(bviz_ui_components::centered_notice(notice, &palette.colors))
+                    }),
+            )
             .child(
                 // What the drawing itself cannot state, held clear of the graph
                 // at the foot of the canvas.
@@ -726,9 +728,7 @@ impl GraphPanel {
             mode: self.mode,
             chips: chips::bar(self, palette, window, cx),
             picker: self.mode_picker.clone(),
-            class_filter: (!self.classes.is_empty()).then(|| self.class_filter.clone()),
-            origin_filter: (!self.origins.is_empty()).then(|| self.origin_filter.clone()),
-            preset_filter: self.preset_filter.clone(),
+            boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
             why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
@@ -1188,13 +1188,8 @@ struct Controls {
     /// The query bar.
     chips: AnyElement,
     picker: Entity<Dropdown>,
-    /// The checklists over the facets the loaded graph carries, each offered
-    /// only where that graph carries a value on its axis.
-    class_filter: Option<Entity<MultiSelect>>,
-    origin_filter: Option<Entity<MultiSelect>>,
-    /// The reductions offered as one click, listed whether or not the loaded
-    /// inputs can answer each, so that one they cannot says why.
-    preset_filter: Entity<MultiSelect>,
+    /// The boxes menu, offered only where the loaded graph carries a box class.
+    boxes: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box
     /// is selected: with none there is no marking for it to widen or narrow.
     relation_picker: Option<Entity<Dropdown>>,
@@ -1420,6 +1415,7 @@ mod tests {
     };
     use crate::paint::lane_polyline;
     use bviz_graph_layout::Box;
+    use bviz_graph_layout::Kind;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
     use bviz_ui_components::keymap_probe::{self, is};
     use gpui::{Bounds, Size, point};
@@ -1533,6 +1529,26 @@ mod tests {
         }
         assert!(dispatched("q", IN_ROOTS).is_none());
         assert!(dispatched("/", IN_ROOTS).is_none());
+    }
+
+    /// The field's word keys reach it inside the bar, beside the bar's own
+    /// keys that share their arrow or backspace.
+    #[test]
+    fn the_query_field_moves_and_deletes_by_word() {
+        let field = |key: &str| {
+            let keys = format!("{}-{key}", text_input::WORD_MODIFIER);
+            dispatched(&keys, IN_CHIP_FIELD)
+        };
+        assert!(is(field("left"), text_input::WordLeft));
+        assert!(is(field("right"), text_input::WordRight));
+        assert!(is(field("shift-left"), text_input::SelectWordLeft));
+        assert!(is(field("shift-right"), text_input::SelectWordRight));
+        assert!(is(field("backspace"), text_input::DeleteWordLeft));
+        assert!(is(field("delete"), text_input::DeleteWordRight));
+        assert!(is(
+            dispatched("secondary-shift-backspace", IN_CHIP_FIELD),
+            chips::ClearQuery
+        ));
     }
 
     const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT.id()];

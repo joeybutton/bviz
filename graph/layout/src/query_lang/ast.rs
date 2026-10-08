@@ -4,7 +4,10 @@
 use std::fmt;
 use std::ops::Range;
 
+use super::config::{ANY_EXEC, NULL, TARGET};
 use super::lex;
+use crate::facets::RuleCategory;
+use crate::repo::RepoCategory;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Expr {
@@ -108,7 +111,49 @@ impl Signature {
     }
 }
 
-/// Every function `bazel query`, `cquery` and `aquery` accept between them.
+/// The words an argument a function reads as a word is one of, where they
+/// are few and known before any graph is read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Vocabulary {
+    RepoCategory,
+    RuleCategory,
+    /// The configurations `config()` names by a word of its own rather than
+    /// by a checksum.
+    Configuration,
+}
+
+impl Vocabulary {
+    const REPO_CATEGORIES: [&'static str; RepoCategory::ALL.len()] = {
+        let mut words = [""; RepoCategory::ALL.len()];
+        let mut at = 0;
+        while at < words.len() {
+            words[at] = RepoCategory::ALL[at].spelling();
+            at += 1;
+        }
+        words
+    };
+
+    const RULE_CATEGORIES: [&'static str; RuleCategory::ALL.len()] = {
+        let mut words = [""; RuleCategory::ALL.len()];
+        let mut at = 0;
+        while at < words.len() {
+            words[at] = RuleCategory::ALL[at].spelling();
+            at += 1;
+        }
+        words
+    };
+
+    pub fn words(self) -> &'static [&'static str] {
+        match self {
+            Vocabulary::RepoCategory => &Vocabulary::REPO_CATEGORIES,
+            Vocabulary::RuleCategory => &Vocabulary::RULE_CATEGORIES,
+            Vocabulary::Configuration => &[TARGET, NULL, ANY_EXEC],
+        }
+    }
+}
+
+/// Every function `bazel query`, `cquery` and `aquery` accept between them,
+/// and bviz's extensions.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Function {
     AllPaths,
@@ -127,11 +172,15 @@ pub enum Function {
     Outputs,
     RBuildFiles,
     Rdeps,
+    RepoCategory,
+    RuleCategory,
+    RunfilesPlumbing,
     SamePkgDirectRdeps,
     Siblings,
     Some,
     SomePath,
     Tests,
+    ToolConfigured,
     Visible,
 }
 
@@ -149,15 +198,19 @@ pub(super) enum Evaluable {
     Mnemonic,
     Outputs,
     Rdeps,
+    RepoCategory,
+    RuleCategory,
+    RunfilesPlumbing,
     SamePkgDirectRdeps,
     Siblings,
     Some,
     SomePath,
+    ToolConfigured,
 }
 
 impl Function {
-    /// Every function, sorted by name.
-    pub const ALL: [Function; 22] = [
+    /// Every function Bazel 9.2.0 accepts, sorted by name.
+    pub const BAZEL: [Function; 22] = [
         Function::AllPaths,
         Function::AllRdeps,
         Function::Attr,
@@ -182,6 +235,62 @@ impl Function {
         Function::Visible,
     ];
 
+    /// Every function bviz accepts that Bazel does not, sorted by name.
+    pub const EXTENSIONS: [Function; 4] = [
+        Function::RepoCategory,
+        Function::RuleCategory,
+        Function::RunfilesPlumbing,
+        Function::ToolConfigured,
+    ];
+
+    /// Every function bviz accepts: Bazel's, then the extensions.
+    pub const ALL: [Function; Function::BAZEL.len() + Function::EXTENSIONS.len()] = {
+        let mut all = [Function::AllPaths; Function::BAZEL.len() + Function::EXTENSIONS.len()];
+        let mut at = 0;
+        while at < Function::BAZEL.len() {
+            all[at] = Function::BAZEL[at];
+            at += 1;
+        }
+        while at < all.len() {
+            all[at] = Function::EXTENSIONS[at - Function::BAZEL.len()];
+            at += 1;
+        }
+        all
+    };
+
+    /// Whether the function is one of bviz's [`Function::EXTENSIONS`] rather
+    /// than one of [`Function::BAZEL`].
+    pub fn is_extension(self) -> bool {
+        match self {
+            Function::RepoCategory
+            | Function::RuleCategory
+            | Function::RunfilesPlumbing
+            | Function::ToolConfigured => true,
+            Function::AllPaths
+            | Function::AllRdeps
+            | Function::Attr
+            | Function::BuildFiles
+            | Function::Config
+            | Function::Deps
+            | Function::Executables
+            | Function::Filter
+            | Function::Inputs
+            | Function::Kind
+            | Function::Labels
+            | Function::LoadFiles
+            | Function::Mnemonic
+            | Function::Outputs
+            | Function::RBuildFiles
+            | Function::Rdeps
+            | Function::SamePkgDirectRdeps
+            | Function::Siblings
+            | Function::Some
+            | Function::SomePath
+            | Function::Tests
+            | Function::Visible => false,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Function::AllPaths => "allpaths",
@@ -200,11 +309,15 @@ impl Function {
             Function::Outputs => "outputs",
             Function::RBuildFiles => "rbuildfiles",
             Function::Rdeps => "rdeps",
+            Function::RepoCategory => "repo_category",
+            Function::RuleCategory => "rule_category",
+            Function::RunfilesPlumbing => "runfiles_plumbing",
             Function::SamePkgDirectRdeps => "same_pkg_direct_rdeps",
             Function::Siblings => "siblings",
             Function::Some => "some",
             Function::SomePath => "somepath",
             Function::Tests => "tests",
+            Function::ToolConfigured => "tool_configured",
             Function::Visible => "visible",
         }
     }
@@ -236,10 +349,14 @@ impl Function {
             Function::Mnemonic => return Ok(Evaluable::Mnemonic),
             Function::Outputs => return Ok(Evaluable::Outputs),
             Function::Rdeps => return Ok(Evaluable::Rdeps),
+            Function::RepoCategory => return Ok(Evaluable::RepoCategory),
+            Function::RuleCategory => return Ok(Evaluable::RuleCategory),
+            Function::RunfilesPlumbing => return Ok(Evaluable::RunfilesPlumbing),
             Function::SamePkgDirectRdeps => return Ok(Evaluable::SamePkgDirectRdeps),
             Function::Siblings => return Ok(Evaluable::Siblings),
             Function::Some => return Ok(Evaluable::Some),
             Function::SomePath => return Ok(Evaluable::SomePath),
+            Function::ToolConfigured => return Ok(Evaluable::ToolConfigured),
             Function::Labels => "the labels each rule's attributes name",
             Function::Visible => "each target's visibility",
             Function::Tests => "the tests each test suite names",
@@ -254,7 +371,18 @@ impl Function {
         ))
     }
 
-    /// The signature Bazel declares for the function.
+    /// The vocabulary of the argument at `index`, where the function reads
+    /// it as one of a few known words.
+    pub fn vocabulary(self, index: usize) -> Option<Vocabulary> {
+        match (self, index) {
+            (Function::RepoCategory, 0) => Some(Vocabulary::RepoCategory),
+            (Function::RuleCategory, 0) => Some(Vocabulary::RuleCategory),
+            (Function::Config, 1) => Some(Vocabulary::Configuration),
+            _ => None,
+        }
+    }
+
+    /// The signature Bazel declares for the function, or bviz for an extension.
     pub fn signature(self) -> Signature {
         use ArgType::{Expr as E, Int as I, Word as W};
         let (params, mandatory): (&[ArgType], usize) = match self {
@@ -264,11 +392,17 @@ impl Function {
             Function::BuildFiles
             | Function::Executables
             | Function::LoadFiles
+            | Function::RunfilesPlumbing
             | Function::SamePkgDirectRdeps
             | Function::Siblings
-            | Function::Tests => (&[E], 1),
+            | Function::Tests
+            | Function::ToolConfigured => (&[E], 1),
             Function::Config => (&[E, W], 2),
-            Function::Filter | Function::Kind | Function::Labels => (&[W, E], 2),
+            Function::Filter
+            | Function::Kind
+            | Function::Labels
+            | Function::RepoCategory
+            | Function::RuleCategory => (&[W, E], 2),
             // Bazel lets aquery's filters drop the expression for
             // `--skyframe_state`, and rejects that when it evaluates them.
             Function::Inputs | Function::Mnemonic | Function::Outputs => (&[W, E], 1),

@@ -34,12 +34,34 @@ use regex_syntax::hir::{Hir, Look};
 use rustc_hash::FxHashMap;
 
 use super::ast::Function;
-use super::declared::Attribute;
+use super::declared::{Attribute, FILE_KINDS, file_kind};
 use super::universe::Universe;
-use crate::capability::Support;
+use crate::capability::{CONSISTENT_LABELS_FLAG, Support};
 use crate::exec_path::{ExecPath, LeftOutInputs};
+use crate::facets::{RuleCategory, Sym};
 use crate::graph::Kind;
 use crate::intern::Id;
+use crate::repo::{RepoCategory, RepoName};
+
+/// The mnemonics of the actions that build a runfiles tree or lay down a
+/// symlink, manifest or expanded template: the wiring between the actions that
+/// do the build's work rather than work itself.
+///
+/// Bazel 9 names the runfiles-tree action `RunfilesTree` where Bazel 8 and
+/// earlier name it `Middleman`, and bviz reads a dump from either, so both stand
+/// here.
+const RUNFILES_MNEMONICS: [&str; 10] = [
+    "SymlinkTree",
+    "SourceSymlinkManifest",
+    "PackagingSourcesManifest",
+    "RepoMappingManifest",
+    "Symlink",
+    "ExecutableSymlink",
+    "FileWrite",
+    "TemplateExpand",
+    "RunfilesTree",
+    "Middleman",
+];
 
 /// The most patterns a [`Patterns`] cache keeps compiled. A query names few,
 /// but a session of edits to one names many, so the cache empties when full.
@@ -176,9 +198,8 @@ impl Universe {
         })
     }
 
-    /// `pattern` compiled to match a whole string for the aquery filter
-    /// `function`, or the message Bazel's engine fails with for a pattern it
-    /// cannot compile.
+    /// `pattern` compiled to match a whole string for `function`, or the
+    /// message Bazel's engine fails with for a pattern it cannot compile.
     pub(super) fn whole_regex(&self, function: Function, pattern: &str) -> Result<Regex, String> {
         self.patterns.whole(pattern).map_err(|why| {
             let name = function.name();
@@ -207,10 +228,92 @@ impl Universe {
         }
     }
 
-    /// The members of `value` whose target's kind `regex` matches.
+    /// The members of `value`, and the files its configured targets hold,
+    /// whose kind `regex` matches: a file's own, as Bazel names a file target,
+    /// and the target's of any other node.
     pub(super) fn kind(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
-        self.retain(value, |at| {
-            (self.declared.kind(at)).is_some_and(|kind| regex.is_match(kind.as_bytes()))
+        let matches = |kind: &str| regex.is_match(kind.as_bytes());
+        let files = FILE_KINDS.map(|(file, name)| (file, matches(name)));
+        let own = |id: Id| {
+            let kind = self.index.kind(id)?;
+            (files.iter()).find_map(|&(file, kept)| (file == kind).then_some(kept))
+        };
+        let mut considered = value.clone();
+        for id in value.ones().map(|id| Id(id as u32)) {
+            if self.index.kind(id) == Some(Kind::ConfiguredTarget) {
+                let held = self
+                    .index
+                    .children(id)
+                    .filter(|&child| own(child).is_some());
+                considered.extend(held.map(|file| file.0 as usize));
+            }
+        }
+        self.retain_unless_own(&considered, own, |at| {
+            self.declared.kind(at).is_some_and(matches)
+        })
+    }
+
+    /// The members of `value` whose target's repository is of a category whose
+    /// [spelling](RepoCategory::spelling) `regex` matches, or why the graph
+    /// cannot tell them for `function`.
+    ///
+    /// A repository named only by an apparent name that no module evidence
+    /// places is of the unknown category, but may truly be a module's, an
+    /// extension's or the builtin one; a pattern matching one of those and not
+    /// unknown would drop it whatever it is, so it fails instead.
+    pub(super) fn repo_category(
+        &self,
+        function: Function,
+        regex: &Regex,
+        value: &FixedBitSet,
+    ) -> Result<FixedBitSet, String> {
+        let matched: Vec<RepoCategory> = (RepoCategory::ALL.into_iter())
+            .filter(|category| regex.is_match(category.spelling().as_bytes()))
+            .collect();
+        let hideable = [
+            RepoCategory::Module,
+            RepoCategory::ModuleExtension,
+            RepoCategory::Builtin,
+        ];
+        let undecidable = !matched.contains(&RepoCategory::WorkspaceOrUnknown)
+            && hideable.iter().any(|category| matched.contains(category));
+        if let Some(apparent) = self.unplaced_apparent_repo().filter(|_| undecidable) {
+            return Err(format!(
+                "{}() requires {CONSISTENT_LABELS_FLAG} to tell where @{apparent} comes from",
+                function.name()
+            ));
+        }
+        Ok(self.retain(value, |at| {
+            let repo = self.facets.repo(self.labels.entries()[at].0);
+            repo.is_some_and(|repo| matched.contains(&self.facets.repo_category(repo)))
+        }))
+    }
+
+    /// The first by name of the repositories named only by an apparent name
+    /// that no module evidence places.
+    fn unplaced_apparent_repo(&self) -> Option<&str> {
+        let facets = &self.facets;
+        (facets.repos())
+            .filter(|&(repo, _)| facets.repo_category(repo) == RepoCategory::WorkspaceOrUnknown)
+            .filter_map(|(repo, _)| match facets.repo_name(repo) {
+                RepoName::Apparent(name) => Some(name),
+                RepoName::Canonical(_) => None,
+            })
+            .min()
+    }
+
+    /// The members of `value` whose target is a rule of a class in a category
+    /// whose [spelling](RuleCategory::spelling) `regex` matches. A file, being
+    /// no rule, is in no category.
+    pub(super) fn rule_category(&self, regex: &Regex, value: &FixedBitSet) -> FixedBitSet {
+        let matched: Vec<RuleCategory> = (RuleCategory::ALL.into_iter())
+            .filter(|category| regex.is_match(category.spelling().as_bytes()))
+            .collect();
+        let own = |id: Id| file_kind(self.index.kind(id)?).map(|_| false);
+        self.retain_unless_own(value, own, |at| {
+            let class = self.facets.rule_class(self.labels.entries()[at].0);
+            let category = class.and_then(|class| self.facets.rule_category(class));
+            category.is_some_and(|category| matched.contains(&category))
         })
     }
 
@@ -266,6 +369,18 @@ impl Universe {
         })
     }
 
+    /// The actions of `value`, and those its configured targets hold, whose
+    /// mnemonic is one of [`RUNFILES_MNEMONICS`].
+    pub(super) fn runfiles_plumbing(&self, value: &FixedBitSet) -> FixedBitSet {
+        let strings = self.facets.strings();
+        let mnemonics: Vec<Sym> = (RUNFILES_MNEMONICS.iter())
+            .filter_map(|mnemonic| strings.get(mnemonic))
+            .collect();
+        self.retain_actions(value, |action| {
+            (self.facets.mnemonic(action)).is_some_and(|mnemonic| mnemonics.contains(&mnemonic))
+        })
+    }
+
     /// Whether `action` has a mnemonic every one of `regexes` matches.
     fn mnemonic_matches(&self, action: Id, regexes: &[Regex]) -> bool {
         let mnemonic = self.facets.mnemonic(action);
@@ -278,24 +393,6 @@ impl Universe {
     /// Whether `matcher` matches the exec path of one of `files`.
     fn any_path_matches(&self, files: impl Iterator<Item = Id>, matcher: &mut PathMatcher) -> bool {
         (files.filter_map(|file| self.facets.exec_path(file))).any(|path| matcher.matches(path))
-    }
-
-    /// Why `function` cannot filter this graph's actions, if it cannot: the
-    /// graph holds none, or its inputs left out the files they read and write.
-    pub(super) fn filters_actions(&self, function: Function) -> Result<(), String> {
-        let name = function.name();
-        if !self.holds_actions {
-            return Err(format!(
-                "{name}() needs the actions of an aquery, which the graph's inputs do not include"
-            ));
-        }
-        match (function, self.artifacts) {
-            (Function::Inputs | Function::Outputs, Support::Unavailable { flag }) => Err(format!(
-                "{name}() needs the files each action reads and writes, which the graph's \
-                     inputs state only under {flag}"
-            )),
-            _ => Ok(()),
-        }
     }
 
     /// The actions among `value` and among what its configured targets hold
@@ -323,13 +420,28 @@ impl Universe {
     /// The members of `value` belonging to a target `keeps`, by its position
     /// among the labels, asked once for each target.
     fn retain(&self, value: &FixedBitSet, keeps: impl Fn(usize) -> bool) -> FixedBitSet {
+        self.retain_unless_own(value, |_| None, keeps)
+    }
+
+    /// [`Self::retain`], but a member `own` gives a verdict of its own is kept
+    /// by that verdict.
+    fn retain_unless_own(
+        &self,
+        value: &FixedBitSet,
+        own: impl Fn(Id) -> Option<bool>,
+        keeps: impl Fn(usize) -> bool,
+    ) -> FixedBitSet {
         let mut verdicts: FxHashMap<usize, bool> = FxHashMap::default();
         let mut kept = self.empty();
         for id in value.ones() {
-            let Some(at) = self.position(Id(id as u32)) else {
-                continue;
+            let verdict = match own(Id(id as u32)) {
+                Some(verdict) => verdict,
+                None => match self.position(Id(id as u32)) {
+                    Some(at) => *verdicts.entry(at).or_insert_with(|| keeps(at)),
+                    None => false,
+                },
             };
-            if *verdicts.entry(at).or_insert_with(|| keeps(at)) {
+            if verdict {
                 kept.insert(id);
             }
         }

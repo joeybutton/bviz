@@ -2,6 +2,7 @@
 //! the multi-select opening under a trigger, and the context menu standing over
 //! the window at a point — so they read alike wherever they sit.
 
+use crate::scrollbar::SCROLLBAR_THICKNESS;
 use crate::{CONTROL_HEIGHT, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
@@ -16,10 +17,6 @@ const MENU_GAP: Pixels = px(2.);
 
 /// Side of the marks a menu's chrome draws.
 pub(crate) const MENU_ICON: Pixels = px(12.);
-
-/// Side of the square a group's fold mark is given, wider than the mark itself
-/// so that what folds a group is no harder to hit than what checks it.
-const MENU_FOLD: Pixels = px(18.);
 
 /// Room a row leaves above and below its label.
 const ROW_PADDING: Pixels = px(4.);
@@ -326,6 +323,13 @@ pub fn aimed_row(id: ElementId, colors: &ThemeColors, aimed: bool) -> Stateful<D
     row_frame(id, colors).when(aimed, |row| row.bg(aimed_fill(colors)))
 }
 
+/// `row` keeping the strip a list's scroll bar is drawn over inside its own
+/// trailing padding, so its fill spans the sheet and the bar covers none of
+/// what it holds.
+pub fn clear_of_scrollbar<E: Styled>(row: E) -> E {
+    row.pr(ROW_INSET + px(SCROLLBAR_THICKNESS))
+}
+
 fn row_frame(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
     div()
         .id(id)
@@ -337,32 +341,6 @@ fn row_frame(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
         .py(ROW_PADDING)
         .cursor_pointer()
         .text_color(colors.text)
-}
-
-/// The mark a group's row carries saying whether the values under it are listed
-/// or folded away, which the caller hangs the gesture folding them on.
-pub(crate) fn fold(id: ElementId, colors: &ThemeColors, folded: bool) -> Stateful<Div> {
-    let hover = colors.element_hover;
-    div()
-        .id(id)
-        .size(MENU_FOLD)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_sm()
-        .cursor_pointer()
-        .hover(move |mark| mark.bg(hover))
-        .child(mark(
-            if folded { "caret-right" } else { "caret-down" },
-            colors,
-        ))
-}
-
-/// The room a row leaves where it heads no group, so that in a menu holding
-/// groups the values line up under the rows heading them.
-pub(crate) fn gutter() -> Div {
-    div().size(MENU_FOLD).flex_none()
 }
 
 /// The check mark a row carries while the value it names is chosen, and the

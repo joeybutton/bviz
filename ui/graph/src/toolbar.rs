@@ -3,17 +3,16 @@ use bviz_ui_components::{Button, OneRow, Toolbar, spinner};
 use gpui::{ClickEvent, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
 /// How many strips [`toolbar`] stacks.
-const STRIPS: usize = 3;
+const STRIPS: usize = 2;
 
 /// The height of [`toolbar`], whatever its strips hold.
 pub(crate) fn height() -> Pixels {
     OneRow::height() * STRIPS as f32
 }
 
-/// The panel's controls in three strips, each one row tall, so that neither
+/// The panel's controls in two strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
-/// how the graph is drawn, then the checklists over its facets, then the
-/// query bar.
+/// how the graph is drawn, then the query bar.
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
@@ -24,6 +23,7 @@ pub(crate) fn toolbar(
         .one_row("graph-view-controls")
         .child(controls.picker)
         .child(controls.colour_picker)
+        .when_some(controls.boxes, |view, boxes| view.child(boxes))
         .child(
             Button::new(
                 "neighborhood-toggle",
@@ -78,18 +78,10 @@ pub(crate) fn toolbar(
         // The prior layout stays interactive while a relayout runs.
         view.trailing(busy("relaying-spinner", "laying out…", palette))
     });
-    let mut facets = Toolbar::new().one_row("graph-facet-controls");
-    for checklist in [controls.class_filter, controls.origin_filter]
-        .into_iter()
-        .flatten()
-    {
-        facets = facets.child(checklist);
-    }
-    let facets = facets.child(controls.preset_filter);
     let query = Toolbar::new()
         .one_row("graph-query-bar")
         .child(controls.chips);
-    let strips: [OneRow; STRIPS] = [view, facets, query];
+    let strips: [OneRow; STRIPS] = [view, query];
     div().size_full().flex().flex_col().children(strips)
 }
 

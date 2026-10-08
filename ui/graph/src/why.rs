@@ -14,7 +14,7 @@ use bviz_graph_layout::facets::{ConfigRef, Sym};
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
-use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Kind, Names, Support};
+use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
     load_in_background, overlay_canvas,
@@ -672,7 +672,9 @@ pub(crate) fn card(
     );
     let unmarked = found
         .then(|| {
-            let configured = view.classes.contains(&Kind::ConfiguredTarget);
+            let configured = [Input::Cquery, Input::Aquery]
+                .into_iter()
+                .any(|input| shared.inputs.contains(input));
             unmarked_transitions(&shared.capabilities, configured)
         })
         .flatten();

@@ -1,40 +1,45 @@
 //! Evaluating a [`Filter`] over every node of a graph at once.
-//!
-//! Each rule is resolved against the graph's facet tables before the nodes are
-//! scanned, so that a term over strings becomes a set of handles or a column
-//! read by id and testing one node costs a few integer lookups.
 
-use crate::facets::{Facets, RepoRef, SparseFacet, Sym, Tri};
-use crate::graph::{Graph, Kind, Node};
+use fixedbitset::FixedBitSet;
+
+use crate::graph::{Graph, Node};
 use crate::intern::Id;
-use crate::select::{Aspects, Filter, Predicate, Rule, Values, Visibility, stating};
+use crate::select::{Filter, Rule, Visibility};
 
 impl Filter {
-    /// The verdict on every node of `graph`, whose facets are `facets`.
-    pub fn evaluate(&self, graph: &Graph, facets: &Facets) -> Verdicts {
+    /// The verdict on every node of `graph`.
+    pub fn evaluate(&self, graph: &Graph) -> Verdicts {
         let ids = graph
             .nodes
             .iter()
             .map(|node| node.id.0 as usize + 1)
             .max()
             .unwrap_or(0);
-        let rules: Vec<Resolved> = (0u32..)
-            .zip(&self.rules)
-            .map(|(index, rule)| Resolved::of(index, rule, facets, ids))
-            .collect();
+        let rules: Vec<(u32, &Rule)> = (0u32..).zip(&self.rules).collect();
 
-        // A node outside the scope is stated by nothing, so that one holding a
-        // node drawn is drawn as context around it.
+        let parents = Parents::of(graph, ids);
+        let holders = match self.rules.iter().any(|rule| rule.predicate.holding) {
+            true => parents.holders(),
+            false => FixedBitSet::new(),
+        };
+
         let mut stated: Vec<Option<Stated>> = vec![None; ids];
-        let mut out_of_scope = vec![false; ids];
+        let mut unscoped: Vec<Option<Unscoped>> = vec![None; ids];
         for node in &graph.nodes {
             let id = node.id.0 as usize;
-            if self.scope.as_ref().is_some_and(|scope| !scope.holds(node)) {
-                out_of_scope[id] = true;
-            } else if let Some(rule) = rules.iter().rev().find(|rule| rule.matches(node, facets)) {
-                stated[id] = Some(Stated::Rule {
-                    index: rule.index,
+            let in_scope = self.scope.as_ref().is_none_or(|scope| scope.holds(node));
+            let rule = (rules.iter().rev()).find(|(_, rule)| rule.matches(node, &holders));
+            if in_scope {
+                stated[id] = rule.map(|&(index, rule)| Stated::Rule {
+                    index,
                     visibility: rule.visibility,
+                });
+            } else {
+                unscoped[id] = Some(match rule {
+                    Some(&(index, rule)) if rule.visibility == Visibility::Hidden => {
+                        Unscoped::Unwrapped(index)
+                    }
+                    _ => Unscoped::Framing,
                 });
             }
         }
@@ -44,19 +49,25 @@ impl Filter {
             }
         }
 
-        let unmatched = Reached::of(self.base.visibility(), Hiding::Base);
-        let mut by_id: Vec<Reached> = (stated.iter().zip(&out_of_scope))
-            .map(|(stated, &out_of_scope)| match stated {
+        let mut by_id: Vec<Reached> = (stated.iter().zip(&unscoped))
+            .map(|(stated, unscoped)| match stated {
                 Some(stated) => stated.reached(),
-                None if out_of_scope => Reached::hidden(Hiding::Scope),
-                None => unmatched,
+                None if unscoped.is_some() => Reached::hidden(Hiding::Scope),
+                None => Reached::SHOWN,
             })
             .collect();
-        let parents = Parents::of(graph, ids);
         hide_empty_frames(graph, &parents, &mut by_id);
-        frame_drawn_nodes(graph, &parents, &stated, &mut by_id);
-        Verdicts { by_id, unmatched }
+        frame_drawn_nodes(graph, &parents, &stated, &unscoped, &mut by_id);
+        Verdicts { by_id }
     }
+}
+
+/// What a node the scope leaves out is drawn as around a drawn node it holds.
+#[derive(Clone, Copy, Debug)]
+enum Unscoped {
+    Framing,
+    /// Nothing, the hiding rule at this index unwrapping it.
+    Unwrapped(u32),
 }
 
 /// What decided one node's visibility before where it sits in the containment
@@ -87,9 +98,6 @@ pub enum Hiding {
     /// The rule at this index of [`Filter::rules`], the last one matching the
     /// node.
     Rule(u32),
-    /// The filter's [`Base`](crate::select::Base), no rule or pin having
-    /// matched the node.
-    Base,
     /// The node is a frame and nothing it holds is drawn, which no rule or pin
     /// over the frame itself can change.
     NothingToFrame,
@@ -105,16 +113,14 @@ impl Reached {
     const FADED: Reached = Reached(1);
     const CONTEXT: Reached = Reached(2);
     const BY_PIN: u32 = 3;
-    const BY_BASE: u32 = 4;
-    const BY_NOTHING_TO_FRAME: u32 = 5;
-    const BY_SCOPE: u32 = 6;
+    const BY_NOTHING_TO_FRAME: u32 = 4;
+    const BY_SCOPE: u32 = 5;
     /// The code of [`Hiding::Rule`]`(0)`; each later rule counts on from it.
-    const BY_FIRST_RULE: u32 = 7;
+    const BY_FIRST_RULE: u32 = 6;
 
     fn hidden(hiding: Hiding) -> Self {
         Reached(match hiding {
             Hiding::Pin => Self::BY_PIN,
-            Hiding::Base => Self::BY_BASE,
             Hiding::NothingToFrame => Self::BY_NOTHING_TO_FRAME,
             Hiding::Scope => Self::BY_SCOPE,
             Hiding::Rule(index) => Self::BY_FIRST_RULE + index,
@@ -135,7 +141,6 @@ impl Reached {
         match self.0 {
             0..Self::BY_PIN => None,
             Self::BY_PIN => Some(Hiding::Pin),
-            Self::BY_BASE => Some(Hiding::Base),
             Self::BY_NOTHING_TO_FRAME => Some(Hiding::NothingToFrame),
             Self::BY_SCOPE => Some(Hiding::Scope),
             rule => Some(Hiding::Rule(rule - Self::BY_FIRST_RULE)),
@@ -163,7 +168,7 @@ pub enum Verdict {
     Hidden,
     Faded,
     /// A containment ancestor of a drawn node that no rule or pin of the filter
-    /// decided, so only the filter's base or scope hid it. It is drawn as an ordinary
+    /// decided, so only the filter's scope hid it. It is drawn as an ordinary
     /// container, which is what leaves the node below it stating the package
     /// and target it sits in instead of standing at the root of the drawing.
     Context,
@@ -197,6 +202,17 @@ impl Parents {
             parent[node.id.0 as usize] = node.parent;
         }
         Parents(parent)
+    }
+
+    /// The ids of the nodes holding another.
+    fn holders(&self) -> FixedBitSet {
+        let mut holders = FixedBitSet::with_capacity(self.0.len());
+        for parent in self.0.iter().flatten() {
+            if (parent.0 as usize) < self.0.len() {
+                holders.insert(parent.0 as usize);
+            }
+        }
+        holders
     }
 
     /// Where the node at `id` sits, `None` for a root and for a node whose
@@ -237,14 +253,15 @@ fn hide_empty_frames(graph: &Graph, parents: &Parents, by_id: &mut [Reached]) {
 }
 
 /// Turns into a [`Verdict::Context`] frame every containment ancestor of a drawn
-/// node that `stated` leaves to the base or the scope and `by_id` therefore
-/// hides. Each
-/// ancestor is decided on its own, so a rule hiding one of them unwraps that one
-/// while the frames above and below it stand.
+/// node that `stated` leaves to the scope and `by_id` therefore hides, but for
+/// one `unscoped` names a hiding rule of, which that rule unwraps. Each
+/// ancestor is decided on its own, so a rule hiding one of them unwraps that
+/// one while the frames above and below it stand.
 fn frame_drawn_nodes(
     graph: &Graph,
     parents: &Parents,
     stated: &[Option<Stated>],
+    unscoped: &[Option<Unscoped>],
     by_id: &mut [Reached],
 ) {
     for node in &graph.nodes {
@@ -255,33 +272,26 @@ fn frame_drawn_nodes(
         let mut at = parents.above(id);
         while let Some(ancestor) = at {
             if stated[ancestor].is_none() && !by_id[ancestor].drawn() {
-                by_id[ancestor] = Reached::CONTEXT;
+                by_id[ancestor] = match unscoped[ancestor] {
+                    Some(Unscoped::Unwrapped(index)) => Reached::hidden(Hiding::Rule(index)),
+                    _ => Reached::CONTEXT,
+                };
             }
             at = parents.above(ancestor);
         }
     }
 }
 
-/// What a filter made of every node of one graph, by node id.
-#[derive(Clone, Debug)]
+/// What a filter made of every node of one graph, by node id. The default is
+/// what a filter deciding nothing makes of them, which shows every node.
+#[derive(Clone, Debug, Default)]
 pub struct Verdicts {
     by_id: Vec<Reached>,
-    unmatched: Reached,
-}
-
-impl Default for Verdicts {
-    /// The verdicts of a filter deciding nothing, which shows every node.
-    fn default() -> Self {
-        Verdicts {
-            by_id: Vec::new(),
-            unmatched: Reached::SHOWN,
-        }
-    }
 }
 
 impl Verdicts {
     /// The verdict for the node `id` names. An id the evaluated graph does not
-    /// name reads as the verdict of a node no rule reached.
+    /// name reads as shown, as a node nothing decided is.
     pub fn get(&self, id: Id) -> Verdict {
         self.reached(id).verdict()
     }
@@ -295,213 +305,18 @@ impl Verdicts {
         self.by_id
             .get(id.0 as usize)
             .copied()
-            .unwrap_or(self.unmatched)
+            .unwrap_or(Reached::SHOWN)
     }
 }
 
-/// One rule with its predicate resolved against the graph being evaluated.
-///
-/// The terms reading one facet are resolved together, since the values a term
-/// names and the categories another admits constrain that one facet and the
-/// handles passing both are settled here rather than per node.
-struct Resolved<'a> {
-    kinds: Option<&'a Values<Kind>>,
-    testonly: Option<Tri>,
-    repos: Option<Admits<RepoRef>>,
-    rule_classes: Option<Admits<Sym>>,
-    configs: Option<Admits<Sym>>,
-    mnemonics: Option<Admits<Sym>>,
-    tags: Option<Column>,
-    aspects: Option<Column>,
-    /// Where the rule stands in [`Filter::rules`].
-    index: u32,
-    visibility: Visibility,
-}
-
-impl<'a> Resolved<'a> {
-    fn of(index: u32, rule: &'a Rule, facets: &Facets, ids: usize) -> Self {
-        let predicate = &rule.predicate;
-        Resolved {
-            kinds: predicate.kinds.as_ref(),
-            testonly: predicate.testonly.map(stating),
-            repos: repos(predicate, facets),
-            rule_classes: rule_classes(predicate, facets),
-            configs: configs(predicate, facets),
-            mnemonics: predicate
-                .mnemonics
-                .as_ref()
-                .map(|mnemonics| interned(mnemonics, facets)),
-            tags: predicate.tags.as_ref().map(|tags| {
-                let admitted = interned(tags, facets);
-                column(facets.tags(), ids, false, |values| {
-                    values.iter().any(|&tag| admitted.holds(tag))
-                })
-            }),
-            aspects: predicate
-                .aspects
-                .as_ref()
-                .map(|aspects| aspect_column(aspects, facets, ids)),
-            index,
-            visibility: rule.visibility,
-        }
+impl Rule {
+    /// Whether the rule matches `node`; `holders` holds every node holding
+    /// another wherever a rule of the filter asks for that.
+    fn matches(&self, node: &Node, holders: &FixedBitSet) -> bool {
+        let predicate = &self.predicate;
+        (predicate.kinds.as_ref()).is_none_or(|kinds| kinds.contains(&node.kind))
+            && (!predicate.holding || holders.contains(node.id.0 as usize))
     }
-
-    fn matches(&self, node: &Node, facets: &Facets) -> bool {
-        let id = node.id;
-        self.kinds.is_none_or(|kinds| kinds.contains(&node.kind))
-            && self
-                .testonly
-                .is_none_or(|testonly| facets.testonly(id) == testonly)
-            && self
-                .repos
-                .as_ref()
-                .is_none_or(|repos| facets.repo(id).is_some_and(|repo| repos.holds(repo)))
-            && self.rule_classes.as_ref().is_none_or(|rule_classes| {
-                facets
-                    .rule_class(id)
-                    .is_some_and(|rule_class| rule_classes.holds(rule_class.sym()))
-            })
-            && self.configs.as_ref().is_none_or(|configs| {
-                facets
-                    .config(id)
-                    .is_some_and(|config| configs.holds(config.sym()))
-            })
-            && self.mnemonics.as_ref().is_none_or(|mnemonics| {
-                facets
-                    .mnemonic(id)
-                    .is_some_and(|mnemonic| mnemonics.holds(mnemonic))
-            })
-            && self.tags.as_ref().is_none_or(|tags| tags.holds(id))
-            && self
-                .aspects
-                .as_ref()
-                .is_none_or(|aspects| aspects.holds(id))
-    }
-}
-
-/// The handles a term admits. Empty where every value the term names is one
-/// this graph never interned, which admits no node at all.
-struct Admits<T>(Vec<T>);
-
-impl<T: Copy + Ord> Admits<T> {
-    fn of(handles: impl Iterator<Item = T>) -> Self {
-        let mut handles: Vec<T> = handles.collect();
-        handles.sort_unstable();
-        handles.dedup();
-        Admits(handles)
-    }
-
-    fn holds(&self, handle: T) -> bool {
-        self.0.binary_search(&handle).is_ok()
-    }
-}
-
-/// A term's answer for each id, settled before the nodes are scanned.
-struct Column {
-    held: Vec<bool>,
-    /// The answer for an id past the ones the column was built over, which is
-    /// the answer for a node carrying nothing of the facet the term reads.
-    beyond: bool,
-}
-
-impl Column {
-    fn holds(&self, id: Id) -> bool {
-        self.held.get(id.0 as usize).copied().unwrap_or(self.beyond)
-    }
-}
-
-/// The handles of the values `values` names, dropping every name this graph
-/// never interned.
-fn interned(values: &Values<String>, facets: &Facets) -> Admits<Sym> {
-    Admits::of(
-        values
-            .as_slice()
-            .iter()
-            .filter_map(|value| facets.strings().get(value)),
-    )
-}
-
-fn repos(predicate: &Predicate, facets: &Facets) -> Option<Admits<RepoRef>> {
-    let (names, categories) = (predicate.repos.as_ref(), predicate.repo_categories.as_ref());
-    if names.is_none() && categories.is_none() {
-        return None;
-    }
-    Some(Admits::of(
-        facets
-            .repos()
-            .filter(|(repo, entry)| {
-                let name = entry.name().map(|name| facets.strings().resolve(name));
-                names.is_none_or(|names| {
-                    names
-                        .as_slice()
-                        .iter()
-                        .any(|named| named.as_deref() == name)
-                }) && categories
-                    .is_none_or(|categories| categories.contains(&facets.repo_category(*repo)))
-            })
-            .map(|(repo, _)| repo),
-    ))
-}
-
-fn rule_classes(predicate: &Predicate, facets: &Facets) -> Option<Admits<Sym>> {
-    let (names, categories) = (
-        predicate.rule_classes.as_ref(),
-        predicate.rule_categories.as_ref(),
-    );
-    if names.is_none() && categories.is_none() {
-        return None;
-    }
-    Some(Admits::of(
-        facets
-            .rule_classes()
-            .filter(|(rule_class, category)| {
-                names.is_none_or(|names| names.contains(facets.strings().resolve(rule_class.sym())))
-                    && categories.is_none_or(|categories| categories.contains(category))
-            })
-            .map(|(rule_class, _)| rule_class.sym()),
-    ))
-}
-
-fn configs(predicate: &Predicate, facets: &Facets) -> Option<Admits<Sym>> {
-    let (checksums, is_tool) = (predicate.configs.as_ref(), predicate.is_tool);
-    if checksums.is_none() && is_tool.is_none() {
-        return None;
-    }
-    Some(Admits::of(
-        facets
-            .configs()
-            .filter(|(config, entry)| {
-                checksums.is_none_or(|checksums| {
-                    checksums.contains(facets.strings().resolve(config.sym()))
-                }) && is_tool.is_none_or(|is_tool| entry.is_tool == stating(is_tool))
-            })
-            .map(|(config, _)| config.sym()),
-    ))
-}
-
-fn aspect_column(aspects: &Aspects, facets: &Facets, ids: usize) -> Column {
-    match aspects {
-        Aspects::Any => column(facets.aspects(), ids, false, |values| !values.is_empty()),
-        Aspects::None => column(facets.aspects(), ids, true, |values| values.is_empty()),
-        Aspects::Named(named) => {
-            let admitted = interned(named, facets);
-            column(facets.aspects(), ids, false, |values| {
-                values.iter().any(|&value| admitted.holds(value))
-            })
-        }
-    }
-}
-
-/// A column over `ids` answering `carried` for every node `facet` records values
-/// for and `bare` for every other node, which carries none.
-fn column(facet: &SparseFacet, ids: usize, bare: bool, carried: impl Fn(&[Sym]) -> bool) -> Column {
-    let mut held = vec![bare; ids];
-    for (id, values) in facet.rows() {
-        if let Some(slot) = held.get_mut(id.0 as usize) {
-            *slot = carried(values);
-        }
-    }
-    Column { held, beyond: bare }
 }
 
 #[cfg(test)]
@@ -509,50 +324,31 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::facets::{FacetsBuilder, RuleCategory};
+    use crate::graph::Kind;
     use crate::intern::Names;
-    use crate::repo::{RepoCategory, RepoName};
-    use crate::select::{Base, Pin, Scope};
-    use fixedbitset::FixedBitSet;
+    use crate::select::{Pin, Predicate, Scope, Values};
 
-    /// A graph holding, in the main repository, a `cc_test` target with the
-    /// configured target, action, and output artifact it owns, all of which
-    /// inherit the target's facets; beside them a `cc_library` target of an
-    /// external repository built for a tool, a source file no input described
-    /// beyond its label, and a group box such as the quotient pass mints, whose
-    /// id lies past every facet the inputs stated.
+    /// A graph holding a target with the configured target, action, and output
+    /// artifact it owns, and beside it a target holding nothing and a source
+    /// file.
     struct Fixture {
         graph: Graph,
         names: Names,
-        facets: Facets,
     }
 
     const APP: &str = "target://foo:app";
     const CONFIGURED: &str = "ct://foo:app#ck1";
     const ACTION: &str = "action0";
     const OUTPUT: &str = "artifact://foo:app.o#ck1";
-    const LIB: &str = "target:@@rules_foo+//bar:lib";
+    const LIB: &str = "target://bar:lib";
     const SOURCE: &str = "target://foo:main.c";
-    const GROUP: &str = "group:target://foo:main.c";
 
     impl Fixture {
         fn new() -> Self {
             let mut graph = Graph::new();
             let mut names = Names::default();
-            let mut builder = FacetsBuilder::default();
-
             let app = names.intern(APP);
             graph.add_node(Node::new(app, ":app", Kind::Target, None));
-            builder.describe_label(app, None, "//foo:app");
-            builder.set_tags(app, ["manual"]);
-            builder.set_aspects(app, ["//tools:coverage.bzl%instrument"]);
-            let facets = builder.facets();
-            let rule_class = facets.intern_rule_class("cc_test");
-            facets.set_rule_class(app, Some(rule_class));
-            let config = facets.intern_config("ck1", Some("k8-fastbuild"), Tri::No);
-            facets.set_config(app, Some(config));
-            facets.set_testonly(app, Tri::Yes);
-
             for (name, kind, label) in [
                 (CONFIGURED, Kind::ConfiguredTarget, ":app"),
                 (ACTION, Kind::Action, "CppCompile"),
@@ -560,39 +356,16 @@ mod tests {
             ] {
                 let id = names.intern(name);
                 graph.add_node(Node::new(id, label, kind, Some(app)));
-                builder.facets().inherit(id, app);
             }
-            let action = names.get(ACTION).expect("the action just interned");
-            let facets = builder.facets();
-            let mnemonic = facets.intern_mnemonic("CppCompile");
-            facets.set_mnemonic(action, Some(mnemonic));
-
             let lib = names.intern(LIB);
             graph.add_node(Node::new(lib, ":lib", Kind::Target, None));
-            builder.describe_label(lib, None, "@@rules_foo+//bar:lib");
-            let facets = builder.facets();
-            let rule_class = facets.intern_rule_class("cc_library");
-            facets.set_rule_class(lib, Some(rule_class));
-            let exec = facets.intern_config("ck2", Some("k8-opt-exec"), Tri::Yes);
-            facets.set_config(lib, Some(exec));
-
             let source = names.intern(SOURCE);
             graph.add_node(Node::new(source, ":main.c", Kind::Source, None));
-            builder.describe_label(source, None, "//foo:main.c");
-
-            let (facets, _) = builder.seal();
-            let group = names.intern(GROUP);
-            graph.add_node(Node::new(group, "2 sources", Kind::Source, None));
-
-            Fixture {
-                graph,
-                names,
-                facets,
-            }
+            Fixture { graph, names }
         }
 
         fn evaluate(&self, filter: &Filter) -> Verdicts {
-            filter.evaluate(&self.graph, &self.facets)
+            filter.evaluate(&self.graph)
         }
 
         fn id(&self, name: &str) -> Id {
@@ -615,185 +388,50 @@ mod tests {
         names.into_iter().collect()
     }
 
-    /// A filter hiding every node but the ones `predicate` matches.
-    fn showing(predicate: Predicate) -> Filter {
+    /// A filter hiding the nodes of `kinds`.
+    fn hiding(kinds: &[Kind]) -> Filter {
         Filter {
-            base: Base::HideAll,
             rules: vec![Rule {
-                predicate,
-                visibility: Visibility::Shown,
+                predicate: Predicate {
+                    kinds: Values::new(kinds.iter().copied()),
+                    ..Predicate::default()
+                },
+                visibility: Visibility::Hidden,
             }],
             ..Filter::default()
         }
     }
 
-    fn values(values: &[&str]) -> Option<Values<String>> {
-        Values::new(values.iter().map(|&value| value.to_string()))
-    }
-
-    fn repos(repos: &[RepoName<&str>]) -> Option<Values<RepoName<String>>> {
-        Values::new(repos.iter().map(|repo| repo.map(str::to_string)))
-    }
-
     #[test]
-    fn a_repository_term_keeps_the_nodes_of_the_repositories_it_names() {
+    fn a_holding_term_matches_only_the_nodes_holding_another() {
         let fixture = Fixture::new();
-        let main = showing(Predicate {
-            repo_categories: Values::new([RepoCategory::Main]),
-            ..Predicate::default()
-        });
-
-        assert_eq!(
-            fixture.nodes(&main, Verdict::Shown),
-            named([APP, CONFIGURED, ACTION, OUTPUT, SOURCE])
-        );
-        assert_eq!(fixture.nodes(&main, Verdict::Hidden), named([LIB, GROUP]));
-    }
-
-    /// A repository term reads the name identifying each repository, so a rule
-    /// naming one written canonically leaves a repository the inputs named only
-    /// apparently drawn, however alike the two names read.
-    #[test]
-    fn a_repository_term_tells_an_apparent_name_from_a_canonical_one() {
-        const APPARENT: &str = "target:@somerepo//foo:lib";
-        const CANONICAL: &str = "target:@@somerepo//bar:lib";
-
-        let mut graph = Graph::new();
-        let mut names = Names::default();
-        let mut builder = FacetsBuilder::default();
-        for (node, label) in [
-            (APPARENT, "@somerepo//foo:lib"),
-            (CANONICAL, "@@somerepo//bar:lib"),
-        ] {
-            let id = names.intern(node);
-            graph.add_node(Node::new(id, ":lib", Kind::Target, None));
-            builder.describe_label(id, None, label);
-        }
-        let (facets, _) = builder.seal();
-
-        let shown = |named: RepoName<&str>| {
-            let filter = showing(Predicate {
-                repos: repos(&[named]),
-                ..Predicate::default()
-            });
-            let verdicts = filter.evaluate(&graph, &facets);
-            graph
-                .nodes
-                .iter()
-                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
-                .map(|node| names.resolve(node.id))
-                .collect::<BTreeSet<&str>>()
+        let filter = Filter {
+            rules: vec![Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target]),
+                    holding: true,
+                },
+                visibility: Visibility::Hidden,
+            }],
+            ..Filter::default()
         };
 
-        assert_eq!(shown(RepoName::Apparent("somerepo")), named([APPARENT]));
-        assert_eq!(shown(RepoName::Canonical("somerepo")), named([CANONICAL]));
-    }
-
-    /// A repository named only apparently after a module the graph names
-    /// canonically is selected as a module repository, so the origin a checklist
-    /// lists it under reaches it.
-    #[test]
-    fn a_repository_term_over_modules_reaches_an_apparently_named_module_repository() {
-        const APPARENT: &str = "target:@llvm//lib:core";
-        const GENERATED: &str = "target:@@llvm++llvm+llvm-project//lib:support";
-
-        let mut graph = Graph::new();
-        let mut names = Names::default();
-        let mut builder = FacetsBuilder::default();
-        for (node, label) in [
-            (APPARENT, "@llvm//lib:core"),
-            (GENERATED, "@@llvm++llvm+llvm-project//lib:support"),
-        ] {
-            let id = names.intern(node);
-            graph.add_node(Node::new(id, ":lib", Kind::Target, None));
-            builder.describe_label(id, None, label);
-        }
-        let (facets, _) = builder.seal();
-
-        let modules = showing(Predicate {
-            repo_categories: Values::new([RepoCategory::Module]),
-            ..Predicate::default()
-        });
-        let verdicts = modules.evaluate(&graph, &facets);
-
-        assert_eq!(
-            graph
-                .nodes
-                .iter()
-                .filter(|node| verdicts.get(node.id) == Verdict::Shown)
-                .map(|node| names.resolve(node.id))
-                .collect::<BTreeSet<&str>>(),
-            named([APPARENT])
-        );
+        assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([APP]));
     }
 
     #[test]
-    fn a_repository_the_graph_never_saw_keeps_nothing() {
+    fn an_id_the_graph_does_not_name_reads_as_shown() {
         let fixture = Fixture::new();
-        let elsewhere = showing(Predicate {
-            repos: repos(&[RepoName::Canonical("rules_bar+")]),
-            ..Predicate::default()
-        });
+        let verdicts = fixture.evaluate(&hiding(&[Kind::Target]));
 
-        assert!(fixture.nodes(&elsewhere, Verdict::Shown).is_empty());
-    }
-
-    /// A configured target, an action, and an output artifact inherit the rule
-    /// class of the target they belong to, so a term over rule classes reaches
-    /// the whole of what a target became and not the target box alone.
-    #[test]
-    fn a_rule_class_term_reaches_everything_a_target_became() {
-        let fixture = Fixture::new();
-        let tests = showing(Predicate {
-            rule_categories: Values::new([RuleCategory::Test]),
-            ..Predicate::default()
-        });
-
-        assert_eq!(
-            fixture.nodes(&tests, Verdict::Shown),
-            named([APP, CONFIGURED, ACTION, OUTPUT])
-        );
-    }
-
-    /// The quotient pass mints group ids above every id the inputs described, so
-    /// a group answers a term over any facet as a node carrying none does.
-    #[test]
-    fn an_id_past_the_facets_carries_nothing_and_answers_every_term() {
-        let fixture = Fixture::new();
-        let group = fixture.id(GROUP);
-        let over_facets = showing(Predicate {
-            rule_classes: values(&["cc_test"]),
-            tags: values(&["manual"]),
-            aspects: Some(Aspects::Any),
-            ..Predicate::default()
-        });
-        assert_eq!(fixture.evaluate(&over_facets).get(group), Verdict::Hidden);
-
-        let unaspected = showing(Predicate {
-            aspects: Some(Aspects::None),
-            ..Predicate::default()
-        });
-        assert_eq!(fixture.evaluate(&unaspected).get(group), Verdict::Shown);
-
-        let everything = showing(Predicate::default());
-        assert_eq!(fixture.evaluate(&everything).get(group), Verdict::Shown);
-    }
-
-    #[test]
-    fn an_id_the_graph_does_not_name_reads_as_a_node_no_rule_reached() {
-        let fixture = Fixture::new();
-        let verdicts = fixture.evaluate(&showing(Predicate::default()));
-
-        assert_eq!(verdicts.get(Id(9_999)), Verdict::Hidden);
+        assert_eq!(verdicts.get(Id(9_999)), Verdict::Shown);
+        assert_eq!(verdicts.hiding(Id(9_999)), None);
     }
 
     #[test]
     fn a_pin_decides_the_node_it_names_whatever_the_rules_say() {
         let fixture = Fixture::new();
-        let mut filter = showing(Predicate {
-            kinds: Values::new([Kind::Target]),
-            ..Predicate::default()
-        });
+        let mut filter = hiding(&[Kind::Action, Kind::Source]);
         filter
             .pins
             .insert(fixture.id(APP), Pin::Set(Visibility::Faded));
@@ -811,10 +449,7 @@ mod tests {
     #[test]
     fn a_revealed_pin_shows_the_node_the_rules_hide() {
         let fixture = Fixture::new();
-        let mut filter = showing(Predicate {
-            kinds: Values::new([Kind::Target]),
-            ..Predicate::default()
-        });
+        let mut filter = hiding(&[Kind::Action, Kind::Artifact]);
         filter.pins.insert(fixture.id(ACTION), Pin::Revealed);
 
         let verdicts = fixture.evaluate(&filter);
@@ -825,54 +460,21 @@ mod tests {
     /// A filter whose rules overlap, so that the order they are read in decides
     /// several of the nodes and a pin decides one more.
     fn layered(fixture: &Fixture) -> Filter {
-        let rule = |predicate, visibility| Rule {
-            predicate,
+        let rule = |kinds: &[Kind], holding, visibility| Rule {
+            predicate: Predicate {
+                kinds: Values::new(kinds.iter().copied()),
+                holding,
+            },
             visibility,
         };
         Filter {
-            base: Base::HideAll,
             scope: None,
             rules: vec![
-                rule(Predicate::default(), Visibility::Shown),
-                rule(
-                    Predicate {
-                        kinds: Values::new([Kind::Action, Kind::Artifact]),
-                        ..Predicate::default()
-                    },
-                    Visibility::Hidden,
-                ),
-                rule(
-                    Predicate {
-                        rule_categories: Values::new([RuleCategory::Test]),
-                        testonly: Some(true),
-                        ..Predicate::default()
-                    },
-                    Visibility::Faded,
-                ),
-                rule(
-                    Predicate {
-                        repos: repos(&[RepoName::Canonical("rules_foo+")]),
-                        is_tool: Some(true),
-                        ..Predicate::default()
-                    },
-                    Visibility::Hidden,
-                ),
-                rule(
-                    Predicate {
-                        mnemonics: values(&["CppCompile"]),
-                        ..Predicate::default()
-                    },
-                    Visibility::Shown,
-                ),
-                rule(
-                    Predicate {
-                        aspects: Some(Aspects::Named(
-                            values(&["//tools:coverage.bzl%instrument"]).expect("one aspect"),
-                        )),
-                        ..Predicate::default()
-                    },
-                    Visibility::Faded,
-                ),
+                rule(&[], false, Visibility::Shown),
+                rule(&[Kind::Action, Kind::Artifact], false, Visibility::Hidden),
+                rule(&[Kind::Target], true, Visibility::Faded),
+                rule(&[Kind::Action], false, Visibility::Shown),
+                rule(&[Kind::Source], false, Visibility::Hidden),
             ],
             pins: [(fixture.id(OUTPUT), Pin::Set(Visibility::Faded))]
                 .into_iter()
@@ -887,13 +489,10 @@ mod tests {
 
         assert_eq!(
             fixture.nodes(&filter, Verdict::Shown),
-            named([ACTION, SOURCE, GROUP])
+            named([CONFIGURED, ACTION, LIB])
         );
-        assert_eq!(
-            fixture.nodes(&filter, Verdict::Faded),
-            named([APP, CONFIGURED, OUTPUT])
-        );
-        assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([LIB]));
+        assert_eq!(fixture.nodes(&filter, Verdict::Faded), named([APP, OUTPUT]));
+        assert_eq!(fixture.nodes(&filter, Verdict::Hidden), named([SOURCE]));
     }
 
     /// Two packages, each holding a target, the first holding two actions and the
@@ -902,7 +501,6 @@ mod tests {
     struct Nested {
         graph: Graph,
         names: Names,
-        facets: Facets,
     }
 
     const PACKAGE: &str = "//foo";
@@ -930,12 +528,7 @@ mod tests {
                     graph.add_node(Node::new(action_id, action, Kind::Action, Some(target_id)));
                 }
             }
-            let (facets, _) = FacetsBuilder::default().seal();
-            Nested {
-                graph,
-                names,
-                facets,
-            }
+            Nested { graph, names }
         }
 
         fn id(&self, name: &str) -> Id {
@@ -943,18 +536,7 @@ mod tests {
         }
 
         fn evaluate(&self, filter: &Filter) -> Verdicts {
-            filter.evaluate(&self.graph, &self.facets)
-        }
-
-        /// A filter that draws nothing of its own accord and shows `name` alone.
-        fn showing_one(&self, name: &str) -> Filter {
-            Filter {
-                base: Base::HideAll,
-                pins: [(self.id(name), Pin::Set(Visibility::Shown))]
-                    .into_iter()
-                    .collect(),
-                ..Filter::default()
-            }
+            filter.evaluate(&self.graph)
         }
     }
 
@@ -1012,6 +594,72 @@ mod tests {
         assert_eq!(verdicts.get(fixture.id(LINK)), Verdict::Shown);
     }
 
+    /// A box the scope leaves out frames what it keeps, unless a rule hides
+    /// the box, which unwraps it as it would a box in scope.
+    #[test]
+    fn a_rule_hiding_a_box_outside_the_scope_unwraps_it() {
+        let fixture = Nested::new();
+        let mut filter = fixture.scoped(&[COMPILE]);
+        filter.rules.push(Rule {
+            predicate: Predicate {
+                kinds: Values::new([Kind::Target]),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        });
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(verdicts.hiding(fixture.id(TARGET)), Some(Hiding::Rule(0)));
+        assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Shown);
+        assert_eq!(verdicts.hiding(fixture.id(LINK)), Some(Hiding::Scope));
+    }
+
+    /// A box holding nothing drawn has nothing to unwrap, so the scope alone
+    /// hides it.
+    #[test]
+    fn a_rule_hiding_a_box_outside_the_scope_framing_nothing_leaves_it_to_the_scope() {
+        let fixture = Nested::new();
+        let mut filter = fixture.scoped(&[COMPILE]);
+        filter.rules.push(Rule {
+            predicate: Predicate {
+                kinds: Values::new([Kind::Target]),
+                ..Predicate::default()
+            },
+            visibility: Visibility::Hidden,
+        });
+        let verdicts = fixture.evaluate(&filter);
+
+        assert_eq!(
+            verdicts.hiding(fixture.id(OTHER_TARGET)),
+            Some(Hiding::Scope)
+        );
+    }
+
+    /// A query narrows and never widens, so a rule showing or fading a box the
+    /// scope leaves out leaves it the frame of what the scope keeps.
+    #[test]
+    fn a_rule_showing_a_box_outside_the_scope_leaves_it_a_frame() {
+        let fixture = Nested::new();
+        for visibility in [Visibility::Shown, Visibility::Faded] {
+            let mut filter = fixture.scoped(&[COMPILE]);
+            filter.rules.push(Rule {
+                predicate: Predicate {
+                    kinds: Values::new([Kind::Target]),
+                    ..Predicate::default()
+                },
+                visibility,
+            });
+            let verdicts = fixture.evaluate(&filter);
+
+            assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
+            assert_eq!(
+                verdicts.hiding(fixture.id(OTHER_TARGET)),
+                Some(Hiding::Scope)
+            );
+        }
+    }
+
     #[test]
     fn a_rule_hides_within_the_scope() {
         let fixture = Nested::new();
@@ -1029,19 +677,9 @@ mod tests {
     }
 
     #[test]
-    fn a_shown_node_keeps_the_ancestors_only_the_base_hides() {
-        let fixture = Nested::new();
-        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
-
-        assert_eq!(verdicts.get(fixture.id(COMPILE)), Verdict::Shown);
-        assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
-        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Context);
-    }
-
-    #[test]
     fn a_context_frame_keeps_none_of_its_other_children() {
         let fixture = Nested::new();
-        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
+        let verdicts = fixture.evaluate(&fixture.scoped(&[COMPILE]));
 
         assert_eq!(verdicts.get(fixture.id(LINK)), Verdict::Hidden);
         for elsewhere in [OTHER_PACKAGE, OTHER_TARGET, OTHER_ACTION] {
@@ -1054,7 +692,7 @@ mod tests {
     #[test]
     fn a_rule_hiding_a_kind_unwraps_it_even_around_a_shown_node() {
         let fixture = Nested::new();
-        let mut filter = fixture.showing_one(COMPILE);
+        let mut filter = fixture.scoped(&[COMPILE]);
         filter.rules.push(Rule {
             predicate: Predicate {
                 kinds: Values::new([Kind::Package]),
@@ -1116,26 +754,16 @@ mod tests {
         assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Shown);
     }
 
-    /// Only a node the drawing holds calls for a frame, so one a rule hides
-    /// leaves its ancestors as hidden as the base left them — while a node the
+    /// Only a node the drawing holds calls for a frame, so one a pin hides
+    /// leaves its ancestors as hidden as the scope left them — while a node the
     /// same filter shows keeps its own.
     #[test]
-    fn a_node_a_rule_hides_keeps_no_ancestor() {
+    fn a_node_a_pin_hides_keeps_no_ancestor() {
         let fixture = Nested::new();
-        let filter = Filter {
-            base: Base::HideAll,
-            scope: None,
-            rules: vec![Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Action]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Shown,
-            }],
-            pins: [(fixture.id(OTHER_ACTION), Pin::Set(Visibility::Hidden))]
-                .into_iter()
-                .collect(),
-        };
+        let mut filter = fixture.scoped(&[COMPILE, LINK, OTHER_ACTION]);
+        filter
+            .pins
+            .insert(fixture.id(OTHER_ACTION), Pin::Set(Visibility::Hidden));
 
         let verdicts = fixture.evaluate(&filter);
 
@@ -1143,17 +771,15 @@ mod tests {
         assert_eq!(verdicts.get(fixture.id(OTHER_TARGET)), Verdict::Hidden);
         assert_eq!(verdicts.get(fixture.id(OTHER_PACKAGE)), Verdict::Hidden);
         assert_eq!(verdicts.get(fixture.id(TARGET)), Verdict::Context);
-        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Context);
+        assert_eq!(verdicts.get(fixture.id(PACKAGE)), Verdict::Shown);
     }
 
     /// Each hidden node names what hid it: the last rule matching it, its own
-    /// pin, or the base where neither reached it.
+    /// pin, or the scope where neither reached it.
     #[test]
     fn a_hidden_node_names_what_hid_it() {
         let fixture = Nested::new();
         let filter = Filter {
-            base: Base::HideAll,
-            scope: None,
             rules: vec![
                 Rule {
                     predicate: Predicate {
@@ -1173,6 +799,7 @@ mod tests {
             pins: [(fixture.id(OTHER_ACTION), Pin::Set(Visibility::Hidden))]
                 .into_iter()
                 .collect(),
+            ..fixture.scoped(&[COMPILE, LINK, OTHER_ACTION])
         };
 
         let verdicts = fixture.evaluate(&filter);
@@ -1181,14 +808,14 @@ mod tests {
         assert_eq!(verdicts.hiding(fixture.id(OTHER_ACTION)), Some(Hiding::Pin));
         assert_eq!(
             verdicts.hiding(fixture.id(OTHER_TARGET)),
-            Some(Hiding::Base)
+            Some(Hiding::Scope)
         );
     }
 
     #[test]
     fn a_drawn_node_names_nothing_hiding_it() {
         let fixture = Nested::new();
-        let verdicts = fixture.evaluate(&fixture.showing_one(COMPILE));
+        let verdicts = fixture.evaluate(&fixture.scoped(&[COMPILE]));
 
         for drawn in [COMPILE, TARGET, PACKAGE] {
             assert_eq!(verdicts.hiding(fixture.id(drawn)), None);
@@ -1228,7 +855,7 @@ mod tests {
     fn a_packed_verdict_reads_back_what_hid_the_node() {
         for hiding in [
             Hiding::Pin,
-            Hiding::Base,
+            Hiding::Scope,
             Hiding::NothingToFrame,
             Hiding::Rule(0),
             Hiding::Rule(70_000),
@@ -1241,7 +868,7 @@ mod tests {
             (Visibility::Shown, Verdict::Shown),
             (Visibility::Faded, Verdict::Faded),
         ] {
-            let reached = Reached::of(visibility, Hiding::Base);
+            let reached = Reached::of(visibility, Hiding::Pin);
             assert_eq!(reached.hiding(), None);
             assert_eq!(reached.verdict(), verdict);
         }
