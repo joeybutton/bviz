@@ -13,7 +13,11 @@ use super::{Function, Universe, parse};
 use crate::graph::Kind;
 use crate::intern::{Id, Names};
 use crate::joint::build_joint;
-use crate::test_support;
+use crate::test_support::{
+    self, boolean, explicit, label_list, selector_list, string, string_list,
+};
+use bazel_query_proto::blaze_query::Attribute;
+use bazel_query_proto::blaze_query::attribute::Discriminator as AttributeType;
 
 /// Each input, and its tokens as LexerTest prints them.
 const SCANS: &[(&str, &str)] = &[
@@ -262,12 +266,29 @@ fn an_unknown_function_lists_the_known_ones() {
 /// cc_test(name='f', srcs=['g.cc'])
 /// ```
 ///
-/// with the `.dwp` and `.stripped` outputs each C++ rule implies; and its
-/// package `t`:
+/// with the `.dwp` and `.stripped` outputs each C++ rule implies, and those
+/// of its rules' attributes the cases read, the ones the BUILD file leaves
+/// out at their defaults; its package `t`:
 ///
 /// ```text
 /// cc_library(name='t', srcs=['t.cc'], data=['r'], testonly=0)
 /// cc_library(name='t_test', srcs=['t.cc'], data=['r'], testonly=1)
+/// ```
+///
+/// and its package `configurable`:
+///
+/// ```text
+/// cc_binary(
+///     name = 'main',
+///     srcs = ['main.cc'],
+///     deps = select({
+///         '//conditions:a': [':adep'],
+///         '//conditions:b': [':bdep'],
+///         '//conditions:default': [':defaultdep'],
+///     }))
+/// cc_library(name = 'adep', srcs = ['adep.cc'])
+/// cc_library(name = 'bdep', srcs = ['bdep.cc'])
+/// cc_library(name = 'defaultdep', srcs = ['defaultdep.cc'])
 /// ```
 fn abstract_query_test_packages() -> Universe {
     let mut targets = Vec::new();
@@ -304,12 +325,45 @@ fn abstract_query_test_packages() -> Universe {
         ),
     ];
     for (name, class, inputs, outputs) in c_rules {
-        targets.push(test_support::rule(name, class, inputs, Vec::new()));
+        targets.push(test_support::rule(name, class, inputs, c_attributes(name)));
         targets.extend(
             outputs
                 .iter()
                 .map(|output| test_support::generated(output, name)),
         );
+    }
+    let configurable = [
+        ("//configurable:main", "cc_binary"),
+        ("//configurable:adep", "cc_library"),
+        ("//configurable:bdep", "cc_library"),
+        ("//configurable:defaultdep", "cc_library"),
+    ];
+    for (name, class) in configurable {
+        let (_, short) = name.split_once(':').expect("a label");
+        let source = format!("//configurable:{short}.cc");
+        let mut attributes = vec![
+            explicit(string("name", short)),
+            explicit(label_list("srcs", &[&source])),
+        ];
+        let mut inputs = vec![source.clone()];
+        if short == "main" {
+            let deps = [":adep", ":bdep", ":defaultdep"].map(|dep| format!("//configurable{dep}"));
+            attributes.push(explicit(selector_list(
+                "deps",
+                &label_list("", &[]),
+                &[&[
+                    ("//conditions:a", Some(label_list("", &[&deps[0]]))),
+                    ("//conditions:b", Some(label_list("", &[&deps[1]]))),
+                    ("//conditions:default", Some(label_list("", &[&deps[2]]))),
+                ]],
+            )));
+            inputs.extend(deps);
+        } else {
+            attributes.push(label_list("deps", &[]));
+        }
+        let inputs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+        targets.push(test_support::rule(name, class, &inputs, attributes));
+        targets.push(test_support::source(&source));
     }
     for (name, testonly) in [("//t:t", false), ("//t:t_test", true)] {
         let attributes = vec![test_support::boolean("testonly", testonly)];
@@ -318,6 +372,46 @@ fn abstract_query_test_packages() -> Universe {
     }
     let joint = build_joint(None, None, Some(&targets), false);
     Universe::of_joint(joint).0
+}
+
+/// The attributes `bazel query --output=proto` writes for the rule `name` of
+/// AbstractQueryTest's package `c` that its cases read.
+fn c_attributes(name: &str) -> Vec<Attribute> {
+    let (_, short) = name.split_once(':').expect("a label");
+    let unset_deprecation = Attribute {
+        name: "deprecation".to_string(),
+        r#type: AttributeType::String as i32,
+        ..Default::default()
+    };
+    let mut attributes = vec![
+        explicit(string("name", short)),
+        unset_deprecation,
+        string_list("tags", &[]),
+    ];
+    match short {
+        "c" => attributes.extend([
+            explicit(label_list("srcs", &["//c:p", "//c:q"])),
+            explicit(Attribute {
+                r#type: AttributeType::OutputList as i32,
+                ..label_list("outs", &["//c:r", "//c:s"])
+            }),
+            explicit(string("cmd", ":")),
+            label_list("data", &[]),
+        ]),
+        "d" => attributes.extend([
+            explicit(label_list("srcs", &["//c:e.cc"])),
+            explicit(label_list("data", &["//c:r"])),
+            label_list("deps", &[]),
+            boolean("linkshared", false),
+        ]),
+        _ => attributes.extend([
+            explicit(label_list("srcs", &["//c:g.cc"])),
+            label_list("data", &[]),
+            label_list("deps", &[]),
+            boolean("linkshared", false),
+        ]),
+    }
+    attributes
 }
 
 /// Each expression AbstractQueryTest evaluates over [`abstract_query_test_packages`],
@@ -364,40 +458,76 @@ const EVALUATIONS: &[(&str, &str)] = &[
     ("attr(name, '.+', '//c:*')", "//c:c //c:d //c:f"),
     ("attr(name, '.*d.*', '//c:*')", "//c:d"),
     ("attr(name, '.*e.*', '//c:*')", ""),
+    // testAttrOperator
+    ("attr(cmd,':', c:*)", "//c:c"),
+    ("attr(cmd,'', c:*)", "//c:c"),
+    ("attr(linkshared, 0, c:*)", "//c:d //c:f"),
+    ("attr('data', 'r', c:*)", "//c:d"),
+    ("attr('deps', '\\[\\]', c:*)", "//c:d //c:f"),
+    ("attr('deps', '^..$', c:*)", "//c:d //c:f"),
+    ("attr('srcs', '\\[[^,]+\\]', c:*)", "//c:d //c:f"),
+    (
+        "attr('deps', 'bdep', //configurable/...)",
+        "//configurable:main",
+    ),
+    ("attr('deps', 'nomatch', //configurable/...)", ""),
+    // testNullAttrOperator
+    ("attr(deprecation, ' ', c:*)", ""),
     // testAttrOperatorOnBooleans
     ("attr(testonly, 0, t:*)", "//t:t"),
     ("attr(testonly, 1, t:*)", "//t:t_test"),
 ];
 
-/// Expressions of AbstractQueryTest's `testAttrOperator`, reading attributes
-/// bviz does not load into its graph.
-const UNLOADED_ATTRIBUTES: &[&str] = &[
-    "attr(cmd,':', c:*)",
-    "attr(linkshared, 0, c:*)",
-    "attr('data', 'r', c:*)",
-    "attr('deps', '\\[\\]', c:*)",
-];
+/// The labels `input` names over `universe`, as `evalToString` prints them.
+fn eval_to_string(universe: &Universe, input: &str) -> String {
+    let value = universe.evaluate(&parse(input).unwrap()).unwrap();
+    let named: BTreeSet<&str> = value
+        .ones()
+        .map(|id| universe.label(Id(id as u32)).unwrap())
+        .collect();
+    named.into_iter().collect::<Vec<&str>>().join(" ")
+}
 
 #[test]
 fn narrows_as_bazel_does() {
     let universe = abstract_query_test_packages();
     for &(input, expected) in EVALUATIONS {
-        let value = universe.evaluate(&parse(input).unwrap()).unwrap();
-        let named: BTreeSet<&str> = value
-            .ones()
-            .map(|id| universe.label(Id(id as u32)).unwrap())
-            .collect();
-        let named: Vec<&str> = named.into_iter().collect();
-        assert_eq!(named.join(" "), expected, "{input}");
+        assert_eq!(eval_to_string(&universe, input), expected, "{input}");
     }
-    for &input in UNLOADED_ATTRIBUTES {
-        let error = universe.evaluate(&parse(input).unwrap()).unwrap_err();
-        assert!(
-            error.message.starts_with("attr() needs each rule's '"),
-            "{input}: {}",
-            error.message
-        );
-    }
+}
+
+/// AbstractQueryTest's `testAttrOnPackageDefaultVisibility`, over its package
+/// `t` as `bazel query --output=proto` writes it, the rule stating the
+/// visibility its package gives it by default:
+///
+/// ```text
+/// package(default_visibility=['//visibility:public'])
+/// cc_library(name='t', srcs=['t.cc'])
+/// ```
+#[test]
+fn reads_a_package_default_visibility_as_bazel_does() {
+    let attributes = vec![
+        explicit(string("name", "t")),
+        explicit(label_list("srcs", &["//t:t.cc"])),
+        test_support::nodep_label_list("visibility", &["//visibility:public"]),
+    ];
+    let targets = [
+        test_support::rule("//t:t", "cc_library", &["//t:t.cc"], attributes),
+        test_support::source("//t:t.cc"),
+        test_support::source("//t:BUILD"),
+    ];
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &Arc::new(joint.attributes),
+        &joint.capabilities,
+    );
+    assert_eq!(
+        eval_to_string(&universe, "attr(visibility, public, t:*)"),
+        "//t:t"
+    );
 }
 
 /// The configured targets of ConfiguredTargetQuerySemanticsTest's `config()`
@@ -539,6 +669,90 @@ fn config_names_configured_targets_as_cquery_does() {
 
     // testConfigFunctionRefinesMultipleMatches
     assert_eq!(configured("config(//test:simple, target)").len(), 1);
+}
+
+/// ConfiguredTargetQuerySemanticsTest's package `configurable`, as a cquery
+/// writes it built in a configuration where its `:enabled` setting holds when
+/// `enabled`, and in one where it does not otherwise:
+///
+/// ```text
+/// config_setting(
+///     name = "enabled",
+///     define_values = {"test_enable": "true"})
+/// rule_with_list(
+///     name = 'target',
+///     string_values = select({
+///         ':enabled': ['foo', 'bar'],
+///         '//conditions:default': ['quux'],
+///     }),
+/// )
+/// ```
+fn configurable_target(enabled: bool) -> Universe {
+    use test_support::{configuration, configured, rule};
+    let values: &[&str] = match enabled {
+        true => &["foo", "bar"],
+        false => &["quux"],
+    };
+    let attributes = vec![
+        explicit(string("name", "target")),
+        explicit(string_list("string_values", values)),
+    ];
+    let target = rule("//configurable:target", "rule_with_list", &[], attributes);
+    let cquery = [CqueryResult {
+        results: vec![configured(target, 1)],
+        configurations: vec![configuration(1, "0a1b2c3d4e5f", "k8-fastbuild", false)],
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    Universe::new(
+        &joint.graph,
+        &joint.names,
+        &Arc::new(joint.facets),
+        &Arc::new(joint.attributes),
+        &joint.capabilities,
+    )
+}
+
+/// ConfiguredTargetQuerySemanticsTest's `testAttrRespectsConfiguration`: in
+/// the default configuration and then under `--define=test_enable=true`.
+#[test]
+fn reads_attributes_as_configured_as_cquery_does() {
+    let cases = [
+        (
+            false,
+            [
+                ("attr(string_values, 'foo', '//configurable:target')", ""),
+                ("attr(string_values, 'bar', '//configurable:target')", ""),
+                (
+                    "attr(string_values, 'quux', '//configurable:target')",
+                    "//configurable:target",
+                ),
+            ],
+        ),
+        (
+            true,
+            [
+                (
+                    "attr(string_values, 'foo', '//configurable:target')",
+                    "//configurable:target",
+                ),
+                (
+                    "attr(string_values, 'bar', '//configurable:target')",
+                    "//configurable:target",
+                ),
+                ("attr(string_values, 'quux', '//configurable:target')", ""),
+            ],
+        ),
+    ];
+    for (enabled, evaluations) in cases {
+        let universe = configurable_target(enabled);
+        for (input, expected) in evaluations {
+            assert_eq!(
+                eval_to_string(&universe, input),
+                expected,
+                "{input}, enabled: {enabled}"
+            );
+        }
+    }
 }
 
 /// The actions of a target of aquery_test.sh's BUILD files: its label, and
