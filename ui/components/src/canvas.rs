@@ -20,8 +20,7 @@ pub fn shape_truncated(
 const ELLIPSIS: char = '…';
 
 /// `text` shaped by `shape`, or, if wider than `avail`, its longest prefix that
-/// fits `avail` with an [`ELLIPSIS`] appended, the prefix no longer than the
-/// proportional estimate of what fits and down to none at all.
+/// fits `avail` with an [`ELLIPSIS`] appended, down to none at all.
 ///
 /// The whole line's glyph positions place the cut, which a shape or two
 /// confirms; finding it that way relies on an ellipsized prefix never narrowing
@@ -32,16 +31,10 @@ fn truncated(
     mut shape: impl FnMut(String) -> gpui::ShapedLine,
 ) -> gpui::ShapedLine {
     let line = shape(text.to_owned());
-    let width = f32::from(line.width());
-    if width <= avail {
+    if f32::from(line.width()) <= avail {
         return line;
     }
     let chars = text.chars().count();
-    // The proportional estimate can overshoot in a variable-width font, leaving
-    // the ellipsized line wider than the box; it only caps the prefix.
-    let estimate = ((chars as f32 * avail / width).floor() as usize)
-        .min(chars)
-        .saturating_sub(1);
     let ellipsis = shape(ELLIPSIS.to_string()).width();
     let placed = line
         .index_for_x(px(avail) - ellipsis)
@@ -56,10 +49,10 @@ fn truncated(
         shape(s)
     };
     let fits = |line: &gpui::ShapedLine| f32::from(line.width()) <= avail;
-    let mut keep = placed.min(estimate);
+    let mut keep = placed;
     let mut best = ellipsized(keep);
     if fits(&best) {
-        while keep < estimate {
+        while keep < chars {
             let longer = ellipsized(keep + 1);
             if !fits(&longer) {
                 break;
@@ -161,9 +154,8 @@ mod tests {
     use gpui::{Font, FontWeight, SharedString, TextRun, WindowTextSystem, font};
     use std::sync::Arc;
 
-    /// Truncation by dropping one character at a time from the proportional
-    /// estimate until the ellipsized prefix fits: the definition
-    /// [`truncated`] must agree with.
+    /// The longest prefix whose ellipsized width fits, found by shaping every
+    /// prefix: the definition [`truncated`] must agree with.
     fn truncated_by_scan(
         text: &str,
         avail: f32,
@@ -174,18 +166,16 @@ mod tests {
             return line;
         }
         let chars: Vec<char> = text.chars().collect();
-        let mut keep = ((chars.len() as f32 * avail / f32::from(line.width())).floor() as usize)
-            .min(chars.len())
-            .saturating_sub(1);
-        loop {
-            let mut truncated: String = chars[..keep].iter().collect();
-            truncated.push(ELLIPSIS);
-            let shaped = shape(truncated);
-            if keep == 0 || f32::from(shaped.width()) <= avail {
-                return shaped;
-            }
-            keep -= 1;
-        }
+        let mut ellipsized = |keep: usize| {
+            let mut s: String = chars[..keep].iter().collect();
+            s.push(ELLIPSIS);
+            shape(s)
+        };
+        let longest = (0..=chars.len())
+            .rev()
+            .find(|&keep| f32::from(ellipsized(keep).width()) <= avail)
+            .unwrap_or(0);
+        ellipsized(longest)
     }
 
     const TEXTS: &[&str] = &[
@@ -226,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn truncates_where_dropping_one_character_at_a_time_does() {
+    fn truncates_to_the_longest_fitting_prefix() {
         gpui_platform::headless().run(|cx| {
             bviz_ui_assets::load_fonts(cx);
             let text_system = WindowTextSystem::new(Arc::clone(cx.text_system()));
