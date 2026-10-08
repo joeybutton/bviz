@@ -176,8 +176,7 @@ fn function_note(
         true => "bviz extension",
         false => "function",
     };
-    let note = (function.unevaluable())
-        .or_else(|| readable.check(function).err())
+    let note = failure(function, readable)
         .or_else(|| function.is_extension().then(|| EXTENSION_NOTE.to_owned()))
         .or_else(|| {
             if commands.iter().any(|command| command.reads(function)) {
@@ -191,6 +190,12 @@ fn function_note(
             ))
         });
     (kind, note)
+}
+
+/// Why `function` does not evaluate over a graph whose data `readable`
+/// states, `None` where it does.
+fn failure(function: Function, readable: Readable) -> Option<String> {
+    (function.unevaluable()).or_else(|| readable.check(function).err())
 }
 
 /// What the functions are noted by over a graph whose data `readable` and
@@ -698,9 +703,12 @@ pub(super) fn list(
         range
             .filter_map(|index| {
                 let (completion, row) = offered.row(index)?;
-                let (kind, note) = match completion.named {
-                    Named::Function(function) => function_note(function, commands, *readable),
-                    named => (named.name(), None),
+                let (kind, note, evaluable) = match completion.named {
+                    Named::Function(function) => {
+                        let (kind, note) = function_note(function, commands, *readable);
+                        (kind, note, failure(function, *readable).is_none())
+                    }
+                    named => (named.name(), None, true),
                 };
                 let accepts = match offered.aimed {
                     Some(aimed) => (aimed == index).then_some(Accepts::Aimed),
@@ -712,6 +720,7 @@ pub(super) fn list(
                     index,
                     kind,
                     note,
+                    evaluable,
                     accepts,
                     accepts_keys: accepts.and_then(|accepts| accepts.keys(cx)),
                 };
@@ -756,14 +765,16 @@ struct Listed<'a> {
     kind: &'static str,
     /// The row's tooltip.
     note: Option<String>,
+    /// Whether the graph evaluates the function the row offers, if any.
+    evaluable: bool,
     accepts: Option<Accepts>,
     /// The keys that accept the row, where any do.
     accepts_keys: Option<SharedString>,
 }
 
 /// One row: the pattern or the function's signature with the characters the
-/// word matched picked out, and what it names. A function no graph
-/// evaluates is dimmed.
+/// word matched picked out, and what it names. A function the graph does not
+/// evaluate is dimmed.
 fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Stateful<Div> {
     let Listed {
         completion,
@@ -771,6 +782,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         index,
         kind,
         note,
+        evaluable,
         accepts,
         accepts_keys,
     } = listed;
@@ -788,9 +800,9 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         }
         None => (completion.text.to_string(), completion.path.clone()),
     };
-    let ink = match function.and_then(Function::unevaluable) {
-        Some(_) => colors.text_disabled,
-        None => colors.text,
+    let ink = match evaluable {
+        true => colors.text,
+        false => colors.text_disabled,
     };
     let aimed = accepts == Some(Accepts::Aimed);
     menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
@@ -999,6 +1011,23 @@ mod tests {
             note(&[GraphInput::Query]).1.as_deref(),
             Some("mnemonic() requires an aquery")
         );
+    }
+
+    /// A function is dimmed where the graph cannot evaluate it, its note then
+    /// saying why.
+    #[test]
+    fn a_function_is_dimmed_where_its_note_says_the_graph_cannot_evaluate_it() {
+        let targets = readable(&[Kind::Target]);
+        let dimmed = |function| failure(function, targets).is_some();
+        assert!(dimmed(Function::Mnemonic), "without an aquery");
+        assert!(dimmed(Function::BuildFiles), "evaluated over no graph");
+        assert!(!dimmed(Function::Deps));
+        for function in Function::ALL {
+            if let Some(failure) = failure(function, targets) {
+                let (_, note) = function_note(function, &[Command::Query], targets);
+                assert_eq!(note, Some(failure), "{}", function.name());
+            }
+        }
     }
 
     /// The field completes only the targets the sources a panel reads keep,
