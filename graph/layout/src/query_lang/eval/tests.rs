@@ -911,7 +911,7 @@ fn an_aquery_filter_names_the_data_a_graph_lacks() {
     let fixture = Fixture::new();
     assert_eq!(
         fixture.error("mnemonic(Genrule, //a:lib)"),
-        "mnemonic() needs the actions of an aquery, which the graph's inputs do not include"
+        "mnemonic() requires an aquery"
     );
     let aquery = [bazel_query_proto::analysis::ActionGraphContainer {
         targets: vec![bazel_query_proto::analysis::Target {
@@ -937,8 +937,7 @@ fn an_aquery_filter_names_the_data_a_graph_lacks() {
     assert_eq!(query("mnemonic(Genrule, //p:all)").unwrap().len(), 1);
     assert_eq!(
         query("outputs('.*', //p:all)").unwrap_err(),
-        "outputs() needs the files each action reads and writes, which the graph's inputs \
-         state only under --include_artifacts"
+        "outputs() requires an aquery with --include_artifacts"
     );
 }
 
@@ -1605,9 +1604,7 @@ fn apparent_repositories() -> Fixture {
 #[test]
 fn repo_category_fails_where_an_apparent_name_may_hide_a_matched_origin() {
     let fixture = apparent_repositories();
-    let message = "repo_category() cannot tell where @r comes from, which the graph's inputs \
-                   name by an apparent name, stating each canonical name only under \
-                   --consistent_labels";
+    let message = "repo_category() requires --consistent_labels to tell where @r comes from";
     assert_eq!(
         fixture.error("repo_category(module, deps(//a:app))"),
         message
@@ -1742,8 +1739,7 @@ fn runfiles_plumbing_keeps_the_actions_wiring_runfiles() {
     assert!(query("runfiles_plumbing(mnemonic(CppLink, //p:bin))").is_empty());
     assert_eq!(
         Fixture::new().error("runfiles_plumbing(//a:lib)"),
-        "runfiles_plumbing() needs the actions of an aquery, which the graph's inputs do not \
-         include"
+        "runfiles_plumbing() requires an aquery"
     );
 }
 
@@ -1823,8 +1819,7 @@ fn tool_configured_needs_every_configured_targets_configuration() {
     let (universe, names) = tools(false);
     assert_eq!(
         configured_query(&universe, &names, "tool_configured(//t:gen)").unwrap_err(),
-        "tool_configured() needs the configuration each configured target is built in, which \
-         the graph's inputs do not state for every one"
+        "tool_configured() requires every configured target's configuration"
     );
 }
 

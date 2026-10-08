@@ -215,8 +215,7 @@ impl Universe {
     ) -> Result<FixedBitSet, String> {
         if self.configured != Support::Available {
             return Err(format!(
-                "{}() needs the configuration each configured target is built in, which the \
-                 graph's inputs do not state for every one",
+                "{}() requires every configured target's configuration",
                 function.name()
             ));
         }

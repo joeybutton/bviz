@@ -279,9 +279,7 @@ impl Universe {
             && hideable.iter().any(|category| matched.contains(category));
         if let Some(apparent) = self.unplaced_apparent_repo().filter(|_| undecidable) {
             return Err(format!(
-                "{}() cannot tell where @{apparent} comes from, which the graph's inputs name \
-                 by an apparent name, stating each canonical name only under \
-                 {CONSISTENT_LABELS_FLAG}",
+                "{}() requires {CONSISTENT_LABELS_FLAG} to tell where @{apparent} comes from",
                 function.name()
             ));
         }
@@ -402,15 +400,12 @@ impl Universe {
     pub(super) fn filters_actions(&self, function: Function) -> Result<(), String> {
         let name = function.name();
         if !self.holds_actions {
-            return Err(format!(
-                "{name}() needs the actions of an aquery, which the graph's inputs do not include"
-            ));
+            return Err(format!("{name}() requires an aquery"));
         }
         match (function, self.artifacts) {
-            (Function::Inputs | Function::Outputs, Support::Unavailable { flag }) => Err(format!(
-                "{name}() needs the files each action reads and writes, which the graph's \
-                     inputs state only under {flag}"
-            )),
+            (Function::Inputs | Function::Outputs, Support::Unavailable { flag }) => {
+                Err(format!("{name}() requires an aquery with {flag}"))
+            }
             _ => Ok(()),
         }
     }
