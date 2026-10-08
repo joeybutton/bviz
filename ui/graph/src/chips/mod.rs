@@ -18,55 +18,97 @@ use bviz_graph_layout::query_lang::{
     ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
 };
 use bviz_graph_layout::select::{Filter, Scope};
+use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
-    Button, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, load_in_background, text_input,
+    Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
+    load_in_background, text_input,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window, actions,
-    div, prelude::*, px,
+    Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
+    KeyBinding, KeyContext, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*, px,
 };
 use std::sync::Arc;
 
 actions!(
     bviz_graph_chips,
     [
+        /// Focus query field
         Focus,
+        /// Add text as chip
         Commit,
+        /// Apply query
         Apply,
+        /// Leave query bar
         Leave,
+        /// Select previous chip
         SelectPrevious,
+        /// Select next chip
         SelectNext,
+        /// Enable or disable chip
         Toggle,
+        /// Negate chip
         Negate,
+        /// Move chip back
         MoveBack,
+        /// Move chip forward
         MoveForward,
+        /// Remove chip
         Remove,
+        /// Edit chip
         Edit,
+        /// Copy chip
         CopyChip,
+        /// Copy as Bazel query
         CopyStack,
+        /// Clear query
         ClearQuery,
+        /// Revert query
         RevertQuery,
+        /// Aim at previous completion
         CompletePrevious,
+        /// Aim at next completion
         CompleteNext,
+        /// Accept completion
         AcceptCompletion,
-        CloseCompletion
+        /// Close completions
+        CloseCompletion,
     ]
 );
 
 /// The key context the bar carries, scoping the keys that act on its chips.
-pub(crate) const KEY_CONTEXT: &str = "GraphChips";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
+    &crate::KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChips",
+    "Query bar",
+);
 
-/// The key context the bar's field carries, inside the bar's.
-pub(crate) const FIELD_KEY_CONTEXT: &str = "GraphChipField";
+/// The key context the bar's field carries.
+pub(crate) const FIELD_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChipField",
+    "Query field",
+);
 
-/// The key context the field carries inside its own while the list
-/// completing its word stands open, scoping the keys acting on the list.
-pub(crate) const COMPLETION_KEY_CONTEXT: &str = "GraphChipCompletion";
+/// The key context the field carries while the list completing its word
+/// stands open, scoping the keys acting on the list.
+pub(crate) const COMPLETION_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &FIELD_KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphChipCompletion",
+    "Query completions",
+);
 
-/// The key context the field carries inside the completion's while the
-/// arrow keys have moved onto a row, which Enter then accepts.
-pub(crate) const AIMED_KEY_CONTEXT: &str = "GraphChipCompletionAimed";
+/// The state of the completion's list while the arrow keys have moved onto a
+/// row, which Enter then accepts.
+pub(crate) const AIMED_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &COMPLETION_KEY_CONTEXT,
+    Nesting::State,
+    "GraphChipCompletionAimed",
+    "Aimed completion",
+);
 
 /// Width the field is drawn at, wide enough for a call over a package.
 const FIELD_WIDTH: Pixels = px(200.);
@@ -76,22 +118,25 @@ const NOTICE_WIDTH: Pixels = px(480.);
 
 const PLACEHOLDER: &str = "query: //foo/... or deps()";
 
-/// The bar's keys; `outside_text` scopes those reaching it from the panel.
-pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
-    let field = Some(FIELD_KEY_CONTEXT);
+/// The bar's keys; `unless_typing` scopes those reaching it from the panel.
+pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
+    let field = Some(FIELD_KEY_CONTEXT.id());
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
-    let completing = Some(COMPLETION_KEY_CONTEXT);
-    let aimed = Some(AIMED_KEY_CONTEXT);
+    let completing = Some(COMPLETION_KEY_CONTEXT.id());
+    let aimed = Some(AIMED_KEY_CONTEXT.id());
+    // Outside the panel's text fields, or anywhere in the bar, its own field
+    // included: one predicate, which the keys help lists once.
+    let panel_or_bar = unless_typing.map(|panel| format!("{panel} || {KEY_CONTEXT}"));
+    let panel_or_bar = panel_or_bar.as_deref();
     vec![
         KeyBinding::new("up", CompletePrevious, completing),
         KeyBinding::new("down", CompleteNext, completing),
         KeyBinding::new("tab", AcceptCompletion, completing),
         KeyBinding::new("enter", AcceptCompletion, aimed),
         KeyBinding::new("escape", CloseCompletion, completing),
-        KeyBinding::new("q", Focus, outside_text),
-        KeyBinding::new("secondary-enter", Apply, outside_text),
-        KeyBinding::new("secondary-enter", Apply, Some(KEY_CONTEXT)),
+        KeyBinding::new("q", Focus, unless_typing),
+        KeyBinding::new("secondary-enter", Apply, panel_or_bar),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),
         KeyBinding::new("left", SelectPrevious, on_chips),
@@ -105,10 +150,13 @@ pub(crate) fn bindings(outside_text: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", Edit, on_chips),
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
-        KeyBinding::new("secondary-shift-c", CopyStack, outside_text),
-        KeyBinding::new("secondary-shift-c", CopyStack, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-backspace", ClearQuery, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-shift-c", CopyStack, panel_or_bar),
+        KeyBinding::new(
+            "secondary-shift-backspace",
+            ClearQuery,
+            Some(KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new("secondary-z", RevertQuery, Some(KEY_CONTEXT.id())),
     ]
 }
 
@@ -584,9 +632,9 @@ fn open_menu(
     window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
-    let Some(chip) = view.chips.stack.chip(id) else {
+    if view.chips.stack.chip(id).is_none() {
         return;
-    };
+    }
     let panel = cx.weak_entity();
     let act = |act: fn(&mut GraphPanel, ChipId, &mut Window, &mut Context<GraphPanel>)| {
         let panel = panel.clone();
@@ -594,35 +642,27 @@ fn open_menu(
             panel.update(cx, |view, cx| act(view, id, window, cx)).ok();
         }
     };
-    let negate = match chip.negated() {
-        true => "stop negating",
-        false => "negate",
-    };
-    let enable = match chip.enabled() {
-        true => "disable",
-        false => "enable",
-    };
+    let keys_in = Some(&view.chips.focus_handle);
+    let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
     let items = vec![
-        MenuItem::new(
-            negate,
+        item(
+            &Negate,
             act(|view, id, _, cx| {
                 view.chips.stack.toggle_negated(id);
                 view.chips.scroll_to(id);
                 changed(view, cx);
             }),
-        )
-        .keys("!"),
-        MenuItem::new(
-            enable,
+        ),
+        item(
+            &Toggle,
             act(|view, id, _, cx| {
                 view.chips.stack.toggle_enabled(id);
                 changed(view, cx);
             }),
-        )
-        .keys("space"),
-        MenuItem::new("edit", act(edit)).keys("enter"),
-        MenuItem::new("remove", act(remove)).keys("delete"),
-        MenuItem::new("copy text", act(copy_chip)).keys(COPY_KEYS),
+        ),
+        item(&Edit, act(edit)),
+        item(&Remove, act(remove)),
+        item(&CopyChip, act(copy_chip)),
     ];
     view.chips.selected = Some(id);
     put_up(view, items, at, window, cx);
@@ -636,23 +676,20 @@ fn open_stack_menu(
     cx: &mut Context<GraphPanel>,
 ) {
     let panel = cx.weak_entity();
-    let copying = panel.clone();
-    let copy = MenuItem::new("copy as bazel query", move |_, cx| {
-        copying.update(cx, copy_stack).ok();
-    })
-    .keys(COPY_STACK_KEYS);
-    let clearing = panel.clone();
-    let clear = MenuItem::new("clear query", move |_, cx| {
-        clearing.update(cx, clear_query).ok();
-    })
-    .keys(CLEAR_QUERY_KEYS);
-    let mut items = vec![copy, clear];
+    let act = |act: fn(&mut GraphPanel, &mut Context<GraphPanel>)| {
+        let panel = panel.clone();
+        move |_: &mut Window, cx: &mut App| {
+            panel.update(cx, act).ok();
+        }
+    };
+    let keys_in = Some(&view.chips.focus_handle);
+    let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
+    let mut items = vec![
+        item(&CopyStack, act(copy_stack)),
+        item(&ClearQuery, act(clear_query)),
+    ];
     if view.chips.staged {
-        let revert = MenuItem::new("revert to applied", move |_, cx| {
-            panel.update(cx, revert_query).ok();
-        })
-        .keys(REVERT_QUERY_KEYS);
-        items.push(revert);
+        items.push(item(&RevertQuery, act(revert_query)));
     }
     put_up(view, items, at, window, cx);
 }
@@ -671,13 +708,6 @@ fn revert_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     changed(view, cx);
 }
 
-/// How a menu row names the key reverting the query.
-const REVERT_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-z"
-} else {
-    "ctrl-z"
-};
-
 /// Takes every chip off the stack and empties the field. Like every other
 /// edit to the stack it is staged, the scope applied standing until the
 /// stack is applied or the applied stack is reverted to.
@@ -691,13 +721,6 @@ fn clear_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.chips.field.update(cx, |field, cx| field.clear(cx));
     changed(view, cx);
 }
-
-/// How a menu row names the key clearing the query.
-const CLEAR_QUERY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-backspace"
-} else {
-    "ctrl-shift-backspace"
-};
 
 /// Puts up a menu of `items` at `at`, which gives the focus back to the bar
 /// as it closes holding it.
@@ -762,20 +785,6 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     cx.notify();
 }
 
-/// How a menu row names the key copying the stack.
-const COPY_STACK_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-c"
-} else {
-    "ctrl-shift-c"
-};
-
-/// How a menu row names the key copying what the row copies.
-const COPY_KEYS: &str = if cfg!(target_os = "macos") {
-    "cmd-c"
-} else {
-    "ctrl-c"
-};
-
 /// The menu a chip or the stack put up, standing over the whole window.
 pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElement> {
     let open = view.chips.menu.as_ref()?;
@@ -786,6 +795,11 @@ pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElemen
 /// anywhere in the panel.
 pub(crate) fn apply_staged(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     commit(view, cx);
+}
+
+/// The gestures the bar answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    pill::GESTURES.rows().chain(complete::gestures())
 }
 
 /// The bar: the chips, the field, and what applies them.
@@ -911,7 +925,7 @@ pub(crate) fn bar(
                 .child(
                     div()
                         .when(completing, |field| {
-                            field.key_context(COMPLETION_KEY_CONTEXT)
+                            field.key_context(completion_context(aimed))
                         })
                         .on_action(cx.listener(|view, _: &CompletePrevious, _, cx| {
                             complete::aim(view, -1, cx)
@@ -927,11 +941,7 @@ pub(crate) fn bar(
                                 complete::close(view, cx)
                             }),
                         )
-                        .child(
-                            div()
-                                .when(aimed, |field| field.key_context(AIMED_KEY_CONTEXT))
-                                .child(chips.field.clone()),
-                        ),
+                        .child(chips.field.clone()),
                 )
                 .children(completions),
         )
@@ -954,6 +964,7 @@ pub(crate) fn bar(
                     cx.listener(|view, _: &ClickEvent, _, cx| commit(view, cx)),
                 )
                 .label("apply")
+                .keys_for(&Apply, &chips.focus_handle)
                 .compact()
                 .disabled(!staged),
             ),
@@ -967,10 +978,32 @@ pub(crate) fn bar(
                     }),
                 )
                 .ghost()
-                .icon("dots-three-vertical"),
+                .icon("dots-three-vertical")
+                .tooltip("Query menu"),
             )
         }))
         .into_any_element()
+}
+
+/// The key contexts from the panel's in to the field's text while its
+/// completion's list stands open.
+pub(crate) fn completion_stack(aimed: bool) -> [KeyContext; 5] {
+    [
+        crate::KEY_CONTEXT.into(),
+        KEY_CONTEXT.into(),
+        FIELD_KEY_CONTEXT.into(),
+        completion_context(aimed),
+        text_input::KEY_CONTEXT.into(),
+    ]
+}
+
+/// The key context of the field while its completion's list stands open.
+fn completion_context(aimed: bool) -> KeyContext {
+    let mut context = KeyContext::from(COMPLETION_KEY_CONTEXT);
+    if aimed {
+        context.add(AIMED_KEY_CONTEXT.id());
+    }
+    context
 }
 
 /// What the bar last has to say, standing over the drawing's top-left corner

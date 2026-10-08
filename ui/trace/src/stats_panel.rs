@@ -1,28 +1,49 @@
 use crate::chart::format_duration;
 use crate::model::{SourceReplaced, TraceModel};
 use crate::rebuild::Rebuild;
+use crate::row_step;
 use crate::theme::Palette;
 use crate::{
-    STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH, STATS_ROW_HEIGHT, STATS_TEXT_SIZE,
-    profile_status, set_list_thumb, thumb_offset, time_window_chip,
+    ChooseNext, ChoosePrevious, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH,
+    STATS_ROW_HEIGHT, STATS_TEXT_SIZE, Unchoose, profile_status, set_list_thumb, thumb_offset,
+    time_window_chip,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
+use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip, Toolbar,
-    centered_spinner, load_in_background, overlay_canvas, sort_header, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip,
+    Toolbar, centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header,
+    track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, SharedString, Subscription,
-    UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Rgba, ScrollStrategy, SharedString,
+    Subscription, UniformListScrollHandle, Window, div, point, prelude::*, px, size, uniform_list,
 };
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// The key context scoping the stats table's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const STATS_KEY_CONTEXT: &str = "TraceStats";
-use std::rc::Rc;
-use std::sync::Arc;
+pub(crate) const STATS_KEY_CONTEXT: KeyScope = KeyScope::new("TraceStats", "Stats");
+
+/// What the table does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum StatsIntent {
+    Sort,
+    Pick,
+}
+
+const GESTURES: Gestures<StatsIntent> = Gestures::new(&[
+    sort_gesture(StatsIntent::Sort),
+    Entry::new(
+        Input::click(Button::Left),
+        Place::On("a row"),
+        "Choose row",
+        StatsIntent::Pick,
+    ),
+]);
 
 /// A sortable column of the graph-mode stats table.
 #[derive(Clone, Copy, PartialEq)]
@@ -328,9 +349,15 @@ impl StatsPanel {
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sort_by(column);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, e, _, cx| {
+                        GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                            StatsIntent::Sort => {
+                                this.sort_by(column);
+                                cx.notify();
+                                true
+                            }
+                            _ => false,
+                        });
                     }))
             }));
 
@@ -413,13 +440,22 @@ impl StatsPanel {
                                 .items_center()
                                 .size_full()
                                 .cursor_pointer()
-                                .on_click(move |_, _, cx: &mut App| {
+                                .on_click(move |e, _, cx: &mut App| {
                                     entity.update(cx, |panel, cx| {
-                                        panel.picked = Some(StatsPick {
-                                            aggregate_version: version,
-                                            index,
-                                        });
-                                        cx.notify();
+                                        GESTURES.dispatch(
+                                            Pointer::click(e),
+                                            |intent| match intent {
+                                                StatsIntent::Pick => {
+                                                    panel.picked = Some(StatsPick {
+                                                        aggregate_version: version,
+                                                        index,
+                                                    });
+                                                    cx.notify();
+                                                    true
+                                                }
+                                                _ => false,
+                                            },
+                                        );
                                     });
                                 })
                                 .children(cells),
@@ -513,6 +549,27 @@ impl StatsPanel {
         (picked.aggregate_version == order.aggregate_version).then_some(picked.index)
     }
 
+    /// Picks the row `by` rows from the picked one in the order the table
+    /// shows, or its first where none is picked, and scrolls it into view.
+    fn pick_by(&mut self, by: isize, cx: &mut Context<Self>) {
+        let Some(order) = self.stats_order.clone() else {
+            return;
+        };
+        let shown = order.order();
+        let Some(index) = row_step::moved(shown, self.picked_row(&order), by) else {
+            return;
+        };
+        self.picked = Some(StatsPick {
+            aggregate_version: order.aggregate_version,
+            index,
+        });
+        if let Some(row) = row_step::position(shown, index) {
+            self.stats_scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
     /// Sorts by `column`, the other way where the table is sorted by it
     /// already, and descending otherwise.
     fn sort_by(&mut self, column: StatsColumn) {
@@ -571,13 +628,16 @@ impl Panel for StatsPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-stats"),
-            label: "Stats",
             key_context: STATS_KEY_CONTEXT,
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -602,6 +662,12 @@ impl Render for StatsPanel {
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|panel, _: &ChoosePrevious, _, cx| panel.pick_by(-1, cx)))
+            .on_action(cx.listener(|panel, _: &ChooseNext, _, cx| panel.pick_by(1, cx)))
+            .on_action(cx.listener(|panel, _: &Unchoose, _, cx| {
+                panel.picked = None;
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -616,7 +682,8 @@ impl Render for StatsPanel {
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                            this.focus.focus(window, cx);
                             // A press on the scroll thumb/track drives the bar; the
                             // canvas paint re-installs the drag handlers while the
                             // drag is set, so repaint now.
@@ -671,4 +738,19 @@ fn stats_end_drag(
 ) {
     panel.drag = StatsDrag::None;
     cx.notify();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
 }

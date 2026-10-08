@@ -40,7 +40,7 @@ impl ViewSpec {
         let kind = T::kind();
         Self {
             kind: kind.view,
-            label: kind.label,
+            label: kind.label(),
             mint: Rc::new(move |document, ordinal, cx| AnyPanel::new(mint(cx), document, ordinal)),
         }
     }

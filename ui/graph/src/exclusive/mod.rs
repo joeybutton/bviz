@@ -10,7 +10,6 @@ mod selection;
 mod transition;
 
 use crate::Palette;
-use crate::drag::DOUBLE_CLICK;
 use crate::history::History;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};
 use crate::menu::over_window;
@@ -25,14 +24,18 @@ use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standi
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
+use bviz_ui_components::gesture::{
+    Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{
-    Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar, TooltipColors, beside_anchor,
-    cached_layer, centered_notice, centered_spinner, load_in_background, paint_tooltip,
+    KeyScope, KeyStyle, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar,
+    TooltipColors, beside_anchor, cached_layer, centered_notice, centered_spinner, key_text_in,
+    load_in_background, paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use cell_menu::{Offer, PointFacts};
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
+    Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
     WeakEntity, Window, canvas, div, point, prelude::*, px, relative,
@@ -51,23 +54,101 @@ use transition::Transition;
 
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.
-pub(crate) const KEY_CONTEXT: &str = "GraphExclusive";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphExclusive", "Exclusive deps");
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
+
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum ExclusiveIntent {
+    ShowWholeBuild,
+    FocusCell,
+    OpenMenu,
+    GoBack,
+    GoForward,
+    FocusCrumb,
+    SelectCell,
+}
+
+const CELL: Place = Place::On("a cell");
+
+const FOCUS_CELL: Entry<ExclusiveIntent> = Entry::new(
+    Input::new(Motion::Press(Button::Left, Clicks::Single)),
+    CELL,
+    "Focus cell or go up one level",
+    ExclusiveIntent::FocusCell,
+);
+
+const OPEN_MENU: Entry<ExclusiveIntent> = Entry::new(
+    Input::press(Button::Right),
+    CELL,
+    "Open cell menu",
+    ExclusiveIntent::OpenMenu,
+);
+
+const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole build",
+        ExclusiveIntent::ShowWholeBuild,
+    ),
+    FOCUS_CELL,
+    OPEN_MENU,
+    Entry::new(
+        Input::press(Button::Back),
+        Place::Anywhere,
+        "Go back",
+        ExclusiveIntent::GoBack,
+    ),
+    Entry::new(
+        Input::press(Button::Forward),
+        Place::Anywhere,
+        "Go forward",
+        ExclusiveIntent::GoForward,
+    ),
+    Entry::new(
+        Input::click(Button::Left),
+        Place::On("a breadcrumb"),
+        "Focus what it names",
+        ExclusiveIntent::FocusCrumb,
+    ),
+    Entry::new(
+        Input::HOVER,
+        CELL,
+        "Select and describe cell",
+        ExclusiveIntent::SelectCell,
+    ),
+]);
 
 gpui::actions!(
     bviz_graph,
     [
+        /// Show whole build
         ShowWholeBuild,
+        /// Go up one level
         FocusUp,
+        /// Leave roots field
         LeaveRoots,
+        /// Focus roots field
+        FocusRoots,
+        /// Select previous cell
         SelectPrevious,
+        /// Select next cell
         SelectNext,
+        /// Select parent cell
         SelectParent,
+        /// Select heaviest child cell
         SelectChild,
+        /// Clear selection
+        Deselect,
+        /// Focus cell
         FocusSelected,
+        /// Show cell in graph
         ShowSelected,
+        /// Go back
         FocusBack,
+        /// Go forward
         FocusForward,
     ]
 );
@@ -708,11 +789,10 @@ impl ExclusivePanel {
         }
     }
 
-    /// Acts on a press: the first of a click on a cell focuses as
-    /// [`Self::click_cell`] does, and the second of a double click whose first
-    /// landed clear of every cell returns to the whole build. A later press of
-    /// a click begun on a cell does nothing, the cell under it being whatever
-    /// the first press moved there.
+    /// Acts on a press as [`GESTURES`] has it. A double click returns to the
+    /// whole build only where its first press also landed clear of every cell;
+    /// a later press of a click begun on a cell does nothing, the cell under it
+    /// being whatever the first press moved there.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let cell = self.cell_at(e.position);
         let Some(drawn) = &mut self.drawn else {
@@ -724,12 +804,21 @@ impl ExclusivePanel {
         if drawn.transition.is_some() {
             return;
         }
-        match (cell, e.click_count) {
-            (Some(cell), 1) => self.click_cell(cell.holds, cx),
-            (None, 1) => drawn.pressed_clear = true,
-            (None, DOUBLE_CLICK) if pressed_clear => self.focus_on(None, cx),
-            _ => {}
-        }
+        drawn.pressed_clear = cell.is_none() && e.click_count == 1;
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            ExclusiveIntent::ShowWholeBuild if cell.is_none() && pressed_clear => {
+                self.focus_on(None, cx);
+                true
+            }
+            ExclusiveIntent::FocusCell => match cell {
+                Some(cell) => {
+                    self.click_cell(cell.holds, cx);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        });
     }
 
     /// Selects the cell under a right press and puts up the menu of what can
@@ -739,7 +828,7 @@ impl ExclusivePanel {
             return;
         };
         self.select(cell, Picked::Menu, cx);
-        let items = self.menu_items(cell.holds, cx);
+        let items = self.menu_items(cell.holds, window, cx);
         if items.is_empty() {
             return;
         }
@@ -779,7 +868,7 @@ impl ExclusivePanel {
     }
 
     /// The rows of the menu of the cell holding `holds`.
-    fn menu_items(&self, holds: Holds, cx: &Context<Self>) -> Vec<MenuItem> {
+    fn menu_items(&self, holds: Holds, window: &Window, cx: &Context<Self>) -> Vec<MenuItem> {
         let Some(drawn) = &self.drawn else {
             return Vec::new();
         };
@@ -794,33 +883,32 @@ impl ExclusivePanel {
                 done.ok();
             }
         };
-        let items = offers.into_iter().map(|offer| {
-            let name = offer.label();
-            let item = match offer {
-                Offer::Focus | Offer::Open | Offer::Up => {
-                    MenuItem::new(name, deed(Deed::Click(holds)))
+        // A row an action also does reads that action's label, the action
+        // working on the selected cell, which the cell under the menu becomes.
+        let keys_in = Some(&self.focus_handle);
+        let action =
+            |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
+        let items = offers.into_iter().map(|offer| match offer {
+            Offer::Focus => action(&FocusSelected, deed(Deed::Click(holds))),
+            Offer::Up => action(&FocusUp, deed(Deed::Click(holds))),
+            Offer::Show { node, can } => {
+                let item = action(&ShowSelected, deed(Deed::Reveal(node)));
+                if can { item } else { item.disabled() }
+            }
+            Offer::Root { node, caveat } => {
+                let label = label(node);
+                let explained = caveat.map(|caveat| caveat.explain(&label));
+                let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
+                match explained {
+                    Some(explained) => item.tooltip(explained),
+                    None => item,
                 }
-                Offer::Show { can: false, .. } => MenuItem::disabled(name),
-                Offer::Show { node, can: true } => MenuItem::new(name, deed(Deed::Reveal(node))),
-                Offer::Root { node, caveat } => {
-                    let label = label(node);
-                    let explained = caveat.map(|caveat| caveat.explain(&label));
-                    let item = MenuItem::new(name, deed(Deed::Root(label.into())));
-                    match explained {
-                        Some(explained) => item.tooltip(explained),
-                        None => item,
-                    }
-                }
-                Offer::CopyLabel { node } => {
-                    let label = label(node);
-                    MenuItem::new(name, move |_, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
-                    })
-                }
-            };
-            match offer.keys() {
-                Some(keys) => item.keys(keys),
-                None => item,
+            }
+            Offer::CopyLabel { node } => {
+                let label = label(node);
+                MenuItem::new("Copy label", move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
+                })
             }
         });
         items.collect()
@@ -1534,33 +1622,32 @@ fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> St
 /// The most roots a tooltip names as reaching a top.
 const NAMED_ROOTS: usize = 3;
 
-/// What a click on the cell holding `holds` under `top` does, and where its
+/// What a click on the cell holding `holds` under `top` does, along with the
+/// keys `up` that go up a level as a click on the top cell does, and where its
 /// menu offers `more` than the click that it does; absent where a click does
 /// nothing.
-fn gesture(holds: Holds, top: Holds, more: bool) -> Option<String> {
-    let click = match holds {
+fn gesture(holds: Holds, top: Holds, up: Option<&str>, more: bool) -> Option<String> {
+    let click = FOCUS_CELL.gesture().input.text(KeyStyle::NATIVE);
+    let does = match holds {
         Holds::Build => return None,
-        _ if holds == top => FOCUS_UP,
-        Holds::Node(_) => FOCUS,
-        Holds::Shared | Holds::Rest(_) => OPEN,
+        _ if holds == top => match up {
+            Some(keys) => format!("{click} or {keys} to go up a level"),
+            None => format!("{click} to go up a level"),
+        },
+        Holds::Node(_) => format!("{click} to focus"),
+        Holds::Shared | Holds::Rest(_) => format!("{click} to open"),
     };
     Some(match more {
-        true => format!("{click} · {MORE}"),
-        false => click.to_owned(),
+        true => {
+            let menu = OPEN_MENU.gesture().input.text(KeyStyle::NATIVE);
+            format!("{does} · {menu} for more")
+        }
+        false => does,
     })
 }
 
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
-
-/// What a click on a cell does: on a point, on a cell gathering several, and
-/// on the cell on top.
-const FOCUS: &str = "click to focus";
-const OPEN: &str = "click to open";
-const FOCUS_UP: &str = "click or Backspace to go up a level";
-
-/// Says that a cell's menu offers more than a click does.
-const MORE: &str = "right-click for more";
 
 /// What share of `whole` `part` is, as a percentage.
 fn share(part: u32, whole: u32) -> String {
@@ -1595,17 +1682,20 @@ impl Panel for ExclusivePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph-exclusive"),
-            label: "Exclusive deps",
             key_context: KEY_CONTEXT,
         }
     }
 
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn description() -> Option<&'static str> {
         Some("What exists only because of each target (the build's dominator tree)")
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1647,17 +1737,34 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectNext, _, cx| view.step(Step::Next, cx)))
             .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
+            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.deselect(cx)))
             .on_action(cx.listener(|view, _: &FocusSelected, _, cx| view.focus_selected(cx)))
             .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
             .on_action(cx.listener(|view, _: &FocusBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &FocusForward, _, cx| view.go_forward(cx)))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
-                cx.listener(|view, _: &MouseDownEvent, _, cx| view.go_back(cx)),
+                cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                    GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                        ExclusiveIntent::GoBack => {
+                            view.go_back(cx);
+                            true
+                        }
+                        _ => false,
+                    });
+                }),
             )
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Forward),
-                cx.listener(|view, _: &MouseDownEvent, _, cx| view.go_forward(cx)),
+                cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                    GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                        ExclusiveIntent::GoForward => {
+                            view.go_forward(cx);
+                            true
+                        }
+                        _ => false,
+                    });
+                }),
             )
             .track_focus(&self.focus_handle)
             .flex_1()
@@ -1671,6 +1778,11 @@ impl Render for ExclusivePanel {
         }
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
+        let root = root.when(self.picker.is_some(), |root| {
+            root.on_action(cx.listener(|view, _: &FocusRoots, window, cx| {
+                view.roots_field.read(cx).focus_handle(cx).focus(window, cx);
+            }))
+        });
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
@@ -1739,11 +1851,23 @@ impl Render for ExclusivePanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|view, e: &MouseDownEvent, window, cx| {
-                            view.open_menu(e, window, cx);
+                            GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                                ExclusiveIntent::OpenMenu => {
+                                    view.open_menu(e, window, cx);
+                                    true
+                                }
+                                _ => false,
+                            });
                         }),
                     )
                     .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                        view.hover_at(e.position, cx);
+                        GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+                            ExclusiveIntent::SelectCell => {
+                                view.hover_at(e.position, cx);
+                                true
+                            }
+                            _ => false,
+                        });
                     }))
                     .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
                         if !hovered {
@@ -1851,8 +1975,14 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
             .cursor_pointer()
             .text_color(palette.colors.text_muted)
             .hover(|style| style.text_color(palette.label))
-            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
-                view.focus_on_in(&tree, to, cx);
+            .on_click(cx.listener(move |view, e: &ClickEvent, _, cx| {
+                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                    ExclusiveIntent::FocusCrumb => {
+                        view.focus_on_in(&tree, to, cx);
+                        true
+                    }
+                    _ => false,
+                });
             }))
     };
     let mut above: Vec<Div> = Vec::with_capacity(CRUMBS + 1);
@@ -1944,7 +2074,8 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
             return;
         };
         let more = panel.offers(cell.holds, cx).len() > 1;
-        let gesture = gesture(cell.holds, drawn.top(), more);
+        let up = key_text_in(&FocusUp, &panel.focus_handle, window);
+        let gesture = gesture(cell.holds, drawn.top(), up.as_deref(), more);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, by, pointer) = (*cell, *by, drawn.pointer);
         paint::paint_ring(&cell, &palette, window);
@@ -2039,6 +2170,16 @@ impl Render for IcicleCanvas {
 mod tests {
     use super::*;
     use gpui::size;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     /// A tooltip for a cell with no room below it stands above the cell
     /// rather than over it.

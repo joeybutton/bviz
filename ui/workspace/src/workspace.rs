@@ -1,22 +1,29 @@
 use crate::carry::{Carrying, Reported, Taken};
-use crate::documents_menu::DocumentsMenu;
+use crate::documents_menu::{self, DocumentsMenu};
 use crate::drop::{PaneGeometry, Preview};
+use crate::gestures::{CHROME_GESTURES, ChromeIntent, chrome_gestures};
 use crate::pane::Handover;
+use crate::panel::keys_focus;
 use crate::panel_menu::{Deed, Standing};
 use crate::{
     AnyPanel, Arrangement, DividerId, Document, Documents, Framing, Layout, Maximize, Pane,
     PaneEvent, PanelGroup, Removal, Side, Split, SplitSide, WindowsChanged, documents, drag_icon,
     drop, panel_menu,
 };
+use bviz_ui_components::gesture::Pointer;
 use bviz_ui_components::{
-    Divider, DragEnd, Menu, MenuEvent, overlay_canvas, text_input, track_drag,
+    Divider, DragEnd, GestureGroup, KeyScope, KeyStyle, KeysHelp, Menu, MenuEvent, action_label,
+    declare_scopes, declared_scopes, keys_in_effect, overlay_canvas, text_input, track_drag,
 };
-use bviz_ui_playback::{Clock, PlaybackBar};
+use bviz_ui_playback::{
+    Clock, KEY_CONTEXT as PLAYBACK_KEY_CONTEXT, PlayPause, PlaybackBar, SeekEnd, SeekStart,
+    SpeedDown, SpeedUp, StepBack, StepForward,
+};
 use bviz_ui_shell::Chrome;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyElement, AnyWindowHandle, App, Axis, Bounds, Canvas, Div, ElementId, Entity,
-    EntityId, FocusHandle, IconScale, IntoElement, KeyBinding, MouseDownEvent, Pixels,
+    EntityId, FocusHandle, IconScale, IntoElement, KeyBinding, KeyContext, MouseDownEvent, Pixels,
     PlatformDragEvent, Point, Rems, Render, SharedString, Size, Stateful, Subscription, WeakEntity,
     Window, actions, deferred, div, point, prelude::*, px,
 };
@@ -27,45 +34,54 @@ use std::sync::OnceLock;
 actions!(
     bviz_workspace,
     [
+        /// Show next tab
         NextTab,
+        /// Show previous tab
         PreviousTab,
+        /// Close panel
         ClosePanel,
+        /// Move panel to new window
         DetachPanel,
+        /// Maximize or restore pane
         ToggleMaximize,
+        /// Open or close Documents menu
         ToggleDocuments,
+        /// Focus left pane
         FocusLeft,
+        /// Focus right pane
         FocusRight,
+        /// Focus pane above
         FocusUp,
+        /// Focus pane below
         FocusDown,
+        /// Move panel left
         MovePanelLeft,
+        /// Move panel right
         MovePanelRight,
+        /// Move panel up
         MovePanelUp,
+        /// Move panel down
         MovePanelDown,
+        /// Split panel left
         SplitLeft,
+        /// Split panel right
         SplitRight,
+        /// Split panel up
         SplitUp,
+        /// Split panel down
         SplitDown,
+        /// Even out split
         EvenSplit,
-        ResetArrangement
-    ]
-);
-
-actions!(
-    bviz_playback,
-    [
-        PlayPause,
-        StepBack,
-        StepForward,
-        SeekStart,
-        SeekEnd,
-        SpeedUp,
-        SpeedDown
+        /// Reset to opening arrangement
+        ResetArrangement,
+        /// Show keys and gestures
+        ShowKeysAndGestures,
     ]
 );
 
 /// The key context the workspace's own bindings are scoped to, so they reach a
 /// window this crate frames and no other.
-const KEY_CONTEXT: &str = "Workspace";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("Workspace", "Panes & windows");
 
 /// The hairline drawn between two sides of a split.
 const DIVIDER_LINE: Pixels = px(1.);
@@ -123,30 +139,47 @@ const MARK_FILL: f32 = 0.3;
 const MENU_LAYER: usize = 1;
 
 pub(crate) fn register_keys(cx: &mut App) {
-    // Typed into a text field, the playback keys edit the text.
-    let playback = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
+    declare_scopes(
+        cx,
+        [
+            KEY_CONTEXT,
+            PLAYBACK_KEY_CONTEXT,
+            documents_menu::KEY_CONTEXT,
+        ],
+    );
+    let workspace = Some(KEY_CONTEXT.id());
+    let unless_typing = text_input::unless_typing(KEY_CONTEXT);
+    let unless_typing = Some(unless_typing.as_str());
+    let playback = text_input::unless_typing(PLAYBACK_KEY_CONTEXT);
     let playback = Some(playback.as_str());
     cx.bind_keys([
-        KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-w", ClosePanel, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-n", DetachPanel, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-shift-d", ToggleDocuments, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k m", ToggleMaximize, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k =", EvenSplit, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k 0", ResetArrangement, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k left", FocusLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k right", FocusRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k up", FocusUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k down", FocusDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-left", MovePanelLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-right", MovePanelRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-up", MovePanelUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k shift-down", MovePanelDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-left", SplitLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-right", SplitRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-up", SplitUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-k alt-down", SplitDown, Some(KEY_CONTEXT)),
+        KeyBinding::new("?", ShowKeysAndGestures, unless_typing),
+        KeyBinding::new("f1", ShowKeysAndGestures, workspace),
+        KeyBinding::new("ctrl-tab", NextTab, workspace),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, workspace),
+        KeyBinding::new("secondary-w", ClosePanel, workspace),
+        KeyBinding::new("secondary-shift-n", DetachPanel, workspace),
+        KeyBinding::new("secondary-shift-d", ToggleDocuments, workspace),
+        KeyBinding::new(
+            "escape",
+            documents_menu::CloseDocuments,
+            Some(documents_menu::KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new("secondary-k m", ToggleMaximize, workspace),
+        KeyBinding::new("secondary-k =", EvenSplit, workspace),
+        KeyBinding::new("secondary-k 0", ResetArrangement, workspace),
+        KeyBinding::new("secondary-k left", FocusLeft, workspace),
+        KeyBinding::new("secondary-k right", FocusRight, workspace),
+        KeyBinding::new("secondary-k up", FocusUp, workspace),
+        KeyBinding::new("secondary-k down", FocusDown, workspace),
+        KeyBinding::new("secondary-k shift-left", MovePanelLeft, workspace),
+        KeyBinding::new("secondary-k shift-right", MovePanelRight, workspace),
+        KeyBinding::new("secondary-k shift-up", MovePanelUp, workspace),
+        KeyBinding::new("secondary-k shift-down", MovePanelDown, workspace),
+        KeyBinding::new("secondary-k alt-left", SplitLeft, workspace),
+        KeyBinding::new("secondary-k alt-right", SplitRight, workspace),
+        KeyBinding::new("secondary-k alt-up", SplitUp, workspace),
+        KeyBinding::new("secondary-k alt-down", SplitDown, workspace),
         KeyBinding::new("space", PlayPause, playback),
         KeyBinding::new("left", StepBack, playback),
         KeyBinding::new("right", StepForward, playback),
@@ -656,6 +689,8 @@ impl Workspace {
             return;
         };
         let windows = self.other_windows(cx);
+        let active = self.active_panel(cx);
+        let keys_in = keys_focus(panel, Some(&active), cx);
         let items = panel_menu::items(
             panel,
             &cx.weak_entity(),
@@ -665,6 +700,9 @@ impl Workspace {
                 alone: pane.read(cx).tab_count() == 1,
             },
             &windows,
+            keys_in.as_ref(),
+            window,
+            cx,
         );
         let menu = cx.new(|cx| Menu::new(items, at, window, cx));
         let dismissed = cx.subscribe_in(
@@ -684,6 +722,82 @@ impl Workspace {
             _dismissed: dismissed,
         });
         cx.notify();
+    }
+
+    /// Closes the keys help the pane holding `panel` has up, or else puts the
+    /// keys help of `panel` up over it, bringing it forward first where it is
+    /// not the active panel.
+    fn toggle_keys_help(&mut self, panel: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((pane, _)) = self.holder(panel, cx) else {
+            return;
+        };
+        if pane.read(cx).shows_keys_help() {
+            pane.update(cx, |pane, cx| pane.close_keys_help(window, cx));
+            return;
+        }
+        if self.active_panel(cx).entity_id() != panel {
+            self.reveal(panel, window, cx);
+        }
+        let room = pane.read(cx).keys_help_room(window);
+        let help = self.keys_help(&self.active_panel(cx), room, window, cx);
+        pane.update(cx, |pane, cx| pane.show_keys_help(help, window, cx));
+    }
+
+    /// The keys help of `panel`, which holds focus, standing at most
+    /// `max_height` tall. Its keys are those in effect in the context stack the
+    /// last frame drew from the window's root to `panel`, read along the path
+    /// to the focused element; where that path does not pass through `panel`,
+    /// [`stack_around`] stands in for it.
+    fn keys_help(
+        &self,
+        panel: &AnyPanel,
+        max_height: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<KeysHelp> {
+        let scope = panel.key_scope();
+        let mut stack = window.context_stack();
+        match stack
+            .iter()
+            .rposition(|context| context.contains(scope.id()))
+        {
+            Some(at) => stack.truncate(at + 1),
+            None => stack = stack_around(self.key_context(cx), scope),
+        }
+        let keys = {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keys_in_effect(
+                &keymap,
+                declared_scopes(cx),
+                &stack,
+                scope,
+                |action| action_label(action, cx).unwrap_or(action.name()).into(),
+                KeyStyle::NATIVE,
+            )
+        };
+        let gestures = vec![
+            GestureGroup {
+                scope: scope.label(),
+                rows: panel.gestures(),
+            },
+            GestureGroup {
+                scope: KEY_CONTEXT.label(),
+                rows: chrome_gestures(),
+            },
+        ];
+        cx.new(|cx| KeysHelp::new(keys, gestures, max_height, window, cx))
+    }
+
+    /// The key context the window's root carries: the workspace's own, and the
+    /// playback scope while the active panel's document plays back.
+    fn key_context(&self, cx: &mut App) -> KeyContext {
+        let mut key_context = KeyContext::from(KEY_CONTEXT);
+        let document = self.active_panel(cx).document();
+        if Documents::global(cx).read(cx).playback(document).is_some() {
+            key_context.add(PLAYBACK_KEY_CONTEXT.id());
+        }
+        key_context
     }
 
     /// Hands focus to the panel the active pane shows. Which panel that is is
@@ -739,6 +853,7 @@ impl Workspace {
                     self.even_pane_split(&pane, cx);
                 }
             }
+            Deed::KeysHelp => self.toggle_keys_help(panel, window, cx),
             Deed::Close => {
                 if let Some((pane, at)) = self.holder(panel, cx) {
                     pane.update(cx, |pane, cx| pane.close(at, window, cx));
@@ -1180,6 +1295,7 @@ impl Workspace {
                 PaneEvent::Menu { panel, at } => {
                     workspace.open_panel_menu(*panel, *at, window, cx);
                 }
+                PaneEvent::KeysHelp(panel) => workspace.toggle_keys_help(*panel, window, cx),
                 PaneEvent::Reveal(panel) => {
                     // The gesture asking for it may have come from another
                     // window.
@@ -1263,10 +1379,10 @@ impl Workspace {
         }
     }
 
-    /// Tells every pane how the window frames it. The arrangement is the
-    /// workspace's to know, and a frame draws a window from its root, so every
-    /// pane hears this before it draws itself.
-    fn tell_panes_how_they_are_framed(&self, cx: &mut Context<Self>) {
+    /// Tells every pane how the window frames it and whether it is the active
+    /// pane. The arrangement is the workspace's to know, and a frame draws a
+    /// window from its root, so every pane hears this before it draws itself.
+    fn tell_panes_where_they_stand(&self, cx: &mut Context<Self>) {
         let here = cx.entity_id();
         let elsewhere = Documents::global(cx).read(cx).holds_another_window(here);
         let layout = self.arrangement.layout();
@@ -1279,7 +1395,11 @@ impl Workspace {
             } else {
                 Framing::Beside
             };
-            pane.update(cx, |pane, _| pane.set_framing(framing));
+            let active = *pane == self.active;
+            pane.update(cx, |pane, _| {
+                pane.set_framing(framing);
+                pane.set_window_active(active);
+            });
         }
     }
 
@@ -1865,8 +1985,7 @@ fn span(bounds: Bounds<Pixels>, axis: Axis) -> (f32, f32) {
 }
 
 /// The grab band at one boundary between a split's sides, [`DIVIDER_GRIP`]
-/// across. A press takes hold of the boundary to drag it; a double click evens
-/// the split it parts instead, taking hold of nothing.
+/// across.
 fn divider(
     id: DividerId,
     axis: Axis,
@@ -1883,12 +2002,18 @@ fn divider(
         ElementId::NamedInteger("split-divider".into(), id.as_u64()),
         axis,
         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
-            if event.click_count > 1 {
-                workspace.even_split(id, cx);
-                return;
-            }
-            workspace.divider_drag = Some(id);
-            cx.notify();
+            CHROME_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+                ChromeIntent::EvenSplit => {
+                    workspace.even_split(id, cx);
+                    true
+                }
+                ChromeIntent::ResizeSplit => {
+                    workspace.divider_drag = Some(id);
+                    cx.notify();
+                    true
+                }
+                _ => false,
+            });
         }),
     )
     .band(DIVIDER_GRIP)
@@ -1965,7 +2090,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let panel = self.active_panel(cx);
-        self.tell_panes_how_they_are_framed(cx);
+        self.tell_panes_where_they_stand(cx);
         self.aim_panel_drag(window, cx);
         // The room the chrome's bands leave, asked for as the room left rather
         // than as the whole of the window, which would squeeze those bands out
@@ -1975,6 +2100,7 @@ impl Render for Workspace {
             .child(self.body_element(&colors, cx))
             .child(measure_body(cx));
         let playback = self.playback_bar(&panel, cx);
+        let key_context = self.key_context(cx);
         let chrome = Chrome::new(&self.window_focus)
             .title(window_title(&self.app_name, &panel, cx))
             .menu(self.documents_menu.clone())
@@ -1984,7 +2110,7 @@ impl Render for Workspace {
             None => chrome,
         };
         let body = div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context)
             .size_full()
             .on_action(cx.listener(|workspace, _: &NextTab, window, cx| {
                 workspace
@@ -2012,6 +2138,12 @@ impl Render for Workspace {
                 let pane = workspace.active.clone();
                 workspace.even_pane_split(&pane, cx);
             }))
+            .on_action(
+                cx.listener(|workspace, _: &ShowKeysAndGestures, window, cx| {
+                    let panel = workspace.active_panel(cx).entity_id();
+                    workspace.toggle_keys_help(panel, window, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &ResetArrangement, window, cx| {
                 workspace.reset_arrangement(window, cx);
             }))
@@ -2089,6 +2221,12 @@ fn window_name(place: usize, shown: &str) -> SharedString {
 
 fn set_window_title(app_name: &str, panel: &AnyPanel, window: &mut Window, cx: &App) {
     window.set_window_title(&window_title(app_name, panel, cx));
+}
+
+/// The context stack from the window's root to a panel scoped to `scope`,
+/// where the root carries `workspace`.
+fn stack_around(workspace: KeyContext, scope: KeyScope) -> Vec<KeyContext> {
+    vec![workspace, bviz_ui_shell::KEY_CONTEXT.into(), scope.into()]
 }
 
 #[cfg(test)]
@@ -2633,5 +2771,32 @@ mod tests {
         let second = window_name(2, "build.profile.gz");
         assert_ne!(first, second);
         assert!(first.contains("build.profile.gz"), "{first}");
+    }
+
+    /// The keys help of a panel the last frame's path to focus left out still
+    /// lists the keys the window's frame binds.
+    #[test]
+    fn the_stack_around_a_panel_reaches_the_window_frames_keys() {
+        const PANEL: KeyScope = KeyScope::new("Panel", "Panel");
+        let keymap = gpui::Keymap::new(bviz_ui_shell::bindings());
+        let groups = keys_in_effect(
+            &keymap,
+            &[KEY_CONTEXT, bviz_ui_shell::KEY_CONTEXT, PANEL],
+            &stack_around(KEY_CONTEXT.into(), PANEL),
+            PANEL,
+            |action| action.name().into(),
+            KeyStyle::Words,
+        );
+        let listed: Vec<SharedString> = groups
+            .into_iter()
+            .flat_map(|group| group.rows)
+            .map(|row| row.label)
+            .collect();
+        for action in [&bviz_ui_shell::Tab as &dyn Action, &bviz_ui_shell::TabPrev] {
+            assert!(
+                listed.iter().any(|label| label == action.name()),
+                "{listed:?}"
+            );
+        }
     }
 }

@@ -1,12 +1,27 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens from it.
 
-use crate::menu_chrome;
+use crate::{KeyScope, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, Pixels, Render,
-    SharedString, Subscription, Window, div, prelude::*,
+    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, KeyBinding,
+    Pixels, Render, SharedString, Subscription, Window, div, prelude::*,
 };
+
+gpui::actions!(
+    bviz_dropdown,
+    [
+        /// Close list
+        Dismiss,
+    ]
+);
+
+/// The key context the dropdown carries, which [`Dismiss`] is scoped to.
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("Dropdown", "Dropdown");
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("escape", Dismiss, Some(KEY_CONTEXT.id()))]);
+}
 
 /// Emitted when the user picks a different option. Programmatic
 /// [`set_selected`](Dropdown::set_selected) does NOT emit — only a user choice —
@@ -25,6 +40,13 @@ struct Choice {
     available: bool,
 }
 
+/// The list a [`Dropdown`] has open.
+struct Opened {
+    /// Where focus stood when the list opened, which closing it from within
+    /// hands focus back to.
+    from: Option<FocusHandle>,
+}
+
 /// A dropdown over a fixed list of options. The chosen index is read with
 /// [`selected`](Self::selected); subscribe to [`DropdownEvent`] to react to a
 /// user's selection change.
@@ -32,7 +54,7 @@ pub struct Dropdown {
     id: ElementId,
     options: Vec<Choice>,
     selected: usize,
-    open: bool,
+    open: Option<Opened>,
     focus_handle: FocusHandle,
     /// Closes the menu when focus leaves it (an outside click); installed lazily on
     /// the first render, where the window is in hand.
@@ -56,7 +78,7 @@ impl Dropdown {
                 })
                 .collect(),
             selected,
-            open: false,
+            open: None,
             focus_handle: cx.focus_handle(),
             dismiss: None,
         }
@@ -110,7 +132,7 @@ impl Dropdown {
         }
     }
 
-    fn choose(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if !self
             .options
             .get(index)
@@ -118,11 +140,38 @@ impl Dropdown {
         {
             return;
         }
-        self.open = false;
+        self.close(window, cx);
         if self.select(index) {
             cx.emit(DropdownEvent::Changed(index));
         }
+    }
+
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open.is_some() {
+            self.close(window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Takes focus into the list, where an outside click takes it away.
+    fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = Some(Opened {
+            from: window.focused(cx),
+        });
+        self.focus_handle.focus(window, cx);
         cx.notify();
+    }
+
+    /// Closes the list from within, handing focus back where it stood when the
+    /// list opened.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Opened { from }) = self.open.take() {
+            if let Some(from) = from {
+                window.focus(&from, cx);
+            }
+            cx.notify();
+        }
     }
 
     fn trigger(
@@ -138,12 +187,11 @@ impl Dropdown {
             .unwrap_or_default();
         menu_chrome::trigger(self.id.clone(), colors)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.open = !this.open;
-                // Hold focus while open so an outside click dismisses the menu.
-                if this.open {
-                    this.focus_handle.focus(window, cx);
+                if this.open.is_some() {
+                    this.close(window, cx);
+                } else {
+                    this.open(window, cx);
                 }
-                cx.notify();
             }))
             .child(menu_chrome::reading(option_width, label))
             .child(menu_chrome::caret(colors))
@@ -159,7 +207,9 @@ impl Dropdown {
             .when(!option.available, |row| {
                 row.cursor_default().text_color(colors.text_disabled)
             })
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose(index, cx)))
+            .on_click(
+                cx.listener(move |this, _: &ClickEvent, window, cx| this.choose(index, window, cx)),
+            )
             .child(div().whitespace_nowrap().child(option.label.clone()))
         });
         menu_chrome::under_trigger(menu_chrome::sheet(colors).children(rows))
@@ -170,13 +220,12 @@ impl EventEmitter<DropdownEvent> for Dropdown {}
 
 impl Render for Dropdown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Close on an outside click: the menu holds focus while open (see the
-        // trigger handler), so losing it means a click landed elsewhere.
+        // Close on an outside click: the menu holds focus while open, so losing
+        // it means a click landed elsewhere.
         if self.dismiss.is_none() {
             self.dismiss = Some(
                 cx.on_focus_out(&self.focus_handle, window, |this, _, _, cx| {
-                    if this.open {
-                        this.open = false;
+                    if this.open.take().is_some() {
                         cx.notify();
                     }
                 }),
@@ -191,8 +240,12 @@ impl Render for Dropdown {
 
         div()
             .relative()
-            .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            // Focusable only while open, so a press on the closed trigger leaves
+            // focus to whatever around it takes it, for the list to hand back.
+            .when(self.open.is_some(), |el| el.track_focus(&self.focus_handle))
+            .on_action(cx.listener(Self::dismiss))
             .child(self.trigger(&colors, option_width, cx))
-            .children(self.open.then(|| self.menu(&colors, cx)))
+            .children(self.open.is_some().then(|| self.menu(&colors, cx)))
     }
 }

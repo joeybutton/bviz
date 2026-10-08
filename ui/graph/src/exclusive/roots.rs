@@ -10,13 +10,17 @@ use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGra
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
-use bviz_ui_components::{QueryField, TextTooltip, TooltipColors};
+use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip, TooltipColors};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 use std::sync::Arc;
 
-/// The key context the roots field carries, by which the panel's own
-/// single-key bindings stand down while a target set is typed into it.
-pub(crate) const KEY_CONTEXT: &str = "GraphExclusiveRoots";
+/// The key context the roots field carries, which [`LeaveRoots`] is scoped to.
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
+    &super::KEY_CONTEXT,
+    Nesting::Inside,
+    "GraphExclusiveRoots",
+    "Roots field",
+);
 
 /// Width the field is drawn at, wide enough for its placeholder.
 pub(super) const FIELD_WIDTH: Pixels = px(380.);

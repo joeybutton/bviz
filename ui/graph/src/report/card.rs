@@ -7,6 +7,9 @@ use crate::status::{Status, Statuses};
 use crate::{GraphPanel, Palette, why};
 use bviz_graph_layout::Id;
 use bviz_invocation::Configurations;
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
+};
 use bviz_ui_components::{
     Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
 };
@@ -14,6 +17,24 @@ use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, MouseButton, MouseDownEvent,
     Stateful, div, prelude::*, px, uniform_list,
 };
+
+/// What the card does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum ReportIntent {
+    JumpTo,
+}
+
+const GESTURES: Gestures<ReportIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    Place::On("an outcome"),
+    "Jump to node",
+    ReportIntent::JumpTo,
+)]);
+
+/// The gestures the card answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// What the panel holds of the card reading what the build reported.
 pub(crate) struct Card {
@@ -85,6 +106,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .label("outcomes")
+        .tooltip("Toggle build outcomes")
         .selected(view.report.is_up(report)),
     )
 }
@@ -138,7 +160,14 @@ fn row(
             listed
                 .cursor_pointer()
                 .hover(move |row| row.bg(hover))
-                .on_click(move |_, _, cx| view.update(cx, |view, cx| reveal(view, node, cx)))
+                .on_click(move |event: &ClickEvent, _, cx| {
+                    GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                        ReportIntent::JumpTo => {
+                            view.update(cx, |view, cx| reveal(view, node, cx));
+                            true
+                        }
+                    });
+                })
         }
         None => listed.text_color(colors.text_muted),
     }
@@ -207,6 +236,7 @@ fn selected(
                 }),
             )
             .label("paths from its root cause")
+            .tooltip("Show paths from root cause")
             .compact()
         }))
 }
@@ -298,6 +328,7 @@ pub(crate) fn card(
                         cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
                     )
                     .label("close")
+                    .tooltip("Close card")
                     .compact(),
                 ),
         )
@@ -317,6 +348,12 @@ pub(crate) fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     use super::super::tests::{node, resolved};
     use bviz_invocation::{BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes};

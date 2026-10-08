@@ -2,6 +2,8 @@
 use crate::OpenDocument;
 use crate::documents::{Held, Registration};
 use crate::{DocumentId, Documents, Pane, PanelGroup, ViewSpec};
+use bviz_ui_components::KeyScope;
+use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_playback::{Clock, DocumentClock};
 use gpui::{
     AnyView, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Render,
@@ -43,11 +45,16 @@ impl ViewKind {
 #[derive(Clone, Copy)]
 pub struct PanelKind {
     pub view: ViewKind,
-    /// The name the view goes by among the views its document can show.
-    pub label: &'static str,
     /// The gpui key context this panel's own key bindings are scoped to; unique
     /// across kinds, so such a binding reaches only this panel.
-    pub key_context: &'static str,
+    pub key_context: KeyScope,
+}
+
+impl PanelKind {
+    /// The name the view goes by among the views its document can show.
+    pub fn label(&self) -> &'static str {
+        self.key_context.label()
+    }
 }
 
 /// A view a [`Workspace`] can host. It renders its own body; the workspace draws
@@ -67,6 +74,15 @@ pub trait Panel: Render + Focusable + EventEmitter<PanelEvent> {
         Self: Sized,
     {
         None
+    }
+
+    /// The pointer gestures panels of this kind answer to, in the order their
+    /// table tries them.
+    fn gestures() -> Vec<GestureRow>
+    where
+        Self: Sized,
+    {
+        Vec::new()
     }
 
     fn status(&self, _cx: &App) -> Option<SharedString> {
@@ -147,6 +163,14 @@ impl AnyPanel {
         self.panel.description()
     }
 
+    pub fn gestures(&self) -> Vec<GestureRow> {
+        self.panel.gestures()
+    }
+
+    pub fn key_scope(&self) -> KeyScope {
+        self.panel.key_scope()
+    }
+
     pub fn status(&self, cx: &App) -> Option<SharedString> {
         self.panel.status(cx)
     }
@@ -187,6 +211,20 @@ impl AnyPanel {
     pub fn subscribe(&self, window: &Window, cx: &mut Context<Pane>) -> Subscription {
         self.panel.subscribe(window, cx)
     }
+}
+
+/// The focus a control acting on `panel` looks up the keys it names in,
+/// `active` being the panel the window's keys act on, if any: that panel's
+/// focus, wherever focus stands in the window, where it is `panel`; `None`
+/// otherwise, as those keys would act on a panel other than `panel`.
+pub(crate) fn keys_focus(
+    panel: EntityId,
+    active: Option<&AnyPanel>,
+    cx: &App,
+) -> Option<FocusHandle> {
+    active
+        .filter(|active| active.entity_id() == panel)
+        .map(|active| active.focus_handle(cx))
 }
 
 /// The views one file brings to a window, arranged and weighed as its viewer
@@ -407,6 +445,8 @@ trait PanelOps {
     fn view_kind(&self) -> ViewKind;
     fn title(&self, cx: &App) -> SharedString;
     fn description(&self) -> Option<&'static str>;
+    fn gestures(&self) -> Vec<GestureRow>;
+    fn key_scope(&self) -> KeyScope;
     fn status(&self, cx: &App) -> Option<SharedString>;
     fn icon(&self, cx: &App) -> Option<&'static str>;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
@@ -428,6 +468,14 @@ impl<T: Panel> PanelOps for Entity<T> {
 
     fn description(&self) -> Option<&'static str> {
         T::description()
+    }
+
+    fn gestures(&self) -> Vec<GestureRow> {
+        T::gestures()
+    }
+
+    fn key_scope(&self) -> KeyScope {
+        T::kind().key_context
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {

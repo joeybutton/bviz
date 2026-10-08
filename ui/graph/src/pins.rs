@@ -10,12 +10,33 @@ use crate::{GraphPanel, Palette, checklist};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
+};
 use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
 use gpui::{
     ClickEvent, Context, Div, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString,
     Stateful, div, prelude::*, px, relative,
 };
 use std::collections::HashMap;
+
+/// What the card does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum PinIntent {
+    Unpin,
+}
+
+const GESTURES: Gestures<PinIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    Place::On("a pinned node"),
+    "Unpin node",
+    PinIntent::Unpin,
+)]);
+
+/// The gestures the card answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// Width the list of pins is drawn at, over the drawing it names boxes of.
 const PANEL_WIDTH: Pixels = px(320.);
@@ -172,7 +193,8 @@ pub(crate) fn control(view: &GraphPanel, cx: &mut Context<GraphPanel>) -> Option
             cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, Visibility::Hidden, cx)),
         )
         .ghost()
-        .label(label(Pin::Set(Visibility::Hidden))),
+        .label(label(Pin::Set(Visibility::Hidden)))
+        .tooltip("Always hide box"),
     )
 }
 
@@ -237,6 +259,7 @@ pub(crate) fn panel(
                                     }),
                                 )
                                 .label("clear revealed")
+                                .tooltip("Unpin revealed nodes")
                                 .compact()
                             }))
                             .child(
@@ -245,6 +268,7 @@ pub(crate) fn panel(
                                     cx.listener(|view, _: &ClickEvent, _, cx| clear_all(view, cx)),
                                 )
                                 .label("clear")
+                                .tooltip("Unpin all nodes")
                                 .compact(),
                             ),
                     ),
@@ -296,7 +320,14 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
         .cursor_pointer()
         .text_xs()
         .text_color(palette.label)
-        .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| unpin(view, node, cx)))
+        .on_click(cx.listener(move |view, event: &ClickEvent, _, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                PinIntent::Unpin => {
+                    unpin(view, node, cx);
+                    true
+                }
+            });
+        }))
         .child(
             div()
                 .flex_1()
@@ -312,6 +343,12 @@ fn row(held: Held, palette: &Palette, cx: &mut Context<GraphPanel>) -> Stateful<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     /// The override `filter` holds for `node`.
     fn pinned(filter: &Filter, node: Id) -> Option<Pin> {

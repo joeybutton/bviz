@@ -4,9 +4,13 @@
 
 use bviz_graph_layout::{Id, Kind};
 use bviz_invocation::Session;
+use bviz_ui_components::gesture::{
+    GestureRow, Pointer, pinch_factor, scroll_pixels, wheel_zoom_factor,
+};
 use bviz_ui_components::{
-    DragEnd, Dropdown, DropdownEvent, MultiSelect, MultiSelectEvent, Pending, ScrollbarColors,
-    cached_layer, overlay_canvas, text_input,
+    DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
+    ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
+    find_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{GraphArgs, GraphSource};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -18,9 +22,9 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window, actions,
-    canvas, div, prelude::*, px, size,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
+    PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString, Subscription,
+    WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
 };
 use std::time::{Duration, Instant};
 
@@ -69,11 +73,11 @@ mod toolbar;
 mod unit_picker;
 mod why;
 
-use camera::{Camera, Rect, from_screen, recenter_rect, zoom_step};
+use camera::{Camera, Rect, from_screen, recenter_rect, scale_about};
 use checklist::OriginRow;
 use colour::Colouring;
 use derive::{Derived, Drawn, Expandable, LayoutLanded};
-use drag::{Drag, end_drag, start_pan, track_gesture};
+use drag::{CanvasIntent, Drag, GESTURES, end_drag, pan_by, start_pan, track_gesture};
 use emphasis::Emphasis;
 pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
@@ -90,78 +94,102 @@ use selection::Selection;
 actions!(
     bviz_graph,
     [
+        /// Toggle neighbor highlighting
         ToggleNeighborhood,
+        /// Toggle transitive reduction
         ToggleReduce,
+        /// Dismiss card, selection or paths
         Dismiss,
+        /// Go back
         JumpBack,
-        JumpForward
+        /// Go forward
+        JumpForward,
+        /// Show whole graph
+        ShowWholeGraph,
     ]
 );
 
 /// The key context scoping the graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const KEY_CONTEXT: &str = "Graph";
+const KEY_CONTEXT: KeyScope = KeyScope::new("Graph", "Graph");
 
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(
+        cx,
+        [
+            KEY_CONTEXT,
+            exclusive::KEY_CONTEXT,
+            exclusive::ROOTS_KEY_CONTEXT,
+            scatter::KEY_CONTEXT,
+            scatter::PICKING,
+            jump::KEY_CONTEXT,
+            chips::KEY_CONTEXT,
+            chips::FIELD_KEY_CONTEXT,
+            chips::COMPLETION_KEY_CONTEXT,
+            chips::AIMED_KEY_CONTEXT,
+        ],
+    );
     cx.bind_keys(bindings());
 }
 
 fn bindings() -> Vec<KeyBinding> {
-    // A bare character typed into a text field is text, so the panel's own
-    // bindings stand down inside one.
-    let outside_text = format!("{KEY_CONTEXT} && !{}", text_input::KEY_CONTEXT);
-    let outside_text = Some(outside_text.as_str());
-    let graph = Some(KEY_CONTEXT);
-    let jumping = Some(jump::KEY_CONTEXT);
+    let unless_typing = text_input::unless_typing(KEY_CONTEXT);
+    let unless_typing = Some(unless_typing.as_str());
+    let jumping = Some(jump::KEY_CONTEXT.id());
+    let scatter_canvas = text_input::unless_typing(scatter::KEY_CONTEXT);
+    let scatter_canvas = Some(scatter_canvas.as_str());
     let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
     let picking = Some(picking.as_str());
-    let exclusive = format!(
-        "{} && !{}",
-        exclusive::KEY_CONTEXT,
-        exclusive::ROOTS_KEY_CONTEXT
-    );
-    let outside_roots = Some(exclusive.as_str());
+    let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
+    let exclusive_canvas = Some(exclusive_canvas.as_str());
     let mut bindings = vec![
-        KeyBinding::new("h", ToggleNeighborhood, outside_text),
-        KeyBinding::new("r", ToggleReduce, outside_text),
-        KeyBinding::new("escape", Dismiss, outside_text),
-        KeyBinding::new("enter", reveal::Accept, outside_text),
-        KeyBinding::new("alt-left", JumpBack, outside_text),
-        KeyBinding::new("alt-right", JumpForward, outside_text),
-        KeyBinding::new("cmd-f", jump::Open, graph),
-        KeyBinding::new("ctrl-f", jump::Open, graph),
-        KeyBinding::new("/", jump::Open, outside_text),
+        KeyBinding::new("h", ToggleNeighborhood, unless_typing),
+        KeyBinding::new("r", ToggleReduce, unless_typing),
+        KeyBinding::new("escape", Dismiss, unless_typing),
+        KeyBinding::new("0", ShowWholeGraph, unless_typing),
+        KeyBinding::new("enter", reveal::Accept, unless_typing),
+        KeyBinding::new("alt-left", JumpBack, unless_typing),
+        KeyBinding::new("alt-right", JumpForward, unless_typing),
         KeyBinding::new("up", jump::Previous, jumping),
         KeyBinding::new("down", jump::Next, jumping),
         KeyBinding::new("enter", jump::Go, jumping),
-        KeyBinding::new("ctrl-enter", jump::AskWhy, jumping),
+        KeyBinding::new("secondary-enter", jump::AskWhy, jumping),
         KeyBinding::new("shift-enter", jump::AlwaysShow, jumping),
         KeyBinding::new("alt-enter", jump::AddChip, jumping),
         KeyBinding::new("escape", jump::Close, jumping),
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
-        KeyBinding::new("0", scatter::ShowWholePlot, Some(scatter::KEY_CONTEXT)),
-        KeyBinding::new("0", exclusive::ShowWholeBuild, outside_roots),
-        KeyBinding::new("backspace", exclusive::FocusUp, outside_roots),
-        KeyBinding::new("left", exclusive::SelectPrevious, outside_roots),
-        KeyBinding::new("right", exclusive::SelectNext, outside_roots),
-        KeyBinding::new("up", exclusive::SelectParent, outside_roots),
-        KeyBinding::new("down", exclusive::SelectChild, outside_roots),
-        KeyBinding::new("enter", exclusive::FocusSelected, outside_roots),
-        KeyBinding::new("g", exclusive::ShowSelected, outside_roots),
-        KeyBinding::new("alt-left", exclusive::FocusBack, outside_roots),
-        KeyBinding::new("alt-right", exclusive::FocusForward, outside_roots),
+        KeyBinding::new("0", scatter::ShowWholePlot, scatter_canvas),
+        KeyBinding::new("0", exclusive::ShowWholeBuild, exclusive_canvas),
+        KeyBinding::new("backspace", exclusive::FocusUp, exclusive_canvas),
+        KeyBinding::new("left", exclusive::SelectPrevious, exclusive_canvas),
+        KeyBinding::new("right", exclusive::SelectNext, exclusive_canvas),
+        KeyBinding::new("up", exclusive::SelectParent, exclusive_canvas),
+        KeyBinding::new("down", exclusive::SelectChild, exclusive_canvas),
+        KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
+        KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
+        KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
+        KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
+        KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
+        KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
-            Some(exclusive::ROOTS_KEY_CONTEXT),
+            Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
-    bindings.extend(chips::bindings(outside_text));
+    bindings.extend(chips::bindings(unless_typing));
+    bindings.extend(zoom_key_bindings(KEY_CONTEXT));
+    bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
+    bindings.extend(find_key_bindings(
+        exclusive::KEY_CONTEXT,
+        exclusive::FocusRoots,
+    ));
     bindings
 }
 
@@ -180,14 +208,6 @@ const MAX_ZOOM: f32 = 4.0;
 /// The most a frame request zooms in to show what it names, at which a label
 /// reads at a comfortable size however small the box framed.
 const MAX_FRAME_ZOOM: f32 = 1.5;
-
-/// Factor one wheel notch scales the zoom by, small enough that a notch nudges
-/// the view rather than jumping it.
-const ZOOM_PER_NOTCH: f32 = 1.1;
-
-/// Scroll delta one wheel notch amounts to, for the devices that report a delta
-/// in pixels rather than in lines.
-const PIXELS_PER_NOTCH: f32 = 120.0;
 
 /// Fraction of the viewport the fitted graph spans, leaving a margin so the whole
 /// graph sits within the inner part of the window rather than edge to edge.
@@ -262,6 +282,11 @@ pub struct GraphPanel {
     derived: Derived,
     framing: Framing,
     drag: Drag,
+    /// Whether the last press on the canvas was the first of its run and
+    /// landed clear of every box, which a double click showing the whole graph
+    /// must begin with: a first click on a box opens or closes it, and the
+    /// boxes moving under the second may leave it on empty space.
+    pressed_clear: bool,
     emphasis: Emphasis,
     morph: Morph,
     mode: LayoutMode,
@@ -487,6 +512,7 @@ impl GraphPanel {
             derived,
             framing: Framing::new(),
             drag: Drag::None,
+            pressed_clear: false,
             emphasis: Emphasis::none(),
             morph: Morph::none(),
             mode,
@@ -640,6 +666,7 @@ impl GraphPanel {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_hover(cx.listener(Self::on_hover))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_pinch(cx.listener(Self::on_pinch))
             // Track the shared focus handle here too (the chrome already tracks
             // it on an ancestor) so a press on the canvas brings the focus back
             // here from whichever control last took it. Key events bubble from
@@ -684,20 +711,66 @@ impl GraphPanel {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
         jump::dismiss(self, cx);
+        let clear = self.box_id_at(e.position).is_none();
+        let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
         // content under it.
         if let Some(axis) = scrollbar_hit(self, e.position) {
             start_scroll_drag(self, axis, e.position, cx);
             return;
         }
-        start_pan(self, e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::ShowWhole if clear && pressed_clear => {
+                self.show_whole(cx);
+                true
+            }
+            CanvasIntent::Pan => {
+                start_pan(self, e, cx);
+                true
+            }
+            _ => false,
+        });
     }
 
-    /// Picks the box under the cursor out for as long as it stays selected, or
-    /// drops the selection where the press lands on no box.
+    /// Eases the view onto the whole of what the panel draws.
+    fn show_whole(&mut self, cx: &mut Context<Self>) {
+        self.framing.request_frame(framing::Frame::Drawing);
+        self.invalidate_canvas(cx);
+    }
+
     fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         jump::dismiss(self, cx);
-        select_box_at(self, e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::Select => {
+                select_box_at(self, e.position, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn on_navigate_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+            CanvasIntent::GoBack => {
+                self.go_back(cx);
+                true
+            }
+            CanvasIntent::GoForward => {
+                self.go_forward(cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        jump::dismiss(self, cx);
+        reveal::back(self, cx);
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        jump::dismiss(self, cx);
+        reveal::forward(self, cx);
     }
 
     /// Ends the drag on the release the element receives directly, which the
@@ -714,16 +787,32 @@ impl GraphPanel {
         if matches!(self.drag, Drag::Pan(_)) {
             return;
         }
-        let Some(drawn) = self.drawn() else {
-            return;
-        };
+        GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+            CanvasIntent::Mark => {
+                self.mark_box_at(e.position, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// The box drawn under the window-space `position`, if any.
+    fn box_id_at(&self, position: Point<Pixels>) -> Option<Id> {
+        let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
         let morph = self.morph_frame();
-        let hit = drawn
+        drawn
             .view(camera.zoom)
-            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, e.position))
-            .map(|b| b.id);
+            .and_then(|g| box_at(&self.titles, g, morph.as_ref(), vp, camera, position))
+            .map(|b| b.id)
+    }
+
+    fn mark_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.drawn().is_none() {
+            return;
+        }
+        let hit = self.box_id_at(position);
         if hit != self.hovered {
             self.hovered = hit;
             self.invalidate_canvas(cx);
@@ -742,21 +831,42 @@ impl GraphPanel {
     }
 
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let delta = scroll_pixels(e);
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        GESTURES.dispatch(Pointer::scroll(e), |intent| {
+            match intent {
+                CanvasIntent::Zoom => self.zoom_about(e.position, wheel_zoom_factor(e), cx),
+                CanvasIntent::PanAcross => pan_by(self, (dx + dy, 0.0), cx),
+                CanvasIntent::Scroll => pan_by(self, (dx, dy), cx),
+                _ => return false,
+            }
+            true
+        });
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+            CanvasIntent::Zoom => {
+                self.zoom_about(e.position, pinch_factor(e), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the middle of the view.
+    fn zoom_centred(&mut self, factor: f32, cx: &mut Context<Self>) {
+        self.zoom_about(self.framing.viewport().center(), factor, cx);
+    }
+
+    /// Zooms `factor` times closer about the window-space point `at`.
+    fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
         let Some(content) = self.drawn().map(|d| d.content()) else {
             return;
         };
-        let notches = match e.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => f32::from(p.y) / PIXELS_PER_NOTCH,
-        };
         let viewport = self.framing.viewport();
-        self.framing.move_to(zoom_step(
-            e.position,
-            self.camera(),
-            notches,
-            viewport,
-            content,
-        ));
+        self.framing
+            .move_to(scale_about(at, self.camera(), factor, viewport, content));
         self.invalidate_canvas(cx);
     }
 
@@ -809,9 +919,20 @@ impl Panel for GraphPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph"),
-            label: "Graph",
             key_context: KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES
+            .rows()
+            .chain(jump::gestures())
+            .chain(chips::gestures())
+            .chain(pins::gestures())
+            .chain(report::gestures())
+            .chain(timecard::gestures())
+            .chain(missing::gestures())
+            .collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -849,20 +970,29 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
-            .on_action(cx.listener(|view, _: &JumpBack, _, cx| {
-                jump::dismiss(view, cx);
-                reveal::back(view, cx);
-            }))
-            .on_action(cx.listener(|view, _: &JumpForward, _, cx| {
-                jump::dismiss(view, cx);
-                reveal::forward(view, cx);
-            }))
+            .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
+            .on_action(cx.listener(|view, _: &JumpForward, _, cx| view.go_forward(cx)))
             .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .on_action(
                 cx.listener(|view, _: &chips::Focus, window, cx| chips::focus(view, window, cx)),
             )
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
+            .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
+            .on_action(cx.listener(|view, _: &ZoomIn, _, cx| view.zoom_centred(ZOOM_KEY_STEP, cx)))
+            .on_action(
+                cx.listener(|view, _: &ZoomOut, _, cx| {
+                    view.zoom_centred(ZOOM_KEY_STEP.recip(), cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(Self::on_navigate_down),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(Self::on_navigate_down),
+            )
             .track_focus(&self.focus_handle)
             .flex_1()
             .flex()
@@ -897,7 +1027,7 @@ impl Render for GraphPanel {
                     relaying: self.derived.deriving(),
                 };
                 chrome
-                    .child(toolbar::toolbar(controls, &palette, cx))
+                    .child(toolbar::toolbar(controls, &palette, &self.focus_handle, cx))
                     .child(
                         div()
                             .flex_1()
@@ -1188,6 +1318,8 @@ mod tests {
     };
     use crate::paint::lane_polyline;
     use bviz_graph_layout::Box;
+    use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
+    use bviz_ui_components::keymap_probe::{self, is};
     use gpui::{Bounds, Size, point};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
@@ -1209,25 +1341,16 @@ mod tests {
     fn dispatched(keys: &str, contexts: &[&str]) -> Option<std::boxed::Box<dyn gpui::Action>> {
         let mut bindings = bindings();
         bindings.extend(text_input::bindings());
-        let keymap = gpui::Keymap::new(bindings);
-        let stack: Vec<gpui::KeyContext> = contexts
-            .iter()
-            .map(|context| gpui::KeyContext::parse(context).expect("a key context"))
-            .collect();
-        let keystroke = gpui::Keystroke::parse(keys).expect("a keystroke");
-        let (matched, _) = keymap.bindings_for_input(&[keystroke], &stack);
-        matched
-            .first()
-            .map(|binding| binding.action().boxed_clone())
+        keymap_probe::dispatched(bindings, keys, contexts)
     }
 
-    fn is<A: gpui::Action>(action: Option<std::boxed::Box<dyn gpui::Action>>, expected: A) -> bool {
-        action.is_some_and(|action| action.partial_eq(&expected))
-    }
-
-    const IN_PANEL: &[&str] = &[KEY_CONTEXT];
-    const IN_FIELD: &[&str] = &[KEY_CONTEXT, text_input::KEY_CONTEXT];
-    const IN_PALETTE: &[&str] = &[KEY_CONTEXT, jump::KEY_CONTEXT, text_input::KEY_CONTEXT];
+    const IN_PANEL: &[&str] = &[KEY_CONTEXT.id()];
+    const IN_FIELD: &[&str] = &[KEY_CONTEXT.id(), text_input::KEY_CONTEXT.id()];
+    const IN_PALETTE: &[&str] = &[
+        KEY_CONTEXT.id(),
+        jump::KEY_CONTEXT.id(),
+        text_input::KEY_CONTEXT.id(),
+    ];
 
     /// A letter typed into any text field is text, not one of the panel's
     /// keys.
@@ -1246,10 +1369,8 @@ mod tests {
         assert!(is(dispatched("/", IN_PANEL), jump::Open));
         assert!(dispatched("/", IN_CHIP_FIELD).is_none());
         assert!(dispatched("/", IN_PALETTE).is_none());
-        for find in ["ctrl-f", "cmd-f"] {
-            assert!(is(dispatched(find, IN_PANEL), jump::Open), "{find}");
-            assert!(is(dispatched(find, IN_CHIP_FIELD), jump::Open), "{find}");
-        }
+        assert!(is(dispatched("secondary-f", IN_PANEL), jump::Open));
+        assert!(is(dispatched("secondary-f", IN_CHIP_FIELD), jump::Open));
     }
 
     /// A letter typed into the palette's field is text, and the keys moving
@@ -1265,7 +1386,7 @@ mod tests {
         assert!(is(dispatched("enter", IN_CHIPS), chips::Edit));
         assert!(is(dispatched("up", IN_PALETTE), jump::Previous));
         assert!(is(dispatched("enter", IN_PALETTE), jump::Go));
-        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
+        assert!(is(dispatched("secondary-enter", IN_PALETTE), jump::AskWhy));
         assert!(is(dispatched("shift-enter", IN_PALETTE), jump::AlwaysShow));
         assert!(is(dispatched("alt-enter", IN_PALETTE), jump::AddChip));
         assert!(is(dispatched("tab", IN_PALETTE), jump::NextScope));
@@ -1284,7 +1405,7 @@ mod tests {
                 assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
             }
         }
-        let exclusive = &[exclusive::KEY_CONTEXT];
+        let exclusive = &[exclusive::KEY_CONTEXT.id()];
         assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
         assert!(is(
             dispatched("alt-right", exclusive),
@@ -1292,43 +1413,55 @@ mod tests {
         ));
     }
 
-    const IN_CHIPS: &[&str] = &[KEY_CONTEXT, chips::KEY_CONTEXT];
+    /// The exclusive-deps panel's roots field is reached by the keys reaching
+    /// the graph's query bar and finder, and `q` is text inside it.
+    #[test]
+    fn the_roots_field_is_reached_by_q_and_the_find_keys() {
+        const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
+        const IN_ROOTS: &[&str] = &[
+            exclusive::KEY_CONTEXT.id(),
+            exclusive::ROOTS_KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        for keys in ["q", "secondary-f", "/"] {
+            assert!(
+                is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
+                "{keys}"
+            );
+        }
+        assert!(dispatched("q", IN_ROOTS).is_none());
+        assert!(dispatched("/", IN_ROOTS).is_none());
+    }
+
+    const IN_CHIPS: &[&str] = &[KEY_CONTEXT.id(), chips::KEY_CONTEXT.id()];
     const IN_CHIP_FIELD: &[&str] = &[
-        KEY_CONTEXT,
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
+        KEY_CONTEXT.id(),
+        chips::KEY_CONTEXT.id(),
+        chips::FIELD_KEY_CONTEXT.id(),
+        text_input::KEY_CONTEXT.id(),
     ];
 
-    const IN_CHIP_COMPLETION: &[&str] = &[
-        KEY_CONTEXT,
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
-        chips::COMPLETION_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
-    ];
-    const IN_AIMED_COMPLETION: &[&str] = &[
-        KEY_CONTEXT,
-        chips::KEY_CONTEXT,
-        chips::FIELD_KEY_CONTEXT,
-        chips::COMPLETION_KEY_CONTEXT,
-        chips::AIMED_KEY_CONTEXT,
-        text_input::KEY_CONTEXT,
-    ];
+    /// The action `keys` dispatch with focus in the query field while its
+    /// completion's list stands open, with a row `aimed` at or not.
+    fn completing(keys: &str, aimed: bool) -> Option<std::boxed::Box<dyn gpui::Action>> {
+        let mut bindings = bindings();
+        bindings.extend(text_input::bindings());
+        keymap_probe::dispatched_within(bindings, keys, &chips::completion_stack(aimed))
+    }
 
     /// While the list completing the field's word stands open, its keys
     /// move through it, accept a row and close it ahead of the field's own;
     /// the field's text keys and the panel's apply still reach through.
     #[test]
     fn an_open_completion_takes_the_keys_ahead_of_the_field() {
-        for completion in [IN_CHIP_COMPLETION, IN_AIMED_COMPLETION] {
-            assert!(is(dispatched("up", completion), chips::CompletePrevious));
-            assert!(is(dispatched("down", completion), chips::CompleteNext));
-            assert!(is(dispatched("tab", completion), chips::AcceptCompletion));
-            assert!(is(dispatched("escape", completion), chips::CloseCompletion));
-            assert!(is(dispatched("ctrl-enter", completion), chips::Apply));
-            assert!(is(dispatched("left", completion), text_input::Left));
-            assert!(dispatched("q", completion).is_none());
+        for aimed in [false, true] {
+            assert!(is(completing("up", aimed), chips::CompletePrevious));
+            assert!(is(completing("down", aimed), chips::CompleteNext));
+            assert!(is(completing("tab", aimed), chips::AcceptCompletion));
+            assert!(is(completing("escape", aimed), chips::CloseCompletion));
+            assert!(is(completing("secondary-enter", aimed), chips::Apply));
+            assert!(is(completing("left", aimed), text_input::Left));
+            assert!(completing("q", aimed).is_none());
         }
         for closed in ["up", "down", "tab"] {
             assert!(
@@ -1343,11 +1476,8 @@ mod tests {
     /// row, and accepts that row once they have.
     #[test]
     fn enter_accepts_a_completion_only_once_a_row_is_aimed_at() {
-        assert!(is(dispatched("enter", IN_CHIP_COMPLETION), chips::Commit));
-        assert!(is(
-            dispatched("enter", IN_AIMED_COMPLETION),
-            chips::AcceptCompletion
-        ));
+        assert!(is(completing("enter", false), chips::Commit));
+        assert!(is(completing("enter", true), chips::AcceptCompletion));
     }
 
     /// `q` reaches the query bar from the panel and is text in a field; the
@@ -1359,7 +1489,10 @@ mod tests {
         assert!(dispatched("q", IN_CHIP_FIELD).is_none());
         assert!(is(dispatched("enter", IN_CHIP_FIELD), chips::Commit));
         assert!(is(dispatched("escape", IN_CHIP_FIELD), chips::Leave));
-        assert!(is(dispatched("ctrl-enter", IN_CHIP_FIELD), chips::Apply));
+        assert!(is(
+            dispatched("secondary-enter", IN_CHIP_FIELD),
+            chips::Apply
+        ));
         assert!(is(
             dispatched("backspace", IN_CHIP_FIELD),
             text_input::Backspace
@@ -1386,38 +1519,65 @@ mod tests {
         assert!(is(dispatched("backspace", IN_CHIPS), chips::Remove));
         assert!(is(dispatched("enter", IN_CHIPS), chips::Edit));
         assert!(is(dispatched("escape", IN_CHIPS), chips::Leave));
-        assert!(is(dispatched("ctrl-enter", IN_CHIPS), chips::Apply));
+        assert!(is(dispatched("secondary-enter", IN_CHIPS), chips::Apply));
         assert!(is(dispatched("h", IN_CHIPS), ToggleNeighborhood));
-        assert!(is(dispatched("ctrl-c", IN_CHIPS), chips::CopyChip));
-        assert!(is(dispatched("ctrl-c", IN_CHIP_FIELD), text_input::Copy));
-        assert!(is(dispatched("ctrl-shift-c", IN_CHIPS), chips::CopyStack));
+        assert!(is(dispatched("secondary-c", IN_CHIPS), chips::CopyChip));
         assert!(is(
-            dispatched("ctrl-shift-c", IN_CHIP_FIELD),
+            dispatched("secondary-c", IN_CHIP_FIELD),
+            text_input::Copy
+        ));
+        assert!(is(
+            dispatched("secondary-shift-c", IN_CHIPS),
             chips::CopyStack
         ));
-        assert!(is(dispatched("ctrl-shift-c", IN_PANEL), chips::CopyStack));
         assert!(is(
-            dispatched("ctrl-shift-backspace", IN_CHIPS),
+            dispatched("secondary-shift-c", IN_CHIP_FIELD),
+            chips::CopyStack
+        ));
+        assert!(is(
+            dispatched("secondary-shift-c", IN_PANEL),
+            chips::CopyStack
+        ));
+        assert!(is(
+            dispatched("secondary-shift-backspace", IN_CHIPS),
             chips::ClearQuery
         ));
         assert!(is(
-            dispatched("ctrl-shift-backspace", IN_CHIP_FIELD),
+            dispatched("secondary-shift-backspace", IN_CHIP_FIELD),
             chips::ClearQuery
         ));
-        assert!(dispatched("ctrl-shift-backspace", IN_PANEL).is_none());
-        assert!(is(dispatched("ctrl-z", IN_CHIPS), chips::RevertQuery));
-        assert!(is(dispatched("ctrl-z", IN_CHIP_FIELD), chips::RevertQuery));
-        assert!(dispatched("ctrl-z", IN_PANEL).is_none());
-        assert!(dispatched("ctrl-shift-c", IN_FIELD).is_none());
+        assert!(dispatched("secondary-shift-backspace", IN_PANEL).is_none());
+        assert!(is(dispatched("secondary-z", IN_CHIPS), chips::RevertQuery));
+        assert!(is(
+            dispatched("secondary-z", IN_CHIP_FIELD),
+            chips::RevertQuery
+        ));
+        assert!(dispatched("secondary-z", IN_PANEL).is_none());
+        assert!(dispatched("secondary-shift-c", IN_FIELD).is_none());
+    }
+
+    /// Each key reaching the query bar from the panel and from within the bar
+    /// is one binding, which the keys help lists once.
+    #[test]
+    fn the_bars_keys_reaching_it_from_the_panel_are_bound_once() {
+        let bindings = bindings();
+        let bound = |action: &dyn gpui::Action| {
+            bindings
+                .iter()
+                .filter(|binding| binding.action().partial_eq(action))
+                .count()
+        };
+        assert_eq!(bound(&chips::Apply), 1);
+        assert_eq!(bound(&chips::CopyStack), 1);
     }
 
     /// A staged stack is applied from anywhere in the panel but the text
-    /// fields, the palette keeping its own Ctrl-Enter.
+    /// fields, the palette keeping its own secondary-Enter.
     #[test]
-    fn ctrl_enter_applies_the_stack_outside_the_palette() {
-        assert!(is(dispatched("ctrl-enter", IN_PANEL), chips::Apply));
-        assert!(is(dispatched("ctrl-enter", IN_PALETTE), jump::AskWhy));
-        assert!(dispatched("ctrl-enter", IN_FIELD).is_none());
+    fn secondary_enter_applies_the_stack_outside_the_palette() {
+        assert!(is(dispatched("secondary-enter", IN_PANEL), chips::Apply));
+        assert!(is(dispatched("secondary-enter", IN_PALETTE), jump::AskWhy));
+        assert!(dispatched("secondary-enter", IN_FIELD).is_none());
     }
 
     #[test]
@@ -1868,6 +2028,23 @@ mod tests {
                 .into_iter()
                 .map(move |b| point(px(ox + a * w), px(oy + b * h)))
         })
+    }
+
+    /// The camera a wheel step of `notches` lands on.
+    fn zoom_step(
+        cursor: Point<Pixels>,
+        camera: Camera,
+        notches: f32,
+        bounds: Bounds<Pixels>,
+        content: (f32, f32),
+    ) -> Camera {
+        scale_about(
+            cursor,
+            camera,
+            ZOOM_PER_NOTCH.powf(notches),
+            bounds,
+            content,
+        )
     }
 
     /// How far the layout point under `cursor` travels on screen across one wheel

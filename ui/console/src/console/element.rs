@@ -9,7 +9,7 @@ use gpui::{
     relative, size,
 };
 
-use super::{ConsolePanel, ContentLayout};
+use super::{ConsoleIntent, ConsolePanel, ContentLayout, GESTURES};
 use crate::color::{CellStyle, Defaults, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
@@ -340,14 +340,20 @@ impl TerminalElement {
                         view.selecting = false;
                         view.selection_drag = None;
                         view.selection_anchor = None;
-                        if let Some(url) = view.pressed_url.take() {
+                        if let Some((url, click)) = view.pressed_url.take() {
                             let dragged = view
                                 .terminal
                                 .as_ref()
                                 .and_then(Terminal::selection_text)
                                 .is_some();
                             if !dragged && matches!(end, DragEnd::Released) {
-                                cx.open_url(&url);
+                                GESTURES.dispatch(click, |intent| match intent {
+                                    ConsoleIntent::OpenLink => {
+                                        cx.open_url(&url);
+                                        true
+                                    }
+                                    _ => false,
+                                });
                             }
                         }
                         cx.notify();

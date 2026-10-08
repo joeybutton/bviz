@@ -3,19 +3,24 @@
 //! query functions where one can stand, matched against the word under the
 //! cursor and listed under the field.
 
-use super::{GraphPanel, command};
+use super::{AcceptCompletion, GraphPanel, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
 use crate::model::{Prepared, Shared};
 use bviz_graph_layout::query_lang::{ArgType, Function, Params, Place, word_at, written_word};
 use bviz_graph_layout::{Id, Kind};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
+};
 use bviz_ui_components::{
-    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar, menu_chrome,
+    ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, key_text_within, list_scrollbar,
+    menu_chrome,
 };
 use gpui::{
-    App, ClickEvent, Context, Deferred, Div, Entity, Focusable, MouseButton, MouseDownEvent,
-    Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
+    MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
+    px, uniform_list,
 };
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
@@ -28,6 +33,24 @@ const LIST_WIDTH: Pixels = px(480.);
 /// The most rows the list stands tall, few enough to read at a glance; the
 /// rest of the matches scroll through it.
 const VISIBLE_ROWS: usize = 10;
+
+/// What the list does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum CompletionIntent {
+    Accept,
+}
+
+const GESTURES: Gestures<CompletionIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    PointerPlace::On("a completion"),
+    "Accept completion",
+    CompletionIntent::Accept,
+)]);
+
+/// The gestures the list answers to.
+pub(super) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// What a completion names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -586,6 +609,7 @@ pub(super) fn list(
                     index,
                     read,
                     accepts,
+                    accepts_keys: accepts.and_then(|accepts| accepts.keys(cx)),
                 };
                 Some(listed(row, &listing, &entity))
             })
@@ -630,6 +654,8 @@ struct Listed<'a> {
     /// true for a pattern.
     read: bool,
     accepts: Option<Accepts>,
+    /// The keys that accept the row, where any do.
+    accepts_keys: Option<SharedString>,
 }
 
 /// One row: the pattern or the function's signature with the characters the
@@ -643,6 +669,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         index,
         read,
         accepts,
+        accepts_keys,
     } = listed;
     let colors = &palette.colors;
     let entity = entity.clone();
@@ -682,8 +709,13 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
             ))
         })
         .w_full()
-        .on_click(move |_: &ClickEvent, window, cx| {
-            entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+        .on_click(move |event: &ClickEvent, window, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                CompletionIntent::Accept => {
+                    entity.update(cx, |view, cx| accept(view, Some(index), window, cx));
+                    true
+                }
+            });
         })
         .child(
             div()
@@ -701,7 +733,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
                     palette.highlight.into(),
                 )),
         )
-        .children(accepts.map(|accepts| {
+        .children(accepts_keys.map(|keys| {
             div()
                 .flex_none()
                 .px_1()
@@ -710,7 +742,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
                 .border_color(colors.text_muted)
                 .text_xs()
                 .text_color(colors.text_muted)
-                .child(accepts.keys())
+                .child(keys)
         }))
         .child(
             div()
@@ -742,8 +774,8 @@ fn signature(function: Function) -> String {
     format!("{}({})", function.name(), arguments.join(", "))
 }
 
-/// Which keys accept a row: Tab the first row while none is aimed at, and
-/// Tab or Enter the row aimed at.
+/// Which row the keys accepting a completion accept: the first while none is
+/// aimed at, else the row aimed at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Accepts {
     First,
@@ -751,18 +783,43 @@ enum Accepts {
 }
 
 impl Accepts {
-    /// The keys, as the row's hint names them.
-    fn keys(self) -> &'static str {
-        match self {
-            Accepts::First => "tab",
-            Accepts::Aimed => "enter",
-        }
+    /// The keys the keymap accepts the row by.
+    fn keys(self, cx: &App) -> Option<SharedString> {
+        key_text_within(&AcceptCompletion, &self.stack(), cx)
+    }
+
+    /// The key contexts the field stands in while the keys accept this row.
+    fn stack(self) -> [KeyContext; 5] {
+        completion_stack(self == Accepts::Aimed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_ui_components::{KeyStyle, binding_text, binding_within, text_input};
+    use gpui::Keymap;
+
+    /// Tab accepts the first row while none is aimed at, Enter there
+    /// committing the field as typed, and Enter accepts a row aimed at.
+    #[test]
+    fn the_keys_named_for_accepting_follow_the_aim() {
+        let mut bindings = crate::bindings();
+        bindings.extend(text_input::bindings());
+        let keymap = Keymap::new(bindings);
+        let keys = |accepts: Accepts| {
+            binding_within(&keymap, &AcceptCompletion, &accepts.stack())
+                .map(|binding| binding_text(binding, KeyStyle::Words))
+        };
+        assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
+        assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+    }
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     fn offered(labels: &[&str]) -> Vec<(String, String, Named)> {
         patterns(labels.iter().copied())

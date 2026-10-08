@@ -1,6 +1,7 @@
 //! A multi-select: a trigger reading how many of its values are checked, and a
 //! menu of rows that stays open as they are toggled.
 
+use crate::KeyScope;
 use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
@@ -15,15 +16,23 @@ use gpui::{
 use std::collections::HashSet;
 use std::ops::Range;
 
-gpui::actions!(bviz_multi_select, [Toggle, Dismiss]);
+gpui::actions!(
+    bviz_multi_select,
+    [
+        /// Open or close list
+        Toggle,
+        /// Close list
+        Dismiss,
+    ]
+);
 
 /// The key context scoping the control's own bindings, so a key pressed while
 /// it has focus works the control rather than an enclosing binding.
-const KEY_CONTEXT: &str = "MultiSelect";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("MultiSelect", "Checklist");
 
 /// Register the multi-select's key bindings.
 pub(crate) fn bind_keys(cx: &mut App) {
-    let ctx = Some(KEY_CONTEXT);
+    let ctx = Some(KEY_CONTEXT.id());
     cx.bind_keys([
         KeyBinding::new("enter", Toggle, ctx),
         KeyBinding::new("space", Toggle, ctx),

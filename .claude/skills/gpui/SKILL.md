@@ -42,6 +42,9 @@ behaves consistently:
 - `bviz_ui_components::{QueryField, QueryFieldEvent}` — a text field with a button that
   empties it, which emits one event per edit and another once typing settles.
 - `bviz_ui_components::track_drag` — a drag that follows the cursor past the window.
+- `bviz_ui_components::{KeyScope, declare_scopes, zoom_key_bindings, find_key_bindings, gesture}`
+  — labelled key scopes, the shared key bindings, and the gesture tables pointer handlers
+  dispatch through.
 - `bviz_ui_components::load_in_background` — run work off the UI thread, then apply it.
 - `bviz_ui_assets::{text_metrics, shape_line, icon, UI, MONO, load_fonts}` — fonts,
   text metrics, single-run line shaping, Phosphor icons.
@@ -310,6 +313,10 @@ ctrl elsewhere; the optional context scopes the binding to a `key_context`), and
 with `.on_action(|_: &CloseWindow, window, cx| …)` on an element in the focus path. Actions
 dispatch up from the focused element, so a view needs `.track_focus(&handle)` (with
 `focus_handle: FocusHandle` created via `cx.focus_handle()`) to receive them.
+
+Every panel follows the keys and gestures convention in `references/keys-and-gestures.md`,
+which keeps the Keys & Gestures sheet complete and key text out of string literals. Read it
+before adding an action, a key binding, a key context or a pointer handler.
 
 Focus and tab order: configure a handle with `.tab_index(n).tab_stop(true)`, bind `tab` /
 `shift-tab` to actions that call `window.focus_next(cx)` / `window.focus_prev(cx)`, and style
@@ -679,13 +686,25 @@ lays a graph out reaches its first frame almost at once and the view many second
 Size it from the app's own measured load time with room to spare, and confirm the
 capture shows the view rather than a spinner before drawing any conclusion from it.
 
+**Driving input.** `cage` delivers no injected input. `screenshot-input.sh` runs the app in
+headless `sway` instead, with a virtual pointer and `wtype`'s virtual keyboard, and sources a
+steps file that moves, clicks, scrolls, types and captures (its header lists the commands):
+
+```
+.claude/skills/gpui/screenshot-input.sh <steps-file> <app-binary> [args...]
+```
+
+It holds one `wtype` keyboard on the seat for the whole run, which is what lets the keys of
+each later `wtype` call reach the app. Click into the window before a modified key or wheel,
+so the window holds keyboard focus (see the wheel-modifier note under Scrolling).
+
 **A capture proves the frame, not the behaviour.** Bit-identical PNGs across a refactor are
 strong evidence that nothing moved — build the binary before and after, capture both, and
 compare with `sha256sum`; that is the cheapest proof a "no visible change" claim can have.
-But they say nothing about state that only a gesture reaches. `cage` cannot inject input,
-so for a behavioural claim (a position surviving a reflow, a selection surviving a rebuild)
-drive the sequence programmatically with the *same* throwaway instrumentation on both
-revisions, and take **three** captures — control, old-revision cycle, new-revision cycle —
+But they say nothing about state that only a gesture reaches. For a behavioural claim (a
+position surviving a reflow, a selection surviving a rebuild) drive the same sequence on both
+revisions, through `screenshot-input.sh` or the *same* throwaway instrumentation, and take
+**three** captures — control, old-revision cycle, new-revision cycle —
 so the result distinguishes "fixed" from merely "different". `references/scroll-model.md`
 has the full method, including which region to diff and how to pick a perturbation that
 actually moves the bound.

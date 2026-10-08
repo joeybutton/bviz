@@ -21,24 +21,26 @@ use crate::point::{
 use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::{busy, group};
 use crate::unit_picker::UnitPicker;
-use crate::{PIXELS_PER_NOTCH, ZOOM_PER_NOTCH};
 use axis::{Axes, Axis, Clocks};
 use bviz_graph_layout::capability::TRANSITIONS_FLAG;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
+use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, ListScroll, SCROLLBAR_THICKNESS, TextTooltip,
-    Toolbar, TooltipColors, cached_layer, centered_spinner, list_scrollbar, load_in_background,
-    menu_chrome, paint_tooltip, paint_tooltip_box, tooltip_extent, track_drag,
+    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS,
+    TextTooltip, Toolbar, TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    centered_spinner, list_scrollbar, load_in_background, menu_chrome, paint_tooltip,
+    paint_tooltip_box, tooltip_extent, track_drag,
 };
+use bviz_ui_components::{KeyStyle, key_text_in};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rems,
-    Render, Rgba, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
-    Subscription, Task, WeakEntity, Window, canvas, div, prelude::*, px, rems, uniform_list,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+    Point, Rems, Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -50,15 +52,27 @@ use std::sync::Arc;
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.
-pub(crate) const KEY_CONTEXT: &str = "GraphScatter";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphScatter", "Scatter");
 
 /// The identifier the scatter plot's key context carries while a list of the
 /// points under a click is up, which the list's own bindings require.
-pub(crate) const PICKING: &str = "picking";
+pub(crate) const PICKING: KeyScope =
+    KeyScope::within(&KEY_CONTEXT, Nesting::State, "picking", "Pick list");
 
 gpui::actions!(
     bviz_graph,
-    [ShowWholePlot, AimUp, AimDown, RevealAimed, ClosePickList]
+    [
+        /// Show whole plot
+        ShowWholePlot,
+        /// Aim at previous point
+        AimUp,
+        /// Aim at next point
+        AimDown,
+        /// Show point in graph
+        RevealAimed,
+        /// Close pick list
+        ClosePickList,
+    ]
 );
 
 /// What the panel reads while the graph is being measured.
@@ -360,42 +374,83 @@ impl ScatterPanel {
         }
     }
 
-    /// Zooms about the pointer by as many notches as the wheel turned.
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let notches = match e.delta {
-            ScrollDelta::Lines(lines) => lines.y,
-            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
-        };
+        let delta = gesture::scroll_pixels(e);
+        GESTURES.dispatch(gesture::Pointer::scroll(e), |intent| {
+            let by = match intent {
+                ScatterIntent::Zoom => {
+                    self.zoom_about(e.position, gesture::wheel_zoom_factor(e), cx);
+                    return true;
+                }
+                ScatterIntent::PanAcross => point(delta.x + delta.y, px(0.)),
+                ScatterIntent::Scroll => delta,
+                _ => return false,
+            };
+            if let Some(area) = self.area() {
+                self.zoom_to(area.panned(by), e.position, cx);
+            }
+            true
+        });
+    }
+
+    fn on_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(gesture::Pointer::pinch(e), |intent| match intent {
+            ScatterIntent::Zoom => {
+                self.zoom_about(e.position, gesture::pinch_factor(e), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the window-space point `at`.
+    fn zoom_about(&mut self, at: Point<Pixels>, factor: f32, cx: &mut Context<Self>) {
         if let Some(area) = self.area() {
-            let zoom = area.zoomed(e.position, ZOOM_PER_NOTCH.powf(notches));
-            self.zoom_to(zoom, e.position, cx);
+            self.zoom_to(area.zoomed(at, factor), at, cx);
         }
     }
 
-    /// Starts a press, or shows the whole of each axis again on a double
-    /// click clear of every mark: a first click on a mark shows it in the
-    /// graph, which the second click then lands on. A press beside an open
-    /// list of points closes it and goes on as a press on the plot. The second
-    /// press of a double click whose first put the list up or revealed one of
-    /// its rows goes no further.
+    /// Zooms `factor` times closer about the middle of the plot, naming what
+    /// the pointer is over there.
+    fn zoom_centred(&mut self, factor: f32, window: &Window, cx: &mut Context<Self>) {
+        if let Some(area) = self.area() {
+            let zoom = area.zoomed(area.frame().center(), factor);
+            self.zoom_to(zoom, window.mouse_position(), cx);
+        }
+    }
+
+    /// Acts on a press as [`GESTURES`] has it. A double click shows the whole
+    /// of each axis only clear of every mark: a first click on a mark shows it
+    /// in the graph, which the second click then lands on. A press beside an
+    /// open list of points closes it and goes on as a press on the plot. The
+    /// second press of a double click whose first put the list up or revealed
+    /// one of its rows goes no further.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
         let row_revealed = std::mem::take(&mut self.row_revealed);
         if e.click_count >= DOUBLE_CLICK && (row_revealed || self.picking()) {
             return;
         }
         self.close_pick(cx);
-        if e.click_count == DOUBLE_CLICK && self.pick(e.position).is_none() {
-            self.press = None;
-            self.zoom_to(Zoom::WHOLE, e.position, cx);
-            return;
-        }
-        self.press = Some(Press {
-            from: e.position,
-            last: e.position,
-            dragged: false,
+        GESTURES.dispatch(gesture::Pointer::press(e), |intent| match intent {
+            ScatterIntent::ShowWholePlot if self.pick(e.position).is_none() => {
+                self.press = None;
+                self.zoom_to(Zoom::WHOLE, e.position, cx);
+                true
+            }
+            ScatterIntent::Pan => {
+                self.press = Some(Press {
+                    from: e.position,
+                    last: e.position,
+                    dragged: false,
+                    click: gesture::Pointer::completing(e),
+                });
+                // The frame this asks for installs the handlers carrying the
+                // drag.
+                cx.notify();
+                true
+            }
+            _ => false,
         });
-        // The frame this asks for installs the handlers carrying the drag.
-        cx.notify();
     }
 
     /// Follows the pointer to the mark it picks, repainting only where that
@@ -450,10 +505,8 @@ impl ScatterPanel {
         }
     }
 
-    /// Ends the press, which where it was a click shows the graph's drawing of
-    /// the point under the pointer, or lists the points there where it lands
-    /// on several. Taking the press makes a second call for the same release a
-    /// no-op.
+    /// Ends the press, which where it was a click acts as [`GESTURES`] has
+    /// it. Taking the press makes a second call for the same release a no-op.
     fn end_press(&mut self, at: Point<Pixels>, end: DragEnd, cx: &mut Context<Self>) {
         let Some(press) = self.press.take() else {
             return;
@@ -463,6 +516,18 @@ impl ScatterPanel {
         if press.dragged || !matches!(end, DragEnd::Released) {
             return;
         }
+        GESTURES.dispatch(press.click, |intent| match intent {
+            ScatterIntent::Reveal => {
+                self.reveal_at(at, cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Shows the graph's drawing of the point under `at`, or lists the points
+    /// there where it lands on several.
+    fn reveal_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let (Some(picked), Some(area)) = (self.pick(at), self.area()) else {
             return;
         };
@@ -796,6 +861,82 @@ struct Plot {
     timed: Revision,
 }
 
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum ScatterIntent {
+    ShowWholePlot,
+    Pan,
+    Reveal,
+    RevealListed,
+    Zoom,
+    PanAcross,
+    Scroll,
+    Describe,
+}
+
+const POINT: Place = Place::On("a point");
+
+const SHOW_WHOLE: Entry<ScatterIntent> = Entry::new(
+    gesture::Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+    Place::Empty,
+    "Show whole plot",
+    ScatterIntent::ShowWholePlot,
+);
+
+const REVEAL: Entry<ScatterIntent> = Entry::new(
+    gesture::Input::click(gesture::Button::Left),
+    POINT,
+    "Show in graph or list points",
+    ScatterIntent::Reveal,
+);
+
+const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
+    SHOW_WHOLE,
+    Entry::new(
+        gesture::Input::drag(gesture::Button::Left),
+        Place::Anywhere,
+        "Pan",
+        ScatterIntent::Pan,
+    ),
+    REVEAL,
+    Entry::new(
+        gesture::Input::click(gesture::Button::Left),
+        Place::On("a listed point"),
+        "Show point in graph",
+        ScatterIntent::RevealListed,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        ScatterIntent::Zoom,
+    ),
+    Entry::new(
+        gesture::Input::PINCH,
+        Place::Anywhere,
+        "Zoom about pointer",
+        ScatterIntent::Zoom,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        ScatterIntent::PanAcross,
+    ),
+    Entry::new(
+        gesture::Input::SCROLL,
+        Place::Anywhere,
+        "Pan",
+        ScatterIntent::Scroll,
+    ),
+    Entry::new(
+        gesture::Input::HOVER,
+        POINT,
+        "Describe point",
+        ScatterIntent::Describe,
+    ),
+]);
+
 /// A press over the plot, which is a click until it is dragged past
 /// [`CLICK_SLOP`](crate::drag::CLICK_SLOP) and pans the plot from then on.
 struct Press {
@@ -803,6 +944,8 @@ struct Press {
     /// Where the pointer was at the last step of the pan.
     last: Point<Pixels>,
     dragged: bool,
+    /// The click a release short of [`CLICK_SLOP`] makes of the press.
+    click: gesture::Pointer,
 }
 
 /// What among a plot's marks the pointer is on.
@@ -873,7 +1016,8 @@ fn describe(
         lines.push(format!("{} {actions}", point.actions));
     }
     if others > 0 {
-        lines.push(format!("+{others} more here · click to list"));
+        let click = REVEAL.gesture().input.text(KeyStyle::NATIVE);
+        lines.push(format!("+{others} more here · {click} to list"));
     }
     lines
 }
@@ -926,13 +1070,16 @@ impl Panel for ScatterPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("graph-scatter"),
-            label: "Scatter",
             key_context: KEY_CONTEXT,
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -969,12 +1116,18 @@ impl Render for ScatterPanel {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let key_context = match self.picking() {
             true => format!("{} {PICKING}", Self::kind().key_context),
-            false => Self::kind().key_context.to_owned(),
+            false => Self::kind().key_context.to_string(),
         };
         let root = div()
             .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholePlot, window, cx| {
                 view.zoom_to(Zoom::WHOLE, window.mouse_position(), cx);
+            }))
+            .on_action(cx.listener(|view, _: &ZoomIn, window, cx| {
+                view.zoom_centred(ZOOM_KEY_STEP, window, cx);
+            }))
+            .on_action(cx.listener(|view, _: &ZoomOut, window, cx| {
+                view.zoom_centred(ZOOM_KEY_STEP.recip(), window, cx);
             }))
             .on_action(cx.listener(|view, _: &AimUp, _, cx| view.step_aim(-1, cx)))
             .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))
@@ -1048,7 +1201,9 @@ impl Render for ScatterPanel {
             _ => None,
         };
         let hovering = matches!(plot.pointer, Pointer::Hover(_));
-        root.child(legend(plot, self.zoom, &palette)).child(
+        let show_whole = key_text_in(&ShowWholePlot, &self.focus, window);
+        let legend = legend(plot, self.zoom, show_whole.as_deref(), &palette);
+        root.child(legend).child(
             div()
                 .id("scatter-plot")
                 .relative()
@@ -1060,12 +1215,19 @@ impl Render for ScatterPanel {
                 .children(list)
                 .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
                     if view.press.is_none() {
-                        view.hover_at(e.position, cx);
+                        GESTURES.dispatch(gesture::Pointer::HOVER, |intent| match intent {
+                            ScatterIntent::Describe => {
+                                view.hover_at(e.position, cx);
+                                true
+                            }
+                            _ => false,
+                        });
                     }
                 }))
                 .on_scroll_wheel(cx.listener(|view, e: &ScrollWheelEvent, _, cx| {
                     view.on_scroll_wheel(e, cx);
                 }))
+                .on_pinch(cx.listener(|view, e: &PinchEvent, _, cx| view.on_pinch(e, cx)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
@@ -1289,7 +1451,8 @@ fn pick_list(
         .flex_col()
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+            cx.listener(|view, e: &MouseDownEvent, window, cx| {
+                view.focus.focus(window, cx);
                 view.pick_scroll.press(e.position);
                 cx.stop_propagation();
                 cx.notify();
@@ -1397,7 +1560,17 @@ fn pick_row(
         .gap(PICK_GAP)
         .when(!style.reveals, |row| row.cursor_default())
         .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
-        .on_click(move |_, _, cx| reveal.update(cx, |view, cx| view.reveal_row(index, cx)))
+        .on_click(move |e, _, cx| {
+            reveal.update(cx, |view, cx| {
+                GESTURES.dispatch(gesture::Pointer::click(e), |intent| match intent {
+                    ScatterIntent::RevealListed => {
+                        view.reveal_row(index, cx);
+                        true
+                    }
+                    _ => false,
+                });
+            });
+        })
         .child(
             div()
                 .flex_none()
@@ -1432,9 +1605,6 @@ const SWATCH_ALPHA: f32 = 0.7;
 
 /// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
-
-/// What the legend reads while the plot shows part of an axis.
-const ZOOMED: &str = "double-click empty space or press 0 to show all";
 
 /// The strip choosing what the plot measures, now `scope`, which reads
 /// `measuring` while a new choice is measured over the plot drawn for the last.
@@ -1609,13 +1779,20 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom.
-fn legend(plot: &Plot, zoom: Zoom, palette: &Palette) -> Div {
+/// mark's size stands for, and how to leave a zoom, which the keys
+/// `show_whole` also do.
+fn legend(plot: &Plot, zoom: Zoom, show_whole: Option<&str>, palette: &Palette) -> Div {
     let swatch = Swatch {
         alpha: SWATCH_ALPHA,
         diameter: px(SWATCH_DIAMETER),
     };
-    let zoomed = (zoom != Zoom::WHOLE).then_some(ZOOMED);
+    let zoomed = (zoom != Zoom::WHOLE).then(|| {
+        let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
+        match show_whole {
+            Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
+            None => format!("{gesture} to show the whole plot"),
+        }
+    });
     let hints = zoomed
         .into_iter()
         .map(SharedString::from)
@@ -1647,5 +1824,20 @@ impl Render for ScatterCanvas {
             },
         )
         .size_full()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
     }
 }

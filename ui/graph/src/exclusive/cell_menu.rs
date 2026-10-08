@@ -6,10 +6,8 @@ use bviz_graph_layout::metrics::Unit;
 /// One row of a cell's menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Offer {
-    /// Focus the cell, which holds one point.
+    /// Focus the cell.
     Focus,
-    /// Focus the cell, which gathers several points.
-    Open,
     /// Focus what the cell on top stands under.
     Up,
     /// Show the point `node` in the graph, which only a graph panel `can`.
@@ -61,8 +59,7 @@ pub(super) fn offered(
     let focus = match holds {
         Holds::Build => None,
         _ if holds == top => Some(Offer::Up),
-        Holds::Node(_) => Some(Offer::Focus),
-        Holds::Shared | Holds::Rest(_) => Some(Offer::Open),
+        Holds::Node(_) | Holds::Shared | Holds::Rest(_) => Some(Offer::Focus),
     };
     let Holds::Node(node) = holds else {
         return focus.into_iter().collect();
@@ -78,29 +75,6 @@ pub(super) fn offered(
     let labelled = [Offer::Root { node, caveat }, Offer::CopyLabel { node }];
     let labelled = labelled.into_iter().filter(|_| facts.labelled);
     focus.into_iter().chain([show]).chain(labelled).collect()
-}
-
-impl Offer {
-    pub(super) fn label(&self) -> &'static str {
-        match self {
-            Offer::Focus => "Focus",
-            Offer::Open => "Open",
-            Offer::Up => "Go Up",
-            Offer::Show { .. } => "Show in Graph",
-            Offer::Root { .. } => "Use as Root",
-            Offer::CopyLabel { .. } => "Copy Label",
-        }
-    }
-
-    /// The key the offer also answers to outside the menu.
-    pub(super) fn keys(&self) -> Option<&'static str> {
-        match self {
-            Offer::Focus | Offer::Open => Some("Enter"),
-            Offer::Up => Some("Backspace"),
-            Offer::Show { .. } => Some("g"),
-            Offer::Root { .. } | Offer::CopyLabel { .. } => None,
-        }
-    }
 }
 
 impl Caveat {
@@ -189,10 +163,10 @@ mod tests {
         assert!(build.is_empty());
     }
 
-    /// A cell gathering several points offers only to be opened, there being
+    /// A cell gathering several points offers only to be focused, there being
     /// no one point to show, root at or name.
     #[test]
-    fn a_cell_gathering_points_offers_only_to_open() {
+    fn a_cell_gathering_points_offers_only_to_be_focused() {
         let tree = Laid::of(&[leaf(90), leaf(6), leaf(4)]);
         let cells = lay_out(&tree, Holds::Build, area(100., 2.), ROW, px(8.));
         let rest = cells
@@ -203,11 +177,11 @@ mod tests {
         let no_point = |_| unreachable!("a cell gathering points holds no one point");
         assert_eq!(
             offered(rest, Holds::Build, unit, true, no_point),
-            [Offer::Open]
+            [Offer::Focus]
         );
         assert_eq!(
             offered(Holds::Shared, Holds::Build, unit, true, no_point),
-            [Offer::Open]
+            [Offer::Focus]
         );
     }
 

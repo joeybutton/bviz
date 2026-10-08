@@ -11,6 +11,7 @@ mod groups;
 mod model;
 mod rebuild;
 mod regions;
+mod row_step;
 mod stats_panel;
 #[cfg(test)]
 mod test_profile;
@@ -26,21 +27,23 @@ pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
 use groups::{ChartLanes, GroupChrome, group_label, lanes_headed_by_pool};
 use model::{SourceReplaced, TraceModel};
-use regions::{
-    CountersStrip, DividerGrab, DividerPress, LaneBand, LaneHeights, Regions, clamp_gutter_width,
-};
+use regions::{CountersStrip, DividerGrab, LaneBand, LaneHeights, Regions, clamp_gutter_width};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::{HoveredSlice, Timeline};
+use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
 use bviz_invocation::{InvocationId, Session};
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, Pending, SCROLLBAR_THICKNESS,
-    Scrollbar, overlay_canvas, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
+    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, find_key_bindings, overlay_canvas, text_input,
+    track_drag, zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{TraceArgs, TraceSource};
@@ -61,31 +64,89 @@ use std::borrow::Cow;
 gpui::actions!(
     bviz_trace,
     [
+        /// Select all visible tracks
         SelectAllTracks,
+        /// Clear time selection
         ClearTimeSelection,
+        /// Choose previous row
         ChoosePrevious,
+        /// Choose next row
         ChooseNext,
-        Unchoose
+        /// Clear chosen row
+        Unchoose,
+        /// Show whole timeline
+        ShowWholeTimeline,
+        /// Show whole flame graph
+        ShowWholeFlameGraph,
+        /// Filter tracks
+        FilterTracks,
+        /// Close tracks menu
+        CloseTracksMenu,
     ]
 );
 
 pub fn register_keys(cx: &mut App) {
+    declare_scopes(
+        cx,
+        [
+            TRACE_KEY_CONTEXT,
+            TIMELINE_KEY_CONTEXT,
+            TRACKS_MENU_KEY_CONTEXT,
+            stats_panel::STATS_KEY_CONTEXT,
+            flame_panel::FLAME_KEY_CONTEXT,
+            critical_path::KEY_CONTEXT,
+        ],
+    );
+    let timeline = Some(TIMELINE_KEY_CONTEXT.id());
+    let critical_path = Some(critical_path::KEY_CONTEXT.id());
+    let stats = Some(stats_panel::STATS_KEY_CONTEXT.id());
+    let timeline_canvas = text_input::unless_typing(TIMELINE_KEY_CONTEXT);
+    let timeline_canvas = Some(timeline_canvas.as_str());
+    let flame_canvas = text_input::unless_typing(flame_panel::FLAME_KEY_CONTEXT);
+    let flame_canvas = Some(flame_canvas.as_str());
     cx.bind_keys([
-        KeyBinding::new("secondary-a", SelectAllTracks, Some(TIMELINE_KEY_CONTEXT)),
-        KeyBinding::new("escape", ClearTimeSelection, Some(TIMELINE_KEY_CONTEXT)),
-        KeyBinding::new("up", ChoosePrevious, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("down", ChooseNext, Some(critical_path::KEY_CONTEXT)),
-        KeyBinding::new("escape", Unchoose, Some(critical_path::KEY_CONTEXT)),
+        KeyBinding::new("secondary-a", SelectAllTracks, timeline),
+        KeyBinding::new("escape", ClearTimeSelection, timeline),
+        KeyBinding::new(
+            "escape",
+            CloseTracksMenu,
+            Some(TRACKS_MENU_KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new("up", ChoosePrevious, critical_path),
+        KeyBinding::new("down", ChooseNext, critical_path),
+        KeyBinding::new("escape", Unchoose, critical_path),
+        KeyBinding::new("up", ChoosePrevious, stats),
+        KeyBinding::new("down", ChooseNext, stats),
+        KeyBinding::new("escape", Unchoose, stats),
+        KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
+        KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
     ]);
+    cx.bind_keys(zoom_key_bindings(TIMELINE_KEY_CONTEXT));
+    cx.bind_keys(zoom_key_bindings(flame_panel::FLAME_KEY_CONTEXT));
+    cx.bind_keys(find_key_bindings(TIMELINE_KEY_CONTEXT, FilterTracks));
 }
 
 /// The key context of the trace panel, enclosing every sub-surface's.
-const TRACE_KEY_CONTEXT: &str = "Trace";
+const TRACE_KEY_CONTEXT: KeyScope = KeyScope::new("Trace", "Timeline");
 
 /// The key context scoping the timeline's own bindings, narrowing
 /// [`TRACE_KEY_CONTEXT`]. The timeline element carries it, so a key pressed in
 /// the tracks menu's filter field types there instead of dispatching one of them.
-const TIMELINE_KEY_CONTEXT: &str = "TraceTimeline";
+/// Its keys are the panel's own, so the help lists them under the panel's name.
+const TIMELINE_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &TRACE_KEY_CONTEXT,
+    Nesting::Inside,
+    "TraceTimeline",
+    TRACE_KEY_CONTEXT.label(),
+);
+
+/// The key context of the open tracks menu.
+const TRACKS_MENU_KEY_CONTEXT: KeyScope = KeyScope::within(
+    &TRACE_KEY_CONTEXT,
+    Nesting::Inside,
+    "TracksMenu",
+    "Tracks menu",
+);
 
 /// Vertical sizing of the stacked thread and counter lanes, in pixels. The lane
 /// header is a thin top margin above the depth rows — the names live in the
@@ -116,16 +177,9 @@ const SLICE_TEXT_PAD: f32 = 3.0;
 /// Deepest horizontal zoom, in pixels per microsecond.
 const MAX_PX_PER_US: f64 = 50.0;
 
-/// Horizontal zoom multiplier per wheel notch, shared by the chart's time axis
-/// and the graph's width so a notch feels the same in both views.
-const ZOOM_PER_NOTCH: f64 = 1.1;
-
 /// Empty space kept reachable past each end of the timeline so its start and end
 /// stand clear of the window edges.
 const EDGE_MARGIN_PX: f32 = 24.0;
-
-/// Pixels scrolled per wheel line.
-const LINE_SCROLL_PX: f32 = 24.0;
 
 /// How far the left-edge seam is mixed from a box's fill toward the background:
 /// enough to read as a muted divider against any fill on either theme.
@@ -300,7 +354,7 @@ impl TracePanel {
             model,
             timeline,
             drag: Drag::None,
-            counters: CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT),
+            counters: CountersStrip::DEFAULT,
             gutter_width: DEFAULT_GUTTER_WIDTH,
             tracks_menu,
             _source_replaced: source_replaced,
@@ -397,26 +451,49 @@ impl TracePanel {
     }
 }
 
-/// A thin overlay strip at the gutter's right edge that begins a width drag; a
-/// double-click resets the gutter to its default width.
+/// What the panel does for a gesture in [`DIVIDER_GESTURES`].
+#[derive(Clone, Copy)]
+enum DividerIntent {
+    Reset,
+    Resize,
+}
+
+/// The gestures of the gutter handle and the counters divider.
+const DIVIDER_GESTURES: Gestures<DividerIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(PointerButton::Left, Clicks::Double)),
+        Place::On("a divider"),
+        "Reset to default size",
+        DividerIntent::Reset,
+    ),
+    Entry::new(
+        Input::drag(PointerButton::Left),
+        Place::On("a divider"),
+        "Resize gutter or counters",
+        DividerIntent::Resize,
+    ),
+]);
+
+/// A thin overlay strip at the gutter's right edge.
 fn gutter_handle(panel: &Entity<TracePanel>, window: &Window) -> Divider {
     Divider::new(
         "trace-gutter-handle",
         gpui::Axis::Horizontal,
         window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
-            if e.click_count == 2 {
-                this.gutter_width = DEFAULT_GUTTER_WIDTH;
-            } else {
-                this.drag = Drag::Gutter;
-            }
+            DIVIDER_GESTURES.dispatch(Pointer::press(e), |intent| {
+                match intent {
+                    DividerIntent::Reset => this.gutter_width = DEFAULT_GUTTER_WIDTH,
+                    DividerIntent::Resize => this.drag = Drag::Gutter,
+                }
+                true
+            });
             cx.stop_propagation();
             this.invalidate_timeline(cx);
         }),
     )
 }
 
-/// The band between the flame chart and the counters strip. A press on it begins
-/// a strip-resize drag; a double-click resets the strip to its default height.
+/// The band between the flame chart and the counters strip.
 fn counters_divider(
     regions: &Regions,
     palette: Palette,
@@ -428,16 +505,19 @@ fn counters_divider(
         gpui::Axis::Vertical,
         window.listener_for(panel, |this, e: &MouseDownEvent, _, cx| {
             let counters_top = this.regions(cx).counters_top;
-            match this
-                .counters
-                .press(e.click_count, f32::from(e.position.y), counters_top)
-            {
-                DividerPress::Reset(strip) => {
-                    this.counters = strip;
-                    this.drag = Drag::None;
+            DIVIDER_GESTURES.dispatch(Pointer::press(e), |intent| {
+                match intent {
+                    DividerIntent::Reset => {
+                        this.counters = CountersStrip::DEFAULT;
+                        this.drag = Drag::None;
+                    }
+                    DividerIntent::Resize => {
+                        let grab = this.counters.grab(f32::from(e.position.y), counters_top);
+                        this.drag = Drag::Divider(grab);
+                    }
                 }
-                DividerPress::Grab(grab) => this.drag = Drag::Divider(grab),
-            }
+                true
+            });
             cx.stop_propagation();
             this.invalidate_timeline(cx);
         }),
@@ -508,7 +588,8 @@ pub(crate) fn time_window_chip(
                 })
                 .ghost()
                 .compact()
-                .icon("x"),
+                .icon("x")
+                .keys_for_focused(&ClearTimeSelection),
             ),
     )
 }
@@ -544,9 +625,15 @@ impl Panel for TracePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace"),
-            label: "Timeline",
             key_context: TRACE_KEY_CONTEXT,
         }
+    }
+
+    fn gestures() -> Vec<GestureRow> {
+        TIMELINE_GESTURES
+            .rows()
+            .chain(DIVIDER_GESTURES.rows())
+            .collect()
     }
 
     fn title(&self, _cx: &App) -> SharedString {
@@ -590,6 +677,10 @@ impl Render for TracePanel {
                     .unaligned()
                     .then(|| unaligned_note("profile", &theme.colors));
                 chrome
+                    .on_action(cx.listener(|view, _: &FilterTracks, window, cx| {
+                        view.tracks_menu
+                            .update(cx, |menu, cx| menu.open_filtering(window, cx));
+                    }))
                     .children(unaligned)
                     .child(self.trace_body(palette, cx))
             }
@@ -1724,6 +1815,17 @@ pub fn run() {
 mod tests {
     use super::*;
     use bviz_invocation::Configurations;
+    use bviz_ui_components::gesture::LINE_SCROLL_PX;
+
+    #[test]
+    fn every_divider_gesture_is_reachable() {
+        assert_eq!(DIVIDER_GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_divider_gesture_fits_the_keys_help() {
+        assert_eq!(DIVIDER_GESTURES.overlong(), []);
+    }
 
     /// A session told of a configuration per `(checksum, mnemonic)`.
     pub(crate) fn session_knowing(described: &[(&str, &str)]) -> Session {

@@ -2,32 +2,86 @@ use crate::chart::format_duration;
 use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
 use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
-    LINE_SCROLL_PX, METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ZOOM_PER_NOTCH, drawn_scroll,
-    profile_status, scroll_request, thumb_offset, time_window_chip,
+    METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ShowWholeFlameGraph, drawn_scroll, profile_status,
+    scroll_request, thumb_offset, time_window_chip,
 };
 use bviz_trace_layout::{
     FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
     FlamePlacement, FlameRemainder, FlameView, FlameWeight, RemainderSiblings, ScopeAggregate,
     flame_height, lay_out_flame,
 };
+use bviz_ui_components::gesture::{
+    self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
+};
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
-    cached_layer, centered_spinner, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner,
-    track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, overlay_canvas,
+    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas, div, fill,
-    point, prelude::*, px, quad, size,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, PinchEvent, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Stateful, Subscription, WeakEntity, Window, canvas,
+    div, fill, point, prelude::*, px, quad, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
 
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
-const FLAME_KEY_CONTEXT: &str = "TraceFlameGraph";
+pub(crate) const FLAME_KEY_CONTEXT: KeyScope = KeyScope::new("TraceFlameGraph", "Flame Graph");
+
+/// What the flame graph does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum FlameIntent {
+    ShowWhole,
+    Zoom,
+    PanAcross,
+    Scroll,
+    Pan,
+    Describe,
+}
+
+const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Press(gesture::Button::Left, Clicks::Double)),
+        Place::Empty,
+        "Show whole flame graph",
+        FlameIntent::ShowWhole,
+    ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SECONDARY),
+        Place::Anywhere,
+        "Zoom about pointer",
+        FlameIntent::Zoom,
+    ),
+    Entry::new(
+        Input::PINCH,
+        Place::Anywhere,
+        "Zoom about pointer",
+        FlameIntent::Zoom,
+    ),
+    Entry::new(
+        Input::SCROLL.holding(Held::SHIFT),
+        Place::Anywhere,
+        "Pan across",
+        FlameIntent::PanAcross,
+    ),
+    Entry::new(Input::SCROLL, Place::Anywhere, "Pan", FlameIntent::Scroll),
+    Entry::new(
+        Input::drag(gesture::Button::Left),
+        Place::Anywhere,
+        "Pan",
+        FlameIntent::Pan,
+    ),
+    Entry::new(
+        Input::HOVER,
+        Place::On("a box"),
+        "Describe box",
+        FlameIntent::Describe,
+    ),
+]);
 
 /// Narrowest the toolbar's legend is squeezed beside the controls; with less
 /// than this left on their row it starts the next one.
@@ -685,6 +739,23 @@ impl FlamePanel {
         Some((at, self.box_at(at, cx)?))
     }
 
+    /// Whether `pos` lies over the graph clear of every box and scroll bar.
+    fn empty_at(&self, pos: Point<Pixels>, cx: &App) -> bool {
+        let on_bar = [self.vbar(cx), self.hbar(cx)]
+            .into_iter()
+            .flatten()
+            .any(|bar| bar.track_hit(pos));
+        self.layout(cx).is_some_and(|fl| fl.rect().contains(&pos))
+            && !on_bar
+            && self.box_at(pos, cx).is_none()
+    }
+
+    /// Fits the whole width of the graph to the panel, leaving the vertical
+    /// scroll where it is.
+    fn show_whole(&mut self) {
+        self.flame_view = FlameView::FIT;
+    }
+
     /// Begins a drag at `pos`: the vertical or horizontal scroll thumb/track if the
     /// press hit one, otherwise a pan of the panel.
     fn press(&mut self, pos: Point<Pixels>, cx: &App) {
@@ -726,41 +797,83 @@ impl FlamePanel {
         self.flame_view = fv;
     }
 
-    /// Ctrl/Cmd+wheel zooms about the cursor, Shift+wheel pans horizontally, plain
-    /// wheel scrolls vertically.
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let Some(fl) = self.layout(cx) else {
             return;
         };
-        let delta = e.delta.pixel_delta(px(LINE_SCROLL_PX));
+        let delta = gesture::scroll_pixels(e);
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
-        let (mut fv, left, width) = (fl.view, fl.left, fl.width);
-        if e.modifiers.control || e.modifiers.platform {
-            let dy_lines = dy / LINE_SCROLL_PX;
-            fv.zoom_at(
-                f32::from(e.position.x) - left,
-                width,
-                ZOOM_PER_NOTCH.powf(dy_lines as f64),
-            );
-            self.flame_view = fv;
-        } else if e.modifiers.shift {
-            fv.pan_px(dx + dy, width);
-            self.flame_view = fv;
-        } else {
-            self.scroll_by(dy, cx);
-        }
+        let (mut fv, width) = (fl.view, fl.width);
+        GESTURES.dispatch(Pointer::scroll(e), |intent| {
+            match intent {
+                FlameIntent::Zoom => {
+                    let factor = f64::from(gesture::wheel_zoom_factor(e));
+                    self.zoom_about(e.position.x, factor, cx);
+                }
+                FlameIntent::PanAcross => {
+                    fv.pan_px(dx + dy, width);
+                    self.flame_view = fv;
+                }
+                FlameIntent::Scroll => {
+                    self.scroll_by(dy, cx);
+                    fv.pan_px(dx, width);
+                    self.flame_view = fv;
+                }
+                _ => return false,
+            }
+            true
+        });
         self.invalidate_canvas(cx);
     }
 
-    /// The panel's mouse/scroll/hover wiring: a press drives a scroll bar or pans,
-    /// the wheel zooms/pans/scrolls, and a move updates the box hover. Presses and
-    /// the wheel stop propagation so they don't also reach the flame chart's
-    /// handlers underneath.
+    fn on_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+            FlameIntent::Zoom => {
+                self.zoom_about(e.position.x, pinch_factor(e).into(), cx);
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Zooms `factor` times closer about the middle of the view.
+    fn zoom_centred(&mut self, factor: f64, cx: &mut Context<Self>) {
+        if let Some(fl) = self.layout(cx) {
+            self.zoom_about(px(fl.left + fl.width / 2.), factor, cx);
+        }
+    }
+
+    /// Zooms `factor` times closer about the window-space `x`.
+    fn zoom_about(&mut self, x: Pixels, factor: f64, cx: &mut Context<Self>) {
+        let Some(fl) = self.layout(cx) else {
+            return;
+        };
+        let mut fv = fl.view;
+        fv.zoom_at(f32::from(x) - fl.left, fl.width, factor);
+        self.flame_view = fv;
+        self.invalidate_canvas(cx);
+    }
+
+    /// The panel's pointer wiring, acting as [`GESTURES`] has it, a press on a
+    /// scroll bar driving the bar instead of panning. Presses and the wheel
+    /// stop propagation so they don't also reach the flame chart's handlers
+    /// underneath, which leaves a press to focus the panel itself.
     fn panel_handlers(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root.on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                this.press(e.position, cx);
+            cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                this.focus.focus(window, cx);
+                GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                    FlameIntent::ShowWhole if this.empty_at(e.position, cx) => {
+                        this.show_whole();
+                        true
+                    }
+                    FlameIntent::Pan => {
+                        this.press(e.position, cx);
+                        true
+                    }
+                    _ => false,
+                });
                 cx.stop_propagation();
                 this.invalidate_canvas(cx);
             }),
@@ -769,9 +882,19 @@ impl FlamePanel {
             this.on_scroll_wheel(e, cx);
             cx.stop_propagation();
         }))
+        .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
+            this.on_pinch(e, cx);
+            cx.stop_propagation();
+        }))
         .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
             if matches!(this.drag, FlameDrag::None) {
-                this.update_hover(e.position, cx);
+                GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+                    FlameIntent::Describe => {
+                        this.update_hover(e.position, cx);
+                        true
+                    }
+                    _ => false,
+                });
             }
         }))
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -794,13 +917,16 @@ impl Panel for FlamePanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-flame-graph"),
-            label: "Flame Graph",
             key_context: FLAME_KEY_CONTEXT,
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -824,6 +950,16 @@ impl Render for FlamePanel {
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ShowWholeFlameGraph, _, cx| {
+                this.show_whole();
+                this.invalidate_canvas(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.into(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_centred(ZOOM_KEY_STEP.recip().into(), cx);
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -1065,6 +1201,16 @@ mod tests {
         FlameDirection, FlameGraph, FlameLabels, FlameMode, FlameWeight, TimeSelection,
     };
     use bviz_trace_profile::Profile;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     /// Width of the content column the fixture layouts are placed for, wide
     /// enough that every fixture frame clears [`MIN_SLICE_PX`].

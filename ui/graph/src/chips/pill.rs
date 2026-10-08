@@ -3,6 +3,9 @@
 use super::{GraphPanel, edit, open_menu, reorder, select};
 use crate::Palette;
 use bviz_graph_layout::query_lang::{Chip, Counts, Outcome};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Clicks, Entry, Gestures, Input, Motion, Place, Pointer,
+};
 use bviz_ui_components::{Button, TextTooltip, TooltipColors};
 use gpui::{
     ClickEvent, Context, Div, HighlightStyle, Hsla, MouseButton, MouseDownEvent, Pixels,
@@ -16,6 +19,37 @@ const MARK_THICKNESS: Pixels = px(1.);
 /// The widest a pill stands: a longer text is cut at its start, which keeps
 /// the end of a label, its name, in view; the tooltip reads it whole.
 const PILL_MAX_WIDTH: Pixels = px(240.);
+
+/// What a pill does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+pub(crate) enum PillIntent {
+    Edit,
+    Select,
+    Reorder,
+}
+
+const CHIP: Place = Place::On("a chip");
+
+pub(crate) const GESTURES: Gestures<PillIntent> = Gestures::new(&[
+    Entry::new(
+        Input::new(Motion::Click(PointerButton::Left, Clicks::Repeated)),
+        CHIP,
+        "Edit chip",
+        PillIntent::Edit,
+    ),
+    Entry::new(
+        Input::new(Motion::Click(PointerButton::Left, Clicks::Single)),
+        CHIP,
+        "Select chip",
+        PillIntent::Select,
+    ),
+    Entry::new(
+        Input::drag(PointerButton::Left),
+        CHIP,
+        "Move chip within its group",
+        PillIntent::Reorder,
+    ),
+]);
 
 /// `chip`, which evaluated to `outcome` where it has been evaluated.
 pub(super) fn pill(
@@ -64,18 +98,30 @@ pub(super) fn pill(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                reorder::press(view, id, event.position, window, cx);
+                GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+                    PillIntent::Reorder => {
+                        reorder::press(view, id, event.position, window, cx);
+                        true
+                    }
+                    _ => false,
+                });
             }),
         )
         .on_click(cx.listener(move |view, event: &ClickEvent, window, cx| {
             if reorder::swallows_click(view) {
                 return;
             }
-            let double = matches!(event, ClickEvent::Mouse(click) if click.down.click_count >= 2);
-            match double {
-                true => edit(view, id, window, cx),
-                false => select(view, id, window, cx),
-            }
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                PillIntent::Edit => {
+                    edit(view, id, window, cx);
+                    true
+                }
+                PillIntent::Select => {
+                    select(view, id, window, cx);
+                    true
+                }
+                PillIntent::Reorder => false,
+            });
         }))
         .children(
             chip.negated()
@@ -105,7 +151,8 @@ pub(super) fn pill(
             )
             .ghost()
             .compact()
-            .icon("dots-three-vertical"),
+            .icon("dots-three-vertical")
+            .tooltip("Chip menu"),
         )
         .tooltip(TextTooltip::builder(
             explained,
@@ -244,6 +291,12 @@ fn explain_outcome(outcome: &Outcome) -> Option<SharedString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
 
     #[test]
     fn a_count_says_how_far_a_chip_moved_the_set_it_read() {

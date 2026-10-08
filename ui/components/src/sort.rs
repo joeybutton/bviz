@@ -1,6 +1,18 @@
 //! A table sorted by a click on a column's header.
 
+use crate::gesture::{Button, Entry, Input, Place};
 use gpui::{Div, Hsla, IntoElement, ParentElement, Pixels, Styled, div};
+
+/// The gesture asking a table to sort as [`Sort::clicked`] does, for which its
+/// view acts on `intent`.
+pub const fn sort_gesture<I>(intent: I) -> Entry<I> {
+    Entry::new(
+        Input::click(Button::Left),
+        Place::On("a column header"),
+        "Sort by column or reverse",
+        intent,
+    )
+}
 
 /// Which column of a table its rows are ordered by, and which way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

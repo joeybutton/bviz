@@ -3,53 +3,58 @@
 //!
 //! [`Menu`]: bviz_ui_components::Menu
 
-use crate::workspace::{Destination, Workspace, re_homes};
+use crate::workspace::{
+    ClosePanel, Destination, DetachPanel, EvenSplit, ShowKeysAndGestures, SplitDown, SplitLeft,
+    SplitRight, SplitUp, ToggleMaximize, Workspace, re_homes,
+};
 use crate::{Arrangement, Pane, Side};
 use bviz_ui_components::{MenuItem, SubmenuItem};
-use gpui::{App, Entity, EntityId, SharedString, WeakEntity, Window};
+use gpui::{Action, App, Entity, EntityId, FocusHandle, SharedString, WeakEntity, Window};
 
 /// The sides a panel can be split off towards or moved to, in the order a menu
 /// offers them.
 const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Top, Side::Bottom];
 
-/// One rearrangement a panel's menu offers, `W` naming a window a move can take
-/// the panel to.
+/// A rearrangement a row of a panel's menu offers, which an action also does
+/// to the active panel.
 #[derive(PartialEq, Eq, Debug)]
-pub(crate) enum Offer<W> {
+pub(crate) enum Offer {
     /// A pane of its own on that side of the pane holding it.
     Split(Side),
+    NewWindow,
+    /// Draw the pane holding it in place of the whole window's body, or put
+    /// every pane back where one is drawn in place of them already.
+    Maximize,
+    EvenSplit,
+    KeysHelp,
+    Close,
+}
+
+/// A place a row of a submenu offers to move a panel to, `W` naming a window.
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) enum Place<W> {
     /// A pane of its own spanning that edge of the window.
     Edge(Side),
-    NewWindow,
     Window(W),
-    /// Draw the pane holding it in place of the whole window's body.
-    Maximize,
-    /// Put every pane back where the arrangement lays it out.
-    Restore,
-    EvenSplit,
-    Close,
 }
 
 /// One row of a panel's menu, as [`offered`] works it out.
 #[derive(PartialEq, Eq, Debug)]
-pub(crate) struct Row<W> {
-    pub label: SharedString,
-    pub opens: Opens<W>,
-}
-
-/// What a row of a panel's menu stands for.
-#[derive(PartialEq, Eq, Debug)]
-pub(crate) enum Opens<W> {
-    Offer(Offer<W>),
-    Submenu(Vec<Under<W>>),
+pub(crate) enum Row<W> {
+    /// A row reading the label of the action that does what it offers.
+    Offer(Offer),
+    Submenu {
+        label: SharedString,
+        under: Vec<Under<W>>,
+    },
 }
 
 /// One row of the submenu a row opens beside itself. Every such row stands for
-/// an offer of its own, a menu opening no list beside a submenu.
+/// a place of its own, a menu opening no list beside a submenu.
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) struct Under<W> {
     pub label: SharedString,
-    pub offer: Offer<W>,
+    pub place: Place<W>,
 }
 
 /// Where a panel stands, as far as what its menu can offer goes.
@@ -74,6 +79,8 @@ pub(crate) enum Deed<P = Entity<Pane>, W = WeakEntity<Workspace>> {
     Maximize,
     /// Evens the split laying the pane holding the panel out.
     EvenSplit,
+    /// Puts the panel's keys help up, or takes it down.
+    KeysHelp,
     Close,
 }
 
@@ -98,10 +105,7 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
             side,
         };
         if re_homes(&to, Some(pane), alone, layout) {
-            rows.push(offer(
-                format!("Split {}", split_name(side)),
-                Offer::Split(side),
-            ));
+            rows.push(Row::Offer(Offer::Split(side)));
         }
     }
     let edges: Vec<Under<W>> = SIDES
@@ -109,85 +113,85 @@ pub(crate) fn offered<P: Clone + PartialEq, W: Clone>(
         .filter(|&side| re_homes(&Destination::WindowEdge(side), Some(pane), alone, layout))
         .map(|side| Under {
             label: edge_name(side).into(),
-            offer: Offer::Edge(side),
+            place: Place::Edge(side),
         })
         .collect();
     if !edges.is_empty() {
-        rows.push(Row {
-            label: "Move to Window Edge".into(),
-            opens: Opens::Submenu(edges),
+        rows.push(Row::Submenu {
+            label: "Move to window edge".into(),
+            under: edges,
         });
     }
-    rows.push(offer("Move to New Window", Offer::NewWindow));
+    rows.push(Row::Offer(Offer::NewWindow));
     if !windows.is_empty() {
-        rows.push(Row {
-            label: "Move to Window".into(),
-            opens: Opens::Submenu(
-                windows
-                    .iter()
-                    .map(|(window, title)| Under {
-                        label: title.clone(),
-                        offer: Offer::Window(window.clone()),
-                    })
-                    .collect(),
-            ),
+        rows.push(Row::Submenu {
+            label: "Move to window".into(),
+            under: windows
+                .iter()
+                .map(|(window, title)| Under {
+                    label: title.clone(),
+                    place: Place::Window(window.clone()),
+                })
+                .collect(),
         });
     }
-    if arrangement.maximized().is_some() {
-        rows.push(offer("Restore", Offer::Restore));
-    } else if arrangement.maximizes(pane) {
-        rows.push(offer("Maximize", Offer::Maximize));
+    if arrangement.maximized().is_some() || arrangement.maximizes(pane) {
+        rows.push(Row::Offer(Offer::Maximize));
     }
     if layout.innermost_divider(pane).is_some() {
-        rows.push(offer("Even Out Split", Offer::EvenSplit));
+        rows.push(Row::Offer(Offer::EvenSplit));
     }
-    rows.push(offer("Close", Offer::Close));
+    rows.push(Row::Offer(Offer::KeysHelp));
+    rows.push(Row::Offer(Offer::Close));
     rows
 }
 
 /// The menu `standing` offers for `panel`, as rows a [`Menu`] puts up: choosing
-/// one asks `workspace` to carry it out.
+/// one asks `workspace` to carry it out. A row names the keys that do the same
+/// in `keys_in`, which [`keys_focus`] gives.
 ///
 /// [`Menu`]: bviz_ui_components::Menu
+/// [`keys_focus`]: crate::panel::keys_focus
 pub(crate) fn items(
     panel: EntityId,
     workspace: &WeakEntity<Workspace>,
     standing: &Standing<'_>,
     windows: &[(WeakEntity<Workspace>, SharedString)],
+    keys_in: Option<&FocusHandle>,
+    window: &Window,
+    cx: &App,
 ) -> Vec<MenuItem> {
     let offered = offered(standing, windows);
     let mut items = Vec::with_capacity(offered.len());
     for row in offered {
-        items.push(match row.opens {
-            Opens::Submenu(under) => MenuItem::submenu(
-                row.label,
+        items.push(match row {
+            Row::Submenu { label, under } => MenuItem::submenu(
+                label,
                 under
                     .into_iter()
                     .map(|under| {
-                        SubmenuItem::new(
-                            under.label,
-                            taking(under.offer, panel, workspace, standing.pane),
-                        )
+                        let deed = place_deed(under.place);
+                        SubmenuItem::new(under.label, taking(deed, panel, workspace))
                     })
                     .collect(),
             ),
-            Opens::Offer(offer) => {
-                MenuItem::new(row.label, taking(offer, panel, workspace, standing.pane))
+            Row::Offer(offer) => {
+                let action = offer.action();
+                let deed = offer_deed(offer, standing.pane);
+                MenuItem::action(action, keys_in, window, cx, taking(deed, panel, workspace))
             }
         });
     }
     items
 }
 
-/// What choosing the row `offer` stands for does: asks `workspace` to carry out
-/// what that offer comes to for `panel`.
+/// What choosing a row whose choice comes to `deed` does: asks `workspace` to
+/// carry it out for `panel`.
 fn taking(
-    offer: Offer<WeakEntity<Workspace>>,
+    deed: Deed,
     panel: EntityId,
     workspace: &WeakEntity<Workspace>,
-    pane: &Entity<Pane>,
 ) -> impl Fn(&mut Window, &mut App) + use<> {
-    let deed = deed(offer, pane);
     let workspace = workspace.clone();
     move |window, cx| {
         let deed = deed.clone();
@@ -200,37 +204,43 @@ fn taking(
 }
 
 /// What carrying `offer` out for a panel held by `pane` comes to.
-fn deed<P: Clone, W>(offer: Offer<W>, pane: &P) -> Deed<P, W> {
+fn offer_deed<P: Clone, W>(offer: Offer, pane: &P) -> Deed<P, W> {
     match offer {
         Offer::Split(side) => Deed::Move(Destination::Beside {
             pane: pane.clone(),
             side,
         }),
-        Offer::Edge(side) => Deed::Move(Destination::WindowEdge(side)),
         Offer::NewWindow => Deed::Move(Destination::NewWindow),
-        Offer::Window(workspace) => Deed::ToWindow(workspace),
-        // Asking of a window that draws a pane in place of the rest puts them
-        // all back, whichever pane asks, so both read as the one deed.
-        Offer::Maximize | Offer::Restore => Deed::Maximize,
+        Offer::Maximize => Deed::Maximize,
         Offer::EvenSplit => Deed::EvenSplit,
+        Offer::KeysHelp => Deed::KeysHelp,
         Offer::Close => Deed::Close,
     }
 }
 
-fn offer<W>(label: impl Into<SharedString>, offer: Offer<W>) -> Row<W> {
-    Row {
-        label: label.into(),
-        opens: Opens::Offer(offer),
+/// What moving a panel to `place` comes to.
+fn place_deed<P, W>(place: Place<W>) -> Deed<P, W> {
+    match place {
+        Place::Edge(side) => Deed::Move(Destination::WindowEdge(side)),
+        Place::Window(workspace) => Deed::ToWindow(workspace),
     }
 }
 
-/// How a side reads where a pane split off towards it is offered.
-fn split_name(side: Side) -> &'static str {
-    match side {
-        Side::Left => "Left",
-        Side::Right => "Right",
-        Side::Top => "Up",
-        Side::Bottom => "Down",
+impl Offer {
+    /// The action that does to the active panel what the offer does to the
+    /// panel its menu is for.
+    fn action(&self) -> &'static dyn Action {
+        match self {
+            Offer::Split(Side::Left) => &SplitLeft,
+            Offer::Split(Side::Right) => &SplitRight,
+            Offer::Split(Side::Top) => &SplitUp,
+            Offer::Split(Side::Bottom) => &SplitDown,
+            Offer::NewWindow => &DetachPanel,
+            Offer::Maximize => &ToggleMaximize,
+            Offer::EvenSplit => &EvenSplit,
+            Offer::KeysHelp => &ShowKeysAndGestures,
+            Offer::Close => &ClosePanel,
+        }
     }
 }
 
@@ -277,14 +287,17 @@ mod tests {
         }
     }
 
-    /// How each row of a menu reads, a row opening a submenu followed by the
-    /// rows it opens, each set in from it.
+    /// What each row of a menu offers, an offer by its name and a row opening
+    /// a submenu by its label followed by the rows it opens, each set in from it.
     fn labels<W>(rows: &[Row<W>]) -> Vec<String> {
         let mut read = Vec::with_capacity(rows.len());
         for row in rows {
-            read.push(row.label.to_string());
-            if let Opens::Submenu(under) = &row.opens {
-                read.extend(under.iter().map(|under| format!("  {}", under.label)));
+            match row {
+                Row::Offer(offer) => read.push(format!("{offer:?}")),
+                Row::Submenu { label, under } => {
+                    read.push(label.to_string());
+                    read.extend(under.iter().map(|under| format!("  {}", under.label)));
+                }
             }
         }
         read
@@ -292,15 +305,11 @@ mod tests {
 
     /// The rows a menu opens beside the row reading `label`.
     fn under<'a, W>(rows: &'a [Row<W>], label: &str) -> &'a [Under<W>] {
-        match &rows
-            .iter()
-            .find(|row| row.label == label)
-            .unwrap_or_else(|| panic!("{label} is offered"))
-            .opens
-        {
-            Opens::Submenu(under) => under,
-            Opens::Offer(_) => panic!("{label} opens rows of its own"),
-        }
+        let opened = rows.iter().find_map(|row| match row {
+            Row::Submenu { label: read, under } if read == label => Some(under),
+            _ => None,
+        });
+        opened.unwrap_or_else(|| panic!("{label} opens a submenu"))
     }
 
     /// Panes 'a' and 'b' side by side.
@@ -333,7 +342,7 @@ mod tests {
         let arrangement = Arrangement::new(Layout::Pane('a'));
         assert_eq!(
             labels(&offers(&arrangement, 'a', true)),
-            ["Move to New Window", "Close"]
+            ["NewWindow", "KeysHelp", "Close"]
         );
     }
 
@@ -345,16 +354,17 @@ mod tests {
         assert_eq!(
             labels(&offers(&arrangement, 'a', false)),
             [
-                "Split Left",
-                "Split Right",
-                "Split Up",
-                "Split Down",
-                "Move to Window Edge",
+                "Split(Left)",
+                "Split(Right)",
+                "Split(Top)",
+                "Split(Bottom)",
+                "Move to window edge",
                 "  Left",
                 "  Right",
                 "  Top",
                 "  Bottom",
-                "Move to New Window",
+                "NewWindow",
+                "KeysHelp",
                 "Close",
             ]
         );
@@ -368,13 +378,14 @@ mod tests {
         assert_eq!(
             labels(&offers(&split(), 'a', true)),
             [
-                "Move to Window Edge",
+                "Move to window edge",
                 "  Right",
                 "  Top",
                 "  Bottom",
-                "Move to New Window",
+                "NewWindow",
                 "Maximize",
-                "Even Out Split",
+                "EvenSplit",
+                "KeysHelp",
                 "Close",
             ]
         );
@@ -388,32 +399,32 @@ mod tests {
         assert_eq!(
             labels(&offers(&split(), 'a', false)),
             [
-                "Split Left",
-                "Split Right",
-                "Split Up",
-                "Split Down",
-                "Move to Window Edge",
+                "Split(Left)",
+                "Split(Right)",
+                "Split(Top)",
+                "Split(Bottom)",
+                "Move to window edge",
                 "  Left",
                 "  Right",
                 "  Top",
                 "  Bottom",
-                "Move to New Window",
+                "NewWindow",
                 "Maximize",
-                "Even Out Split",
+                "EvenSplit",
+                "KeysHelp",
                 "Close",
             ]
         );
     }
 
     /// The pane already drawn in place of the whole window's body is offered
-    /// the panes back rather than the body it has.
+    /// the panes back, which the same offer as the body carries out.
     #[test]
     fn a_maximized_pane_is_offered_the_panes_it_hides_back() {
         let mut arrangement = split();
         assert_eq!(arrangement.toggle_maximize(&'a'), Maximize::Maximized);
         let read = labels(&offers(&arrangement, 'a', true));
-        assert!(read.contains(&"Restore".to_string()), "{read:?}");
-        assert!(!read.contains(&"Maximize".to_string()), "{read:?}");
+        assert!(read.contains(&"Maximize".to_string()), "{read:?}");
     }
 
     /// The body is offered exactly where asking for it would be carried out, so
@@ -450,7 +461,7 @@ mod tests {
                     for side in SIDES {
                         let beside = Destination::Beside { pane, side };
                         assert_eq!(
-                            read.contains(&format!("Split {}", split_name(side))),
+                            read.contains(&format!("Split({side:?})")),
                             re_homes(&beside, Some(&pane), alone, layout),
                             "{pane} {alone} split {side:?}"
                         );
@@ -475,15 +486,16 @@ mod tests {
         assert_eq!(
             labels(&offered(&standing, &windows(["1. b.profile.gz"]))),
             [
-                "Move to New Window",
-                "Move to Window",
+                "NewWindow",
+                "Move to window",
                 "  1. b.profile.gz",
+                "KeysHelp",
                 "Close",
             ]
         );
         assert_eq!(
             labels(&offered::<char, Window>(&standing, &[])),
-            ["Move to New Window", "Close"]
+            ["NewWindow", "KeysHelp", "Close"]
         );
     }
 
@@ -495,14 +507,14 @@ mod tests {
         let arrangement = Arrangement::new(Layout::Pane('a'));
         let standing = standing(&arrangement, &'a', true);
         let offered = offered(&standing, &windows(["second", "third", "fourth"]));
-        let listed = under(&offered, "Move to Window");
-        let named: Vec<&Offer<Window>> = listed.iter().map(|under| &under.offer).collect();
+        let listed = under(&offered, "Move to window");
+        let named: Vec<&Place<Window>> = listed.iter().map(|under| &under.place).collect();
         assert_eq!(
             named,
             [
-                &Offer::Window("second"),
-                &Offer::Window("third"),
-                &Offer::Window("fourth"),
+                &Place::Window("second"),
+                &Place::Window("third"),
+                &Place::Window("fourth"),
             ]
         );
     }
@@ -513,35 +525,30 @@ mod tests {
     fn every_offer_carries_out_what_its_row_reads() {
         for side in SIDES {
             assert_eq!(
-                deed::<char, Window>(Offer::Split(side), &'a'),
+                offer_deed::<char, Window>(Offer::Split(side), &'a'),
                 Deed::Move(Destination::Beside { pane: 'a', side })
             );
             assert_eq!(
-                deed::<char, Window>(Offer::Edge(side), &'a'),
+                place_deed::<char, Window>(Place::Edge(side)),
                 Deed::Move(Destination::WindowEdge(side))
             );
         }
         assert_eq!(
-            deed::<char, Window>(Offer::NewWindow, &'a'),
+            offer_deed::<char, Window>(Offer::NewWindow, &'a'),
             Deed::Move(Destination::NewWindow)
         );
         assert_eq!(
-            deed::<char, Window>(Offer::Window("second"), &'a'),
+            place_deed::<char, Window>(Place::Window("second")),
             Deed::ToWindow("second")
         );
         assert_eq!(
-            deed::<char, Window>(Offer::EvenSplit, &'a'),
+            offer_deed::<char, Window>(Offer::EvenSplit, &'a'),
             Deed::EvenSplit
         );
-        assert_eq!(deed::<char, Window>(Offer::Close, &'a'), Deed::Close);
-    }
-
-    /// Asking of a window that draws a pane in place of the rest puts them all
-    /// back, so the row offering the body and the row offering the panes back
-    /// are the one deed.
-    #[test]
-    fn the_body_and_the_panes_back_are_the_one_deed() {
-        assert_eq!(deed::<char, Window>(Offer::Maximize, &'a'), Deed::Maximize);
-        assert_eq!(deed::<char, Window>(Offer::Restore, &'a'), Deed::Maximize);
+        assert_eq!(
+            offer_deed::<char, Window>(Offer::Maximize, &'a'),
+            Deed::Maximize
+        );
+        assert_eq!(offer_deed::<char, Window>(Offer::Close, &'a'), Deed::Close);
     }
 }

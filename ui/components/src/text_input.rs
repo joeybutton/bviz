@@ -2,7 +2,7 @@
 //! movement, mouse selection, clipboard, and IME composition, built on gpui's
 //! platform input handler.
 
-use crate::track_drag;
+use crate::{KeyScope, track_drag};
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, GlobalElementId, Hsla,
@@ -15,27 +15,48 @@ use std::ops::Range;
 gpui::actions!(
     bviz_text_input,
     [
+        /// Delete before cursor
         Backspace,
+        /// Delete after cursor
         Delete,
+        /// Move cursor left
         Left,
+        /// Move cursor right
         Right,
+        /// Extend selection left
         SelectLeft,
+        /// Extend selection right
         SelectRight,
+        /// Select all
         SelectAll,
+        /// Move cursor to start
         Home,
+        /// Move cursor to end
         End,
+        /// Select to start
         SelectHome,
+        /// Select to end
         SelectEnd,
+        /// Copy selection
         Copy,
+        /// Cut selection
         Cut,
+        /// Paste
         Paste,
-        ShowCharacterPalette
+        /// Show character palette
+        ShowCharacterPalette,
     ]
 );
 
 /// The key context scoping the text field's own bindings, so a key pressed
 /// while it has focus edits the text rather than reaching an enclosing panel.
-pub const KEY_CONTEXT: &str = "TextInput";
+pub const KEY_CONTEXT: KeyScope = KeyScope::new("TextInput", "Text field");
+
+/// The predicate of a binding in `scope` that stands down while a text field
+/// within it holds the focus, where the keystroke edits the text instead.
+pub fn unless_typing(scope: KeyScope) -> String {
+    format!("{scope} && !{KEY_CONTEXT}")
+}
 
 /// Register the text field's key bindings.
 pub fn bind_keys(cx: &mut App) {
@@ -44,7 +65,7 @@ pub fn bind_keys(cx: &mut App) {
 
 /// The text field's key bindings.
 pub fn bindings() -> Vec<KeyBinding> {
-    let ctx = Some(KEY_CONTEXT);
+    let ctx = Some(KEY_CONTEXT.id());
     vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),

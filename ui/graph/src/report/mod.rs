@@ -14,7 +14,7 @@ use std::ops::Range;
 mod card;
 mod words;
 
-pub(crate) use card::{Card, card, control};
+pub(crate) use card::{Card, card, control, gestures};
 
 /// How building ended for the targets a build reports on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -4,14 +4,14 @@ use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE, TRACKS_MENU_MAX_LIST,
-    TRACKS_MENU_WIDTH, TracePanel,
+    CloseTracksMenu, GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE,
+    TRACKS_MENU_KEY_CONTEXT, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, TextInput, list_scrollbar};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
+    AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
+    Pixels, Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
 };
 
 /// Side of the menu's caret icons.
@@ -76,6 +76,24 @@ impl TracksMenu {
         }
     }
 
+    /// Opens the menu with the cursor in its filter.
+    pub(crate) fn open_filtering(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = true;
+        self.filter.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the menu, handing focus the filter held back to the timeline.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = false;
+        if self.filter.read(cx).focus_handle(cx).is_focused(window)
+            && let Some(shell) = self.shell.upgrade()
+        {
+            shell.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
     /// Resets the view-local fold state and list scroll for a freshly loaded
     /// profile. The document-derived visibility is seeded by the model instead.
     pub(crate) fn reset_for_new_profile(&mut self) {
@@ -119,7 +137,15 @@ impl TracksMenu {
         let rows = self.menu_rows(&profile, palette, cx);
         let menu = self.chrome(rows, palette, cx);
         let backdrop = self.backdrop(viewport, cx);
-        Some(deferred(div().child(backdrop).child(menu)))
+        Some(deferred(
+            div()
+                .key_context(TRACKS_MENU_KEY_CONTEXT)
+                .on_action(
+                    cx.listener(|this, _: &CloseTracksMenu, window, cx| this.close(window, cx)),
+                )
+                .child(backdrop)
+                .child(menu),
+        ))
     }
 
     /// Tracks under their lane-class group headers, each group's tracks in the
@@ -448,10 +474,9 @@ impl TracksMenu {
             .h(viewport.size.height)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.open = false;
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.close(window, cx);
                     cx.stop_propagation();
-                    cx.notify();
                 }),
             )
     }
@@ -486,9 +511,12 @@ impl Render for TracksMenu {
             .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
                 cx.stop_propagation()
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.open = !this.open;
-                cx.notify();
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.open {
+                    this.close(window, cx);
+                } else {
+                    this.open_filtering(window, cx);
+                }
             }))
             .child(
                 div()

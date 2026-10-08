@@ -10,7 +10,28 @@
 
 use crate::{GraphPanel, Palette};
 use bviz_graph_layout::{Axis, Capabilities, Support};
+use bviz_ui_components::gesture::{
+    Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
+};
 use gpui::{ClickEvent, Context, Div, Stateful, div, prelude::*};
+
+/// What the card does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum MissingIntent {
+    Toggle,
+}
+
+const GESTURES: Gestures<MissingIntent> = Gestures::new(&[Entry::new(
+    Input::click(PointerButton::Left),
+    Place::On("the unavailable filters"),
+    "Show or hide missing flags",
+    MissingIntent::Toggle,
+)]);
+
+/// The gestures the card answers to.
+pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
+    GESTURES.rows()
+}
 
 /// How a reader knows the property `axis` selects nodes by.
 fn axis_label(axis: Axis) -> &'static str {
@@ -108,7 +129,14 @@ pub(crate) fn card(
             .bg(palette.container)
             .text_xs()
             .text_color(palette.label)
-            .on_click(cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)))
+            .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
+                GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                    MissingIntent::Toggle => {
+                        toggle(view, cx);
+                        true
+                    }
+                });
+            }))
             .child(unavailable(&gaps))
             .children(readings),
     )
@@ -117,6 +145,12 @@ pub(crate) fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(GESTURES.unreachable(), []);
+        assert_eq!(GESTURES.overlong(), []);
+    }
     use bviz_graph_layout::capability::CapabilitiesBuilder;
 
     /// The capabilities of inputs that stated `carried` of every axis they were

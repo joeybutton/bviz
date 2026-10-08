@@ -16,6 +16,8 @@ pub(crate) enum CountersStrip {
 }
 
 impl CountersStrip {
+    pub(crate) const DEFAULT: CountersStrip = CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT);
+
     pub(crate) fn opened(self) -> Self {
         match self {
             CountersStrip::Open(_) => self,
@@ -23,17 +25,14 @@ impl CountersStrip {
         }
     }
 
-    /// What a press with `click_count` at window y `press_y` begins on a divider
-    /// whose strip stands with its top edge at `counters_top`.
-    pub(crate) fn press(self, click_count: usize, press_y: f32, counters_top: f32) -> DividerPress {
-        match click_count {
-            2 => DividerPress::Reset(CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT)),
-            _ => DividerPress::Grab(DividerGrab {
-                pressed: self,
-                press_y,
-                grab: counters_top - press_y,
-                moved: false,
-            }),
+    /// The hold a press at window y `press_y` takes of a divider whose strip
+    /// stands with its top edge at `counters_top`.
+    pub(crate) fn grab(self, press_y: f32, counters_top: f32) -> DividerGrab {
+        DividerGrab {
+            pressed: self,
+            press_y,
+            grab: counters_top - press_y,
+            moved: false,
         }
     }
 
@@ -56,16 +55,6 @@ impl CountersStrip {
             },
         }
     }
-}
-
-/// What a press on the counters divider begins.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum DividerPress {
-    /// A double-click sets the strip back to a default height and takes hold of
-    /// nothing.
-    Reset(CountersStrip),
-    /// A single press takes hold of the band.
-    Grab(DividerGrab),
 }
 
 /// A press holding the counters divider, and the drag it may yet become.
@@ -497,15 +486,6 @@ mod tests {
         )
     }
 
-    /// A press on the divider of a strip standing with its top edge at
-    /// `counters_top`, taking hold of the band.
-    fn grabbed(strip: CountersStrip, press_y: f32, counters_top: f32) -> DividerGrab {
-        match strip.press(1, press_y, counters_top) {
-            DividerPress::Grab(grab) => grab,
-            DividerPress::Reset(_) => panic!("a single press takes hold of the band"),
-        }
-    }
-
     /// Where the strip stands with the drag's cursor at window y `y`.
     fn dragged(grab: &mut DividerGrab, y: f32) -> CountersStrip {
         grab.dragged_to(y, TALL, TALL)
@@ -753,7 +733,7 @@ mod tests {
     #[test]
     fn a_click_on_the_shut_band_brings_the_strip_back() {
         let shut = CountersStrip::Collapsed { restore: 220.0 };
-        let mut grab = grabbed(shut, TALL - 8.0, TALL);
+        let mut grab = shut.grab(TALL - 8.0, TALL);
         assert_eq!(dragged(&mut grab, TALL - 9.0), shut);
         assert_eq!(grab.released(shut), CountersStrip::Open(220.0));
     }
@@ -763,7 +743,7 @@ mod tests {
     #[test]
     fn a_drag_down_the_shut_band_leaves_the_strip_shut() {
         let shut = CountersStrip::Collapsed { restore: 220.0 };
-        let mut grab = grabbed(shut, TALL - 8.0, TALL);
+        let mut grab = shut.grab(TALL - 8.0, TALL);
         assert_eq!(dragged(&mut grab, TALL + 200.0), shut);
         assert_eq!(grab.released(shut), shut);
     }
@@ -775,7 +755,7 @@ mod tests {
         let shut = CountersStrip::Collapsed { restore: 220.0 };
         let (floor, _) = counters_bounds(TALL);
         let held = 7.0;
-        let mut grab = grabbed(shut, TALL - held, TALL);
+        let mut grab = shut.grab(TALL - held, TALL);
         // Short of the slop the strip stays shut; a pixel past it the strip
         // opens, at the floor its lanes need.
         assert_eq!(dragged(&mut grab, TALL - held - COUNTERS_SNAP_SLOP), shut);
@@ -798,27 +778,12 @@ mod tests {
     fn a_drag_holds_the_band_where_it_was_grabbed() {
         let shut = CountersStrip::Collapsed { restore: 220.0 };
         let held = 10.0;
-        let mut grab = grabbed(shut, TALL - held, TALL);
+        let mut grab = shut.grab(TALL - held, TALL);
         for y in [700.0, 600.0, 500.0] {
             let CountersStrip::Open(height) = dragged(&mut grab, y) else {
                 panic!("a drag clear of the band opens the strip")
             };
             assert_eq!(TALL - height, y + held);
-        }
-    }
-
-    /// A double-click resets the strip to its default height from either state,
-    /// and takes hold of nothing.
-    #[test]
-    fn a_double_click_resets_the_strip_from_either_state() {
-        for strip in [
-            CountersStrip::Open(600.0),
-            CountersStrip::Collapsed { restore: 220.0 },
-        ] {
-            assert_eq!(
-                strip.press(2, TALL - 4.0, TALL),
-                DividerPress::Reset(CountersStrip::Open(DEFAULT_COUNTERS_HEIGHT))
-            );
         }
     }
 

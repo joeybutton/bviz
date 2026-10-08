@@ -29,6 +29,7 @@ rust_test(
     name = "bviz_test",
     size = "small",
     crate = ":bviz",
+    deps = ["//ui/components"],
 )
 
 third_party_notices(

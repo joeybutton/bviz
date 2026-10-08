@@ -13,7 +13,7 @@ pub use spawn_time::SpawnTimePanel;
 
 use bviz_execlog::ExecLog;
 use bviz_invocation::{InvocationId, Session};
-use bviz_ui_components::Pending;
+use bviz_ui_components::{Pending, declare_scopes};
 use bviz_ui_execlog_args::{ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, PanelGroup, ViewSpec, document_label};
 use clap::error::ErrorKind;
@@ -21,6 +21,10 @@ use clap::{CommandFactory, Parser};
 use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
 use model::{ExecLogModel, Read};
 use summary::Summary;
+
+pub fn register_keys(cx: &mut App) {
+    declare_scopes(cx, [spawn_time::KEY_CONTEXT]);
+}
 
 /// An execution log being read.
 pub struct Load {
@@ -89,6 +93,6 @@ pub fn run() {
         first,
         loads.collect(),
         |load, window, cx| open(load, None, window, cx).into(),
-        &[],
+        &[register_keys],
     );
 }

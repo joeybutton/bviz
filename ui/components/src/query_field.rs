@@ -127,7 +127,10 @@ impl Render for QueryField {
             .child(div().w(self.width).flex_none().child(self.input.clone()))
             .children(typed.then(|| {
                 let clear = cx.listener(|field, _: &ClickEvent, _, cx| field.clear(cx));
-                Button::new(self.clear_id.clone(), clear).ghost().icon("x")
+                Button::new(self.clear_id.clone(), clear)
+                    .ghost()
+                    .icon("x")
+                    .tooltip("Clear field")
             }))
     }
 }

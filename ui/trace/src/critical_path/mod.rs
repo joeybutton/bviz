@@ -8,6 +8,7 @@ mod words;
 
 use crate::chart::format_duration;
 use crate::model::{CriticalPathDerived, SourceReplaced, TraceModel, TracedPath};
+use crate::row_step;
 use crate::stats_panel::{line, table_cell};
 use crate::theme::Palette;
 use crate::{
@@ -18,9 +19,10 @@ use bviz_critical_path::{
     Coverage, CriticalPath, Modeled, NearlyCritical, Part, Phase, Spawned, Step,
 };
 use bviz_invocation::Chosen;
+use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice, centered_spinner,
-    list_scrollbar, sort_header,
+    Button, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice,
+    centered_spinner, list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, ViewKind};
 use by_height::ByHeight;
@@ -34,7 +36,24 @@ use order::{NEARLY_CRITICAL_SORT, NearlyCriticalKey, STEPS_SORT, StepKey};
 use std::time::Duration;
 use whole::whole_or_none;
 
-pub(crate) const KEY_CONTEXT: &str = "TraceCriticalPath";
+pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("TraceCriticalPath", "Critical path");
+
+/// What the panel does for a gesture in [`GESTURES`].
+#[derive(Clone, Copy)]
+enum CriticalPathIntent {
+    Sort,
+    Choose,
+}
+
+const GESTURES: Gestures<CriticalPathIntent> = Gestures::new(&[
+    sort_gesture(CriticalPathIntent::Sort),
+    Entry::new(
+        Input::click(gesture::Button::Left),
+        Place::On("a row"),
+        "Choose or clear row",
+        CriticalPathIntent::Choose,
+    ),
+]);
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
@@ -225,7 +244,7 @@ impl CriticalPathPanel {
                 &self.nearly_critical_scroll,
             ),
         };
-        if let Some(row) = order::position(&order, index) {
+        if let Some(row) = row_step::position(&order, index) {
             scroll
                 .uniform_handle()
                 .scroll_to_item(row, ScrollStrategy::Nearest);
@@ -266,7 +285,7 @@ impl CriticalPathPanel {
                     Some(Chosen::NearlyCritical(index)) => Some(index),
                     _ => None,
                 };
-                order::moved(&self.nearly_critical_order(path), from, by)
+                row_step::moved(&self.nearly_critical_order(path), from, by)
                     .map(Chosen::NearlyCritical)
             }
             Listing::Steps => {
@@ -274,7 +293,7 @@ impl CriticalPathPanel {
                     Some(Chosen::Step(index)) => Some(index),
                     _ => None,
                 };
-                order::moved(&order::steps(path.steps(), self.steps_sort), from, by)
+                row_step::moved(&order::steps(path.steps(), self.steps_sort), from, by)
                     .map(Chosen::Step)
             }
         };
@@ -482,7 +501,8 @@ impl CriticalPathPanel {
             .min_h_0()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|panel, e: &MouseDownEvent, _, cx| {
+                cx.listener(|panel, e: &MouseDownEvent, window, cx| {
+                    panel.focus.focus(window, cx);
                     if panel.summary_scroll.press(e.position) {
                         cx.stop_propagation();
                     }
@@ -597,10 +617,16 @@ fn choosable(
         row.bg(palette.selection)
             .hover(move |row| row.bg(picked_hover))
     })
-    .on_click(move |_, window, cx| {
+    .on_click(move |e, window, cx| {
         entity.update(cx, |panel, cx| {
-            panel.focus.focus(window, cx);
-            panel.toggle(stands_for, cx)
+            GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                CriticalPathIntent::Choose => {
+                    panel.focus.focus(window, cx);
+                    panel.toggle(stands_for, cx);
+                    true
+                }
+                _ => false,
+            });
         })
     })
 }
@@ -625,7 +651,8 @@ fn list_pane(
         .min_h(px(STATS_ROW_HEIGHT))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |panel, e: &MouseDownEvent, _, cx| {
+            cx.listener(move |panel, e: &MouseDownEvent, window, cx| {
+                panel.focus.focus(window, cx);
                 if scroll_mut(panel).press(e.position) {
                     cx.stop_propagation();
                 }
@@ -874,9 +901,15 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
             .id(column.title)
             .cursor_pointer()
             .hover(|cell| cell.bg(palette.hover))
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                sort_by(panel, by, descending, cx);
-                cx.notify();
+            .on_click(cx.listener(move |panel, e, _, cx| {
+                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
+                    CriticalPathIntent::Sort => {
+                        sort_by(panel, by, descending, cx);
+                        cx.notify();
+                        true
+                    }
+                    _ => false,
+                });
             }))
             .into_any_element(),
         }
@@ -1217,13 +1250,16 @@ impl Panel for CriticalPathPanel {
     fn kind() -> PanelKind {
         PanelKind {
             view: ViewKind::new("trace-critical-path"),
-            label: "Critical path",
             key_context: KEY_CONTEXT,
         }
     }
 
+    fn gestures() -> Vec<GestureRow> {
+        GESTURES.rows().collect()
+    }
+
     fn title(&self, _cx: &App) -> SharedString {
-        Self::kind().label.into()
+        Self::kind().label().into()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1272,5 +1308,20 @@ impl Render for CriticalPathPanel {
                 path: Some(path), ..
             }) => panel.child(self.body(path, &palette, &fills, cx)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_gesture_is_reachable() {
+        assert_eq!(GESTURES.unreachable(), []);
+    }
+
+    #[test]
+    fn every_gesture_fits_the_keys_help() {
+        assert_eq!(GESTURES.overlong(), []);
     }
 }

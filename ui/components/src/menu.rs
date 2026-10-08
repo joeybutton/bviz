@@ -1,18 +1,17 @@
 //! A menu of labelled rows standing over the window at the point it was asked
 //! for, some of its rows opening a submenu beside them.
 
-use crate::menu_chrome::{self, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING, opened};
-use crate::{TextTooltip, TooltipColors};
+use crate::menu_chrome::{
+    self, LABEL_GAP, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING, opened,
+};
+use crate::{TextTooltip, TooltipColors, action_label, key_text_in};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement, Keystroke,
-    MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString, Size, Stateful,
-    Subscription, TextStyleRefinement, Window, div, point, prelude::*, px, size,
+    Action, AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement,
+    Keystroke, Modifiers, MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString, Size,
+    Stateful, Subscription, TextStyleRefinement, Window, div, point, prelude::*, px, size,
 };
 use std::rc::Rc;
-
-/// Room between a row's label and the mark at the end of it.
-const LABEL_GAP: Pixels = px(16.);
 
 /// The tallest a list stands before it scrolls, short enough that a list of
 /// many rows leaves the window's own edges in view.
@@ -50,12 +49,20 @@ impl MenuItem {
         }
     }
 
-    /// A row reading `label` in the muted ink, which taking does nothing.
-    pub fn disabled(label: impl Into<SharedString>) -> Self {
+    /// A row reading the help label of `action` that runs `chosen` and closes
+    /// the menu. It names the keys that run `action` where `keys_in` stands, as
+    /// what its choice answers to outside the menu.
+    pub fn action(
+        action: &dyn Action,
+        keys_in: Option<&FocusHandle>,
+        window: &Window,
+        cx: &App,
+        chosen: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
         Self {
-            label: label.into(),
-            opens: Opens::Disabled,
-            keys: None,
+            label: action_label(action, cx).unwrap_or(action.name()).into(),
+            opens: Opens::Nothing(Rc::new(chosen)),
+            keys: keys_in.and_then(|focus| key_text_in(action, focus, window)),
             tooltip: None,
         }
     }
@@ -70,9 +77,10 @@ impl MenuItem {
         }
     }
 
-    /// The row naming `keys` as what its choice answers to outside the menu.
-    pub fn keys(mut self, keys: impl Into<SharedString>) -> Self {
-        self.keys = Some(keys.into());
+    /// The row in the muted ink, which taking does nothing.
+    pub fn disabled(mut self) -> Self {
+        self.opens = Opens::Disabled;
+        self.keys = None;
         self
     }
 
@@ -392,10 +400,10 @@ impl Menu {
                     .flex()
                     .items_center()
                     .gap(LABEL_GAP)
-                    .children(laid.keys.map(|keys| {
-                        let keys = div().whitespace_nowrap().child(keys.clone());
-                        keys.text_color(colors.text_muted)
-                    }))
+                    .children(
+                        laid.keys
+                            .map(|keys| menu_chrome::row_keys(keys.clone(), colors)),
+                    )
                     .child(menu_chrome::submenu_mark(colors, laid.opens_submenu)),
             )
     }
@@ -423,18 +431,43 @@ enum Which {
 /// Takes the keystrokes of the window `here` for the menu being built, so that
 /// nothing under the menu answers one while the menu stands over it. The
 /// keystrokes of every window of the application come through here, and a menu
-/// takes only those of the window it stands over.
+/// takes only those of the window it stands over, and none once it is closed.
+/// A command's keystroke closes the menu and is dispatched afresh after the
+/// holder of the menu has taken focus back, so it runs the command bound where
+/// focus returns to, or begins its chord there.
 fn intercept(here: AnyWindowHandle, cx: &mut Context<Menu>) -> Subscription {
     let menu = cx.weak_entity();
     cx.intercept_keystrokes(move |event, window, cx| {
         if window.window_handle() != here {
             return;
         }
+        let Some(open) = menu.upgrade().filter(|menu| !menu.read(cx).closed) else {
+            return;
+        };
         cx.stop_propagation();
         let keystroke = event.keystroke.clone();
-        menu.update(cx, |menu, cx| menu.on_key(&keystroke, window, cx))
-            .ok();
+        if names_command(&keystroke.modifiers) {
+            open.update(cx, |menu, cx| menu.close(window, cx));
+            window.defer(cx, move |window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            });
+            return;
+        }
+        open.update(cx, |menu, cx| menu.on_key(&keystroke, window, cx));
     })
+}
+
+/// Whether a keystroke made holding `modifiers` names a command rather than a
+/// key a menu answers: shift alone only changes the key typed.
+fn names_command(modifiers: &Modifiers) -> bool {
+    let Modifiers {
+        control,
+        alt,
+        shift: _,
+        platform,
+        function,
+    } = *modifiers;
+    control || alt || platform || function
 }
 
 /// What a keystroke or a click asks of a menu.
@@ -950,6 +983,16 @@ mod tests {
             asked_by("up", Aim::Away, &SHAPE),
             Some(Asked::At(Aim::Row(2)))
         );
+    }
+
+    #[test]
+    fn a_keystroke_holding_any_modifier_but_shift_names_a_command() {
+        let held = |keys: &str| Keystroke::parse(keys).unwrap().modifiers;
+        assert!(names_command(&held("ctrl-q")));
+        assert!(names_command(&held("cmd-w")));
+        assert!(names_command(&held("alt-left")));
+        assert!(!names_command(&held("shift-down")));
+        assert!(!names_command(&held("down")));
     }
 
     /// A key a menu makes nothing of leaves the menu as it stands; it is taken

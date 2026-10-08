@@ -34,6 +34,7 @@ filegroup(
         "assets/regular/pause.svg",
         "assets/regular/play.svg",
         "assets/regular/plus.svg",
+        "assets/regular/question.svg",
         "assets/regular/skip-back.svg",
         "assets/regular/skip-forward.svg",
         "assets/regular/square.svg",
