@@ -5,7 +5,10 @@ mod rc;
 
 use std::fmt;
 
-pub use rc::{CaptureDir, ConfigName, InvalidCaptureDir, InvalidConfigName, header, settings};
+pub use rc::{
+    BAZELRC_FILE, CaptureDir, ConfigName, InvalidCaptureDir, InvalidConfigName, Output, header,
+    outputs, settings,
+};
 
 /// A flag as Bazel's command line spells it, value included.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,8 +67,9 @@ impl Command {
     }
 }
 
+/// A Bazel command that queries the build graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum QueryCommand {
+pub enum QueryCommand {
     Query,
     Cquery,
     Aquery,

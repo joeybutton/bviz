@@ -1,0 +1,18 @@
+[package]
+name = "bviz_bazel_flags_args"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_bazel_flags_args"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+bviz_bazel_flags = { workspace = true }
+bviz_ui_console_args = { path = "../../ui/console/args" }
+bviz_ui_execlog_args = { path = "../../ui/execlog/args" }
+bviz_ui_graph_args = { path = "../../ui/graph/args" }
+bviz_ui_trace_args = { path = "../../ui/trace/args" }

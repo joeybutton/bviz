@@ -887,9 +887,22 @@ name = "bviz_bazel_flags"
 version = "0.1.0"
 
 [[package]]
+name = "bviz_bazel_flags_args"
+version = "0.1.0"
+dependencies = [
+ "bviz_bazel_flags",
+ "bviz_ui_console_args",
+ "bviz_ui_execlog_args",
+ "bviz_ui_graph_args",
+ "bviz_ui_trace_args",
+ "clap",
+]
+
+[[package]]
 name = "bviz_cli"
 version = "0.1.0"
 dependencies = [
+ "bviz_bazel_flags_args",
  "bviz_ui_console_args",
  "bviz_ui_execlog_args",
  "bviz_ui_graph_args",

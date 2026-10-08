@@ -6,6 +6,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_ui_graph_args",
     visibility = [
+        "//bazel_flags/args:__pkg__",
         "//cli:__pkg__",
         "//ui/graph:__pkg__",
     ],

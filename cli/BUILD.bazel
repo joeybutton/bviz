@@ -7,6 +7,7 @@ rust_library(
     crate_name = "bviz_cli",
     visibility = ["//bviz:__pkg__"],
     deps = [
+        "//bazel_flags/args",
         "//ui/console/args",
         "//ui/execlog/args",
         "//ui/graph/args",

@@ -1,14 +1,16 @@
 //! The command line of the window that shows every kind of Bazel build
 //! document: the viewers' flag fragments joined into one parser, and what
-//! a command line names for each viewer to read. It names no window and draws
-//! nothing, so a parse can be exercised without a display.
+//! a command line names for each viewer to read, or the subcommand that writes
+//! the bazelrc a build is captured with. It names no window and draws nothing,
+//! so a parse can be exercised without a display.
 
+use bviz_bazel_flags_args::BazelrcArgs;
 use bviz_ui_console_args::{BEP_LONG, ConsoleArgs, ConsoleSource};
 use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
 use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
 use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// Opens Bazel build documents: the dependency graph, the action timeline, the
 /// console replay, the spawn time by phase.
@@ -31,25 +33,52 @@ use clap::{CommandFactory, Parser};
 /// id the other files carry is the same one, be that a single file's, and opens
 /// the graph as a document of its own when they carry several ids or none.
 #[derive(Parser, Debug)]
-#[command(name = "bviz", bin_name = "bviz", version, about)]
+#[command(
+    name = "bviz",
+    bin_name = "bviz",
+    version,
+    about,
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[command(flatten)]
-    pub graph: GraphArgs,
+    graph: GraphArgs,
     #[command(flatten)]
-    pub trace: TraceArgs,
+    trace: TraceArgs,
     #[command(flatten)]
-    pub console: ConsoleArgs,
+    console: ConsoleArgs,
     #[command(flatten)]
-    pub exec_log: ExecLogArgs,
+    exec_log: ExecLogArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Bazelrc(BazelrcArgs),
+}
+
+/// What a command line asks bviz to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Bazelrc(BazelrcArgs),
+    Open(Sources),
 }
 
 impl Cli {
+    pub fn request(self) -> Result<Request, clap::Error> {
+        match self.command {
+            Some(Command::Bazelrc(args)) => Ok(Request::Bazelrc(args)),
+            None => self.sources().map(Request::Open),
+        }
+    }
+
     /// What this command line names to open.
     ///
     /// The rejection of a command line naming nothing is written out here rather
     /// than left to a clap argument group, because these fragments are shared
     /// with the per-viewer binaries, where a different flag is the required one.
-    pub fn sources(self) -> Result<Sources, clap::Error> {
+    fn sources(self) -> Result<Sources, clap::Error> {
         let mut files = Vec::with_capacity(
             self.trace.profile.len() + self.console.bep.len() + self.exec_log.exec_log.len(),
         );
@@ -108,6 +137,17 @@ mod tests {
 
     fn sources(args: &[&str]) -> Result<Sources, clap::Error> {
         Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?.sources()
+    }
+
+    fn request(args: &[&str]) -> Result<Request, clap::Error> {
+        Cli::try_parse_from(std::iter::once("bviz").chain(args.iter().copied()))?.request()
+    }
+
+    fn bazelrc(config: &str, dir: &str) -> Request {
+        Request::Bazelrc(BazelrcArgs {
+            config: config.parse().unwrap(),
+            dir: dir.parse().unwrap(),
+        })
     }
 
     fn graph(inputs: &[(InputKind, &str)], files: Vec<Source>) -> Sources {
@@ -232,5 +272,95 @@ mod tests {
                 "no {flag}: {help}"
             );
         }
+    }
+
+    #[test]
+    fn the_bazelrc_subcommand_takes_a_config_name_and_a_directory() {
+        assert_eq!(
+            request(&["bazelrc"]).unwrap(),
+            Request::Bazelrc(BazelrcArgs::default())
+        );
+        assert_eq!(
+            request(&["bazelrc", "--config", "ci", "--dir=out/x"]).unwrap(),
+            bazelrc("ci", "out/x")
+        );
+    }
+
+    /// The words of each bviz command line `rc`'s header shows, joined across
+    /// `\` continuations and cut at a `>` redirect.
+    fn header_commands(rc: &str) -> Vec<Vec<String>> {
+        let mut lines = rc
+            .lines()
+            .map_while(|line| line.strip_prefix('#'))
+            .map(str::trim);
+        let mut commands = Vec::new();
+        while let Some(line) = lines.next() {
+            if !line.starts_with("bviz ") {
+                continue;
+            }
+            let mut command = line.to_owned();
+            while let Some(head) = command.strip_suffix('\\') {
+                command = format!("{head}{}", lines.next().expect("a continued line"));
+            }
+            commands.push(
+                command
+                    .split_whitespace()
+                    .take_while(|&word| word != ">")
+                    .map(str::to_owned)
+                    .collect(),
+            );
+        }
+        commands
+    }
+
+    /// Each bviz command line the header shows parses as the command it is
+    /// shown as: the one opening every captured file, and the one writing the
+    /// same bazelrc again.
+    #[test]
+    fn the_bazelrc_header_shows_bviz_command_lines_bviz_parses() {
+        for args in [
+            BazelrcArgs::default(),
+            BazelrcArgs {
+                config: "ci".parse().unwrap(),
+                dir: "out/capture".parse().unwrap(),
+            },
+        ] {
+            let commands = header_commands(&args.bazelrc());
+            let requests: Vec<Request> = commands
+                .iter()
+                .map(|words| {
+                    Cli::try_parse_from(words)
+                        .and_then(Cli::request)
+                        .unwrap_or_else(|e| panic!("{words:?}: {e}"))
+                })
+                .collect();
+            let [Request::Open(Sources::Graph { graph, files }), regenerate] = &requests[..] else {
+                panic!("{commands:?}");
+            };
+            assert_eq!(graph.first_and_rest().1.len(), 2, "{commands:?}");
+            assert_eq!(files.len(), 3, "{commands:?}");
+            assert_eq!(regenerate, &Request::Bazelrc(args));
+        }
+    }
+
+    #[test]
+    fn a_config_name_no_bazelrc_section_can_hold_is_a_usage_error() {
+        let err = request(&["bazelrc", "--config=build:x"]).expect_err("a colon");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    /// The subcommand opens no window, so it takes no file to open.
+    #[test]
+    fn the_bazelrc_subcommand_takes_no_file_flag() {
+        assert!(request(&["--profile", "p.gz", "bazelrc"]).is_err());
+        assert!(request(&["bazelrc", "--profile", "p.gz"]).is_err());
+    }
+
+    #[test]
+    fn a_command_line_without_the_subcommand_opens_what_it_names() {
+        assert_eq!(
+            request(&["--profile", "p.gz"]).unwrap(),
+            Request::Open(files(trace("p.gz"), Vec::new()))
+        );
     }
 }

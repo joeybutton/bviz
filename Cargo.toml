@@ -2,6 +2,7 @@
 members = [
     "alloc",
     "bazel_flags",
+    "bazel_flags/args",
     "bviz",
     "cli",
     "critical_path",

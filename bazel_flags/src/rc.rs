@@ -1,10 +1,16 @@
 use std::fmt::{self, Write};
 use std::str::FromStr;
 
-use crate::{Capture, MIN_BAZEL, QUERY_OUTPUTS, SECTIONS, Setting};
+use crate::{
+    BUILD_EVENTS, BUILD_EXEC_LOG, BUILD_PROFILE, Capture, MIN_BAZEL, QUERY_OUTPUTS, QueryCommand,
+    SECTIONS, Setting,
+};
 
 const DEFAULT_CONFIG: &str = "bviz";
 const DEFAULT_DIR: &str = ".bviz";
+
+/// The bazelrc's file name in the capture directory.
+pub const BAZELRC_FILE: &str = "bazelrc";
 
 /// Whether `c` reads as itself both in a bazelrc line, which is tokenized with
 /// `#` comments, quotes and `\` escapes, and in an unquoted shell word.
@@ -150,6 +156,28 @@ impl fmt::Display for CaptureDir {
     }
 }
 
+/// A file a build captured through the bazelrc leaves for bviz to read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Output {
+    Profile,
+    BuildEvents,
+    ExecLog,
+    Query(QueryCommand),
+}
+
+/// Each file a build captured into `dir` leaves for bviz, by its path from the
+/// workspace root.
+pub fn outputs(dir: &CaptureDir) -> impl Iterator<Item = (Output, String)> {
+    [
+        (Output::Profile, BUILD_PROFILE.file),
+        (Output::BuildEvents, BUILD_EVENTS.file),
+        (Output::ExecLog, BUILD_EXEC_LOG.file),
+    ]
+    .into_iter()
+    .chain(QUERY_OUTPUTS.map(|(query, file)| (Output::Query(query), file)))
+    .map(move |(output, file)| (output, format!("{dir}/{file}")))
+}
+
 /// The bazelrc lines passing every setting bviz needs under
 /// `--config=<config>`, its files written into `dir`, the workspace root's
 /// subdirectory.
@@ -185,7 +213,7 @@ pub fn header(config: &ConfigName, dir: &CaptureDir) -> String {
 # Once, from the workspace root:
 #   mkdir -p {dir} && {{ [ -e {dir}/.gitignore ] || echo '*' > {dir}/.gitignore; }}
 # and in the workspace's .bazelrc, or a bazelrc it imports:
-#   try-import %workspace%/{dir}/bazelrc
+#   try-import %workspace%/{dir}/{BAZELRC_FILE}
 #
 # Pass --config={config} to build, test, query, cquery and aquery only: any
 # other command inheriting build's flags would overwrite the capture. From the
