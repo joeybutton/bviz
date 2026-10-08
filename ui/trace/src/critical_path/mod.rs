@@ -34,7 +34,7 @@ use gpui::{
 };
 use order::{NEARLY_CRITICAL_SORT, NearlyCriticalKey, STEPS_SORT, StepKey};
 use std::time::Duration;
-use whole::whole_or_none;
+use whole::{WholeOrNone, whole_or_none};
 
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("TraceCriticalPath", "Critical path");
 
@@ -57,19 +57,13 @@ const GESTURES: Gestures<CriticalPathIntent> = Gestures::new(&[
 
 const BAR_HEIGHT: Pixels = px(12.);
 const PATH_BAR_HEIGHT: Pixels = px(14.);
-/// The steps the table keeps in view before the summary's bars give up room
-/// for more of them.
-const STEPS_BEFORE_BARS: f32 = 5.0;
-/// How much faster the summary's bars give up their height than the table
-/// does, so that in a short pane the bars scroll away before the table falls
-/// below its few steps.
-const BARS_YIELD: f32 = 1000.0;
-/// How much faster the table gives up its height than the headline and
-/// levers do, so that they clip only once the table is down to a single
-/// step. No yield is below one: flex items whose shrink factors sum below
-/// one take only that share of the overflow, and leave the rest of it
-/// overflowing.
-const TABLE_YIELD: f32 = 1000.0;
+/// How much faster the summary gives up its height than the lead does, so
+/// that in a short pane the lead's lines are left out only once the
+/// summary's all are. A flex item gives up a share of the overflow by its
+/// shrink factor times its basis, so this must outweigh any ratio of
+/// realistic bases by enough that the lead loses no visible fraction of a
+/// pixel meanwhile.
+const SUMMARY_YIELD: f32 = 100_000.0;
 /// The panel height under which the summary leaves out its legends, whose
 /// entries the bars' segments repeat in their tooltips, and the headline
 /// and levers take less room.
@@ -180,7 +174,6 @@ pub struct CriticalPathPanel {
     nearly_critical_sort: Sort<NearlyCriticalKey>,
     scroll: ListScroll,
     nearly_critical_scroll: ListScroll,
-    summary_scroll: ListScroll,
     /// Shows the document's load state as it changes.
     _model_observer: Subscription,
     _derived: Subscription,
@@ -198,7 +191,6 @@ impl CriticalPathPanel {
             panel.nearly_critical_sort = NEARLY_CRITICAL_SORT;
             panel.scroll.to_top();
             panel.nearly_critical_scroll.to_top();
-            panel.summary_scroll.to_top();
             cx.notify();
         });
         Self {
@@ -209,7 +201,6 @@ impl CriticalPathPanel {
             nearly_critical_sort: NEARLY_CRITICAL_SORT,
             scroll: ListScroll::new(),
             nearly_critical_scroll: ListScroll::new(),
-            summary_scroll: ListScroll::new(),
             _model_observer: model_observer,
             _derived: derived,
             _source_replaced: source_replaced,
@@ -483,8 +474,8 @@ impl CriticalPathPanel {
         )
     }
 
-    /// The path's bars, with their `legends` or without, scrolling where they
-    /// would leave the steps less than their room.
+    /// The path's bars, with their `legends` or without, focusing the panel
+    /// on a press.
     fn summary(
         &self,
         path: &CriticalPath,
@@ -493,38 +484,10 @@ impl CriticalPathPanel {
         fills: &Fills,
         cx: &Context<Self>,
     ) -> Div {
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .flex_shrink(BARS_YIELD * TABLE_YIELD)
-            .min_h_0()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|panel, e: &MouseDownEvent, window, cx| {
-                    panel.focus.focus(window, cx);
-                    if panel.summary_scroll.press(e.position) {
-                        cx.stop_propagation();
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .id("critical-path-summary")
-                    .flex_1()
-                    .min_h_0()
-                    .pr(px(SCROLLBAR_THICKNESS))
-                    .overflow_y_scroll()
-                    .track_scroll(self.summary_scroll.handle())
-                    .child(summary(path, legends, palette, fills)),
-            )
-            .child(list_scrollbar(
-                cx.entity(),
-                |panel: &CriticalPathPanel| &panel.summary_scroll,
-                |panel: &mut CriticalPathPanel| &mut panel.summary_scroll,
-                palette.scroll,
-            ))
+        summary(path, legends, palette, fills).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|panel, _: &MouseDownEvent, window, cx| panel.focus.focus(window, cx)),
+        )
     }
 
     /// The steps, one row each, every bar as long against the longest as the
@@ -645,9 +608,7 @@ fn list_pane(
         .relative()
         .flex()
         .flex_col()
-        .flex_grow_1()
-        .flex_basis(px(STEPS_BEFORE_BARS * STATS_ROW_HEIGHT))
-        .flex_shrink(TABLE_YIELD)
+        .flex_1()
         .min_h(px(STATS_ROW_HEIGHT))
         .on_mouse_down(
             MouseButton::Left,
@@ -664,10 +625,9 @@ fn list_pane(
 }
 
 /// What the path took and the levers acting on the most of it, each hovered
-/// for what pulling it involves: the point of the panel, so kept in view
-/// down to a pane too short for it beside a single step, where its lines are
-/// left out from the last. Where the pane is not `roomy`, the headline is set
-/// smaller and the levers keep to one line.
+/// for what pulling it involves: the point of the panel, so the last of its
+/// shrinking parts to give up height. Where the pane is not `roomy`, the
+/// headline is set smaller and the levers keep to one line.
 fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
     let headline = div().flex_shrink_0().child(words::headline(path));
     div()
@@ -686,6 +646,17 @@ fn lead(path: &CriticalPath, roomy: bool, palette: &Palette) -> Div {
                 .flex_shrink_0()
                 .when(!roomy, |levers| levers.flex_nowrap().overflow_hidden()),
         ))
+}
+
+/// `column` at its own height in a box that gives up height down to none,
+/// leaving out whole the lines it has no room for.
+fn yielding(column: Div) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_h_0()
+        .overflow_hidden()
+        .child(column.flex_shrink_0())
 }
 
 /// The modeled build's length against the observed path's actions, heading
@@ -729,24 +700,29 @@ fn summary(path: &CriticalPath, legends: bool, palette: &Palette, fills: &Fills)
     let segments = parts
         .iter()
         .map(|(part, time, account)| part_segment(*part, *time, account.clone(), fills));
-    let path_bar = bar("path", segments, path.wall(), SEGMENT_GAP, palette).h(PATH_BAR_HEIGHT);
+    let path_bar = bar("path", segments, path.wall(), SEGMENT_GAP, palette)
+        .w_full()
+        .h(PATH_BAR_HEIGHT);
     let spawned = path
         .coverage()
         .filter(|coverage| coverage.steps() > 0)
-        .map(|coverage| spawned_summary(&coverage, legends, palette, fills));
-    div()
-        .flex()
-        .flex_col()
-        .flex_shrink_0()
-        .gap_1()
-        .px_3()
-        .pt_1()
-        .pb_2()
-        .child(path_bar.w_full())
-        .when(legends, |summary| {
-            summary.child(legend_row(palette).children(legend))
-        })
-        .children(spawned)
+        .map(|coverage| spawned_lines(&coverage, legends, palette, fills))
+        .into_iter()
+        .flatten();
+    let lines = std::iter::once(whole_or_none(path_bar))
+        .chain(legends.then(|| whole_or_none(legend_row(palette).children(legend))))
+        .chain(spawned);
+    yielding(
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .pt_1()
+            .pb_2()
+            .children(lines),
+    )
+    .flex_shrink(SUMMARY_YIELD)
 }
 
 fn levers(path: &CriticalPath, palette: &Palette) -> Div {
@@ -771,9 +747,14 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
 }
 
 /// The time the actions of the steps `coverage` holds spent in each spawn
-/// phase and around their spawns, as a titled bar over its legend: a scale
-/// of its own, apart from the path's bar above it.
-fn spawned_summary(coverage: &Coverage, legends: bool, palette: &Palette, fills: &Fills) -> Div {
+/// phase and around their spawns, as the lines of a titled bar over its
+/// legend: a scale of its own, apart from the path's bar above it.
+fn spawned_lines(
+    coverage: &Coverage,
+    legends: bool,
+    palette: &Palette,
+    fills: &Fills,
+) -> impl Iterator<Item = WholeOrNone> + use<> {
     let phases: Vec<(Phase, Duration, SharedString)> = Phase::ALL
         .into_iter()
         .map(|phase| (phase, coverage.phase(phase)))
@@ -815,20 +796,13 @@ fn spawned_summary(coverage: &Coverage, legends: bool, palette: &Palette, fills:
             )
         }))
         .collect::<Vec<_>>();
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .mt_1()
-        .child(div().child(words::spawned_title(coverage)))
-        .child(
-            bar("spawned", segments, coverage.action(), SEGMENT_GAP, palette)
-                .w_full()
-                .h(PATH_BAR_HEIGHT),
-        )
-        .when(legends, |spawned| {
-            spawned.child(legend_row(palette).children(legend))
-        })
+    let title = div().mt_1().child(words::spawned_title(coverage));
+    let phases_bar = bar("spawned", segments, coverage.action(), SEGMENT_GAP, palette)
+        .w_full()
+        .h(PATH_BAR_HEIGHT);
+    [whole_or_none(title), whole_or_none(phases_bar)]
+        .into_iter()
+        .chain(legends.then(|| whole_or_none(legend_row(palette).children(legend))))
 }
 
 fn legend_row(palette: &Palette) -> Div {
