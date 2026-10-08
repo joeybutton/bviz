@@ -15,7 +15,8 @@ use crate::intern::{Id, Names};
 use crate::joint::build_joint;
 use crate::sources::{Deps, Sources};
 use crate::test_support::{
-    self, boolean, explicit, label_list, selector_list, string, string_list, through,
+    self, boolean, explicit, explicit_where, label_list, selector_list, string, string_list,
+    through,
 };
 use bazel_query_proto::blaze_query::Attribute;
 use bazel_query_proto::blaze_query::attribute::Discriminator as AttributeType;
@@ -333,6 +334,20 @@ fn abstract_query_test_packages() -> Universe {
                 .map(|output| test_support::generated(output, name)),
         );
     }
+    targets.extend(configurable_targets());
+    for (name, testonly) in [("//t:t", false), ("//t:t_test", true)] {
+        let attributes = vec![test_support::boolean("testonly", testonly)];
+        let inputs = ["//t:t.cc", "//t:r"];
+        targets.push(test_support::rule(name, "cc_library", &inputs, attributes));
+    }
+    let joint = build_joint(None, None, Some(&targets), false);
+    Universe::of_joint(joint).0
+}
+
+/// AbstractQueryTest's package `configurable`, as
+/// [`abstract_query_test_packages`] shows its BUILD file.
+fn configurable_targets() -> Vec<bazel_query_proto::blaze_query::Target> {
+    let mut targets = Vec::new();
     let configurable = [
         ("//configurable:main", "cc_binary"),
         ("//configurable:adep", "cc_library"),
@@ -366,13 +381,7 @@ fn abstract_query_test_packages() -> Universe {
         targets.push(test_support::rule(name, class, &inputs, attributes));
         targets.push(test_support::source(&source));
     }
-    for (name, testonly) in [("//t:t", false), ("//t:t_test", true)] {
-        let attributes = vec![test_support::boolean("testonly", testonly)];
-        let inputs = ["//t:t.cc", "//t:r"];
-        targets.push(test_support::rule(name, "cc_library", &inputs, attributes));
-    }
-    let joint = build_joint(None, None, Some(&targets), false);
-    Universe::of_joint(joint).0
+    targets
 }
 
 /// The attributes `bazel query --output=proto` writes for the rule `name` of
@@ -1189,5 +1198,396 @@ fn leaves_tool_dependencies_out_as_cquery_does() {
     assert_eq!(
         eval_to_string(&through(&joint, every), "deps(//test:my_rule)"),
         "//test:dep //test:exec_dep //test:my_rule //test:target_dep"
+    );
+}
+
+/// An output list as `bazel query --output=proto` writes one.
+fn output_list(name: &str, values: &[&str]) -> Attribute {
+    Attribute {
+        r#type: AttributeType::OutputList as i32,
+        ..label_list(name, values)
+    }
+}
+
+/// AbstractQueryTest's `testLabelsOperator`, over the packages of its
+/// `writeBuildFiles3` and `writeBuildFilesWithImplicitAttribute` as `bazel
+/// query --output=proto` writes them, with the attributes its cases read,
+/// and package `configurable` of [`abstract_query_test_packages`]:
+///
+/// ```text
+/// # a/BUILD
+/// genrule(name='a', srcs=['//b', '//c'], outs=['out'], cmd=':')
+/// exports_files(['a2'])
+/// # b/BUILD, and c/BUILD alike
+/// genrule(name='b', srcs=['//d'], outs=['out'], cmd=':')
+/// # d/BUILD
+/// exports_files(['d'])
+/// # k/BUILD, whose rule's `_implicit` attribute defaults to '//k:implicit'
+/// has_implicit_attr(name='k', srcs=['k.txt'])
+/// filegroup(name='implicit')
+/// ```
+#[test]
+fn reads_labels_as_bazel_does() {
+    use test_support::{generated, label, source};
+    let genrule = |package: &str, srcs: &[&str]| {
+        let name = format!("//{package}:{package}");
+        let out = format!("//{package}:out");
+        let attributes = vec![
+            explicit(label_list("srcs", srcs)),
+            explicit(output_list("outs", &[&out])),
+            explicit(string("cmd", ":")),
+            label_list("data", &[]),
+        ];
+        [
+            declared_rule(&name, "genrule", srcs, attributes),
+            generated(&out, &name),
+        ]
+    };
+    let mut targets: Vec<_> = [
+        genrule("a", &["//b:b", "//c:c"]),
+        genrule("b", &["//d:d"]),
+        genrule("c", &["//d:d"]),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    targets.extend([
+        source("//a:a2"),
+        source("//d:d"),
+        declared_rule(
+            "//k:k",
+            "has_implicit_attr",
+            &["//k:k.txt", "//k:implicit"],
+            vec![
+                explicit(label_list("srcs", &["//k:k.txt"])),
+                label("$implicit", "//k:implicit"),
+            ],
+        ),
+        source("//k:k.txt"),
+        declared_rule(
+            "//k:implicit",
+            "filegroup",
+            &[],
+            vec![label_list("srcs", &[])],
+        ),
+    ]);
+    targets.extend(configurable_targets());
+    let joint = build_joint(None, None, Some(&targets), false);
+    let universe = through(&joint, Sources::reading(&joint.capabilities));
+    let eval = |expr| eval_to_string(&universe, expr);
+
+    // srcs:
+    assert_eq!(eval("labels(srcs, //a)"), eval("//b + //c"));
+    assert_eq!(eval("labels(srcs, //b)"), eval("//d"));
+    assert_eq!(eval("labels(srcs, //b + //a)"), eval("//b + //c + //d"));
+    // outs:
+    assert_eq!(eval("labels(outs, //a)"), eval("//a:out"));
+    assert_eq!(eval("labels(outs, //b)"), eval("//b:out"));
+    assert_eq!(eval("labels(outs, //d)"), "");
+    // empty:
+    assert_eq!(eval("labels(data, //b + //a)"), "");
+    // no such attribute
+    assert_eq!(eval("labels(no_such_attr, //b)"), "");
+    // singleton LABEL:
+    assert_eq!(eval("labels(srcs, //k)"), eval("//k:k.txt"));
+    assert_eq!(eval("labels('$implicit', //k)"), eval("//k:implicit"));
+    // Configurable deps:
+    assert_eq!(
+        eval("labels(\"deps\", //configurable:main)"),
+        eval("//configurable:adep + //configurable:bdep + //configurable:defaultdep")
+    );
+}
+
+/// A test rule `name` of `class` as `bazel query --output=proto` writes it:
+/// its `tags`, and its `size`, written in its BUILD file where `size` is
+/// given and Bazel's default otherwise.
+fn test_rule(
+    name: &str,
+    class: &str,
+    tags: &[&str],
+    size: Option<&str>,
+) -> bazel_query_proto::blaze_query::Target {
+    let tags = explicit_where(!tags.is_empty(), string_list("tags", tags));
+    let size = match size {
+        Some(size) => explicit(string("size", size)),
+        None => string("size", "medium"),
+    };
+    declared_rule(name, class, &[], vec![tags, size])
+}
+
+/// A test suite `name` as `bazel query --output=proto` writes it: its `tags`,
+/// `tests` and `$implicit_tests`, `implicit` holding the tests of its package
+/// its tags admit but those tagged `manual`.
+fn test_suite(
+    name: &str,
+    tags: &[&str],
+    tests: &[&str],
+    implicit: &[&str],
+) -> bazel_query_proto::blaze_query::Target {
+    let mut attributes = vec![explicit_where(!tags.is_empty(), string_list("tags", tags))];
+    attributes.extend(test_support::suite_tests(tests, implicit));
+    let inputs: Vec<&str> = tests.iter().chain(implicit).copied().collect();
+    declared_rule(name, "test_suite", &inputs, attributes)
+}
+
+/// The universe of a query of `targets`.
+fn queried(targets: &[bazel_query_proto::blaze_query::Target]) -> Universe {
+    let joint = build_joint(None, None, Some(targets), false);
+    through(&joint, Sources::reading(&joint.capabilities))
+}
+
+/// AbstractQueryTest's cases of `tests()`, each over its packages as `bazel
+/// query --output=proto` writes them. `testStrictTestSuiteWithFile` and
+/// `testAmbiguousAllResolvesToTestSuiteNamedAll` run under
+/// `--strict_test_suite`, which bviz offers no counterpart of, and
+/// `testTestsOperatorReportsMissingTargets` fails on a target its package
+/// lacks, which bviz cannot tell from one the dump leaves out.
+#[test]
+fn expands_test_suites_as_bazel_does() {
+    use test_support::source;
+
+    // testTestsOperatorExpandsTestsAndExcludesNonTests:
+    // test_suite(name='a')
+    // foo_test(name='foo_test', srcs=['foo_test.sh'])
+    // foo_binary(name='cc_binary')
+    let universe = queried(&[
+        test_suite("//a:a", &[], &[], &["//a:foo_test"]),
+        test_rule("//a:foo_test", "foo_test", &[], None),
+        declared_rule(
+            "//a:cc_binary",
+            "foo_binary",
+            &[],
+            vec![string_list("tags", &[])],
+        ),
+    ]);
+    assert_eq!(eval_to_string(&universe, "tests(//a)"), "//a:foo_test");
+
+    // testTestsOperatorFiltersByTagSizeAndEnv:
+    // test_suite(name='large_tests', tags=['large'])
+    // test_suite(name='prod_tests', tags=['prod'])
+    // test_suite(name='foo_tests', tags=['foo'])
+    // foo_test(name='large_test', size='large', srcs=['foo_test.sh'])
+    // foo_test(name='prod_test', tags=['prod'], srcs=['py_test.py'])
+    // foo_test(name='foo_test', tags=['foo'])
+    let universe = queried(&[
+        test_suite("//b:large_tests", &["large"], &[], &["//b:large_test"]),
+        test_suite("//b:prod_tests", &["prod"], &[], &["//b:prod_test"]),
+        test_suite("//b:foo_tests", &["foo"], &[], &["//b:foo_test"]),
+        test_rule("//b:large_test", "foo_test", &[], Some("large")),
+        test_rule("//b:prod_test", "foo_test", &["prod"], None),
+        test_rule("//b:foo_test", "foo_test", &["foo"], None),
+    ]);
+    let eval = |expr| eval_to_string(&universe, expr);
+    assert_eq!(eval("tests(//b:large_tests)"), eval("//b:large_test"));
+    assert_eq!(eval("tests(//b:prod_tests)"), eval("//b:prod_test"));
+    assert_eq!(eval("tests(//b:foo_tests)"), eval("//b:foo_test"));
+
+    // testTestsOperatorFiltersByNegativeTag:
+    // test_suite(name='foo_tests', tags=['foo'])
+    // test_suite(name='bar_tests', tags=['bar'])
+    // test_suite(name='foo_notbar_tests', tags=['foo', '-bar'])
+    // py_test(name='py_test', tags=['blah', 'prod'], srcs=['py_test.py'])
+    // cc_test(name='cc_test', tags=['foo'])
+    // cc_test(name='cc_test2', tags=['bar'])
+    // cc_test(name='cc_test3', tags=['foo', 'bar'])
+    let universe = queried(&[
+        test_suite(
+            "//b:foo_tests",
+            &["foo"],
+            &[],
+            &["//b:cc_test", "//b:cc_test3"],
+        ),
+        test_suite(
+            "//b:bar_tests",
+            &["bar"],
+            &[],
+            &["//b:cc_test2", "//b:cc_test3"],
+        ),
+        test_suite(
+            "//b:foo_notbar_tests",
+            &["foo", "-bar"],
+            &[],
+            &["//b:cc_test"],
+        ),
+        test_rule("//b:py_test", "py_test", &["blah", "prod"], None),
+        test_rule("//b:cc_test", "cc_test", &["foo"], None),
+        test_rule("//b:cc_test2", "cc_test", &["bar"], None),
+        test_rule("//b:cc_test3", "cc_test", &["foo", "bar"], None),
+    ]);
+    let eval = |expr| eval_to_string(&universe, expr);
+    assert_eq!(eval("tests(//b:foo_notbar_tests)"), eval("//b:cc_test"));
+    assert_eq!(
+        eval("tests(//b:foo_tests)"),
+        eval("//b:cc_test + //b:cc_test3")
+    );
+    assert_eq!(
+        eval("tests(//b:bar_tests)"),
+        eval("//b:cc_test2 + //b:cc_test3")
+    );
+
+    // testTestsOperatorCrossesPackages:
+    // c/BUILD: test_suite(name='c', tests=['//d:suite'])
+    // d/BUILD: test_suite(name='suite')
+    //          foo_test(name='foo_test', srcs=['foo_test.sh'])
+    let universe = queried(&[
+        test_suite("//c:c", &[], &["//d:suite"], &[]),
+        test_suite("//d:suite", &[], &[], &["//d:foo_test"]),
+        test_rule("//d:foo_test", "foo_test", &[], None),
+    ]);
+    assert_eq!(eval_to_string(&universe, "tests(//c)"), "//d:foo_test");
+
+    // testTestsOperatorHandlesCyclesGracefully:
+    // c/BUILD: test_suite(name='c', tests=['//d'])
+    // d/BUILD: test_suite(name='d', tests=['//c'])
+    let universe = queried(&[
+        test_suite("//c:c", &[], &["//d:d"], &[]),
+        test_suite("//d:d", &[], &["//c:c"], &[]),
+    ]);
+    assert_eq!(eval_to_string(&universe, "tests(//c)"), "");
+
+    // testTestSuiteInTestsAttributeAndViceVersa:
+    // test_suite(name='cherry', tests=[':suite', ':direct'])
+    // test_suite(name='suite', tests=[':indirect'])
+    // foo_test(name='direct', srcs=['direct.sh'])
+    // foo_test(name='indirect', srcs=['indirect.sh'])
+    let universe = queried(&[
+        test_suite(
+            "//cherry:cherry",
+            &[],
+            &["//cherry:suite", "//cherry:direct"],
+            &[],
+        ),
+        test_suite("//cherry:suite", &[], &["//cherry:indirect"], &[]),
+        test_rule("//cherry:direct", "foo_test", &[], None),
+        test_rule("//cherry:indirect", "foo_test", &[], None),
+    ]);
+    let eval = |expr| eval_to_string(&universe, expr);
+    assert_eq!(
+        eval("tests(//cherry:cherry)"),
+        eval("//cherry:direct + //cherry:indirect")
+    );
+
+    // testTestSuiteWithFile:
+    // test_suite(name='a', tests=['a.txt'])
+    let universe = queried(&[
+        test_suite("//x:a", &[], &["//x:a.txt"], &[]),
+        source("//x:a.txt"),
+    ]);
+    assert_eq!(eval_to_string(&universe, "tests(//x:a)"), "");
+    assert_eq!(
+        eval_to_string(&universe, "deps(//x:a)"),
+        eval_to_string(&universe, "//x:a + //x:a.txt")
+    );
+}
+
+/// ConfiguredTargetQuerySemanticsTest's `labels()` cases, over the package
+/// of its `setUpLabelsFunctionTests` as a cquery under `--transitions`
+/// writes it: `my_rule` built in the top-level configuration (1), and each
+/// dependency in a configuration an attribute's transition reaches, a patch
+/// (2, 4) or the two sides of a split (3, 5):
+///
+/// ```text
+/// rule_with_transitions(
+///     name = "my_rule",
+///     patch_dep = ":dep-1",
+///     patch_dep_list = [":dep-3", ":dep-4"],
+///     split_dep = ":dep-2",
+///     string_dep = "some string",
+/// )
+/// no_attribute_rule(name = "dep-1")
+/// no_attribute_rule(name = "dep-2")
+/// no_attribute_rule(name = "dep-3")
+/// no_attribute_rule(name = "dep-4")
+/// ```
+#[test]
+fn reads_configured_labels_as_cquery_does() {
+    use test_support::{configuration, configured, configured_inputs, label};
+    let deps = [
+        ("//test:dep-1", Some(2)),
+        ("//test:dep-2", Some(3)),
+        ("//test:dep-2", Some(5)),
+        ("//test:dep-3", Some(4)),
+        ("//test:dep-4", Some(4)),
+    ];
+    let labels: Vec<&str> = deps.iter().map(|&(label, _)| label).collect();
+    let mut my_rule = declared_rule(
+        "//test:my_rule",
+        "rule_with_transitions",
+        &labels,
+        vec![
+            explicit(label("patch_dep", "//test:dep-1")),
+            explicit(label_list(
+                "patch_dep_list",
+                &["//test:dep-3", "//test:dep-4"],
+            )),
+            explicit(label("split_dep", "//test:dep-2")),
+            explicit(string("string_dep", "some string")),
+            string_list("tags", &[]),
+        ],
+    );
+    my_rule.rule.as_mut().expect("a rule").configured_rule_input = configured_inputs(&deps);
+    let mut results = vec![configured(my_rule, 1)];
+    for (dep, config) in deps {
+        let rule = declared_rule(
+            dep,
+            "no_attribute_rule",
+            &[],
+            vec![string_list("tags", &[])],
+        );
+        results.push(configured(rule, config.expect("a configuration")));
+    }
+    let checksums = [
+        "0a1b2c3d4e5f",
+        "1b2c3d4e5f60",
+        "2c3d4e5f6071",
+        "3d4e5f607182",
+        "4e5f60718293",
+    ];
+    let configurations = (1..)
+        .zip(checksums)
+        .map(|(id, checksum)| configuration(id, checksum, "k8-fastbuild", false))
+        .collect();
+    let cquery = [CqueryResult {
+        results,
+        configurations,
+    }];
+    let joint = build_joint(None, Some(&cquery), None, false);
+    let universe = through(&joint, Sources::reading(&joint.capabilities));
+    let names = &joint.names;
+    let eval = |expr: &str| universe.evaluate(&parse(expr).unwrap());
+    let configured = |expr: &str| configured_targets(&universe, names, &eval(expr).unwrap());
+    let target_configuration = format!("#{}", checksums[0]);
+    let elsewhere = |built: &[String]| {
+        built
+            .iter()
+            .all(|name| !name.ends_with(&target_configuration))
+    };
+
+    // testLabelFunction_getsCorrectConfigurations,
+    // testLabelFunction_getCorrectlyConfiguredDeps
+    let patch_dep = configured("labels('patch_dep', //test:my_rule)");
+    assert_eq!(patch_dep.len(), 1);
+    assert!(elsewhere(&patch_dep), "{patch_dep:?}");
+    // testLabelsFunction_splitTransitionAttribute
+    let split_deps = configured("labels('split_dep', //test:my_rule)");
+    assert_eq!(split_deps.len(), 2);
+    assert!(elsewhere(&split_deps), "{split_deps:?}");
+    // testLabelsFunction_labelListAttribute
+    let list_deps = configured("labels('patch_dep_list', //test:my_rule)");
+    assert_eq!(list_deps.len(), 2);
+    assert!(elsewhere(&list_deps), "{list_deps:?}");
+    // testLabelsFunction_errorsOnBadAttribute
+    assert_eq!(
+        eval("labels('fake_attr', //test:my_rule)")
+            .unwrap_err()
+            .message,
+        "in 'fake_attr' of rule //test:my_rule: configured target of type \
+         rule_with_transitions does not have attribute 'fake_attr'"
+    );
+    // testLabelsFunction_nonLabelAttribute
+    assert!(
+        eval("labels('string_dep', //test:my_rule)")
+            .unwrap()
+            .is_clear()
     );
 }
