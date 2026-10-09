@@ -21,6 +21,9 @@ import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.LabelConverter;
 import com.google.devtools.build.lib.packages.LabelPrinter;
+import com.google.devtools.build.lib.packages.PackageGroupsRuleVisibility;
+import com.google.devtools.build.lib.packages.PackageSpecification;
+import com.google.devtools.build.lib.packages.PackageSpecification.PackageGroupContents;
 import com.google.devtools.build.lib.packages.RuleVisibility;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
@@ -52,6 +55,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -646,10 +650,132 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
       return attribute == null ? List.of() : printed(attribute);
     }
 
+    /**
+     * What {@code BlazeTargetAccessor.getVisibility} gives: its own package, and what the
+     * visibility {@code visibility} reads grants, a package group's contents with those of the
+     * groups it includes, each once.
+     */
     @Override
-    public ImmutableSet<QueryVisibility<Node>> getVisibility(QueryExpression caller, Node node) {
-      throw new UnsupportedOperationException();
+    public ImmutableSet<QueryVisibility<Node>> getVisibility(QueryExpression caller, Node node)
+        throws QueryException {
+      ImmutableSet.Builder<QueryVisibility<Node>> result = ImmutableSet.builder();
+      result.add(QueryVisibility.samePackage(node, packagePaths));
+      RuleVisibility visibility = visibility(node);
+      if (visibility.equals(RuleVisibility.PUBLIC)) {
+        result.add(QueryVisibility.everything());
+      } else if (visibility instanceof PackageGroupsRuleVisibility groups) {
+        for (Label group : groups.getPackageGroups()) {
+          addPackageGroups(caller, group, result, new HashSet<>());
+        }
+        result.add(contained(groups.getDirectPackages()));
+      }
+      return result.build();
     }
+  }
+
+  /**
+   * The accessor {@code QueryVisibility.samePackage} reads a target's package through: its path
+   * alone, as {@code BlazeTargetAccessor.getPackage} gives it ({@code PackageMetadata.getName}).
+   */
+  private final Accessor packagePaths =
+      new Accessor() {
+        @Override
+        public String getPackage(Node node) {
+          return node.label.getPackageFragment().getPathString();
+        }
+      };
+
+  /**
+   * The visibility {@code Target.getVisibility} gives {@code node}: a rule's as its {@code
+   * visibility} attribute declares it, private where the proto states none; a source file's as its
+   * own labels declare it; an output file's its generating rule's; a package group's public.
+   */
+  private RuleVisibility visibility(Node node) {
+    List<String> declared;
+    switch (node.target.getType()) {
+      case RULE -> {
+        Build.Attribute attribute = stated(node, "visibility");
+        declared = attribute == null ? List.of() : attribute.getStringListValueList();
+      }
+      case SOURCE_FILE -> declared = node.target.getSourceFile().getVisibilityLabelList();
+      case GENERATED_FILE -> {
+        String rule = node.target.getGeneratedFile().getGeneratingRule();
+        Node generating = byName.get(Label.parseCanonicalUnchecked(rule).getCanonicalForm());
+        return generating == null ? RuleVisibility.PRIVATE : visibility(generating);
+      }
+      case PACKAGE_GROUP -> {
+        return RuleVisibility.PUBLIC;
+      }
+      default -> {
+        return RuleVisibility.PRIVATE;
+      }
+    }
+    try {
+      List<Label> labels = declared.stream().map(Label::parseCanonicalUnchecked).toList();
+      return (RuleVisibility) PARSE_VISIBILITY.invoke(null, labels);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException(declared.toString(), e);
+    }
+  }
+
+  /**
+   * Adds the contents of the package group {@code label} names and of those it includes, as {@code
+   * BlazeTargetAccessor.addAllPackageGroupsRecursive} does: a group once, a label naming a target
+   * that is no package group nothing, and one naming no target of the dump failing, as Bazel's
+   * {@code getTarget} does, with bviz's wording, the dump holding no BUILD file for Bazel's.
+   */
+  private void addPackageGroups(
+      QueryExpression caller,
+      Label label,
+      ImmutableSet.Builder<QueryVisibility<Node>> result,
+      Set<Label> seen)
+      throws QueryException {
+    if (!seen.add(label)) {
+      return;
+    }
+    Node node = byName.get(label.getCanonicalForm());
+    if (node == null) {
+      String message =
+          "visible() cannot read the visibility label '"
+              + label.getCanonicalForm()
+              + "', which names no target of the query; a query of //...:*, or of deps() over"
+              + " the targets, holds every package group a visibility names";
+      throw new QueryException(
+          caller, message, notFound(message).getDetailedExitCode().getFailureDetail());
+    }
+    if (node.target.getType() != Build.Target.Discriminator.PACKAGE_GROUP) {
+      return;
+    }
+    Build.PackageGroup group = node.target.getPackageGroup();
+    for (String include : group.getIncludedPackageGroupList()) {
+      addPackageGroups(caller, Label.parseCanonicalUnchecked(include), result, seen);
+    }
+    List<PackageSpecification> specs = new ArrayList<>();
+    for (String written : group.getContainedPackageList()) {
+      try {
+        // The proto writes each package canonically, a main-repository one with no repository.
+        specs.add(
+            PackageSpecification.fromString(
+                RepositoryMapping.EMPTY,
+                RepositoryName.MAIN,
+                written,
+                /* allowPublicPrivate= */ true,
+                /* repoRootMeansCurrentRepo= */ true));
+      } catch (Exception e) {
+        throw new IllegalStateException(written, e);
+      }
+    }
+    result.add(contained(PackageGroupContents.create(ImmutableList.copyOf(specs))));
+  }
+
+  /** {@code BlazeQueryVisibility} over a node. */
+  private static QueryVisibility<Node> contained(PackageGroupContents contents) {
+    return new QueryVisibility<>() {
+      @Override
+      public boolean contains(Node node) {
+        return contents.containsPackage(node.label.getPackageIdentifier());
+      }
+    };
   }
 
   /** The attribute {@code name} the rule {@code node} states, or null. */

@@ -26,6 +26,16 @@
 //! hold tests of drawn tags and sizes, and test suites of drawn filtering tags
 //! naming tests, suites, other targets and themselves, nested and in cycles.
 //!
+//! `visible` reads a target's visibility through Bazel's own `VisibleFunction`
+//! and `QueryVisibility`, over what the oracle's accessor gives as
+//! `BlazeTargetAccessor.getVisibility` does, a package group's entries parsed
+//! by Bazel's `PackageSpecification`. The graphs drawn hold packages under
+//! `java/` and `javatests/`, visibilities of every kind of label, package
+//! groups naming packages, negatively or not, and including one another, and
+//! output files whose rule the dump lacks. Some name a package group the dump
+//! lacks, where Bazel's `getTarget` fails, which the oracle's accessor fails
+//! with bviz's wording.
+//!
 //! `somepath` and `some` may each answer any of several sets. Drawn only at
 //! the top of an expression, where nothing reads their answer further, each is
 //! checked for being one Bazel's engine could give: a path of fewest edges
@@ -80,6 +90,9 @@ const PACKAGES: &[(&str, &str)] = &[
     ("", "a/b/c"),
     ("", "ab"),
     ("", "d"),
+    ("", "java/x"),
+    ("", "javatests/x"),
+    ("", "javatests/y"),
     ("@@ext+", ""),
     ("@@ext+", "p"),
     ("@@ext+", "p/q"),
@@ -97,11 +110,16 @@ const RULE_CLASSES: &[&str] = &[
 ];
 const TEST_TAGS: &[&str] = &["manual", "local", "flaky", "x"];
 const TEST_SIZES: &[&str] = &["small", "medium", "large"];
+/// The most entries a drawn package group's `packages` holds, many enough
+/// that a negative one often takes out a package a positive one names.
+const MAX_CONTAINED: usize = 6;
 const SUITE_TAGS: &[&str] = &[
     "manual", "-flaky", "+x", "x", "-local", "small", "-small", "+large",
 ];
 
 /// Patterns naming what no graph holds, or that no graph can resolve.
+/// The label of a package group no graph holds.
+const ABSENT_GROUP: &str = "//zz:group";
 const MISSING: &[&str] = &[
     "//zz:x",
     "//a:nope",
@@ -251,30 +269,43 @@ impl Graph {
                 files.push(generated(&output, &rules[owner].0));
                 labels.push(output);
             }
-            if rng.u8(..3) == 0 {
+            if rng.bool() {
                 groups.push(label("group"));
                 labels.push(label("group"));
             }
+            // An output file whose rule the dump lacks.
+            if rng.u8(..8) == 0 {
+                let output = label("orphan.o");
+                files.push(generated(&output, &label("gone")));
+                labels.push(output);
+            }
         }
+        let drawn_from = Labels {
+            all: &labels,
+            groups: &groups,
+            absent: (rng.u8(..4) == 0).then_some(ABSENT_GROUP),
+        };
         for file in &mut files {
             if let Some(source) = file.source_file.as_mut() {
-                source.package_group = (0..rng.usize(..3))
-                    .filter_map(|_| Some(groups.get(rng.usize(..groups.len().max(1)))?.clone()))
-                    .collect();
-                source.package_group.dedup();
-                // The visibility the file declares, which names exactly the
-                // groups it depends on, as Bazel derives the one from the other.
-                source.visibility_label = source.package_group.clone();
+                let declared = visibility_labels(rng, &drawn_from);
+                source.package_group = visibility_dependencies(&declared);
+                source.visibility_label = declared;
             }
         }
         for group in &groups {
             let mut includes: Vec<String> = (0..rng.usize(..3))
-                .map(|_| groups[rng.usize(..groups.len())].clone())
+                .map(|_| match drawn_from.absent {
+                    Some(absent) if rng.u8(..8) == 0 => absent.to_string(),
+                    _ => groups[rng.usize(..groups.len())].clone(),
+                })
                 .filter(|included| included != group)
                 .collect();
             includes.sort();
             includes.dedup();
-            files.push(package_group(group, includes));
+            let contained = (0..rng.usize(..MAX_CONTAINED))
+                .map(|_| contained_package(rng, &packages))
+                .collect();
+            files.push(package_group(group, contained, includes));
         }
         let mut targets: Vec<Target> = Vec::with_capacity(rules.len() + files.len());
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
@@ -317,7 +348,7 @@ impl Graph {
                 }),
                 _ => {}
             }
-            attributes.extend(typed_attributes(rng, &labels, &groups));
+            attributes.extend(typed_attributes(rng, &drawn_from));
             attributes.sort_by(|a, b| a.name.cmp(&b.name));
             // A rule's inputs are what its attributes name and what aspects
             // add, which no attribute does.
@@ -466,25 +497,28 @@ fn suite_attributes(rng: &mut Rng, tested: &[String], labels: &[String]) -> [Att
     ]
 }
 
-/// The package groups a drawn rule's visibility names, as Bazel's
-/// `RuleVisibility` reads them, each written without the repository a
-/// main-repository label may be spelled with; and whether the BUILD file sets
-/// the visibility.
+/// The package groups a drawn rule's visibility names, as
+/// [`visibility_dependencies`] reads them; and whether the BUILD file sets the
+/// visibility.
 fn visibility_groups(target: &Target) -> Option<(Vec<String>, bool)> {
     let rule = target.rule.as_ref()?;
     let visibility = rule.attribute.iter().find(|a| a.name == "visibility")?;
-    let labels: Vec<String> = visibility
-        .string_list_value
-        .iter()
-        .map(|l| unspelled(l))
-        .collect();
-    let groups = match labels.iter().any(|label| label == PUBLIC) {
-        true => Vec::new(),
-        false => (labels.into_iter())
-            .filter(|label| label != PRIVATE && !label.ends_with(":__pkg__"))
-            .collect(),
-    };
+    let groups = visibility_dependencies(&visibility.string_list_value);
     Some((groups, visibility.explicitly_specified == Some(true)))
+}
+
+/// The package groups a visibility declaring `labels` names, as Bazel's
+/// `RuleVisibility` reads them, each written without the repository a
+/// main-repository label may be spelled with.
+fn visibility_dependencies(labels: &[String]) -> Vec<String> {
+    let labels: Vec<String> = labels.iter().map(|l| unspelled(l)).collect();
+    if labels.iter().any(|label| label == PUBLIC) {
+        return Vec::new();
+    }
+    let direct = |label: &str| label.ends_with(":__pkg__") || label.ends_with(":__subpackages__");
+    (labels.into_iter())
+        .filter(|label| label != PRIVATE && !direct(label))
+        .collect()
 }
 
 const PUBLIC: &str = "//visibility:public";
@@ -576,15 +610,39 @@ fn generated(name: &str, rule: &str) -> Target {
     }
 }
 
-fn package_group(name: &str, includes: Vec<String>) -> Target {
+fn package_group(name: &str, contained: Vec<String>, includes: Vec<String>) -> Target {
     Target {
         r#type: Discriminator::PackageGroup as i32,
         package_group: Some(PackageGroup {
             name: name.to_string(),
+            contained_package: contained,
             included_package_group: includes,
-            ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// An entry of a package group's `packages`, as Bazel writes one by default:
+/// every package or none, or one of `packages` or one no target is in alone
+/// or with those beneath it, now and then negative.
+fn contained_package(rng: &mut Rng, packages: &[(String, String)]) -> String {
+    let (repo, path) = match rng.u8(..12) {
+        0 => return "public".to_string(),
+        1 => return "private".to_string(),
+        2 => ("", "zz"),
+        _ => {
+            let (repo, path) = &packages[rng.usize(..packages.len())];
+            (repo.as_str(), path.as_str())
+        }
+    };
+    let written = match (rng.bool(), path) {
+        (false, path) => format!("{repo}//{path}"),
+        (true, "") => format!("{repo}//..."),
+        (true, path) => format!("{repo}//{path}/..."),
+    };
+    match rng.u8(..3) {
+        0 => format!("-{written}"),
+        _ => written,
     }
 }
 
@@ -598,11 +656,7 @@ const DISTRIBS: &[&str] = &["a", "b c"];
 /// Typed attributes a rule states besides its name, tags and `testonly`, as
 /// Bazel writes them by default: some of those a rule may have, some written
 /// in its BUILD file and some as `select`s.
-fn typed_attributes(rng: &mut Rng, labels: &[String], groups: &[String]) -> Vec<Attribute> {
-    let labels = &Labels {
-        all: labels,
-        groups,
-    };
+fn typed_attributes(rng: &mut Rng, labels: &Labels) -> Vec<Attribute> {
     let mut drawn: Vec<(&str, Draw)> = vec![
         ("srcs", |rng, labels| {
             Value::Labels(many(rng, |rng| label(rng, labels)))
@@ -672,7 +726,7 @@ fn typed_attributes(rng: &mut Rng, labels: &[String], groups: &[String]) -> Vec<
             Value::Outputs(many(rng, |rng| label(rng, labels)))
         }),
         ("visibility", |rng, labels| {
-            Value::NodepLabels(many(rng, |rng| visibility_label(rng, labels)))
+            Value::NodepLabels(visibility_labels(rng, labels))
         }),
         ("licenses", |rng, labels| {
             let types = vec![pick(rng, &["notice", "restricted", "unencumbered"])];
@@ -708,6 +762,9 @@ type Draw = fn(&mut Rng, &Labels) -> Value;
 struct Labels<'a> {
     all: &'a [String],
     groups: &'a [String],
+    /// A label visibilities and includes may name that names no target of the
+    /// graph, which fails `visible` over a target reaching it.
+    absent: Option<&'a str>,
 }
 
 impl std::ops::Deref for Labels<'_> {
@@ -718,16 +775,30 @@ impl std::ops::Deref for Labels<'_> {
     }
 }
 
+/// The labels a visibility declares, at least one as Bazel writes them.
+fn visibility_labels(rng: &mut Rng, labels: &Labels) -> Vec<String> {
+    (0..rng.usize(1..3))
+        .map(|_| visibility_label(rng, labels))
+        .collect()
+}
+
 /// A label a visibility names: mostly a package group, now and then every
-/// package, one package directly, or a target no package group is.
+/// package or none, one package or a package and those beneath it directly,
+/// a target no package group is, or the graph's absent label.
 fn visibility_label(rng: &mut Rng, labels: &Labels) -> String {
-    match rng.u8(..8) {
+    if let Some(absent) = labels.absent.filter(|_| rng.u8(..16) == 0) {
+        return absent.to_string();
+    }
+    let package = |rng: &mut Rng| {
+        let (package, _) = labels[rng.usize(..labels.len())].rsplit_once(':').unwrap();
+        package.to_string()
+    };
+    match rng.u8(..10) {
         0 => PUBLIC.to_string(),
-        1 => {
-            let (package, _) = labels[rng.usize(..labels.len())].rsplit_once(':').unwrap();
-            format!("{package}:__pkg__")
-        }
-        2 => label(rng, labels),
+        1 => PRIVATE.to_string(),
+        2 => format!("{}:__pkg__", package(rng)),
+        3 => format!("{}:__subpackages__", package(rng)),
+        4 => label(rng, labels),
         _ if labels.groups.is_empty() => label(rng, labels),
         _ => {
             let at = rng.usize(..labels.groups.len());
@@ -1226,7 +1297,7 @@ impl Drawer<'_> {
         let (one, two) = (arg(), arg());
         let bounded = self.rng.bool();
         let depth = self.depth();
-        match self.rng.u8(..11) {
+        match self.rng.u8(..12) {
             0 if bounded => format!("deps({one}, {depth})"),
             0 => format!("deps({one})"),
             1 if bounded => format!("allrdeps({one}, {depth})"),
@@ -1244,6 +1315,20 @@ impl Drawer<'_> {
                 format!("attr({attribute}, {}, {one})", self.pick(patterns))
             }
             9 => format!("labels({}, {one})", self.pick(LABEL_ATTRIBUTES)),
+            // Mostly by one target over a wide pattern, as a seer in more
+            // than a package or two leaves little visible.
+            10 => {
+                let labels = &self.graph.labels;
+                let seer = match self.rng.u8(..4) {
+                    0 => one,
+                    _ => labels[self.rng.usize(..labels.len())].clone(),
+                };
+                let seen = match self.rng.bool() {
+                    true => WIDE[self.rng.usize(..WIDE.len())].to_string(),
+                    false => two,
+                };
+                format!("visible({seer}, {seen})")
+            }
             // Over the suites of a wide pattern, now and then, so that what
             // suites admit is often what names a test.
             _ if self.rng.bool() => {
