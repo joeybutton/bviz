@@ -6,7 +6,7 @@ use bazel_query_proto::blaze_query::{PackageGroup as PackageGroupPb, SourceFile}
 use super::AttributesBuilder;
 use crate::facets::{SparseFacet, SparseFacetBuilder, Sym};
 use crate::intern::Id;
-use crate::label::{RepoMapping, parse_package};
+use crate::label::{RepoMapping, encloses, parse_package};
 
 /// The label a visibility naming every package declares.
 const PUBLIC: &str = "//visibility:public";
@@ -45,7 +45,7 @@ impl<'a> Grant<'a> {
 
 /// A package: the repository part its canonical labels carry, empty for the
 /// main repository, and its path.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Package<S = Sym> {
     pub repo: S,
     pub path: S,
@@ -59,6 +59,35 @@ pub enum Packages<S = Sym> {
     Single(Package<S>),
     /// The package and every one beneath it in its repository.
     Beneath(Package<S>),
+}
+
+impl<S> Package<S> {
+    pub(crate) fn map<T>(self, f: impl Fn(S) -> T) -> Package<T> {
+        Package {
+            repo: f(self.repo),
+            path: f(self.path),
+        }
+    }
+}
+
+impl<S> Packages<S> {
+    pub(crate) fn map<T>(self, f: impl Fn(S) -> T) -> Packages<T> {
+        match self {
+            Packages::Single(package) => Packages::Single(package.map(f)),
+            Packages::Beneath(package) => Packages::Beneath(package.map(f)),
+        }
+    }
+}
+
+impl Packages<&str> {
+    pub(crate) fn hold(self, package: Package<&str>) -> bool {
+        match self {
+            Packages::Single(single) => single == package,
+            Packages::Beneath(root) => {
+                root.repo == package.repo && encloses(root.path, package.path)
+            }
+        }
+    }
 }
 
 /// What one entry of a package group's `packages` names.
@@ -352,6 +381,22 @@ mod tests {
         assert_eq!(read(&written), written);
         assert_eq!(read(&["private"]), [""; 0]);
         assert_eq!(read(&["@@//c", "legacy/path"]), ["//c", "//legacy/path"]);
+    }
+
+    #[test]
+    fn packages_hold_as_bazel_specifications_contain() {
+        let main = |path| Package { repo: "", path };
+        let ext = |path| Package {
+            repo: "@@ext+",
+            path,
+        };
+        assert!(Packages::Single(main("a")).hold(main("a")));
+        assert!(!Packages::Single(main("a")).hold(main("a/b")));
+        assert!(!Packages::Single(main("a")).hold(ext("a")));
+        assert!(Packages::Beneath(main("a")).hold(main("a/b")));
+        assert!(!Packages::Beneath(main("a")).hold(main("ab")));
+        assert!(Packages::Beneath(main("")).hold(main("x")));
+        assert!(!Packages::Beneath(main("")).hold(ext("x")));
     }
 
     #[test]

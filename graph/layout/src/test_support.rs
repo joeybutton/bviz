@@ -41,12 +41,19 @@ pub(crate) fn edges<'a>(graph: &Graph, names: &'a Names) -> HashSet<(&'a str, &'
 
 /// A package group including the groups `includes` names.
 pub(crate) fn package_group(name: &str, includes: &[&str]) -> Target {
+    package_group_of(name, &[], includes)
+}
+
+/// A package group naming `packages`, written as `bazel query --output=proto`
+/// writes them, and including the groups `includes` names.
+pub(crate) fn package_group_of(name: &str, packages: &[&str], includes: &[&str]) -> Target {
+    let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect();
     Target {
         r#type: Discriminator::PackageGroup as i32,
         package_group: Some(PackageGroup {
             name: name.to_string(),
-            included_package_group: includes.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
+            contained_package: strings(packages),
+            included_package_group: strings(includes),
         }),
         ..Default::default()
     }

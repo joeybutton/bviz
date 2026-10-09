@@ -950,10 +950,13 @@ impl Command {
     /// `rbuildfiles`, read under `--universe_scope`; cquery adds
     /// `CQUERY_FUNCTIONS` and aquery `AQUERY_FUNCTIONS`. aquery's target
     /// accessor reads no rule's prerequisites, failing `labels` and `tests`
-    /// of a test suite (`ConfiguredTargetValueAccessor.getPrerequisites`).
+    /// of a test suite (`ConfiguredTargetValueAccessor.getPrerequisites`),
+    /// and neither cquery's nor aquery's reads a visibility, failing
+    /// `visible` over any target (`ConfiguredTargetAccessor.getVisibility`).
     pub fn reads(self, function: Function) -> bool {
         match function {
             Function::Labels | Function::Tests => self != Command::Aquery,
+            Function::Visible => self == Command::Query,
             Function::AllRdeps
             | Function::RBuildFiles
             | Function::BuildFiles
@@ -970,8 +973,7 @@ impl Command {
             | Function::Rdeps
             | Function::SamePkgDirectRdeps
             | Function::Some
-            | Function::SomePath
-            | Function::Visible => true,
+            | Function::SomePath => true,
             Function::RepoCategory
             | Function::RuleCategory
             | Function::RunfilesPlumbing

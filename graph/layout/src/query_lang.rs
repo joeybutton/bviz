@@ -15,6 +15,7 @@ mod parse;
 mod prerequisites;
 mod stack;
 mod universe;
+mod visible;
 
 #[cfg(test)]
 mod bazel_goldens;

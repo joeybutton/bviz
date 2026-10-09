@@ -89,6 +89,10 @@ some of which Bazel sets by default:
   `all`)
 - aquery: `--include_artifacts` (default on)
 
+`visible()` reads the package groups each visibility names, which a query of
+`//...` leaves out, it naming rules alone; query `//...:*`, or `deps()` over
+the targets, to hold them.
+
 ### Trace profile
 
 ```sh

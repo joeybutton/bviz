@@ -208,6 +208,7 @@ pub(super) enum Evaluable {
     SomePath,
     Tests,
     ToolConfigured,
+    Visible,
 }
 
 impl Function {
@@ -361,7 +362,7 @@ impl Function {
             Function::SomePath => return Ok(Evaluable::SomePath),
             Function::Tests => return Ok(Evaluable::Tests),
             Function::ToolConfigured => return Ok(Evaluable::ToolConfigured),
-            Function::Visible => "each target's visibility",
+            Function::Visible => return Ok(Evaluable::Visible),
             Function::BuildFiles | Function::LoadFiles | Function::RBuildFiles => {
                 "the BUILD and .bzl files of each package"
             }

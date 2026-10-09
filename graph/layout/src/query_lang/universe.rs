@@ -60,6 +60,9 @@ pub struct Readable {
     /// How far the inputs state every attribute of each rule; `None` where
     /// neither of those describing rules, a query and a cquery, is read.
     rule_attributes: Option<Support>,
+    /// How far a query states every attribute of each rule; `None` where
+    /// none is read.
+    query_attributes: Option<Support>,
 }
 
 impl Readable {
@@ -85,6 +88,10 @@ impl Readable {
             rule_attributes: ([Input::Query, Input::Cquery].into_iter())
                 .any(|input| capabilities.inputs().contains(input))
                 .then(|| capabilities.support(Axis::Attributes)),
+            query_attributes: (capabilities.inputs().contains(Input::Query)).then(|| {
+                let query = capabilities.reading(Input::Query.into());
+                query.support(Axis::Attributes)
+            }),
         }
     }
 
@@ -113,6 +120,13 @@ impl Readable {
                 None => Err(format!("{name}() requires a query or a cquery")),
                 Some(Support::Unavailable { flag }) => {
                     Err(format!("{name}() requires a query or a cquery with {flag}"))
+                }
+                Some(Support::Available | Support::Partial { .. }) => Ok(()),
+            },
+            Function::Visible => match self.query_attributes {
+                None => Err(format!("{name}() is not supported on configured targets")),
+                Some(Support::Unavailable { flag }) => {
+                    Err(format!("{name}() requires a query with {flag}"))
                 }
                 Some(Support::Available | Support::Partial { .. }) => Ok(()),
             },

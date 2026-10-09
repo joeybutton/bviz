@@ -192,8 +192,9 @@ fn siblings_and_same_package_rdeps_stay_in_the_package() {
 fn a_function_reading_what_the_graph_lacks_says_what_it_needs() {
     let fixture = Fixture::new();
     assert_eq!(
-        fixture.error("visible(//a:lib, //b:app)"),
-        "visible() needs each target's visibility, which bviz does not load into its graph"
+        fixture.error("buildfiles(//a:lib)"),
+        "buildfiles() needs the BUILD and .bzl files of each package, which bviz does not load \
+         into its graph"
     );
 }
 
