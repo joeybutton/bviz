@@ -108,24 +108,25 @@ impl RepoMapping {
     }
 
     pub(crate) fn canonicalize_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
-        let Some(repo) = label.strip_prefix('@') else {
+        let Some((repo, _)) = label.split_once("//") else {
             return Cow::Borrowed(label);
         };
-        if let Some(canonical) = repo.strip_prefix('@') {
-            // `@@//pkg:t` is the main repository, whose canonical labels carry
-            // no repository part at all.
-            if canonical.starts_with("//") {
-                return Cow::Borrowed(canonical);
-            }
-            return Cow::Borrowed(label);
+        match self.canonicalize_repo(repo) {
+            Cow::Borrowed(canonical) => Cow::Borrowed(&label[repo.len() - canonical.len()..]),
+            Cow::Owned(canonical) => Cow::Owned(format!("{canonical}{}", &label[repo.len()..])),
         }
-        let Some((apparent, package)) = repo.split_once("//") else {
-            return Cow::Borrowed(label);
-        };
-        if self.canonical.contains(apparent) {
-            Cow::Owned(format!("@@{apparent}//{package}"))
-        } else {
-            Cow::Borrowed(label)
+    }
+
+    /// The repository part a canonical label of the repository `repo` names
+    /// carries: none for the main repository, which `@@` also names. Where
+    /// borrowed, it is `repo` or a suffix of it.
+    pub(crate) fn canonicalize_repo<'a>(&self, repo: &'a str) -> Cow<'a, str> {
+        match repo.strip_prefix('@') {
+            Some("@") => Cow::Borrowed(""),
+            Some(apparent) if !apparent.starts_with('@') && self.canonical.contains(apparent) => {
+                Cow::Owned(format!("@@{apparent}"))
+            }
+            _ => Cow::Borrowed(repo),
         }
     }
 }
