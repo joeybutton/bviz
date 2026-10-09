@@ -13,21 +13,16 @@ command line to change.
 
 ## Features
 
-### Build graph
+bviz reads these Bazel outputs, alone or together:
 
-The target and action graph from `query`, `cquery` and `aquery` output, merged
-into one graph to expand, search and filter.
-
-### Trace profile
-
-The timeline of a build's trace profile: what ran when, and flame graphs of
-where the time went, weighed by summed time or by share of the wall time.
-
-### Build event protocol
-
-The console output of a build, replayed from its build event log.
-
-bviz can open several files at once.
+- **`query`, `cquery` and `aquery` results:** one merged target and action
+  graph to explore, search and filter, with views of why one target depends on
+  another and what each dependency brings in.
+- **Trace profile:** a timeline of the build, flame graphs and statistics of
+  where the time went, and its critical path.
+- **Build event log:** the build's console output and the outcome of each
+  target.
+- **Execution log:** where the time of each spawn went.
 
 ## Install
 
