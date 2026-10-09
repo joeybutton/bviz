@@ -554,100 +554,102 @@ final class ProtoQueryEnvironment extends AbstractBlazeQueryEnvironment<ProtoQue
 
   @Override
   public TargetAccessor<Node> getAccessor() {
-    return new TargetAccessor<>() {
-      @Override
-      public String getTargetKind(Node node) {
-        return node.kind();
-      }
+    return new Accessor();
+  }
 
-      @Override
-      public String getLabel(Node node) {
-        return node.name();
-      }
+  private class Accessor implements TargetAccessor<Node> {
+    @Override
+    public String getTargetKind(Node node) {
+      return node.kind();
+    }
 
-      @Override
-      public String getPackage(Node node) {
-        return node.label.getPackageIdentifier().getCanonicalForm();
-      }
+    @Override
+    public String getLabel(Node node) {
+      return node.name();
+    }
 
-      @Override
-      public boolean isRule(Node node) {
-        return node.isRule();
-      }
+    @Override
+    public String getPackage(Node node) {
+      return node.label.getPackageIdentifier().getCanonicalForm();
+    }
 
-      @Override
-      public boolean isExecutableNonTestRule(Node node) {
-        throw new UnsupportedOperationException();
-      }
+    @Override
+    public boolean isRule(Node node) {
+      return node.isRule();
+    }
 
-      @Override
-      public boolean isTestRule(Node node) {
-        return node.isRule() && TargetUtils.isTestRuleName(node.target.getRule().getRuleClass());
-      }
+    @Override
+    public boolean isExecutableNonTestRule(Node node) {
+      throw new UnsupportedOperationException();
+    }
 
-      @Override
-      public boolean isTestSuite(Node node) {
-        return node.isRule()
-            && TargetUtils.isTestSuiteRuleName(node.target.getRule().getRuleClass());
-      }
+    @Override
+    public boolean isTestRule(Node node) {
+      return node.isRule() && TargetUtils.isTestRuleName(node.target.getRule().getRuleClass());
+    }
 
-      /**
-       * The targets {@code BlazeTargetAccessor.getPrerequisites} gives: those of the labels {@code
-       * AggregatingAttributeMapper.getReachableLabels} reaches without select keys, a label naming
-       * no target of the dump naming nothing, where Bazel would fail to load it. A visibility the
-       * BUILD file leaves unset is stored as none, whose default names nothing, where the proto
-       * writes the package's default.
-       */
-      @Override
-      public Iterable<Node> getPrerequisites(
-          QueryExpression caller, Node node, String attrName, String errorMsgPrefix) {
-        Set<Node> found = new LinkedHashSet<>();
-        Build.Attribute attribute = stated(node, attrName);
-        boolean unstored =
-            attribute != null
-                && attrName.equals("visibility")
-                && !attribute.getExplicitlySpecified();
-        if (attribute != null && !unstored) {
-          for (String label : reachableLabels(attribute)) {
-            Node target = byName.get(label);
-            if (target != null) {
-              found.add(target);
-            }
+    @Override
+    public boolean isTestSuite(Node node) {
+      return node.isRule()
+          && TargetUtils.isTestSuiteRuleName(node.target.getRule().getRuleClass());
+    }
+
+    /**
+     * The targets {@code BlazeTargetAccessor.getPrerequisites} gives: those of the labels {@code
+     * AggregatingAttributeMapper.getReachableLabels} reaches without select keys, a label naming
+     * no target of the dump naming nothing, where Bazel would fail to load it. A visibility the
+     * BUILD file leaves unset is stored as none, whose default names nothing, where the proto
+     * writes the package's default.
+     */
+    @Override
+    public Iterable<Node> getPrerequisites(
+        QueryExpression caller, Node node, String attrName, String errorMsgPrefix) {
+      Set<Node> found = new LinkedHashSet<>();
+      Build.Attribute attribute = stated(node, attrName);
+      boolean unstored =
+          attribute != null
+              && attrName.equals("visibility")
+              && !attribute.getExplicitlySpecified();
+      if (attribute != null && !unstored) {
+        for (String label : reachableLabels(attribute)) {
+          Node target = byName.get(label);
+          if (target != null) {
+            found.add(target);
           }
         }
-        return found;
       }
+      return found;
+    }
 
-      @Override
-      public List<String> getStringListAttr(Node node, String attrName) {
-        Build.Attribute attribute = stated(node, attrName);
-        return attribute == null ? List.of() : attribute.getStringListValueList();
-      }
+    @Override
+    public List<String> getStringListAttr(Node node, String attrName) {
+      Build.Attribute attribute = stated(node, attrName);
+      return attribute == null ? List.of() : attribute.getStringListValueList();
+    }
 
-      @Override
-      public String getStringAttr(Node node, String attrName) {
-        Build.Attribute attribute = stated(node, attrName);
-        return attribute == null || !attribute.hasStringValue() ? null : attribute.getStringValue();
-      }
+    @Override
+    public String getStringAttr(Node node, String attrName) {
+      Build.Attribute attribute = stated(node, attrName);
+      return attribute == null || !attribute.hasStringValue() ? null : attribute.getStringValue();
+    }
 
-      /**
-       * The values {@code TargetUtils.getAttrAsString} prints for an attribute the proto states,
-       * each converted to the attribute's type and printed by Bazel's own code.
-       */
-      @Override
-      public Iterable<String> getAttrAsString(Node node, String attrName) {
-        if (attrName.equals("name")) {
-          return List.of(node.label.getName());
-        }
-        Build.Attribute attribute = stated(node, attrName);
-        return attribute == null ? List.of() : printed(attribute);
+    /**
+     * The values {@code TargetUtils.getAttrAsString} prints for an attribute the proto states,
+     * each converted to the attribute's type and printed by Bazel's own code.
+     */
+    @Override
+    public Iterable<String> getAttrAsString(Node node, String attrName) {
+      if (attrName.equals("name")) {
+        return List.of(node.label.getName());
       }
+      Build.Attribute attribute = stated(node, attrName);
+      return attribute == null ? List.of() : printed(attribute);
+    }
 
-      @Override
-      public ImmutableSet<QueryVisibility<Node>> getVisibility(QueryExpression caller, Node node) {
-        throw new UnsupportedOperationException();
-      }
-    };
+    @Override
+    public ImmutableSet<QueryVisibility<Node>> getVisibility(QueryExpression caller, Node node) {
+      throw new UnsupportedOperationException();
+    }
   }
 
   /** The attribute {@code name} the rule {@code node} states, or null. */
