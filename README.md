@@ -2,7 +2,7 @@
 
 A graphical Bazel build visualization and inspection tool.
 
-![bviz with a trace profile, a dependency graph and a console replay open side by side](docs/screenshots/bviz.png)
+![bviz with a dependency graph, a trace profile, its flame graph and a console replay open side by side, split diagonally between the dark and light themes](docs/screenshots/bviz.png)
 
 Seeing what a Bazel build actually did is hard. bviz reads the outputs Bazel
 generates, such as query results, the trace profile and the build event log,
