@@ -1591,3 +1591,230 @@ fn reads_configured_labels_as_cquery_does() {
             .is_clear()
     );
 }
+
+/// A rule `name` of `class` as `bazel query --output=proto` writes it: its
+/// inputs, its `visibility`, and its tags left to their default.
+fn visible_rule(
+    name: &str,
+    class: &str,
+    inputs: &[&str],
+    visibility: Visibility,
+) -> bazel_query_proto::blaze_query::Target {
+    let (written, labels) = match visibility {
+        Visibility::Declared(labels) => (true, labels),
+        Visibility::Default(labels) => (false, labels),
+    };
+    let visibility = test_support::nodep_label_list("visibility", labels);
+    let attributes = vec![
+        explicit_where(written, visibility),
+        string_list("tags", &[]),
+    ];
+    declared_rule(name, class, inputs, attributes)
+}
+
+/// Where a rule's visibility comes from.
+#[derive(Clone, Copy)]
+enum Visibility<'a> {
+    Declared(&'a [&'a str]),
+    Default(&'a [&'a str]),
+}
+
+/// The default visibility of a package that sets none.
+const DEFAULT_PRIVATE: Visibility = Visibility::Default(&["//visibility:private"]);
+
+/// A filegroup `name` of `srcs` as `bazel query --output=proto` writes it.
+fn filegroup(
+    name: &str,
+    srcs: &[&str],
+    visibility: Visibility,
+) -> bazel_query_proto::blaze_query::Target {
+    visible_rule(name, "filegroup", srcs, visibility)
+}
+
+/// A source file of a package whose default visibility is private.
+fn private_source(name: &str) -> bazel_query_proto::blaze_query::Target {
+    test_support::visible_source(name, &["//visibility:private"])
+}
+
+/// AbstractQueryTest's `simpleVisibilityTest` cases, its packages as `bazel
+/// query --output=proto` writes them:
+///
+/// ```text
+/// # a/BUILD
+/// filegroup(name = 'a', srcs = ['//b:b'])
+/// # b/BUILD
+/// filegroup(name = 'b', srcs = ['b.txt'], visibility = [<visibility>])
+/// ```
+#[test]
+fn reads_a_rules_visibility_as_bazel_does() {
+    // testVisible_simple_public, _private, _package, _subpackages and
+    // _different_subpackages.
+    let cases = [
+        ("//visibility:public", true),
+        ("//visibility:private", false),
+        ("//a:__pkg__", true),
+        ("//a:__subpackages__", true),
+        ("//c:__subpackages__", false),
+    ];
+    for (visibility, visible) in cases {
+        let universe = queried(&[
+            filegroup("//a:a", &["//b:b"], DEFAULT_PRIVATE),
+            filegroup("//b:b", &["//b:b.txt"], Visibility::Declared(&[visibility])),
+            private_source("//b:b.txt"),
+        ]);
+        let expected = match visible {
+            true => "//a:a //b:b",
+            false => "//a:a",
+        };
+        assert_eq!(
+            eval_to_string(&universe, "visible(//a, somepath(//a, //b))"),
+            expected,
+            "{visibility}"
+        );
+    }
+}
+
+/// AbstractQueryTest's `visible()` cases over package groups and package
+/// defaults, each over its packages as `bazel query --output=proto` writes
+/// them, and its `testVisibleWithNonPackageGroupVisibility` and
+/// `testVisibleWithPackageGroupWithNonPackageGroupIncludes`.
+#[test]
+fn reads_package_groups_and_defaults_as_bazel_does() {
+    use test_support::package_group_of;
+    let friends_of_a = |b: bazel_query_proto::blaze_query::Target,
+                        groups: &[bazel_query_proto::blaze_query::Target]| {
+        let mut targets = vec![
+            filegroup("//a:a", &["//b:b"], DEFAULT_PRIVATE),
+            b,
+            private_source("//b:b.txt"),
+        ];
+        targets.extend_from_slice(groups);
+        eval_to_string(&queried(&targets), "visible(//a, somepath(//a, //b))")
+    };
+    let friend = Visibility::Declared(&["//b:friends"]);
+
+    // testVisible_package_group:
+    // package_group(name = 'friends', packages = ['//a', '//b'])
+    // filegroup(name = 'b', srcs = ['b.txt'], visibility = [':friends'])
+    let b = filegroup("//b:b", &["//b:b.txt"], friend);
+    let friends = package_group_of("//b:friends", &["//a", "//b"], &[]);
+    assert_eq!(friends_of_a(b.clone(), &[friends]), "//a:a //b:b");
+
+    // testVisible_package_group_invisible, its package `c` empty:
+    // package_group(name = 'friends', packages = ['//c'])
+    let friends = package_group_of("//b:friends", &["//c"], &[]);
+    assert_eq!(friends_of_a(b.clone(), &[friends]), "//a:a");
+
+    // testVisible_package_group_include:
+    // package_group(name = 'friends', packages = ['//c'], includes = [':friends_of_friends'])
+    // package_group(name = 'friends_of_friends', packages = ['//a'])
+    let friends = package_group_of("//b:friends", &["//c"], &["//b:friends_of_friends"]);
+    let friends_of_friends = package_group_of("//b:friends_of_friends", &["//a"], &[]);
+    assert_eq!(
+        friends_of_a(b.clone(), &[friends, friends_of_friends]),
+        "//a:a //b:b"
+    );
+
+    // testPackageGroupAllBeneath:
+    // package_group(name = 'friends', packages = ['//a/...'])
+    let friends = package_group_of("//b:friends", &["//a/..."], &[]);
+    assert_eq!(friends_of_a(b, &[friends]), "//a:a //b:b");
+
+    // testVisible_default_private and testVisible_default_public:
+    // package(default_visibility = [<visibility>])
+    // filegroup(name = 'b', srcs = ['b.txt'])
+    let b = |visibility| filegroup("//b:b", &["//b:b.txt"], Visibility::Default(visibility));
+    assert_eq!(friends_of_a(b(&["//visibility:private"]), &[]), "//a:a");
+    assert_eq!(
+        friends_of_a(b(&["//visibility:public"]), &[]),
+        "//a:a //b:b"
+    );
+
+    // testVisibleWithNonPackageGroupVisibility:
+    // foo_library(name = 'foo', visibility = ['//bar:bar'])  # foo/BUILD
+    // foo_library(name = 'bar')                             # bar/BUILD
+    let bar = visible_rule("//bar:bar", "foo_library", &[], DEFAULT_PRIVATE);
+    let universe = queried(&[
+        visible_rule(
+            "//foo:foo",
+            "foo_library",
+            &[],
+            Visibility::Declared(&["//bar:bar"]),
+        ),
+        bar.clone(),
+    ]);
+    assert_eq!(
+        eval_to_string(&universe, "visible(//bar:bar, //foo:foo)"),
+        ""
+    );
+
+    // testVisibleWithPackageGroupWithNonPackageGroupIncludes:
+    // foo_library(name = 'foo', visibility = [':pg'])  # foo/BUILD
+    // package_group(name = 'pg', includes = ['//bar:bar'])
+    let universe = queried(&[
+        visible_rule(
+            "//foo:foo",
+            "foo_library",
+            &[],
+            Visibility::Declared(&["//foo:pg"]),
+        ),
+        package_group_of("//foo:pg", &[], &["//bar:bar"]),
+        bar,
+    ]);
+    assert_eq!(
+        eval_to_string(&universe, "visible(//bar:bar, //foo:foo)"),
+        ""
+    );
+}
+
+/// AbstractQueryTest's cases of `visible()` within a package and between
+/// `java/` and `javatests/`, each over its packages as `bazel query
+/// --output=proto` writes them, every rule's visibility
+/// `['//visibility:private']`.
+#[test]
+fn reads_the_packages_a_target_is_always_visible_to_as_bazel_does() {
+    let private = Visibility::Declared(&["//visibility:private"]);
+
+    // testVisible_private_same_package:
+    // filegroup(name = 'a', srcs = [':b'], visibility = ['//visibility:private'])
+    // filegroup(name = 'b', srcs = ['b.txt'], visibility = ['//visibility:private'])
+    let universe = queried(&[
+        filegroup("//a:a", &["//a:b"], private),
+        filegroup("//a:b", &["//a:b.txt"], private),
+        private_source("//a:b.txt"),
+    ]);
+    assert_eq!(
+        eval_to_string(&universe, "visible(//a:a, somepath(//a:a, //a:b))"),
+        "//a:a //a:b"
+    );
+
+    // testVisible_java_javatests, testVisible_java_javatests_different_package
+    // and testVisible_javatests_java: a filegroup of `a.txt` in the first
+    // package, and a filegroup of it in the second.
+    let cases = [
+        ("//java/com/google/a:a", "//javatests/com/google/a:a", true),
+        ("//java/com/google/a:a", "//javatests/com/google/b:b", false),
+        ("//javatests/com/google/a:a", "//java/com/google/a:a", false),
+    ];
+    for (seen, seer, visible) in cases {
+        let (seen_package, _) = seen.split_once(':').unwrap();
+        let (seer_package, _) = seer.split_once(':').unwrap();
+        let source = format!("{seen_package}:a.txt");
+        let universe = queried(&[
+            filegroup(seen, &[&source], private),
+            private_source(&source),
+            filegroup(seer, &[seen], private),
+        ]);
+        let query = format!("visible({seer_package}, somepath({seer_package}, {seen_package}))");
+        let mut expected = vec![seer];
+        if visible {
+            expected.push(seen);
+        }
+        expected.sort();
+        assert_eq!(
+            eval_to_string(&universe, &query),
+            expected.join(" "),
+            "{query}"
+        );
+    }
+}
