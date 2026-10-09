@@ -57,8 +57,6 @@ bviz --profile /tmp/build.profile.gz
 
 ## Usage
 
-### Capturing a build
-
 `bviz bazelrc` generates a Bazel config with every flag bviz needs. From the
 workspace root:
 
@@ -68,14 +66,6 @@ echo 'try-import %workspace%/.bviz/bazelrc' >> .bazelrc
 ```
 
 Then follow the instructions at the top of `.bviz/bazelrc`.
-
-### Opening files
-
-Any one of the captured files is enough, and files captured without some of
-the flags still open, with less to show. bviz merges the three queries into a
-single graph, so each of their flags takes one file. `--profile`, `--bep` and
-`--exec_log` can be repeated, and combined with the graph flags, to open several
-files grouped by Bazel invocation.
 
 ## Getting help
 
