@@ -90,6 +90,31 @@ pub(crate) fn build_with_packages(
     let hierarchy = PackageHierarchy::build(packages, &mut graph, names, facets);
     let rules = targets.iter().filter_map(|target| target.rule.as_ref());
     attributes.reserve(rules.map(|rule| rule.attribute.len()).sum());
+    let files = (targets.iter()).filter_map(|target| target.source_file.as_ref());
+    let groups = (targets.iter()).filter_map(|target| target.package_group.as_ref());
+    let visibilities = (targets.iter()).filter_map(|target| {
+        target
+            .rule
+            .as_ref()?
+            .attribute
+            .iter()
+            .find(|a| a.name == "visibility")
+    });
+    attributes.reserve_visibilities(
+        targets
+            .iter()
+            .filter(|target| target.rule.is_none())
+            .count(),
+        files.clone().map(|file| file.visibility_label.len()).sum(),
+        groups
+            .clone()
+            .map(|group| group.contained_package.len())
+            .sum(),
+        (files.map(|file| file.package_group.len()))
+            .chain(groups.map(|group| group.included_package_group.len()))
+            .chain(visibilities.map(|stated| stated.string_list_value.len()))
+            .sum(),
+    );
 
     // Pass 1: one leaf node per target under its package container.
     for target in targets {
@@ -111,6 +136,10 @@ pub(crate) fn build_with_packages(
         describe_target(facets, Input::Query, target, node_id, parent, &label);
         if let Some(rule) = &target.rule {
             describe_rule(attributes, facets, Input::Query, node_id, rule, repos);
+        } else if let Some(file) = &target.source_file {
+            attributes.describe_source_file(node_id, file, repos);
+        } else if let Some(group) = &target.package_group {
+            attributes.describe_package_group(node_id, group, repos);
         }
         node_by_label.insert(label.into_owned(), node_id);
     }
@@ -134,6 +163,14 @@ pub(crate) fn build_with_packages(
         }
     };
     let unattributed = DepClass::new(Declared::Unattributed);
+    // The node of the target `label` names, recorded as one `to` depends on
+    // through its visibility or a package group's includes.
+    let group = |attributes: &mut AttributesBuilder, to: Id, label: &str| {
+        let canonical = repos.canonicalize_label(label);
+        let found = node_by_label.get(canonical.as_ref());
+        attributes.name_group(to, &canonical, found.copied());
+        found
+    };
     for target in targets {
         let Some(&to) = label_and_kind(target).and_then(|(label, _)| node(label)) else {
             continue;
@@ -150,18 +187,17 @@ pub(crate) fn build_with_packages(
                     true => Declared::Explicit,
                     false => Declared::Implicit,
                 };
-                for group in package_groups(stated, repos) {
-                    add(
-                        &mut graph,
-                        node(group),
-                        to,
-                        DepClass::new(declared).visibility(),
-                    );
+                for label in package_groups(stated, repos) {
+                    let from = group(attributes, to, label);
+                    add(&mut graph, from, to, DepClass::new(declared).visibility());
                 }
             }
         } else if let Some(file) = &target.generated_file {
             let rule = node(&file.generating_rule);
             add(&mut graph, rule, to, unattributed);
+            if let Some(&rule) = rule {
+                attributes.describe_generated_file(to, rule);
+            }
             let rule = rule.and_then(|rule| visibility.get(rule));
             for group in rule
                 .into_iter()
@@ -170,12 +206,14 @@ pub(crate) fn build_with_packages(
                 add(&mut graph, node(group), to, unattributed.visibility());
             }
         } else if let Some(file) = &target.source_file {
-            for group in &file.package_group {
-                add(&mut graph, node(group), to, unattributed.visibility());
+            for label in &file.package_group {
+                let from = group(attributes, to, label);
+                add(&mut graph, from, to, unattributed.visibility());
             }
-        } else if let Some(group) = &target.package_group {
-            for included in &group.included_package_group {
-                add(&mut graph, node(included), to, unattributed.visibility());
+        } else if let Some(package_group) = &target.package_group {
+            for label in &package_group.included_package_group {
+                let from = group(attributes, to, label);
+                add(&mut graph, from, to, unattributed.visibility());
             }
         }
     }

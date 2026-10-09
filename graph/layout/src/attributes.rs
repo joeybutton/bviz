@@ -7,7 +7,8 @@
 //! configured target holds those its cquery dump states, resolved in its
 //! configuration. Most rules share most of their values with many others, so
 //! each distinct (name, value, explicitly specified) row is held once and a
-//! node holds the ids of its rows.
+//! node holds the ids of its rows. Beside them the table holds what a query
+//! states of the visibility of the targets that are no rules.
 
 use std::fmt::Write as _;
 
@@ -23,6 +24,11 @@ use rustc_hash::FxHashMap;
 use crate::facets::{FacetStrings, SparseFacet, SparseFacetBuilder, Sym};
 use crate::intern::Id;
 use crate::label::RepoMapping;
+
+mod visibility;
+
+use visibility::VisibilitiesBuilder;
+pub use visibility::{Named, Package, PackageSpec, Packages, Specified, Visibilities};
 
 /// Attributes a proto states after a rule's own and before its aspects': a
 /// hash of the rule's attributes or of its implementation, which `attr`
@@ -103,7 +109,8 @@ pub enum Stated {
     Undescribed,
 }
 
-/// The attribute rows of every rule node of one graph.
+/// The attribute rows of every rule node of one graph, and the
+/// [`Visibilities`] of its other targets.
 #[derive(Clone)]
 pub struct Attributes {
     strings: FacetStrings,
@@ -113,6 +120,7 @@ pub struct Attributes {
     held: SparseFacet<RowId>,
     /// The nodes some description of which leaves attributes out, ascending.
     incomplete: Vec<Id>,
+    visibilities: Visibilities,
 }
 
 impl Default for Attributes {
@@ -135,6 +143,10 @@ impl Attributes {
     /// The rows `node` holds, in the order its descriptions state them.
     pub fn rows(&self, node: Id) -> &[RowId] {
         self.held.values(node)
+    }
+
+    pub fn visibilities(&self) -> &Visibilities {
+        &self.visibilities
     }
 
     pub fn row(&self, row: RowId) -> &Row {
@@ -171,6 +183,7 @@ impl Attributes {
             *node = remap[node.0 as usize];
         }
         self.incomplete.sort_unstable();
+        self.visibilities.renumber(remap);
     }
 
     /// Whether `matches` holds of one of the strings `value` prints as, which
@@ -483,6 +496,7 @@ pub struct AttributesBuilder {
     rows: FxHashMap<Row, RowId>,
     held: SparseFacetBuilder<RowId>,
     incomplete: Vec<Id>,
+    visibilities: VisibilitiesBuilder,
 }
 
 impl AttributesBuilder {
@@ -694,6 +708,7 @@ impl AttributesBuilder {
             rows: rows.into_iter().map(|(_, row)| row).collect(),
             held: self.held.seal(),
             incomplete: self.incomplete,
+            visibilities: self.visibilities.seal(),
         }
     }
 }

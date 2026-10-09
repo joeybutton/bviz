@@ -391,10 +391,16 @@ impl<V: Copy + PartialEq> SparseFacet<V> {
     /// Moves every value to the node id `remap` gives its node, under the same
     /// terms as [`Facets::renumber`].
     pub fn renumber(&mut self, remap: &[Id]) {
+        self.renumber_with(remap, |value| value);
+    }
+
+    /// [`Self::renumber`], each value replaced by what `value` gives for it,
+    /// for values that name nodes in turn.
+    pub fn renumber_with(&mut self, remap: &[Id], value: impl Fn(V) -> V) {
         let mut renumbered = SparseFacetBuilder::with_capacity(self.values.len());
         for (id, values) in self.rows() {
-            for &value in values {
-                renumbered.push(remap[id.0 as usize], value);
+            for &held in values {
+                renumbered.push(remap[id.0 as usize], value(held));
             }
         }
         *self = renumbered.seal();
