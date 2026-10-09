@@ -134,7 +134,11 @@ impl Universe {
     }
 
     /// Every target in a package any of `value` belongs to, with the
-    /// configured targets each holds.
+    /// configured targets each holds. Bazel 9.2.0's `SiblingsFunction` tells
+    /// packages apart by `BlazeTargetAccessor.getPackage`, which gives a
+    /// package's path without its repository, so of two packages at one path
+    /// in different repositories it takes whichever it reaches first; this
+    /// takes both.
     pub(super) fn siblings(&self, value: &FixedBitSet) -> FixedBitSet {
         let mut packages: FxHashSet<&str> = FxHashSet::default();
         let mut targets: Vec<Id> = Vec::new();
