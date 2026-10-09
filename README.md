@@ -57,8 +57,6 @@ bviz --profile /tmp/build.profile.gz
 
 ## Usage
 
-bviz opens every file named on its command line, and needs at least one.
-
 ### Capturing a build
 
 `bviz bazelrc` generates a Bazel config with every flag bviz needs. From the
