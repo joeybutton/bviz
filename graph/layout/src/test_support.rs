@@ -92,6 +92,14 @@ pub(crate) fn source(name: &str) -> Target {
     }
 }
 
+/// A source file whose visibility declares `visibility`.
+pub(crate) fn visible_source(name: &str, visibility: &[&str]) -> Target {
+    let mut target = source(name);
+    let file = target.source_file.as_mut().expect("a source file");
+    file.visibility_label = visibility.iter().map(|s| s.to_string()).collect();
+    target
+}
+
 pub(crate) fn generated(name: &str, rule: &str) -> Target {
     Target {
         r#type: Discriminator::GeneratedFile as i32,

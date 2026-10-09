@@ -27,6 +27,7 @@ use crate::label::RepoMapping;
 
 mod visibility;
 
+pub(crate) use visibility::Grant;
 use visibility::VisibilitiesBuilder;
 pub use visibility::{Named, Package, PackageSpec, Packages, Specified, Visibilities};
 

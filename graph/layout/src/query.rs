@@ -6,11 +6,12 @@
 //! (`LabelVisitationUtils.visitTarget`). A label naming a target absent from
 //! the stream is left unwired, with no phantom node made up for it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bazel_query_proto::blaze_query::{Attribute, Rule, Target, attribute::Tristate};
 
-use crate::attributes::AttributesBuilder;
+use crate::attributes::{AttributesBuilder, Grant};
 use crate::capability::Axis;
 use crate::explicit::{self, Explicit};
 #[cfg(test)]
@@ -110,7 +111,7 @@ pub(crate) fn build_with_packages(
             .clone()
             .map(|group| group.contained_package.len())
             .sum(),
-        (files.map(|file| file.package_group.len()))
+        (files.map(|file| file.visibility_label.len()))
             .chain(groups.map(|group| group.included_package_group.len()))
             .chain(visibilities.map(|stated| stated.string_list_value.len()))
             .sum(),
@@ -163,12 +164,11 @@ pub(crate) fn build_with_packages(
         }
     };
     let unattributed = DepClass::new(Declared::Unattributed);
-    // The node of the target `label` names, recorded as one `to` depends on
-    // through its visibility or a package group's includes.
-    let group = |attributes: &mut AttributesBuilder, to: Id, label: &str| {
-        let canonical = repos.canonicalize_label(label);
-        let found = node_by_label.get(canonical.as_ref());
-        attributes.name_group(to, &canonical, found.copied());
+    // The node of the target `canonical` names, recorded as one `to` depends
+    // on through its visibility or a package group's includes.
+    let group = |attributes: &mut AttributesBuilder, to: Id, canonical: &str| {
+        let found = node_by_label.get(canonical);
+        attributes.name_group(to, canonical, found.copied());
         found
     };
     for target in targets {
@@ -187,8 +187,8 @@ pub(crate) fn build_with_packages(
                     true => Declared::Explicit,
                     false => Declared::Implicit,
                 };
-                for label in package_groups(stated, repos) {
-                    let from = group(attributes, to, label);
+                for label in package_groups(&stated.string_list_value, repos) {
+                    let from = group(attributes, to, &label);
                     add(&mut graph, from, to, DepClass::new(declared).visibility());
                 }
             }
@@ -199,20 +199,21 @@ pub(crate) fn build_with_packages(
                 attributes.describe_generated_file(to, rule);
             }
             let rule = rule.and_then(|rule| visibility.get(rule));
-            for group in rule
+            for label in rule
                 .into_iter()
-                .flat_map(|&stated| package_groups(stated, repos))
+                .flat_map(|stated| package_groups(&stated.string_list_value, repos))
             {
-                add(&mut graph, node(group), to, unattributed.visibility());
+                let from = node_by_label.get(label.as_ref());
+                add(&mut graph, from, to, unattributed.visibility());
             }
         } else if let Some(file) = &target.source_file {
-            for label in &file.package_group {
-                let from = group(attributes, to, label);
+            for label in package_groups(&file.visibility_label, repos) {
+                let from = group(attributes, to, &label);
                 add(&mut graph, from, to, unattributed.visibility());
             }
         } else if let Some(package_group) = &target.package_group {
             for label in &package_group.included_package_group {
-                let from = group(attributes, to, label);
+                let from = group(attributes, to, &repos.canonicalize_label(label));
                 add(&mut graph, from, to, unattributed.visibility());
             }
         }
@@ -237,27 +238,26 @@ pub(crate) fn describe_rule(
     facets.observe(input, Axis::DependencyClass, explicit::classifies(rule));
 }
 
-/// The package groups a `visibility` attribute names
-/// (`RuleVisibility.getDependencyLabels`): none where it names
-/// `//visibility:public`, and otherwise every label but
-/// `//visibility:private` and those naming a package directly.
-fn package_groups<'a>(
-    visibility: &'a Attribute,
-    repos: &'a RepoMapping,
-) -> impl Iterator<Item = &'a str> {
-    const PUBLIC: &str = "//visibility:public";
-    const PRIVATE: &str = "//visibility:private";
-    const DIRECT: [&str; 2] = ["__pkg__", "__subpackages__"];
-    let canonical = move |label: &'a str| repos.canonicalize_label(label);
-    let labels = &visibility.string_list_value;
-    let public = labels.iter().any(|label| canonical(label) == PUBLIC);
-    (labels.iter())
-        .filter(move |_| !public)
-        .filter(move |label| {
-            let name = label.rsplit_once(':').map_or("", |(_, name)| name);
-            canonical(label) != PRIVATE && !DIRECT.contains(&name)
-        })
-        .map(String::as_str)
+/// The canonical labels of the package groups a visibility declaring `labels`
+/// names (`RuleVisibility.getDependencyLabels`): none where it names
+/// `//visibility:public`, and otherwise every label granting a group.
+fn package_groups<'a>(labels: &'a [String], repos: &RepoMapping) -> Vec<Cow<'a, str>> {
+    let mut groups: Vec<Cow<str>> = (labels.iter())
+        .map(|label| repos.canonicalize_label(label))
+        .collect();
+    let mut public = false;
+    groups.retain(|label| match Grant::of(label) {
+        Grant::Public => {
+            public = true;
+            false
+        }
+        Grant::Group => true,
+        Grant::Private | Grant::Packages(_) => false,
+    });
+    if public {
+        groups.clear();
+    }
+    groups
 }
 
 /// Records what `target`, as `input` describes it, states about the node it
@@ -1007,14 +1007,13 @@ mod tests {
     }
 
     /// A file depends on the package groups its visibility names, a source
-    /// file's as the proto states them and a generated one's being its
-    /// rule's, and a package group on those it includes, the rule alone
+    /// file's as its declared labels name them and a generated one's being
+    /// its rule's, and a package group on those it includes, the rule alone
     /// through an attribute.
     #[test]
     fn files_and_package_groups_depend_on_the_package_groups_they_name() {
         use test_support::{explicit, nodep_label_list};
-        let mut input = source("//foo:in.c");
-        (input.source_file.as_mut().unwrap().package_group).push("//pg:a".to_string());
+        let input = test_support::visible_source("//foo:in.c", &["//pg:a", "//foo:__pkg__"]);
         let (graph, names, _) = build(&[
             input,
             test_support::rule(

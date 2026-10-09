@@ -6,23 +6,59 @@ use bazel_query_proto::blaze_query::{PackageGroup as PackageGroupPb, SourceFile}
 use super::AttributesBuilder;
 use crate::facets::{SparseFacet, SparseFacetBuilder, Sym};
 use crate::intern::Id;
-use crate::label::RepoMapping;
+use crate::label::{RepoMapping, parse_package};
+
+/// The label a visibility naming every package declares.
+const PUBLIC: &str = "//visibility:public";
+/// The label a visibility naming no package beyond its own declares.
+const PRIVATE: &str = "//visibility:private";
+
+/// What one canonical label a visibility declares grants
+/// (`RuleVisibility.parseUnchecked`, `PackageSpecification.fromLabel`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Grant<'a> {
+    Public,
+    Private,
+    /// Packages the label names directly, by `__pkg__` or `__subpackages__`.
+    Packages(Packages<&'a str>),
+    /// The package group the label names, or a target that is none, which
+    /// grants nothing.
+    Group,
+}
+
+impl<'a> Grant<'a> {
+    pub(crate) fn of(label: &'a str) -> Self {
+        match label {
+            PUBLIC => return Grant::Public,
+            PRIVATE => return Grant::Private,
+            _ => {}
+        }
+        let package = || parse_package(label).map(|(repo, path)| Package { repo, path });
+        let direct = match label.rsplit_once(':') {
+            Some((_, "__pkg__")) => package().map(Packages::Single),
+            Some((_, "__subpackages__")) => package().map(Packages::Beneath),
+            _ => None,
+        };
+        direct.map_or(Grant::Group, Grant::Packages)
+    }
+}
 
 /// A package: the repository part its canonical labels carry, empty for the
 /// main repository, and its path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Package {
-    pub repo: Sym,
-    pub path: Sym,
+pub struct Package<S = Sym> {
+    pub repo: S,
+    pub path: S,
 }
 
 /// The packages one entry of a package group's `packages` names beyond
-/// every one (`PackageSpecification`).
+/// every one, or one label of a visibility names directly
+/// (`PackageSpecification`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Packages {
-    Single(Package),
+pub enum Packages<S = Sym> {
+    Single(Package<S>),
     /// The package and every one beneath it in its repository.
-    Beneath(Package),
+    Beneath(Package<S>),
 }
 
 /// What one entry of a package group's `packages` names.
@@ -316,6 +352,22 @@ mod tests {
         assert_eq!(read(&written), written);
         assert_eq!(read(&["private"]), [""; 0]);
         assert_eq!(read(&["@@//c", "legacy/path"]), ["//c", "//legacy/path"]);
+    }
+
+    #[test]
+    fn a_label_grants_what_bazel_reads_it_as() {
+        let package = |repo, path| Package { repo, path };
+        assert_eq!(Grant::of(PUBLIC), Grant::Public);
+        assert_eq!(Grant::of(PRIVATE), Grant::Private);
+        assert_eq!(
+            Grant::of("//a:__pkg__"),
+            Grant::Packages(Packages::Single(package("", "a")))
+        );
+        assert_eq!(
+            Grant::of("@@ext+//a/b:__subpackages__"),
+            Grant::Packages(Packages::Beneath(package("@@ext+", "a/b")))
+        );
+        assert_eq!(Grant::of("//a:friends"), Grant::Group);
     }
 
     #[test]

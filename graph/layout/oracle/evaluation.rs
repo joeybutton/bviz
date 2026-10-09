@@ -262,6 +262,9 @@ impl Graph {
                     .filter_map(|_| Some(groups.get(rng.usize(..groups.len().max(1)))?.clone()))
                     .collect();
                 source.package_group.dedup();
+                // The visibility the file declares, which names exactly the
+                // groups it depends on, as Bazel derives the one from the other.
+                source.visibility_label = source.package_group.clone();
             }
         }
         for group in &groups {
