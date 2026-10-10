@@ -9,6 +9,8 @@ mod roots;
 mod selection;
 mod transition;
 
+pub(crate) use roots::NOTICE_SEPARATOR;
+
 use crate::Palette;
 use crate::history::History;
 use crate::hue::{Colouring, Hue, Swatch, legend_strip};

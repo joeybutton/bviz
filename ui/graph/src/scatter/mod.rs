@@ -12,6 +12,7 @@ mod plot;
 use crate::Palette;
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
+use crate::exclusive::NOTICE_SEPARATOR;
 use crate::hue::{Hue, Swatch, legend_strip};
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
@@ -34,7 +35,7 @@ use bviz_ui_components::{
     centered_spinner, list_scrollbar, load_in_background, menu_chrome, paint_tooltip,
     paint_tooltip_box, tooltip_extent, track_drag,
 };
-use bviz_ui_components::{KeyStyle, key_text_in};
+use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
@@ -1083,7 +1084,12 @@ impl Panel for ScatterPanel {
         let model = self.model.read(cx);
         let status = model.source().status("No graph", |_| match &self.plot {
             None => MEASURING.into(),
-            Some(plot) => drawn_status(&plot.plotted, plot.scope.unit()),
+            Some(plot) => {
+                let zoomed = (self.zoom != Zoom::WHOLE).then(|| show_whole_hint(cx));
+                let parts = [Some(drawn_status(&plot.plotted, plot.scope.unit()))];
+                let parts = parts.into_iter().chain([unplaced(plot), zoomed]);
+                parts.flatten().collect::<Vec<_>>().join(NOTICE_SEPARATOR)
+            }
         });
         Some(status.into())
     }
@@ -1198,8 +1204,7 @@ impl Render for ScatterPanel {
             _ => None,
         };
         let hovering = matches!(plot.pointer, Pointer::Hover(_));
-        let show_whole = key_text_in(&ShowWholePlot, &self.focus, window);
-        let legend = legend(plot, self.zoom, show_whole.as_deref(), &palette);
+        let legend = legend(plot, &palette);
         root.child(legend).child(
             div()
                 .id("scatter-plot")
@@ -1721,7 +1726,7 @@ fn input_toggle(
         })
 }
 
-/// What the legend says of the points of `plot` left unplotted, where any are.
+/// What the status says of the points of `plot` left unplotted, where any are.
 fn unplaced(plot: &Plot) -> Option<String> {
     let unplaced = plot.plotted.unplaced;
     if unplaced == 0 {
@@ -1776,27 +1781,25 @@ fn sizing_name(sizing: Sizing) -> &'static str {
     }
 }
 
-/// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom, which the keys
-/// `show_whole` also do.
-fn legend(plot: &Plot, zoom: Zoom, show_whole: Option<&str>, palette: &Palette) -> Div {
+/// The strip naming what each colour a mark is drawn in stands for and what a
+/// mark's size stands for.
+fn legend(plot: &Plot, palette: &Palette) -> Div {
     let swatch = Swatch {
         alpha: SWATCH_ALPHA,
         diameter: px(SWATCH_DIAMETER),
     };
-    let zoomed = (zoom != Zoom::WHOLE).then(|| {
-        let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
-        match show_whole {
-            Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
-            None => format!("{gesture} to show the whole plot"),
-        }
-    });
-    let hints = zoomed
-        .into_iter()
-        .map(SharedString::from)
-        .chain(unplaced(plot).map(SharedString::from))
-        .chain([sizing_name(plot.plotted.sizing).into()]);
+    let hints = [sizing_name(plot.plotted.sizing)];
     legend_strip(&plot.legend, swatch, hints, palette)
+}
+
+/// How to leave a zoom: by the gesture, or by the keys that show the whole
+/// plot where any reach the plot.
+fn show_whole_hint(cx: &App) -> String {
+    let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
+    match key_text_within(&ShowWholePlot, &[KEY_CONTEXT.into()], cx) {
+        Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
+        None => format!("{gesture} to show the whole plot"),
+    }
 }
 
 /// The layer the points are drawn in, cached across frames that leave the
