@@ -119,13 +119,13 @@ Interactive visualization and inspection tool for Bazel builds.
   buffer, and the churn hides in `memmove` and allocator time that a profiler only
   later attributes back — a recurring, avoidable cost in the parse/merge path.
   Size from whichever is available: an exact count (one element per known input,
-  e.g. one `FoldedRun` per builder, one lane per distinct thread), a small
+  e.g. one lane per distinct thread), a small
   structural bound (per lane, thread, or counter), or a byte-density estimate for
-  a collection whose length tracks the input (mirror `BYTES_PER_DISTINCT` /
-  `BYTES_PER_SLICE` — measure the density on a representative profile and round it
+  a collection whose length tracks the input (mirror the `BYTES_PER_*`
+  constants in `trace/profile` — measure the density on a representative profile and round it
   down so the reservation over-reserves slightly). Reserve at the point that knows
   the count: when a type's `new` cannot, add a `with_capacity` constructor and
-  size it at the call site (as `Merge::with_capacity` does from the builder count)
+  size it at the call site (grep `fn with_capacity` for the pattern)
   rather than leaving `Vec::new()` to double. Over-reserving costs only transient
   capacity freed when the buffer is dropped or sealed; under-reserving costs
   bounded regrowth — for a hot buffer prefer the slight over-reserve. `reserve`
