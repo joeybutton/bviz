@@ -41,11 +41,15 @@ Interactive visualization and inspection tool for Bazel builds.
   changing: it silently wipes that commit's work on the whole file. Revert the
   unwanted hunk with a targeted edit instead; if you already ran the restore,
   `jj undo` recovers it.
-- Commit frequently, one concern per commit — neither one giant commit nor one
-  per file. One concern means one problem addressed, not a shared file,
-  function, feature area, session, or round of review feedback: a request that
-  bundles two fixes and a tweak is three commits. If the subject needs an "and"
-  or the body lists independent changes, split it. When unsure, split.
+- Commit your work as part of the task, without waiting to be asked, following
+  the jj skill's guidance in a jj checkout. Commit frequently, one concern per
+  commit — neither one giant commit nor one per file. One concern means one
+  problem addressed, not a shared file, function, feature area, session, or
+  round of review feedback: a request that bundles two fixes and a tweak is
+  three commits. If the subject needs an "and" or the body lists independent
+  changes, split it. When unsure, split.
+- Write commit messages for a human reader: clear, concise prose that says what
+  changed and why, not an inventory of edits.
 - Only rewrite history that has not been pushed to a remote, and avoid
   rewriting the main branch even then. Reshape history (reword, squash, drop,
   reorder) with the VCS's own operations — `git rebase`/`cherry-pick`, or
