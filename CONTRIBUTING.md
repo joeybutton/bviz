@@ -68,7 +68,7 @@ Rust formatting and Starlark style have fixers; clippy findings are yours to
 resolve.
 
 ```sh
-bazel run @rules_rs_rules_rust//tools/rustfmt
+bazel run @rules_rs_rules_rust//:rustfmt
 bazel run //:buildifier
 ```
 
