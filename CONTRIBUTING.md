@@ -10,8 +10,9 @@ spend time on the code.
 All you install is [bazelisk](https://github.com/bazelbuild/bazelisk), which
 picks up the Bazel version `.bazelversion` pins. Bazel fetches and builds
 everything else, the Rust and C++ toolchains included, so there is no
-`rustup`, no `cargo build`, and no library taken from the host. The build runs
-on x86_64 Linux, and cross-compiles the macOS binaries from there.
+`rustup`, no `cargo build`, and no library taken from the host. Development and
+CI run on x86_64 Linux, and cross-compile from there the release binaries for
+Linux and macOS on x86_64 and arm64.
 
 Machine-local Bazel settings, such as a remote cache, go in `user.bazelrc`,
 which is untracked. A fresh clone builds without credentials.

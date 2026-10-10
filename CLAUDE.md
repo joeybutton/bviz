@@ -261,8 +261,7 @@ Everything is pinned and Bazel-managed. No system toolchains, no system tools.
 - Build, test, and run with Bazel. Never `cargo build`. Never `rustup`.
 - Rust toolchain via rules_rs; CC via the hermetic llvm toolchain.
 - Dev tools (cargo, rustc, rustfmt, rust-analyzer) via `//tools:bazel_env` +
-  direnv; other binaries via multitool, sha256-pinned for all four supported dev
-  platforms (linux/macos × x86_64/arm64).
+  direnv; other binaries via multitool, sha256-pinned per platform.
 - Pin versions in `MODULE.bazel`; commit all lockfiles (`MODULE.bazel.lock`,
   `Cargo.lock`, `multitool.lock.json`). Repin `Cargo.lock` with
   the Bazel-provided cargo, never system cargo. Repinning with cargo writes a
