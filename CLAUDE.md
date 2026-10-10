@@ -237,12 +237,15 @@ Interactive visualization and inspection tool for Bazel builds.
   no name; a bare `86_400`, `4096`, or `0.85` does. This pairs with the comment
   rule above — name the value rather than annotating the literal from afar.
 - Only rewrite history that has not been pushed to a remote, and avoid
-  rewriting the main branch even then. When you do reshape history (reword,
-  squash, drop, reorder), use rebase or cherry-pick and resolve conflicts through
-  git rather than rebuilding commits by hand; squash a commit that only undoes or
-  replaces an earlier one instead of leaving the churn; and do it on a scratch
-  branch, confirming the rewritten tree is unchanged (or changed only as
-  intended, via `git diff`) before moving the real branch.
+  rewriting the main branch even then. Reshape history (reword, squash, drop, reorder) with the VCS's
+  own operations — `git rebase`/`cherry-pick`, or `jj rebase`/`squash`/
+  `describe` — and resolve conflicts through them rather than rebuilding commits
+  by hand. Squash a commit that only undoes or replaces an earlier one instead of
+  leaving the churn. Confirm the rewritten tree is unchanged, or changed only as
+  intended: in git, rewrite on a scratch branch and `git diff` it against the
+  original before moving the real branch; in jj, `jj diff --from <old> --to <new>`
+  against the pre-rewrite commit (`jj evolog` lists it), and `jj undo` a rewrite
+  that went wrong.
 - In a jj checkout, `jj restore <path>` resets that path to the PARENT commit (`@-`), not to some
   pre-edit snapshot — and because the working copy IS a commit, that discards the
   CURRENT commit's own changes to the path, not just an uncommitted tweak. So
