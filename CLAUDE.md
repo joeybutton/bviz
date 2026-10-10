@@ -5,6 +5,8 @@ Interactive visualization and inspection tool for Bazel builds.
 ## Working style
 
 - Incremental: small steps, one concern at a time.
+- In a jj checkout, if a jujutsu (jj) skill is available, load it before the
+  first version-control command of a task.
 - Inspect the working copy before the first edit of any task, and never edit
   into a change you did not open for this task. In a jj checkout (a `.jj`
   directory at the root) the working copy is itself a commit, so any edit lands
@@ -248,7 +250,6 @@ Interactive visualization and inspection tool for Bazel builds.
   flag flip) from a file the working commit is actively changing: it silently
   wipes that commit's work on the whole file. Revert the unwanted hunk with a
   targeted edit instead; if you already ran the restore, `jj undo` recovers it.
-  See the jujutsu skill.
 
 ## Hermeticity
 
