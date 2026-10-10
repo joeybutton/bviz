@@ -26,19 +26,11 @@ Interactive visualization and inspection tool for Bazel builds.
   changing: it silently wipes that commit's work on the whole file. Revert the
   unwanted hunk with a targeted edit instead; if you already ran the restore,
   `jj undo` recovers it.
-- Commit frequently, one concern per commit. Group by shared concern — neither
-  one giant commit nor a commit per file. A single request may bundle unrelated
-  concerns; split them into separate commits anyway — being asked for them
-  together does not make them one concern.
-  What makes changes one concern is addressing the same problem, NOT sharing a
-  file, a function, a feature area, an editing session, or a single round of
-  review feedback — distinct problems are distinct commits even when all touch
-  one function or all came from one list of comments. Two bug fixes, or a fix
-  plus a behavior change plus a tweak, are that many commits. Two tells that you
-  are about to under-split: the subject needs an "and" to join unrelated changes,
-  or the body is a bulleted list of independent changes — in either case, split
-  it, one commit per bullet. When unsure whether two changes are one concern,
-  default to splitting; over-splitting is cheap to read, under-splitting is not.
+- Commit frequently, one concern per commit — neither one giant commit nor one
+  per file. One concern means one problem addressed, not a shared file,
+  function, feature area, session, or round of review feedback: a request that
+  bundles two fixes and a tweak is three commits. If the subject needs an "and"
+  or the body lists independent changes, split it. When unsure, split.
 - Only rewrite history that has not been pushed to a remote, and avoid
   rewriting the main branch even then. Reshape history (reword, squash, drop,
   reorder) with the VCS's own operations — `git rebase`/`cherry-pick`, or
@@ -80,55 +72,25 @@ Interactive visualization and inspection tool for Bazel builds.
   cores that own the memory channels, so SMT oversubscription burns CPU for no
   wall-time gain. Reach for the logical thread count only with a measured reason.
 - Pre-allocate a collection's capacity whenever its final size is known or
-  cheaply estimable, so a buffer filled by `push` in a loop does not grow from
-  empty by repeated reallocation. Each `grow_one` reallocates and moves the whole
-  buffer, and the churn hides in `memmove` and allocator time that a profiler only
-  later attributes back — a recurring, avoidable cost in the parse/merge path.
-  Size from whichever is available: an exact count (one element per known input,
-  e.g. one lane per distinct thread), a small
-  structural bound (per lane, thread, or counter), or a byte-density estimate for
-  a collection whose length tracks the input (mirror the `BYTES_PER_*`
-  constants in `trace/profile` — measure the density on a representative profile and round it
-  down so the reservation over-reserves slightly). Reserve at the point that knows
-  the count: when a type's `new` cannot, add a `with_capacity` constructor and
-  size it at the call site (grep `fn with_capacity` for the pattern)
-  rather than leaving `Vec::new()` to double. Over-reserving costs only transient
-  capacity freed when the buffer is dropped or sealed; under-reserving costs
-  bounded regrowth — for a hot buffer prefer the slight over-reserve. `reserve`
-  the same way for a buffer reused across iterations, and note that `collect` from
-  an `ExactSizeIterator` already pre-sizes; the trap is a hand-grown
-  `Vec::new()`/`vec![]`/`String::new()`.
+  cheaply estimable; the regrowth of a hand-grown `Vec::new()`/`vec![]`/
+  `String::new()` is a recurring cost in the parse/merge path. Size from an exact
+  count, a small structural bound, or a byte-density estimate (mirror the
+  `BYTES_PER_*` constants in `trace/profile`, measured on a representative
+  profile and rounded to over-reserve slightly). Reserve where the count is
+  known: if a type's `new` cannot, add a `with_capacity` constructor and size it
+  at the call site (grep `fn with_capacity` for the pattern).
 - Make invalid states unrepresentable rather than documenting or guarding them.
-  When a combination of fields cannot legitimately occur — an `Option` that is
-  always `Some` once some other field says so, a flag that is only meaningful
-  while a second one is set, an index valid only for one particular buffer —
-  reshape the types so the combination cannot be written: move the fields into
-  the enum variant that guarantees them, pair them in one struct, or make the
-  handle carry what it indexes. An invariant kept only by the order of a few
-  assignments is enforced by nothing; it survives until the next edit, and every
-  reader downstream must either re-derive it or take it on trust.
-  The tell is a guard for a case the author believes cannot happen — an
-  `unwrap`, an `unreachable!`, an early return unwrapping something that "will
-  always" be set, or a comment asserting a combination never occurs. A reader
-  cannot tell such a guard from a live one, so each is both dead weight and a
-  silent place for a real case to hide later. Prefer a type that removes the
-  guard to a comment that explains it.
-  Where the invariant is a property of a single value rather than a combination
-  of fields — a range, a non-empty sequence, a normalized or validated form, a
-  clamped dimension — carry it in an opaque newtype: a private inner field, a
-  constructor that performs the check and reports failure (`Result`/`Option`) or
-  coerces into range, and an API whose every operation either preserves the
-  property or is itself fallible. The check then happens once, where the value
-  enters, and every function downstream receives the invariant as a given
-  instead of re-checking it or trusting a comment. Expose no route back — no
-  public field, no `From<Inner>` — that would let a caller mint an unchecked
-  value, or the guarantee is only advisory.
-  This is not a licence to invent elaborate type machinery: the reshaping should
-  make the code shorter and the guards fewer. If encoding an invariant in the
-  types costs more than it removes — deep generics, a state machine of marker
-  types, a conversion at every use — state the invariant once at the definition
-  and keep the guard, but reach for that after the reshaping and the newtype,
-  not before them.
+  When a combination of fields cannot legitimately occur, reshape the types so it
+  cannot be written: move fields into the enum variant that guarantees them,
+  pair them in one struct, or make a handle carry what it indexes. The tell is a
+  guard for a case believed impossible — an `unwrap`, an `unreachable!`, a
+  comment asserting a combination never occurs. Carry a single-value invariant
+  (a range, non-empty, validated) in an opaque newtype: private field, checking
+  constructor, no route back such as `From<Inner>`. A few extra lines are no
+  reason to leave an invalid state representable; state the invariant once at
+  the definition and keep the guard only when encoding it needs machinery out of
+  all proportion to the gain — deep generics, a state machine of marker types, a
+  conversion at every use.
 - Avoid unnamed magic numbers: bind a non-obvious literal to a named constant
   (or a `let` with a descriptive name) at its definition, so its meaning is
   stated once where the value lives. A self-evident literal in context (an index
@@ -266,17 +228,13 @@ text that Bazel already fetches.
 ## Bazel conventions
 
 - Prefer specific visibility (`//pkg:__pkg__`) over `//visibility:public`.
-- Set `visibility` only on targets other packages depend on. A leaf target such as
-  a `rust_binary` nothing depends on needs none — omit it (default private) rather
-  than writing `//:__pkg__`. The exception is a target referenced by an `alias` in
-  another package, which must be visible to that package.
+- Set `visibility` only on targets other packages depend on, including through
+  an `alias`; omit it on leaf targets such as a `rust_binary`.
 - Give every crate a project-namespaced `crate_name` carrying the `bviz_` prefix,
   matching its Cargo package name (e.g. `bviz_graph_svg`, not a bare `graph_svg`).
 - Prefer symbolic macros over legacy macros.
 - Never compute runfiles paths by hand; use the language's `rlocation` helper and
   `$(rlocationpath LABEL)` in BUILD files.
-- Never hardcode canonical repository names (`@@name+`, `@@name~`); they are
-  Bazel-internal and depend on the Bazel version and module graph. Reference a
-  repo by its apparent name, or where that is not resolvable (e.g. from a
-  generated repo that lacks the mapping) alias the target in a package and
-  reference the alias as a main-repo label.
+- Never hardcode canonical repository names (`@@name+`); reference a repo by
+  its apparent name, or, where that is not resolvable, alias the target in a
+  package and reference the alias.
