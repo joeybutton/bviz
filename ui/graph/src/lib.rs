@@ -189,6 +189,7 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
     bindings.extend(find_key_bindings(
         exclusive::KEY_CONTEXT,
