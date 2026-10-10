@@ -6,17 +6,15 @@ Interactive visualization and inspection tool for Bazel builds.
 
 - Incremental: small steps, one concern at a time.
 - Inspect the working copy before the first edit of any task, and never edit
-  into a change you did not open for this task. Under jj the working copy is
-  itself a commit, so any edit lands in whatever change the working copy holds:
-  editing while it already carries an unrelated in-progress change silently
-  fuses your new work into that change, and the two must then be split back
-  apart — an error-prone rescue that is entirely avoided by looking first. So
-  before touching a file, run `jj st`; if it reports any change (the working
-  copy is non-empty), or the working copy's description names work other than
-  the task at hand, run `jj new` to start a fresh change on top before editing.
-  Only edit directly into the working copy when it is empty, or when its
-  description is the very change you are continuing. This holds even for a
-  one-line fix: the size of the edit does not change where it lands.
+  into a change you did not open for this task. In a jj checkout (a `.jj`
+  directory at the root) the working copy is itself a commit, so any edit lands
+  in whatever change it holds: editing while it carries an unrelated change
+  silently fuses the two, and splitting them back apart is error-prone. So
+  before touching a file, run `jj st`; if the working copy is non-empty, or its
+  description names work other than the task at hand, run `jj new` first. Only
+  edit directly into it when it is empty or its description is the very change
+  you are continuing — even for a one-line fix. In a git checkout, run
+  `git status` and keep unrelated uncommitted changes out of your commits.
 - Commit frequently, one concern per commit. Group by shared concern — neither
   one giant commit nor a commit per file. Imperative subject; body explains why.
   A single request may bundle unrelated concerns; split them into separate
@@ -243,7 +241,7 @@ Interactive visualization and inspection tool for Bazel builds.
   replaces an earlier one instead of leaving the churn; and do it on a scratch
   branch, confirming the rewritten tree is unchanged (or changed only as
   intended, via `git diff`) before moving the real branch.
-- `jj restore <path>` resets that path to the PARENT commit (`@-`), not to some
+- In a jj checkout, `jj restore <path>` resets that path to the PARENT commit (`@-`), not to some
   pre-edit snapshot — and because the working copy IS a commit, that discards the
   CURRENT commit's own changes to the path, not just an uncommitted tweak. So
   never reach for it to strip a small unwanted edit (a debug tweak, a temporary
