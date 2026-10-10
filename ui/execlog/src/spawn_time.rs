@@ -276,8 +276,7 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
             duration(summary.timing.total())
         ))
         .tooltip(TextTooltip::builder(caveats.into(), palette.tooltip));
-    let phases = Phase::ALL
-        .into_iter()
+    let phases = spent_in(&summary.timing)
         .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
     Toolbar::new()
         .one_row("spawn-time-header")
@@ -545,6 +544,14 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
     div().flex().flex_col().child(header).children(body)
 }
 
+/// The phases `timing` spent time in, in the order a bar draws them; a sum's
+/// holds every phase any of its bars draws.
+fn spent_in(timing: &PhaseTiming) -> impl Iterator<Item = Phase> + '_ {
+    Phase::ALL
+        .into_iter()
+        .filter(|&phase| !timing.phase(phase).is_zero())
+}
+
 /// `timing` as a bar of its phases, as long against the bar for `longest` as
 /// its total is, each phase hovered for its exact duration and its share of
 /// the total.
@@ -559,41 +566,38 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
     let summed: Duration = Phase::ALL.into_iter().map(|p| timing.phase(p)).sum();
     let span = total.max(summed);
     let execution_only = timing.reports_execution_only();
-    let segments = Phase::ALL
-        .into_iter()
-        .filter(|&phase| !timing.phase(phase).is_zero())
-        .map(|phase| {
-            let time = timing.phase(phase);
-            let mut tip = format!(
-                "{}: {} ({} of {})",
-                phase_name(phase),
-                exact_duration(time),
-                share(time, total),
-                exact_duration(total),
-            );
-            if summed > total {
-                tip.push_str(&format!(
-                    "\nThe reported phases overlap, summing to {}.",
-                    exact_duration(summed)
-                ));
-            }
-            let segment = div()
-                .id(("phase", phase.index()))
-                .h_full()
-                .min_w(MIN_SEGMENT_WIDTH)
-                .w(relative(fraction(time, span)));
-            let segment = if execution_only && phase == Phase::Execute {
-                tip.push_str("\nThis runner reports no other phase.");
-                segment
-                    .bg(palette.unbroken)
-                    .border_2()
-                    .border_dashed()
-                    .border_color(palette.phase(phase))
-            } else {
-                segment.bg(palette.phase(phase))
-            };
-            segment.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
-        });
+    let segments = spent_in(timing).map(|phase| {
+        let time = timing.phase(phase);
+        let mut tip = format!(
+            "{}: {} ({} of {})",
+            phase_name(phase),
+            exact_duration(time),
+            share(time, total),
+            exact_duration(total),
+        );
+        if summed > total {
+            tip.push_str(&format!(
+                "\nThe reported phases overlap, summing to {}.",
+                exact_duration(summed)
+            ));
+        }
+        let segment = div()
+            .id(("phase", phase.index()))
+            .h_full()
+            .min_w(MIN_SEGMENT_WIDTH)
+            .w(relative(fraction(time, span)));
+        let segment = if execution_only && phase == Phase::Execute {
+            tip.push_str("\nThis runner reports no other phase.");
+            segment
+                .bg(palette.unbroken)
+                .border_2()
+                .border_dashed()
+                .border_color(palette.phase(phase))
+        } else {
+            segment.bg(palette.phase(phase))
+        };
+        segment.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+    });
     div()
         .flex()
         .flex_row()
@@ -705,6 +709,16 @@ mod tests {
 
     fn names(rows: &[GroupRow]) -> Vec<&str> {
         rows.iter().map(|row| row.name.as_ref()).collect()
+    }
+
+    #[test]
+    fn only_the_phases_spent_in_are_listed_in_bar_order() {
+        let mut reported = [Duration::ZERO; bviz_invocation::spawn::REPORTED_PHASES];
+        reported[Phase::Fetch.index()] = Duration::from_millis(3);
+        reported[Phase::Queue.index()] = Duration::from_millis(2);
+        let timing = PhaseTiming::new(Duration::from_millis(5), reported);
+        let phases: Vec<Phase> = spent_in(&timing).collect();
+        assert_eq!(phases, [Phase::Queue, Phase::Fetch]);
     }
 
     #[test]
