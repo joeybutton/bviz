@@ -1,6 +1,6 @@
 use super::{Shown, Slow, Timecard, words};
 use crate::column::{Folding, line};
-use crate::legend::ran_swatch;
+use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
@@ -113,7 +113,7 @@ fn row(
             slow.hover(mnemonic).into(),
             TooltipColors::from_colors(colors),
         ))
-        .child(ran_swatch(Ran::On(slow.timing.runner), palette))
+        .child(legend::ran(Ran::On(slow.timing.runner), palette))
         .child(
             div()
                 .flex_1()
@@ -203,7 +203,7 @@ fn runners(timecard: &Timecard, palette: &Palette) -> impl Iterator<Item = Div> 
             .flex()
             .items_center()
             .gap_1()
-            .child(ran_swatch(ran, &palette))
+            .child(legend::ran(ran, &palette))
             .child(line(said))
     })
 }

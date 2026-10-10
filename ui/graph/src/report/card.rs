@@ -1,6 +1,6 @@
 use super::{Badged, Report, Row};
 use crate::column::{Folding, line};
-use crate::legend::status_swatch;
+use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::status::{Status, Statuses};
@@ -144,7 +144,7 @@ fn row(
             row.hover(configurations).into(),
             TooltipColors::from_colors(colors),
         ))
-        .child(status_swatch(row.listed.status(), palette).flex_none())
+        .child(legend::status(row.listed.status(), palette))
         .child(
             div()
                 .flex_1()
@@ -220,7 +220,7 @@ fn selected(
         .flex()
         .items_center()
         .gap_1()
-        .child(status_swatch(selected.status, palette).flex_none())
+        .child(legend::status(selected.status, palette))
         .child(div().flex_1().min_w_0().child(words));
     div()
         .flex()

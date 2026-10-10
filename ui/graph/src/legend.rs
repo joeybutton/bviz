@@ -3,114 +3,74 @@ use crate::colour::Colouring;
 use crate::critical::CriticalNodes;
 use crate::derive::{Drawn, ViewKey};
 use crate::duration::lasted;
-use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, STATUS_RIM, paint_diamond, paint_status};
+use crate::paint::{BADGE_FLOOR, Fills, STATUS_FLOOR, paint_diamond, paint_status};
 use crate::playback::{NodeState, NodeStates, States};
 use crate::status::{Status, Statuses};
 use crate::timing::{Extent, NodeTimes, Ran};
 use bviz_graph_layout::transition::Transition;
 use bviz_graph_layout::{EdgeKind, Kind, LaidOut};
 use bviz_invocation::{Revision, Runner};
-use bviz_ui_components::overlay_canvas;
-use gpui::{Div, Rgba, div, prelude::*, px};
-
-/// Width of the line shown beside a kind's name.
-const SWATCH_WIDTH: f32 = 16.;
-
-/// Height of a box fill shown beside what the fill says.
-const FILL_HEIGHT: f32 = 10.;
-
-/// Width of the time ramp, wide enough for its steps to read as one
-/// gradient, and of each fill shown beside it so their names line up.
-const RAMP_WIDTH: f32 = 48.;
+use bviz_ui_components::{LegendEntry, LegendState, Swatch};
+use gpui::{Entity, Rgba};
+use std::rc::Rc;
 
 /// Steps the time ramp is shown in, each a fill a box can wear.
 const RAMP_STEPS: usize = 12;
 
-/// Dash and gap of the line shown for a bridge. A swatch is too short to
-/// reproduce the lengths a route is dashed at, so it shows the pattern at a size
-/// that reads as dashed over the width it has.
-const SWATCH_DASH: f32 = 4.;
-const SWATCH_GAP: f32 = 2.;
-
-/// The line drawn beside a kind's name, as a route of that kind is drawn: solid
-/// for a dependency the graph states, dashed for a bridge standing in for a path
-/// through boxes the drawing does not hold.
-fn swatch(kind: EdgeKind, palette: &Palette) -> Div {
-    let color = palette.edge_color(kind, false);
-    let line = |width: f32| div().w(px(width)).h(px(2.)).bg(color);
-    match kind {
-        EdgeKind::Transitive => {
-            let dashes = ((SWATCH_WIDTH + SWATCH_GAP) / (SWATCH_DASH + SWATCH_GAP)) as usize;
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SWATCH_GAP))
-                .children((0..dashes).map(|_| line(SWATCH_DASH)))
-        }
-        _ => line(SWATCH_WIDTH),
-    }
-}
-
-/// The badge marking `transition`, as a route wears it at its smallest, centred
-/// where a line would run.
-fn transition_swatch(transition: Transition, palette: &Palette) -> Div {
-    let color = palette.transition_color(transition);
-    div()
-        .relative()
-        .w(px(SWATCH_WIDTH))
-        .h(px(2. * BADGE_FLOOR))
-        .child(overlay_canvas(move |bounds, window, _| {
-            paint_diamond(bounds.center(), BADGE_FLOOR, color, window)
-        }))
-}
-
 /// The badge of `status`, as a box wears it at its smallest.
-pub(crate) fn status_swatch(status: Status, palette: &Palette) -> Div {
+pub(crate) fn status(status: Status, palette: &Palette) -> Swatch {
     let palette = *palette;
-    div()
-        .relative()
-        .w(px(SWATCH_WIDTH))
-        .h(px(2. * (STATUS_FLOOR + STATUS_RIM)))
-        .child(overlay_canvas(move |bounds, window, _| {
-            paint_status(bounds.center(), STATUS_FLOOR, status, 1.0, &palette, window)
-        }))
-}
-
-/// A box's fill, as a box of `width` wears it.
-fn fill_swatch(fill: Rgba, width: f32, palette: &Palette) -> Div {
-    div()
-        .flex_none()
-        .w(px(width))
-        .h(px(FILL_HEIGHT))
-        .rounded_sm()
-        .border_1()
-        .border_color(palette.border)
-        .bg(fill)
-}
-
-/// A box wearing the critical path's halo.
-fn halo_swatch(palette: &Palette) -> Div {
-    fill_swatch(palette.container, SWATCH_WIDTH, palette)
-        .border_2()
-        .border_color(palette.label)
+    Swatch::Painted(Rc::new(move |bounds, window, _| {
+        paint_status(bounds.center(), STATUS_FLOOR, status, 1.0, &palette, window)
+    }))
 }
 
 /// The fill a box wears whose actions ran as `ran` says.
-pub(crate) fn ran_swatch(ran: Ran, palette: &Palette) -> Div {
-    fill_swatch(palette.ran_fill(ran), SWATCH_WIDTH, palette)
+pub(crate) fn ran(ran: Ran, palette: &Palette) -> Swatch {
+    fill(palette.ran_fill(ran), palette)
+}
+
+/// A box's fill, edged as a box is.
+fn fill(fill: Rgba, palette: &Palette) -> Swatch {
+    Swatch::Outlined {
+        fill: fill.into(),
+        edge: palette.border.into(),
+    }
+}
+
+/// The line a route of `kind` is drawn as: solid for a dependency the graph
+/// states, dashed for a bridge standing in for a path through boxes the
+/// drawing does not hold.
+fn edge(kind: EdgeKind, palette: &Palette) -> Swatch {
+    let color = palette.edge_color(kind, false).into();
+    match kind {
+        EdgeKind::Transitive => Swatch::DashedLine(color),
+        _ => Swatch::Line(color),
+    }
+}
+
+/// The badge marking `transition`, as a route wears it at its smallest.
+fn transition(transition: Transition, palette: &Palette) -> Swatch {
+    let color = palette.transition_color(transition);
+    Swatch::Painted(Rc::new(move |bounds, window, _| {
+        paint_diamond(bounds.center(), BADGE_FLOOR, color, window)
+    }))
+}
+
+/// A box wearing the critical path's halo.
+fn halo(palette: &Palette) -> Swatch {
+    Swatch::Ring {
+        fill: palette.container.into(),
+        ring: palette.label.into(),
+    }
 }
 
 /// The fills a box's time is read off, from the least its kind holds to the
 /// most.
-fn ramp_swatch(palette: &Palette) -> Div {
+fn ramp(palette: &Palette) -> Swatch {
     let last = (RAMP_STEPS - 1) as f32;
-    fill_swatch(palette.background, RAMP_WIDTH, palette)
-        .flex()
-        .overflow_hidden()
-        .children((0..RAMP_STEPS).map(|step| {
-            let fill = palette.time_fill(step as f32 / last);
-            div().flex_1().h_full().bg(fill)
-        }))
+    let steps = (0..RAMP_STEPS).map(|step| palette.time_fill(step as f32 / last).into());
+    Swatch::Ramp(steps.collect())
 }
 
 /// How the legend names the boxes of `kind`.
@@ -245,12 +205,13 @@ impl Reading {
     }
 }
 
-/// The edge kinds, transitions and statuses present in a view, and what its
-/// fills say, found once per view so that a frame drawn over an unchanged view
-/// does not scan it again.
+/// The key to what a view draws: the edge kinds, transitions and statuses
+/// present in it and what its fills say, found once per view so that a frame
+/// drawn over an unchanged view does not scan it again.
 #[derive(Default)]
 pub(crate) struct Legend {
     found: Option<Found>,
+    drawn_for: Option<ViewKey>,
 }
 
 /// What is present in the view `view` identifies, each in enum order.
@@ -274,10 +235,20 @@ struct Found {
 }
 
 impl Legend {
-    /// Lists the edge kinds `drawn` draws at `zoom`, the transitions its
-    /// connectors cross, the statuses `statuses` gives its boxes and what
-    /// their fills say as `coloured` fills them, so it explains only what is
-    /// present in this view; the caller places it. `None` when nothing is
+    /// Whether the key is drawn for a view other than `shown`, taking `shown`
+    /// as the view it is drawn for from then on. The key is drawn in the
+    /// panel's chrome, which a camera move or a fit leaves alone, so the
+    /// caller redraws that chrome where the view changed.
+    pub(crate) fn retarget(&mut self, shown: Option<ViewKey>) -> bool {
+        let lags = self.drawn_for != shown;
+        self.drawn_for = shown;
+        lags
+    }
+
+    /// Keys, open as `state` says, what the fills of `drawn` at `zoom` say as
+    /// `coloured` fills them, the statuses `statuses` gives its boxes, the edge
+    /// kinds it draws and the transitions its connectors cross, so it explains
+    /// only what is present in this view; the caller places it. `None` when nothing is
     /// drawn, or the view is yet to be derived.
     ///
     /// `resolved` says which of a session's outcomes `statuses` were resolved
@@ -285,7 +256,7 @@ impl Legend {
     /// changing, so what is found stands for as long as the view, `resolved`,
     /// `coloured` and `haloed` do.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn card(
+    pub(crate) fn strip(
         &mut self,
         drawn: &Drawn,
         zoom: f32,
@@ -293,10 +264,11 @@ impl Legend {
         resolved: Revision,
         coloured: Coloured,
         haloed: Haloed,
+        state: &Entity<LegendState>,
         palette: &Palette,
-    ) -> Option<Div> {
+    ) -> Option<bviz_ui_components::Legend> {
         let found = self.found(drawn, zoom, statuses, resolved, coloured, haloed)?;
-        card(found, coloured.times, palette)
+        strip(found, coloured.times, state, palette)
     }
 
     fn found(
@@ -374,115 +346,92 @@ fn crossed(g: &LaidOut) -> Vec<Transition> {
         .collect()
 }
 
-/// A row of the legend: `swatch` beside what it stands for.
-fn row(swatch: Div, name: impl IntoElement, palette: &Palette) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(swatch)
-        .child(div().text_xs().text_color(palette.label).child(name))
-}
-
-/// A line of the legend saying how the rows below it, or above it, are to be
-/// read.
-fn note(text: String, palette: &Palette) -> Div {
-    div()
-        .text_xs()
-        .text_color(palette.colors.text_muted)
-        .child(text)
-}
-
-/// The rows explaining what the fills read as `reading` says, and how much of
-/// the profile `times` places; empty for fills by kind.
-fn reading(reading: &Reading, times: Option<&NodeTimes>, palette: &Palette) -> Vec<Div> {
-    let untimed_row = |width, said: &'static str| {
-        let fill = palette.untimed_fill(Kind::Action, false);
-        row(fill_swatch(fill, width, palette), said, palette)
+/// The entries explaining what the fills read as `reading` says, and the notes
+/// on how to read them and how much of the profile `times` places; none for
+/// fills by kind.
+fn reading(
+    reading: &Reading,
+    times: Option<&NodeTimes>,
+    palette: &Palette,
+) -> (Vec<LegendEntry>, Vec<String>) {
+    let untimed = |said: &'static str| {
+        LegendEntry::new(
+            fill(palette.untimed_fill(Kind::Action, false), palette),
+            said,
+        )
     };
-    let mut rows = match reading {
-        Reading::Kinds => return Vec::new(),
-        Reading::Times { scales, untimed } => {
-            let mut rows = Vec::with_capacity(scales.len() + 2);
-            rows.push(note(
-                "action time, on a log scale per kind".to_owned(),
-                palette,
-            ));
-            rows.extend(scales.iter().map(|&(kind, extent)| {
+    let mut notes = Vec::with_capacity(2);
+    let entries = match reading {
+        Reading::Kinds => return (Vec::new(), notes),
+        Reading::Times {
+            scales,
+            untimed: any,
+        } => {
+            notes.push("action time, on a log scale per kind".to_owned());
+            let ramps = scales.iter().map(|&(kind, extent)| {
                 let (least, most) = (lasted(extent.least()), lasted(extent.most()));
-                let said = format!("{}: {least} to {most}", kind_name(kind));
-                row(ramp_swatch(palette), said, palette)
-            }));
-            rows.extend(untimed.then(|| untimed_row(RAMP_WIDTH, "no action time")));
-            rows
+                LegendEntry::new(
+                    ramp(palette),
+                    format!("{}: {least} to {most}", kind_name(kind)),
+                )
+            });
+            ramps
+                .chain(any.then(|| untimed("no action time")))
+                .collect()
         }
-        Reading::Runners { ran, untimed } => {
-            let mut rows = Vec::with_capacity(ran.len() + 2);
-            rows.extend(
-                ran.iter()
-                    .map(|&ran| row(ran_swatch(ran, palette), ran.label(), palette)),
-            );
-            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH, "no action time")));
-            rows
-        }
-        Reading::States { reached, untimed } => {
-            let mut rows = Vec::with_capacity(reached.len() + 2);
-            rows.extend(reached.iter().map(|&state| {
-                let fill = fill_swatch(palette.state_fill(state), SWATCH_WIDTH, palette);
-                row(fill, state.label(), palette)
-            }));
-            rows.extend(untimed.then(|| untimed_row(SWATCH_WIDTH, "no record")));
-            rows
-        }
+        Reading::Runners { ran, untimed: any } => ran
+            .iter()
+            .map(|&ran| LegendEntry::new(self::ran(ran, palette), ran.label()))
+            .chain(any.then(|| untimed("no action time")))
+            .collect(),
+        Reading::States {
+            reached,
+            untimed: any,
+        } => reached
+            .iter()
+            .map(|&state| LegendEntry::new(fill(palette.state_fill(state), palette), state.label()))
+            .chain(any.then(|| untimed("no record")))
+            .collect(),
     };
-    rows.extend(times.map(|times| note(times.coverage().line(), palette)));
-    rows
+    notes.extend(times.map(|times| times.coverage().line()));
+    (entries, notes)
 }
 
-fn card(found: &Found, times: Option<&NodeTimes>, palette: &Palette) -> Option<Div> {
-    let Found {
-        kinds,
-        transitions,
-        standing,
-        ..
-    } = found;
-    let reading = reading(&found.reading, times, palette);
-    let present = !kinds.is_empty()
-        || !transitions.is_empty()
-        || !standing.is_empty()
-        || found.on_path
-        || !reading.is_empty();
-    present.then(|| {
-        div()
-            .block_mouse_except_scroll()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(palette.container)
-            .children(
-                kinds
-                    .iter()
-                    .map(|&k| row(swatch(k, palette), k.label(), palette)),
-            )
-            .children(
-                transitions
-                    .iter()
-                    .map(|&t| row(transition_swatch(t, palette), t.label(), palette)),
-            )
-            .children(
-                standing
-                    .iter()
-                    .map(|&s| row(status_swatch(s, palette), s.label(), palette)),
-            )
-            .children(
-                found
-                    .on_path
-                    .then(|| row(halo_swatch(palette), "critical path", palette)),
-            )
-            .children(reading)
-    })
+/// The key to `found`, open as `state` says: what the fills read first, then
+/// the marks boxes wear, then the routes.
+fn strip(
+    found: &Found,
+    times: Option<&NodeTimes>,
+    state: &Entity<LegendState>,
+    palette: &Palette,
+) -> Option<bviz_ui_components::Legend> {
+    let (fills, notes) = reading(&found.reading, times, palette);
+    let statuses = found
+        .standing
+        .iter()
+        .map(|&status| LegendEntry::new(self::status(status, palette), status.label()));
+    let on_path = found
+        .on_path
+        .then(|| LegendEntry::new(halo(palette), "critical path"));
+    let kinds = found
+        .kinds
+        .iter()
+        .map(|&kind| LegendEntry::new(edge(kind, palette), kind.label()));
+    let transitions = found
+        .transitions
+        .iter()
+        .map(|&crossed| LegendEntry::new(transition(crossed, palette), crossed.label()));
+    let mut entries = fills;
+    entries.extend(statuses.chain(on_path).chain(kinds).chain(transitions));
+    if entries.is_empty() {
+        return None;
+    }
+    let legend = bviz_ui_components::Legend::new("graph-legend", state).entries(entries);
+    Some(
+        notes
+            .into_iter()
+            .fold(legend, bviz_ui_components::Legend::note),
+    )
 }
 
 #[cfg(test)]
