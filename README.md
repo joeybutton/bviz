@@ -2,7 +2,7 @@
 
 A graphical Bazel build visualization and inspection tool.
 
-![bviz with a trace profile, a dependency graph and a console replay open side by side](docs/screenshots/bviz.png)
+![bviz with a dependency graph, a trace profile, its flame graph and a console replay open side by side, split diagonally between the dark and light themes](docs/screenshots/bviz.png)
 
 Seeing what a Bazel build actually did is hard. bviz reads the outputs Bazel
 generates, such as query results, the trace profile and the build event log,
@@ -13,21 +13,16 @@ command line to change.
 
 ## Features
 
-### Build graph
+bviz reads these Bazel outputs, alone or together:
 
-The target and action graph from `query`, `cquery` and `aquery` output, merged
-into one graph to expand, search and filter.
-
-### Trace profile
-
-The timeline of a build's trace profile: what ran when, and flame graphs of
-where the time went, weighed by summed time or by share of the wall time.
-
-### Build event protocol
-
-The console output of a build, replayed from its build event log.
-
-bviz can open several files at once.
+- **`query`, `cquery` and `aquery` results:** one merged target and action
+  graph to explore, search and filter, with views of why one target depends on
+  another and what each dependency brings in.
+- **Trace profile:** a timeline of the build, flame graphs and statistics of
+  where the time went, and its critical path.
+- **Build event log:** the build's console output and the outcome of each
+  target.
+- **Execution log:** where the time of each spawn went.
 
 ## Install
 
@@ -62,10 +57,6 @@ bviz --profile /tmp/build.profile.gz
 
 ## Usage
 
-bviz opens every file named on its command line, and needs at least one.
-
-### Capturing a build
-
 `bviz bazelrc` generates a Bazel config with every flag bviz needs. From the
 workspace root:
 
@@ -75,14 +66,6 @@ echo 'try-import %workspace%/.bviz/bazelrc' >> .bazelrc
 ```
 
 Then follow the instructions at the top of `.bviz/bazelrc`.
-
-### Opening files
-
-Any one of the captured files is enough, and files captured without some of
-the flags still open, with less to show. bviz merges the three queries into a
-single graph, so each of their flags takes one file. `--profile`, `--bep` and
-`--exec_log` can be repeated, and combined with the graph flags, to open several
-files grouped by Bazel invocation.
 
 ## Getting help
 
