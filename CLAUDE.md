@@ -147,8 +147,9 @@ access to the chat or task that produced them must fully understand them.
 - Keep references portable: never hard-code a machine-local absolute path
   (`/home/<user>/...`, a personal checkout location) in a checked-in file. Point
   at a repo-relative path, or for external source pin a stable identifier (a
-  release tag or permalink URL, not a moving branch); a local checkout may be
-  named as a preferred-if-present convenience, never as the sole locator.
+  release tag or permalink URL, not a moving branch). When a task names a local
+  checkout of an upstream, prefer it over fetching the source for research and
+  review, but never refer to it in what you write.
 - Checked-in test fixtures and generated data must not embed machine- or
   user-identifying values (usernames, home paths, hostnames); generate them in a
   neutral location — e.g. a `/tmp` workspace with `HOME`/`USER` overridden — and
