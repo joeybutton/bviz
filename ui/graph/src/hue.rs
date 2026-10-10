@@ -8,7 +8,7 @@ use bviz_graph_layout::facets::Sym;
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::{Facets, Id, Kind};
 use bviz_ui_theme::DataColors;
-use gpui::{Div, Pixels, Rgba, SharedString, div, prelude::*, px};
+use gpui::{Rgba, SharedString};
 use std::collections::HashMap;
 
 /// One of the theme's chromatic data slots, by position.
@@ -158,91 +158,6 @@ fn slot_of(slotted: &[(Sym, Slot)], id: Id, facets: &Facets) -> Option<Slot> {
     let &(_, slot) = slotted.iter().find(|&&(sym, _)| sym == mnemonic)?;
     Some(slot)
 }
-
-/// How a legend's swatches are drawn, to match the points they name.
-#[derive(Clone, Copy)]
-pub(crate) struct Swatch {
-    pub(crate) alpha: f32,
-    pub(crate) diameter: Pixels,
-}
-
-/// The strip naming what each hue of `legend` stands for, with a swatch drawn
-/// as `swatch`, followed by `hints`. The names wrap onto as many rows as they
-/// take, and one too long for a row is cut short; the hints wrap beneath the
-/// names where both do not fit.
-pub(crate) fn legend_strip(
-    legend: &[(SharedString, Hue)],
-    swatch: Swatch,
-    hints: impl IntoIterator<Item = impl IntoElement>,
-    palette: &Palette,
-) -> Div {
-    let entry = |(name, hue): &(SharedString, Hue)| {
-        let color = Rgba {
-            a: swatch.alpha,
-            ..hue.color(palette)
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .min_w_0()
-            .child(
-                div()
-                    .flex_none()
-                    .size(swatch.diameter)
-                    .rounded_full()
-                    .bg(color),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(LEGEND_NAME_WIDTH))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(name.clone()),
-            )
-    };
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_start()
-        .gap_x_4()
-        .px_3()
-        .py_1()
-        .text_sm()
-        .text_color(palette.label)
-        .border_b_1()
-        .border_color(palette.border)
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_4()
-                .flex_1()
-                .min_w(px(LEGEND_NAMES_MIN_WIDTH))
-                .children(legend.iter().map(entry)),
-        )
-        .child(
-            div()
-                .ml_auto()
-                .flex()
-                .flex_wrap()
-                .justify_end()
-                .gap_x_4()
-                .text_color(palette.colors.text_muted)
-                .children(hints),
-        )
-}
-
-/// The widest a legend entry's name is drawn before it is cut short, which a
-/// mnemonic or kind is well within.
-const LEGEND_NAME_WIDTH: f32 = 220.0;
-
-/// The narrowest the legend's names are squeezed to beside its hints, which
-/// move to a row of their own where the two do not fit side by side.
-const LEGEND_NAMES_MIN_WIDTH: f32 = 160.0;
 
 #[cfg(test)]
 mod tests {

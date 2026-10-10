@@ -8,9 +8,10 @@ use bviz_ui_components::gesture::{
     GestureRow, Pointer, pinch_factor, scroll_pixels, wheel_zoom_factor,
 };
 use bviz_ui_components::{
-    DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
-    ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
-    find_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
+    DragEnd, Dropdown, DropdownEvent, KeyScope, LegendState, MultiSelect, MultiSelectEvent,
+    Pending, ScrollbarColors, ShowLegend, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    declare_scopes, find_key_bindings, legend_gestures, legend_key_bindings, overlay_canvas,
+    text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -76,7 +77,7 @@ mod why;
 
 use camera::{Camera, Rect, from_screen, recenter_rect, scale_about};
 use colour::Colouring;
-use derive::{Derived, Drawn, Expandable, LayoutLanded};
+use derive::{Derived, Drawn, Expandable, LayoutLanded, ViewKey};
 use drag::{CanvasIntent, Drag, GESTURES, end_drag, pan_by, start_pan, track_gesture};
 use emphasis::Emphasis;
 pub use exclusive::ExclusivePanel;
@@ -188,6 +189,9 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(chips::bindings(unless_typing));
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(legend_key_bindings(KEY_CONTEXT));
+    bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
     bindings.extend(find_key_bindings(
         exclusive::KEY_CONTEXT,
@@ -238,7 +242,7 @@ struct Palette {
     border: Rgba,
     /// Text on the controls framing the canvas.
     label: Rgba,
-    /// Fill of a container box, and the sheet the legend floats on.
+    /// Fill of a container box.
     container: Rgba,
     /// Fill of the outermost package box, which stands one step further off the
     /// canvas than `container` so nesting reads outermost first.
@@ -339,9 +343,7 @@ pub struct GraphPanel {
     /// Whether the boxes standing for the invocation's critical path wear its
     /// halo.
     critical_path_enabled: bool,
-    /// Whether the card naming what the inputs cannot be filtered on is unfolded
-    /// past its one-line reading.
-    missing_open: bool,
+    missing: missing::Missing,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
     reveal: reveal::Reveal,
@@ -361,6 +363,7 @@ pub struct GraphPanel {
     overlays: Entity<ChromeLayer>,
     _chrome_follows: Subscription,
     legend: Legend,
+    legend_state: Entity<LegendState>,
     /// Taken by the first render, which starts it.
     bench: Option<pan_bench::Bench>,
 }
@@ -466,7 +469,7 @@ impl GraphPanel {
         });
         let overlays = cx.new(|_| ChromeLayer {
             parent,
-            draw: GraphPanel::draw_overlays,
+            draw: |view, palette, window, cx| view.draw_overlays(palette, window, cx),
         });
         let chrome_follows = cx.observe_self(|view, cx| {
             view.toolbar.update(cx, |_, cx| cx.notify());
@@ -498,10 +501,12 @@ impl GraphPanel {
             }
         });
         let derived = Derived::new();
+        let focus_handle = cx.focus_handle();
+        let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         let (panel, filter) = (cx.entity(), derived.filter().clone());
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
         let mut view = Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             model,
             derived,
             framing: Framing::new(),
@@ -534,7 +539,7 @@ impl GraphPanel {
             _relation_choices: relations,
             neighborhood_enabled: false,
             critical_path_enabled: true,
-            missing_open: false,
+            missing: missing::Missing::new(),
             pins: pins::Pins::new(),
             reveal: reveal::Reveal::Idle,
             jumps: reveal::Jumps::default(),
@@ -547,6 +552,7 @@ impl GraphPanel {
             overlays,
             _chrome_follows: chrome_follows,
             legend: Legend::default(),
+            legend_state,
             bench: pan_bench::Bench::from_env(),
         };
         // A panel minted over a graph its document has already read, as a
@@ -627,23 +633,6 @@ impl GraphPanel {
         };
         let zoom = self.view_zoom(&drawn);
         let underived = zoom.is_some_and(|zoom| drawn.view(zoom).is_none());
-        let loaded = self.model.read(cx).loaded();
-        let legend = zoom.zip(loaded).and_then(|(zoom, loaded)| {
-            let (statuses, resolved) = (loaded.statuses(), loaded.taken_up());
-            let coloured = legend::Coloured {
-                colouring: self.colouring,
-                times: loaded.times().ok(),
-                timed: loaded.timed(),
-                states: loaded.states(),
-                attempted: loaded.attempted(),
-            };
-            let haloed = legend::Haloed {
-                nodes: self.critical_path_enabled.then(|| loaded.critical()),
-                traced: loaded.traced(),
-            };
-            self.legend
-                .card(&drawn, zoom, statuses, resolved, coloured, haloed, &palette)
-        });
         let entity = cx.entity();
         div()
             .id("graph-viewport")
@@ -676,20 +665,6 @@ impl GraphPanel {
                             .child(bviz_ui_components::centered_notice(notice, &palette.colors))
                     }),
             )
-            .child(
-                // What the drawing itself cannot state, held clear of the graph
-                // at the foot of the canvas.
-                div()
-                    .absolute()
-                    .left_2()
-                    .bottom_2()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap_2()
-                    .children(missing::card(self, &palette, cx))
-                    .children(legend),
-            )
             .child(cached_layer(self.overlays.clone()))
             .children(chips::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
@@ -713,12 +688,52 @@ impl GraphPanel {
             .into_any_element()
     }
 
+    /// The key to the view drawn, placed in the toolbar.
+    fn legend(
+        &mut self,
+        palette: &Palette,
+        cx: &Context<Self>,
+    ) -> Option<bviz_ui_components::Legend> {
+        let drawn = self.drawn()?;
+        let zoom = self.view_zoom(&drawn)?;
+        let loaded = self.model.read(cx).loaded()?;
+        let (statuses, resolved) = (loaded.statuses(), loaded.taken_up());
+        let coloured = legend::Coloured {
+            colouring: self.colouring,
+            times: loaded.times().ok(),
+            timed: loaded.timed(),
+            states: loaded.states(),
+            attempted: loaded.attempted(),
+        };
+        let haloed = legend::Haloed {
+            nodes: self.critical_path_enabled.then(|| loaded.critical()),
+            traced: loaded.traced(),
+        };
+        self.legend.strip(
+            &drawn,
+            zoom,
+            statuses,
+            resolved,
+            coloured,
+            haloed,
+            &self.legend_state,
+            palette,
+        )
+    }
+
+    /// The view a frame draws, where one is derived.
+    fn shown_key(&self) -> Option<ViewKey> {
+        let drawn = self.drawn()?;
+        Some(drawn.shown(self.view_zoom(&drawn)?)?.key())
+    }
+
     fn draw_toolbar(
-        &self,
+        &mut self,
         palette: &Palette,
         window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let legend = self.legend(palette, cx);
         let traced = self
             .model
             .read(cx)
@@ -739,6 +754,7 @@ impl GraphPanel {
             critical_path: traced.then_some(self.critical_path_enabled),
             reduced: self.derived.reduced(),
             relaying: self.derived.deriving(),
+            legend,
         };
         toolbar::toolbar(controls, palette, &self.focus_handle, cx).into_any_element()
     }
@@ -757,6 +773,7 @@ impl GraphPanel {
                     .held(pins::panel(self, palette, cx))
                     .folding(report::card(self, palette, cx))
                     .folding(timecard::card(self, palette, cx))
+                    .folding(missing::card(self, palette, cx))
                     .foot(why::card(self, palette, cx)),
             )
             .children(jump::overlay(self, palette, window, cx))
@@ -1021,6 +1038,7 @@ impl Panel for GraphPanel {
             .chain(report::gestures())
             .chain(timecard::gestures())
             .chain(missing::gestures())
+            .chain(legend_gestures())
             .collect()
     }
 
@@ -1055,6 +1073,10 @@ impl Render for GraphPanel {
             bench.start(cx.entity(), window);
         }
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        if self.legend.retarget(self.shown_key()) {
+            let toolbar = self.toolbar.clone();
+            window.on_next_frame(move |_, cx| toolbar.update(cx, |_, cx| cx.notify()));
+        }
         let chrome = div()
             .key_context(Self::kind().key_context)
             .on_action(
@@ -1072,6 +1094,10 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
+            .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
+                view.legend_state
+                    .update(cx, |legend, cx| legend.show(window, cx));
+            }))
             .on_action(cx.listener(|view, _: &ZoomIn, _, cx| view.zoom_centred(ZOOM_KEY_STEP, cx)))
             .on_action(
                 cx.listener(|view, _: &ZoomOut, _, cx| {
@@ -1121,7 +1147,7 @@ impl Render for GraphPanel {
 /// renders, prepaints or paints may notify it.
 struct ChromeLayer {
     parent: WeakEntity<GraphPanel>,
-    draw: fn(&GraphPanel, &Palette, &mut Window, &Context<GraphPanel>) -> AnyElement,
+    draw: fn(&mut GraphPanel, &Palette, &mut Window, &Context<GraphPanel>) -> AnyElement,
 }
 
 impl Render for ChromeLayer {
@@ -1213,6 +1239,7 @@ struct Controls {
     /// `None` where the drawing offers no choice of edge set.
     reduced: Option<bool>,
     relaying: bool,
+    legend: Option<bviz_ui_components::Legend>,
 }
 
 /// The box a pointer at `pos` (window px) resolves to, which every gesture that

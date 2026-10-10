@@ -21,8 +21,8 @@ use bviz_critical_path::{
 use bviz_invocation::Chosen;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Button, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip, centered_notice,
-    centered_spinner, list_scrollbar, sort_gesture, sort_header,
+    Button, KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip,
+    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use by_height::ByHeight;
@@ -84,7 +84,6 @@ const STRIP_GAP: Pixels = px(1.);
 /// The narrowest a step's bar is drawn, so even the shortest step's bar can
 /// be hovered for its parts.
 const MIN_BAR_WIDTH: Pixels = px(4.);
-const SWATCH: Pixels = px(10.);
 /// Width of the column holding a step's share of the path.
 const SHARE_WIDTH: f32 = 72.0;
 /// Width of the column holding a step's bar of parts.
@@ -689,13 +688,11 @@ fn summary(path: &CriticalPath, legends: bool, palette: &Palette, fills: &Fills)
         .map(|(part, time)| (part, time, words::part_account(part, path).into()))
         .collect();
     let legend = parts.iter().map(|(part, time, account)| {
-        legend_entry(
-            ("critical-path-legend", part.index()),
+        LegendEntry::new(
             part_swatch(*part, fills),
             format!("{} {}", words::part_name(*part), words::duration(*time)),
-            account.clone(),
-            palette,
         )
+        .tooltip(account.clone())
     });
     let segments = parts
         .iter()
@@ -778,22 +775,22 @@ fn spawned_lines(
     let legend = phases
         .iter()
         .map(|(phase, time, account)| {
-            legend_entry(
-                ("critical-path-phase-legend", phase.index()),
-                swatch(fills.phase(*phase), None),
+            LegendEntry::new(
+                Swatch::Fill(fills.phase(*phase)),
                 format!("{} {}", words::phase_name(*phase), words::duration(*time)),
-                account.clone(),
-                palette,
             )
+            .tooltip(account.clone())
         })
         .chain(around.map(|(time, account)| {
-            legend_entry(
-                ("critical-path-phase-legend", Phase::ALL.len()),
-                swatch(fills.around_spawns(), Some(fills.outside_edge)),
+            let swatch = Swatch::Outlined {
+                fill: fills.around_spawns(),
+                edge: fills.outside_edge,
+            };
+            LegendEntry::new(
+                swatch,
                 format!("{} {}", words::AROUND_SPAWNS, words::duration(time)),
-                account,
-                palette,
             )
+            .tooltip(account)
         }))
         .collect::<Vec<_>>();
     let title = div().mt_1().child(words::spawned_title(coverage));
@@ -813,36 +810,13 @@ fn legend_row(palette: &Palette) -> Div {
         .text_color(palette.muted_label)
 }
 
-fn legend_entry(
-    id: impl Into<ElementId>,
-    swatch: Div,
-    label: String,
-    account: SharedString,
-    palette: &Palette,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_1()
-        .tooltip(TextTooltip::builder(account, palette.tooltip))
-        .child(swatch)
-        .child(label)
-}
-
-fn part_swatch(part: Part, fills: &Fills) -> Div {
-    swatch(
-        fills.part(part),
-        outside(part).then_some(fills.outside_edge),
-    )
-}
-
-/// A legend's sample of `fill`, edged in `edge` where it has one.
-fn swatch(fill: Hsla, edge: Option<Hsla>) -> Div {
-    let swatch = div().size(SWATCH).flex_shrink_0().bg(fill);
-    match edge {
-        Some(edge) => swatch.border_1().border_color(edge),
-        None => swatch,
+fn part_swatch(part: Part, fills: &Fills) -> Swatch {
+    match outside(part) {
+        true => Swatch::Outlined {
+            fill: fills.part(part),
+            edge: fills.outside_edge,
+        },
+        false => Swatch::Fill(fills.part(part)),
     }
 }
 

@@ -14,9 +14,9 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Toolbar,
-    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, overlay_canvas,
-    paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, Legend, LegendState, SCROLLBAR_THICKNESS,
+    Scrollbar, ShowLegend, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner,
+    legend_gestures, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -82,10 +82,6 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
         FlameIntent::Describe,
     ),
 ]);
-
-/// Narrowest the toolbar's legend is squeezed beside the controls; with less
-/// than this left on their row it starts the next one.
-const LEGEND_MIN_WIDTH: f32 = 144.0;
 
 /// The weights the toolbar offers, each with its button's id and label, in the
 /// order the buttons stand.
@@ -456,6 +452,7 @@ pub struct FlamePanel {
     flame_hover: Option<Point<Pixels>>,
     drag: FlameDrag,
     last_mouse: Point<Pixels>,
+    legend: Entity<LegendState>,
     /// The layer painting the boxes and scroll bars; notified through
     /// [`Self::invalidate_canvas`].
     canvas: Entity<FlameCanvas>,
@@ -484,8 +481,10 @@ impl FlamePanel {
             this.reset_view();
             this.invalidate_canvas(cx);
         });
+        let focus = cx.focus_handle();
+        let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
         Self {
-            focus: cx.focus_handle(),
+            focus,
             model,
             flame_view: FlameView::FIT,
             flame_scroll_y: 0.0,
@@ -495,6 +494,7 @@ impl FlamePanel {
             drag: FlameDrag::None,
             last_mouse: Point::default(),
             canvas,
+            legend,
             _model_observer: model_observer,
             _build_start: build_start,
             _source_replaced: source_replaced,
@@ -532,9 +532,8 @@ impl FlamePanel {
     /// choose which graph is aggregated and the legend for the colours it is
     /// drawn in.
     fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Toolbar {
-        let legend = theme::role_legend(&palette, STATS_TEXT_SIZE)
-            .flex_1()
-            .min_w(px(LEGEND_MIN_WIDTH));
+        let legend =
+            Legend::new("flame-legend", &self.legend).entries(theme::role_legend(&palette));
         time_window_chip(&self.model, palette, cx)
             .into_iter()
             .chain(self.mode_controls(palette, cx))
@@ -923,7 +922,7 @@ impl Panel for FlamePanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().collect()
+        GESTURES.rows().chain(legend_gestures()).collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -956,6 +955,9 @@ impl Render for FlamePanel {
             }))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
                 this.zoom_centred(ZOOM_KEY_STEP.recip().into(), cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowLegend, window, cx| {
+                this.legend.update(cx, |legend, cx| legend.show(window, cx));
             }))
             .flex()
             .flex_col()

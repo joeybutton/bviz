@@ -298,7 +298,8 @@ fn failure(error: &str, by: Option<RootedBy>) -> String {
     }
 }
 
-const NOTICE_SEPARATOR: &str = " · ";
+/// Joins the parts of a line of notices.
+pub(crate) const NOTICE_SEPARATOR: &str = " · ";
 
 #[cfg(test)]
 mod tests {

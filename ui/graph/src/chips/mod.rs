@@ -894,7 +894,6 @@ pub(crate) fn bar(
             }
         }))
         .flex()
-        .min_w_0()
         .items_center()
         .gap_1()
         .children(carrying)

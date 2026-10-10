@@ -12,7 +12,8 @@ mod plot;
 use crate::Palette;
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
-use crate::hue::{Hue, Swatch, legend_strip};
+use crate::exclusive::NOTICE_SEPARATOR;
+use crate::hue::Hue;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
@@ -29,12 +30,13 @@ use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, ListScroll, Nesting, SCROLLBAR_THICKNESS,
-    TextTooltip, Toolbar, TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
-    centered_spinner, list_scrollbar, load_in_background, menu_chrome, paint_tooltip,
-    paint_tooltip_box, tooltip_extent, track_drag,
+    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState,
+    ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip, Toolbar,
+    TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
+    list_scrollbar, load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box,
+    tooltip_extent, track_drag,
 };
-use bviz_ui_components::{KeyStyle, key_text_in};
+use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
@@ -97,6 +99,7 @@ pub struct ScatterPanel {
     /// The layer drawing the marks; notified through
     /// [`Self::invalidate_canvas`].
     canvas: Entity<ScatterCanvas>,
+    legend: Entity<LegendState>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
     /// The press over the plot, until the button comes up again.
@@ -144,8 +147,11 @@ impl ScatterPanel {
             view.replot(cx);
         });
         let parent = cx.entity().downgrade();
+        let focus = cx.focus_handle();
+        let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
         Self {
-            focus: cx.focus_handle(),
+            focus,
+            legend,
             choice: Choice::of(&model, cx),
             model,
             shown: false,
@@ -1076,14 +1082,19 @@ impl Panel for ScatterPanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().collect()
+        GESTURES.rows().chain(legend_gestures()).collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
         let model = self.model.read(cx);
         let status = model.source().status("No graph", |_| match &self.plot {
             None => MEASURING.into(),
-            Some(plot) => drawn_status(&plot.plotted, plot.scope.unit()),
+            Some(plot) => {
+                let zoomed = (self.zoom != Zoom::WHOLE).then(|| show_whole_hint(cx));
+                let parts = [Some(drawn_status(&plot.plotted, plot.scope.unit()))];
+                let parts = parts.into_iter().chain([unplaced(plot), zoomed]);
+                parts.flatten().collect::<Vec<_>>().join(NOTICE_SEPARATOR)
+            }
         });
         Some(status.into())
     }
@@ -1130,6 +1141,9 @@ impl Render for ScatterPanel {
             .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))
             .on_action(cx.listener(|view, _: &RevealAimed, _, cx| view.reveal_aimed(cx)))
             .on_action(cx.listener(|view, _: &ClosePickList, _, cx| view.close_pick(cx)))
+            .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
+                view.legend.update(cx, |legend, cx| legend.show(window, cx));
+            }))
             .track_focus(&self.focus)
             .flex_1()
             .flex()
@@ -1141,6 +1155,10 @@ impl Render for ScatterPanel {
             return root.child(placeholder);
         }
         let scope = self.choice.as_ref().map(|choice| choice.picker.chosen(cx));
+        let legend = self
+            .plot
+            .as_ref()
+            .map(|plot| legend(&self.legend, plot, &palette));
         let root = root.children(self.choice.as_ref().zip(scope).map(|(choice, scope)| {
             let measuring = self
                 .plot
@@ -1149,7 +1167,7 @@ impl Render for ScatterPanel {
             let times = model
                 .loaded()
                 .map_or(Err(Untimed::NoProfile), Loaded::times);
-            strip(choice, scope, times, measuring, &palette, cx)
+            strip(choice, scope, times, measuring, legend, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = scope.zip(capabilities);
@@ -1198,9 +1216,7 @@ impl Render for ScatterPanel {
             _ => None,
         };
         let hovering = matches!(plot.pointer, Pointer::Hover(_));
-        let show_whole = key_text_in(&ShowWholePlot, &self.focus, window);
-        let legend = legend(plot, self.zoom, show_whole.as_deref(), &palette);
-        root.child(legend).child(
+        root.child(
             div()
                 .id("scatter-plot")
                 .relative()
@@ -1603,16 +1619,19 @@ fn pick_row(
 /// shows the hue a cluster of marks builds up to.
 const SWATCH_ALPHA: f32 = 0.7;
 
-/// Diameter of a legend swatch: twice the smallest mark's, so its hue reads.
+/// Diameter of a swatch beside a point of the list of points under a click:
+/// twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
 /// The strip choosing what the plot measures, now `scope`, which reads
-/// `measuring` while a new choice is measured over the plot drawn for the last.
+/// `measuring` while a new choice is measured over the plot drawn for the last,
+/// and ends in the `legend` of the plot drawn.
 fn strip(
     choice: &Choice,
     scope: Scope,
     times: Result<&NodeTimes, Untimed>,
     measuring: bool,
+    legend: Option<Legend>,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
@@ -1650,6 +1669,7 @@ fn strip(
         .child(up)
         .child(colour)
         .child(inputs)
+        .when_some(legend, Toolbar::child)
         .when(measuring, |bar| {
             bar.trailing(busy("scatter-measuring", "measuring…", palette))
         })
@@ -1721,7 +1741,7 @@ fn input_toggle(
         })
 }
 
-/// What the legend says of the points of `plot` left unplotted, where any are.
+/// What the status says of the points of `plot` left unplotted, where any are.
 fn unplaced(plot: &Plot) -> Option<String> {
     let unplaced = plot.plotted.unplaced;
     if unplaced == 0 {
@@ -1768,35 +1788,39 @@ fn times_note(
     }
 }
 
-/// How the legend names what a mark's size stands for.
+/// What a mark's size stands for, as the legend names it.
 fn sizing_name(sizing: Sizing) -> &'static str {
     match sizing {
-        Sizing::Actions => "mark size: actions",
-        Sizing::FanIn => "mark size: direct dependents",
+        Sizing::Actions => "actions",
+        Sizing::FanIn => "direct dependents",
     }
 }
 
-/// The strip naming what each colour a mark is drawn in stands for, what a
-/// mark's size stands for, and how to leave a zoom, which the keys
-/// `show_whole` also do.
-fn legend(plot: &Plot, zoom: Zoom, show_whole: Option<&str>, palette: &Palette) -> Div {
-    let swatch = Swatch {
-        alpha: SWATCH_ALPHA,
-        diameter: px(SWATCH_DIAMETER),
-    };
-    let zoomed = (zoom != Zoom::WHOLE).then(|| {
-        let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
-        match show_whole {
-            Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
-            None => format!("{gesture} to show the whole plot"),
-        }
+/// The legend of `plot`, open as `state` says: what each colour a mark is
+/// drawn in stands for, then what a mark's size stands for.
+fn legend(state: &Entity<LegendState>, plot: &Plot, palette: &Palette) -> Legend {
+    let hues = plot.legend.iter().map(|(name, hue)| {
+        let fill = Rgba {
+            a: SWATCH_ALPHA,
+            ..hue.color(palette)
+        };
+        LegendEntry::new(Swatch::Dot(fill.into()), name.clone())
     });
-    let hints = zoomed
-        .into_iter()
-        .map(SharedString::from)
-        .chain(unplaced(plot).map(SharedString::from))
-        .chain([sizing_name(plot.plotted.sizing).into()]);
-    legend_strip(&plot.legend, swatch, hints, palette)
+    let measure = sizing_name(plot.plotted.sizing);
+    // Inked apart from every hue, so the key reads as one of size, not colour.
+    let size = Swatch::Sizes(palette.colors.text_muted);
+    let size = LegendEntry::new(size, measure).tooltip(format!("mark size: {measure}"));
+    Legend::new("scatter-legend", state).entries(hues.chain([size]))
+}
+
+/// How to leave a zoom: by the gesture, or by the keys that show the whole
+/// plot where any reach the plot.
+fn show_whole_hint(cx: &App) -> String {
+    let gesture = SHOW_WHOLE.gesture().text(KeyStyle::NATIVE);
+    match key_text_within(&ShowWholePlot, &[KEY_CONTEXT.into()], cx) {
+        Some(keys) => format!("{gesture} or press {keys} to show the whole plot"),
+        None => format!("{gesture} to show the whole plot"),
+    }
 }
 
 /// The layer the points are drawn in, cached across frames that leave the

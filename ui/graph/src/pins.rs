@@ -6,6 +6,7 @@
 //! be taken back, or an override would be a state a reader could reach and not
 //! leave.
 
+use crate::column::scrolling;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
@@ -13,10 +14,10 @@ use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
+use bviz_ui_components::{Button, ListScroll};
 use gpui::{
-    ClickEvent, Context, Div, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString,
-    Stateful, div, prelude::*, px, relative,
+    ClickEvent, Context, Div, IntoElement, Pixels, SharedString, Stateful, div, prelude::*, px,
+    relative,
 };
 use std::collections::HashMap;
 
@@ -217,13 +218,6 @@ pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPane
             .max_w_full()
             .max_h(relative(MAX_HEIGHT_SHARE))
             .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                    view.pins.scroll.press(e.position);
-                    cx.notify();
-                }),
-            )
             .flex()
             .flex_col()
             .gap_1()
@@ -273,8 +267,7 @@ pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPane
     )
 }
 
-/// The rows, scrollable within whatever height the card is left, with a scroll
-/// bar over their right edge that the rows keep clear of.
+/// A row for each override in force.
 fn listed(
     view: &GraphPanel,
     held: Vec<Held>,
@@ -286,23 +279,16 @@ fn listed(
         .flex()
         .flex_col()
         .gap_1()
-        .w_full()
-        .pr(px(SCROLLBAR_THICKNESS))
         .overflow_y_scroll()
         .track_scroll(view.pins.scroll.handle())
         .children(held.into_iter().map(|held| row(held, palette, cx)));
-    div()
-        .relative()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .child(rows)
-        .child(list_scrollbar(
-            cx.entity(),
-            |view: &GraphPanel| &view.pins.scroll,
-            |view: &mut GraphPanel| &mut view.pins.scroll,
-            palette.scroll,
-        ))
+    scrolling(
+        rows,
+        |view| &view.pins.scroll,
+        |view| &mut view.pins.scroll,
+        palette,
+        cx,
+    )
 }
 
 /// One listed override, which a click takes back off.

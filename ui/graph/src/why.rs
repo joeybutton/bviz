@@ -5,7 +5,7 @@
 //! The mode the panel was in is the reader's own, so putting the question away
 //! returns to it along with the filter.
 
-use crate::column::{Folding, line};
+use crate::column::{Folding, line, scrolling};
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::{GraphPanel, Palette, derive};
@@ -16,13 +16,9 @@ use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
 use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
-    load_in_background, overlay_canvas,
+    Button, ListScroll, TextTooltip, TooltipColors, load_in_background, overlay_canvas,
 };
-use gpui::{
-    ClickEvent, Context, Div, MouseButton, MouseDownEvent, Pixels, SharedString, Stateful, Task,
-    div, prelude::*, px,
-};
+use gpui::{ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -605,8 +601,7 @@ fn chain<'a>(
     })
 }
 
-/// The links of the chain, scrollable within whatever height the card is
-/// left, with a scroll bar over their right edge that the links keep clear of.
+/// The links of the chain.
 fn listed(
     view: &GraphPanel,
     links: impl Iterator<Item = Stateful<Div>>,
@@ -618,32 +613,16 @@ fn listed(
         .flex()
         .flex_col()
         .gap_1()
-        .w_full()
-        .pr(px(SCROLLBAR_THICKNESS))
         .overflow_y_scroll()
         .track_scroll(view.why.scroll.handle())
         .children(links);
-    div()
-        .relative()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .text_xs()
-        .text_color(palette.label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                view.why.scroll.press(e.position);
-                cx.notify();
-            }),
-        )
-        .child(rows)
-        .child(list_scrollbar(
-            cx.entity(),
-            |view: &GraphPanel| &view.why.scroll,
-            |view: &mut GraphPanel| &mut view.why.scroll,
-            palette.scroll,
-        ))
+    scrolling(
+        rows,
+        |view| &view.why.scroll,
+        |view| &mut view.why.scroll,
+        palette,
+        cx,
+    )
 }
 
 /// The question asked and what answers it, for the caller to place over the

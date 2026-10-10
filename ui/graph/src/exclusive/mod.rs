@@ -9,9 +9,11 @@ mod roots;
 mod selection;
 mod transition;
 
+pub(crate) use roots::NOTICE_SEPARATOR;
+
 use crate::Palette;
 use crate::history::History;
-use crate::hue::{Colouring, Hue, Swatch, legend_strip};
+use crate::hue::{Colouring, Hue};
 use crate::menu::over_window;
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
@@ -28,9 +30,10 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    KeyScope, KeyStyle, Menu, MenuEvent, MenuItem, QueryField, QueryFieldEvent, Toolbar,
-    TooltipColors, beside_anchor, cached_layer, centered_notice, centered_spinner, key_text_in,
-    load_in_background, paint_tooltip,
+    KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem, QueryField,
+    QueryFieldEvent, ShowLegend, Swatch, Toolbar, TooltipColors, beside_anchor, cached_layer,
+    centered_notice, centered_spinner, key_text_in, legend_gestures, load_in_background,
+    paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -48,6 +51,7 @@ use paint::{
 use roots::{Found, Within};
 use selection::Step;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use transition::Transition;
@@ -171,6 +175,7 @@ pub struct ExclusivePanel {
     /// The layer drawing the cells; notified through
     /// [`Self::invalidate_canvas`].
     canvas: Entity<IcicleCanvas>,
+    legend: Entity<LegendState>,
     /// Where the cells were last laid out, which a pointer is resolved
     /// against.
     frame: Option<Frame>,
@@ -242,8 +247,11 @@ impl ExclusivePanel {
             QueryFieldEvent::Settled => view.reroot(cx),
         });
         let parent = cx.entity().downgrade();
+        let focus_handle = cx.focus_handle();
+        let legend = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
+            legend,
             picker: unit_picker(&model, cx),
             model,
             shown: false,
@@ -1692,7 +1700,7 @@ impl Panel for ExclusivePanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().collect()
+        GESTURES.rows().chain(legend_gestures()).collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1739,6 +1747,9 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
             .on_action(cx.listener(|view, _: &FocusBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &FocusForward, _, cx| view.go_forward(cx)))
+            .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
+                view.legend.update(cx, |legend, cx| legend.show(window, cx));
+            }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|view, e: &MouseDownEvent, _, cx| {
@@ -1785,7 +1796,8 @@ impl Render for ExclusivePanel {
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
             let field = roots::field(&self.roots_field, &palette, cx);
             let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
-            strip(picker, field, crumbs, computing, &palette)
+            let legend = legend(&self.legend, drawn, &palette);
+            strip(picker, field, crumbs, legend, computing, &palette)
         }));
         let rooting = self.rooting(cx);
         let report = match self.failure(cx) {
@@ -1811,127 +1823,137 @@ impl Render for ExclusivePanel {
             };
             return root.child(centered_notice(empty, &palette.colors));
         }
-        let swatch = Swatch {
-            alpha: 1.0,
-            diameter: LEGEND_SWATCH,
-        };
-        // A legend of one hue names nothing the unit picked does not.
-        let hues = match drawn.coloured.legend.len() {
-            0 | 1 => &[][..],
-            _ => &drawn.coloured.legend[..],
-        };
-        let unit = drawn.coloured.tree.scope().unit();
-        // The key's cells wear a hue the cells drawn wear.
-        let key_fill = match drawn.coloured.legend.first() {
-            Some((_, hue)) => hue.color(&palette),
-            None => palette.data.neutral.into(),
-        };
-        let key = drawn
-            .draws_reached()
-            .then(|| reached_key(unit, drawn.coloured.by(), key_fill, &palette));
-        let legend = (!hues.is_empty() || key.is_some())
-            .then(|| legend_strip(hues, swatch, key.into_iter().flatten(), &palette));
-        root.children(legend)
-            .child(
-                div()
-                    .id("exclusive-icicle")
-                    .relative()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(cached_layer(self.canvas.clone()))
-                    .child(hover_layer(cx.entity(), palette))
-                    .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|view, e: &MouseDownEvent, window, cx| {
-                            GESTURES.dispatch(Pointer::press(e), |intent| match intent {
-                                ExclusiveIntent::OpenMenu => {
-                                    view.open_menu(e, window, cx);
-                                    true
-                                }
-                                _ => false,
-                            });
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
-                        GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
-                            ExclusiveIntent::SelectCell => {
-                                view.hover_at(e.position, cx);
+        root.child(
+            div()
+                .id("exclusive-icicle")
+                .relative()
+                .flex_1()
+                .min_h(px(0.))
+                .child(cached_layer(self.canvas.clone()))
+                .child(hover_layer(cx.entity(), palette))
+                .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|view, e: &MouseDownEvent, window, cx| {
+                        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
+                            ExclusiveIntent::OpenMenu => {
+                                view.open_menu(e, window, cx);
                                 true
                             }
                             _ => false,
                         });
-                    }))
-                    .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                        if !hovered {
-                            view.clear_hover(cx);
+                    }),
+                )
+                .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
+                    GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
+                        ExclusiveIntent::SelectCell => {
+                            view.hover_at(e.position, cx);
+                            true
                         }
-                    })),
-            )
-            .children(
-                self.menu
-                    .as_ref()
-                    .map(|open| over_window(&open.menu, window)),
-            )
+                        _ => false,
+                    });
+                }))
+                .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                    if !hovered {
+                        view.clear_hover(cx);
+                    }
+                })),
+        )
+        .children(
+            self.menu
+                .as_ref()
+                .map(|open| over_window(&open.menu, window)),
+        )
     }
 }
 
 /// The strip choosing the unit drawn and the roots `field`, followed by
-/// `crumbs`, which reads `computing` while the roots of a new choice are
-/// chosen and its tree is computed over the one drawn for the last.
+/// `crumbs` and the `legend` of the tree drawn, which reads `computing` while
+/// the roots of a new choice are chosen and its tree is computed over the one
+/// drawn for the last.
 fn strip(
     picker: &UnitPicker,
     field: impl IntoElement,
     crumbs: Option<Div>,
+    legend: Legend,
     computing: bool,
     palette: &Palette,
 ) -> Toolbar {
     Toolbar::new()
         .child(group("points", palette).child(picker.dropdown()))
         .child(field)
-        .when_some(crumbs, |bar, crumbs| bar.child(crumbs))
+        .child(match crumbs {
+            // The legend takes only the room the crumbs leave.
+            Some(crumbs) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .flex_1()
+                .min_w(CRUMBS_MIN_WIDTH)
+                .child(crumbs)
+                .child(legend)
+                .into_any_element(),
+            None => legend.into_any_element(),
+        })
         .when(computing, |bar| {
             bar.trailing(busy("exclusive-computing", "computing…", palette))
         })
 }
 
+/// The legend of `drawn`, open as `state` says: what each hue its cells wear
+/// stands for, then the key to the notch; keying nothing where it names
+/// nothing the unit picked does not, so that no key outlives the cells it
+/// named.
+fn legend(state: &Entity<LegendState>, drawn: Option<&Drawn>, palette: &Palette) -> Legend {
+    let legend = Legend::new("exclusive-legend", state);
+    let Some(drawn) = drawn.filter(|drawn| drawn.coloured.tree.total() > 0) else {
+        return legend;
+    };
+    let coloured = &drawn.coloured;
+    // A legend of one hue names nothing the unit picked does not.
+    let hues = match coloured.legend.len() {
+        0 | 1 => &[][..],
+        _ => &coloured.legend[..],
+    };
+    let hues = hues
+        .iter()
+        .map(|(name, hue)| LegendEntry::new(Swatch::Fill(hue.color(palette).into()), name.clone()));
+    // The key's cells wear a hue the cells drawn wear.
+    let key_fill = match coloured.legend.first() {
+        Some((_, hue)) => hue.color(palette),
+        None => palette.data.neutral.into(),
+    };
+    let unit = coloured.tree.scope().unit();
+    let key = drawn
+        .draws_reached()
+        .then(|| reached_key(unit, coloured.by(), key_fill, palette));
+    legend.entries(hues.chain(key.into_iter().flatten()))
+}
+
 /// The legend's key to the notch, telling the roots of `unit`, chosen `by`,
 /// that the build also reaches as a dependency apart from the others, each
 /// beside a cell filled `fill` drawn as the icicle draws it.
-fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Div; 2] {
+fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [LegendEntry; 2] {
     let ink = paint::notch_ink(fill, palette.background);
-    let entry = |reached: bool, name: String| {
-        let notch = reached.then(|| {
-            canvas(
-                |_, _, _| {},
-                move |cell, _, window, _| {
-                    paint::paint_notch(cell, ink, window);
-                },
-            )
-            .size_full()
-        });
-        let cell = div()
-            .flex_none()
-            .w(KEY_CELL_WIDTH)
-            .h(paint::NOTCH * 2.)
-            .bg(fill)
-            .children(notch);
-        div().flex().items_center().gap_1().child(cell).child(name)
+    let cell = |notched: bool| {
+        Swatch::Painted(Rc::new(move |cell, window, _| {
+            window.paint_quad(gpui::fill(cell, fill));
+            if notched {
+                paint::paint_notch(cell, ink, window);
+            }
+        }))
     };
     let roots = format!("{} {}", by.word(), unit_names(unit).many);
     let reached = format!("{roots} {}", by.also_a_dependency());
-    [entry(false, roots), entry(true, reached)]
+    [
+        LegendEntry::new(cell(false), roots),
+        LegendEntry::new(cell(true), reached),
+    ]
 }
-
-/// How wide a cell beside a key's entry is drawn.
-const KEY_CELL_WIDTH: Pixels = px(16.);
-
-/// How wide a legend swatch is drawn.
-const LEGEND_SWATCH: Pixels = px(8.);
 
 /// The path from the whole build down to the focus of `drawn`, each step but
 /// the focus a click away; absent at the whole build. Where the path outgrows
@@ -2007,8 +2029,6 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
         .max_w(relative(1.));
     Some(
         row()
-            .flex_1()
-            .min_w(CRUMBS_MIN_WIDTH)
             .text_sm()
             .text_color(palette.label)
             .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None, None).flex_shrink_0())
@@ -2016,8 +2036,9 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
     )
 }
 
-/// The least width the breadcrumb is laid out at: with less left beside the
-/// strip's controls, it takes a row of the strip to itself.
+/// The least width the breadcrumb and the legend after it are laid out at:
+/// with less left beside the strip's controls, they take a row of the strip
+/// to themselves.
 const CRUMBS_MIN_WIDTH: Pixels = px(320.);
 
 /// What the breadcrumb names the whole build.

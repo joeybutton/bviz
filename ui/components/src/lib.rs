@@ -13,6 +13,7 @@ pub mod keymap_probe;
 mod keys;
 mod keys_help;
 mod layer;
+mod legend;
 mod list_scroll;
 mod menu;
 pub mod menu_chrome;
@@ -45,6 +46,10 @@ pub use keys_help::{
     LABEL_MAX_CHARS, keys_in_effect,
 };
 pub use layer::{cached_layer, overlay_canvas};
+pub use legend::{
+    CloseLegend, Legend, LegendEntry, LegendState, PaintSwatch, ShowLegend, Swatch,
+    legend_gestures, legend_key_bindings,
+};
 pub use list_scroll::{ListScroll, list_scrollbar};
 pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
 pub use multi_select::{MultiOption, MultiSelect, MultiSelectEvent};
@@ -86,10 +91,12 @@ pub fn register_keys(cx: &mut App) {
             multi_select::KEY_CONTEXT,
             dropdown::KEY_CONTEXT,
             keys_help::KEY_CONTEXT,
+            legend::KEY_CONTEXT,
         ],
     );
     keys_help::bind_keys(cx);
     text_input::bind_keys(cx);
     multi_select::bind_keys(cx);
     dropdown::bind_keys(cx);
+    legend::bind_keys(cx);
 }

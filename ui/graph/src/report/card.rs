@@ -1,6 +1,6 @@
 use super::{Badged, Report, Row};
-use crate::column::{Folding, line};
-use crate::legend::status_swatch;
+use crate::column::{Folding, line, scrolling};
+use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::status::{Status, Statuses};
@@ -10,12 +10,10 @@ use bviz_invocation::Configurations;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
-};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, TooltipColors};
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, MouseButton, MouseDownEvent,
-    Stateful, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
+    uniform_list,
 };
 
 /// What the card does for a gesture in [`GESTURES`].
@@ -144,7 +142,7 @@ fn row(
             row.hover(configurations).into(),
             TooltipColors::from_colors(colors),
         ))
-        .child(status_swatch(row.listed.status(), palette).flex_none())
+        .child(legend::status(row.listed.status(), palette))
         .child(
             div()
                 .flex_1()
@@ -220,7 +218,7 @@ fn selected(
         .flex()
         .items_center()
         .gap_1()
-        .child(status_swatch(selected.status, palette).flex_none())
+        .child(legend::status(selected.status, palette))
         .child(div().flex_1().min_w_0().child(words));
     div()
         .flex()
@@ -241,54 +239,32 @@ fn selected(
         }))
 }
 
-/// The `rows` rows of the card, as tall as they stand until the card runs
-/// out of room for them, and from there scrolling under a bar the rows keep
-/// clear of.
+/// The `rows` rows of the card.
 fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphPanel>) -> Div {
     let (entity, palette) = (cx.entity(), *palette);
-    let rows = uniform_list("report-rows", rows, {
-        let entity = entity.clone();
-        move |range, _, cx| {
-            let reported = Reported::of(entity.read(cx), cx);
-            let rows = reported.into_iter().flat_map(|reported| {
-                let listed = reported.report().listed(range.clone());
-                listed.map(move |listed| (listed, reported.configurations))
-            });
-            range
-                .clone()
-                .zip(rows)
-                .map(|(index, (listed, configurations))| {
-                    row(index, listed, configurations, &entity, &palette)
-                })
-                .collect::<Vec<_>>()
-        }
+    let rows = uniform_list("report-rows", rows, move |range, _, cx| {
+        let reported = Reported::of(entity.read(cx), cx);
+        let rows = reported.into_iter().flat_map(|reported| {
+            let listed = reported.report().listed(range.clone());
+            listed.map(move |listed| (listed, reported.configurations))
+        });
+        range
+            .clone()
+            .zip(rows)
+            .map(|(index, (listed, configurations))| {
+                row(index, listed, configurations, &entity, &palette)
+            })
+            .collect::<Vec<_>>()
     })
     .with_sizing_behavior(ListSizingBehavior::Infer)
-    .w_full()
-    .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(view.report.scroll.uniform_handle());
-    div()
-        .relative()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .text_xs()
-        .text_color(palette.label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                view.report.scroll.press(e.position);
-                cx.notify();
-            }),
-        )
-        .child(rows)
-        .child(list_scrollbar(
-            entity,
-            |view: &GraphPanel| &view.report.scroll,
-            |view: &mut GraphPanel| &mut view.report.scroll,
-            palette.scroll,
-        ))
+    scrolling(
+        rows,
+        |view| &view.report.scroll,
+        |view| &mut view.report.scroll,
+        &palette,
+        cx,
+    )
 }
 
 /// What the build reported, for the caller to place over the drawing; `None`
