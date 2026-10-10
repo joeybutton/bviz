@@ -2,6 +2,8 @@
 
 Interactive visualization and inspection tool for Bazel builds.
 
+@CONTRIBUTING.md
+
 ## Workflow
 
 - In a jj checkout, if a jujutsu (jj) skill is available, load it before the
@@ -25,9 +27,9 @@ Interactive visualization and inspection tool for Bazel builds.
   unwanted hunk with a targeted edit instead; if you already ran the restore,
   `jj undo` recovers it.
 - Commit frequently, one concern per commit. Group by shared concern — neither
-  one giant commit nor a commit per file. Imperative subject; body explains why.
-  A single request may bundle unrelated concerns; split them into separate
-  commits anyway — being asked for them together does not make them one concern.
+  one giant commit nor a commit per file. A single request may bundle unrelated
+  concerns; split them into separate commits anyway — being asked for them
+  together does not make them one concern.
   What makes changes one concern is addressing the same problem, NOT sharing a
   file, a function, a feature area, an editing session, or a single round of
   review feedback — distinct problems are distinct commits even when all touch
@@ -47,22 +49,12 @@ Interactive visualization and inspection tool for Bazel builds.
   `git diff` it against the original before moving the real branch; in jj,
   `jj diff --from <old> --to <new>` against the pre-rewrite commit (`jj evolog`
   lists it), and `jj undo` a rewrite that went wrong.
-- Commit only verified work. While iterating, check only the targets you are
-  changing, which is faster: `bazel test //ui/graph/...`,
-  `bazel build --config=rustfmt //ui/graph/...`,
-  `bazel build --config=clippy //ui/graph/...`, and
-  `bazel test //:buildifier_test` for BUILD, `.bzl`, and `MODULE.bazel` files.
-  Before committing, pass the full check CI enforces, which catches breakage
-  elsewhere: `bazel test --config=check //...` builds everything, runs every
-  test (buildifier among them), and runs the rustfmt and clippy checks. Apply
-  formatting with
-  `bazel run @rules_rs_rules_rust//:rustfmt` and `bazel run //:buildifier`.
-  For toolchain changes, confirm with `--toolchain_resolution_debug`. Report
-  outcomes honestly; flag side effects.
-- A change to visual output is verified by viewing the rendered result on real
-  input, not just by checking that the output is structurally well-formed —
-  visual faults (overlaps, mis-routed or detached connectors, clipping) do not
-  show up in a structural check.
+- Commit only verified work: run the checks under "Before you open a pull
+  request", on the targets you are changing while iterating and in full before
+  committing. For toolchain changes, confirm with `--toolchain_resolution_debug`.
+  Report outcomes honestly; flag side effects.
+- Verify a change to visual output by viewing the rendered result on real
+  input; a structural check does not catch visual faults.
 
 ## Code
 
@@ -238,7 +230,6 @@ a sentence, not a paragraph. State each fact once, at its definition.
 
 Everything is pinned and Bazel-managed. No system toolchains, no system tools.
 
-- Build, test, and run with Bazel. Never `cargo build`. Never `rustup`.
 - Rust toolchain via rules_rs; CC via the hermetic llvm toolchain.
 - Dev tools (cargo, rustc, rustfmt, rust-analyzer) via `//tools:bazel_env` +
   direnv; other binaries via multitool, sha256-pinned per platform.
