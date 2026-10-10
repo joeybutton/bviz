@@ -96,10 +96,10 @@ Interactive visualization and inspection tool for Bazel builds.
   wall-time gain. Reach for the logical thread count only with a measured reason.
 - Pre-allocate a collection's capacity whenever its final size is known or
   cheaply estimable; the regrowth of a hand-grown `Vec::new()`/`vec![]`/
-  `String::new()` is a recurring cost in the parse/merge path. Size from an exact
+  `String::new()` is an avoidable cost anywhere in the code. Size from an exact
   count, a small structural bound, or a byte-density estimate (mirror the
-  `BYTES_PER_*` constants in `trace/profile`, measured on a representative
-  profile and rounded to over-reserve slightly). Reserve where the count is
+  `BYTES_PER_*` constants in `trace/profile`, measured on representative
+  input and rounded to over-reserve slightly). Reserve where the count is
   known: if a type's `new` cannot, add a `with_capacity` constructor and size it
   at the call site (grep `fn with_capacity` for the pattern).
 - Make invalid states unrepresentable rather than documenting or guarding them.
