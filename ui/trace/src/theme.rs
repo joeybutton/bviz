@@ -2,9 +2,9 @@
 //! roles and counter series to fills, resolved from the shared palette.
 
 use bviz_trace_layout::{SpanRole, Workload};
-use bviz_ui_components::{LabelBoxStyle, ScrollbarColors, TooltipColors};
+use bviz_ui_components::{LabelBoxStyle, LegendEntry, ScrollbarColors, Swatch, TooltipColors};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, label_on, mix, over};
-use gpui::{BorderStyle, Div, Hsla, Rgba, div, hsla, prelude::*, px};
+use gpui::{BorderStyle, Hsla, Rgba, hsla};
 
 /// Saturation of a counter series' translucent fill.
 const CATEGORY_SATURATION: f32 = 0.5;
@@ -59,14 +59,6 @@ pub(crate) struct RemainderPaint {
     pub(crate) wash: Hsla,
     pub(crate) border: BorderStyle,
 }
-
-/// Side of a legend swatch and the gap between a swatch and its label.
-const LEGEND_SWATCH: f32 = 10.0;
-const LEGEND_LABEL_GAP: f32 = 4.0;
-
-/// Leading of a legend label, and so the height of the legend's single row: a
-/// wrapped entry starts below that row and is clipped away.
-const LEGEND_LEADING: f32 = 1.6;
 
 /// Every workload the reader is shown a name for, paired with the weight its
 /// swatch is drawn in, payload first.
@@ -129,39 +121,13 @@ const LEGEND_ROLES: [(SpanRole, &str); 8] = [
     ),
 ];
 
-/// A legend of the span-role colors: a swatch and name per role in a row, painted
-/// from the same fills the flame boxes take. Squeezed, it sheds whole entries off
-/// its right end, so every swatch it shows keeps the size that keys it to the
-/// fill.
-pub(crate) fn role_legend(palette: &Palette, text_size: f32) -> Div {
-    let row = px(text_size * LEGEND_LEADING);
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .content_start()
-        .h(row)
-        .line_height(row)
-        .overflow_hidden()
-        .gap_3()
-        .text_color(palette.label)
-        .text_size(px(text_size))
-        .children(LEGEND_ROLES.map(|(role, name)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .flex_shrink_0()
-                .gap(px(LEGEND_LABEL_GAP))
-                .child(
-                    div()
-                        .size(px(LEGEND_SWATCH))
-                        .rounded_sm()
-                        .bg(palette.role_fill(role)),
-                )
-                .child(name)
-        }))
+/// The legend's entries for the span-role colours, each swatch filled as the
+/// flame boxes of its role are.
+pub(crate) fn role_legend(palette: &Palette) -> impl Iterator<Item = LegendEntry> + use<> {
+    let palette = *palette;
+    LEGEND_ROLES
+        .into_iter()
+        .map(move |(role, name)| LegendEntry::new(Swatch::Fill(palette.role_fill(role)), name))
 }
 
 /// The colors the trace canvas paints with, owned so the `'static` paint closures
