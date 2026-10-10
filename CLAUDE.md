@@ -17,6 +17,10 @@ Interactive visualization and inspection tool for Bazel builds.
 
 ## Workflow
 
+- For a task of more than a few steps, delegate research, implementation,
+  adversarial review, fixes, and validation to subagents, keeping your own
+  context for coordinating them and weighing their results. Run Bazel in at most
+  one of them at a time.
 - In a jj checkout, if a jujutsu (jj) skill is available, load it before the
   first version-control command of a task.
 - Inspect the working copy before the first edit of any task, and never edit
