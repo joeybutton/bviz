@@ -10,7 +10,7 @@ use bviz_ui_components::gesture::{
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, MultiSelect, MultiSelectEvent, Pending,
     ScrollbarColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, declare_scopes,
-    find_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
+    find_key_bindings, legend_key_bindings, overlay_canvas, text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -188,6 +188,7 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(chips::bindings(unless_typing));
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
+    bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
     bindings.extend(find_key_bindings(
         exclusive::KEY_CONTEXT,
