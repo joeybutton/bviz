@@ -4,6 +4,17 @@ Interactive visualization and inspection tool for Bazel builds.
 
 @CONTRIBUTING.md
 
+## Layout
+
+- `bviz/` is the application; `ui/` holds its gpui views, one package per viewer
+  plus the shared ones they are composed from.
+- The other top-level packages are UI-free libraries: parsers and models of
+  Bazel's outputs (e.g. `trace/profile`, `graph/layout`) and their support code.
+- `tools/` holds development and build-time tools; `platforms/` and `dist/` the
+  target platforms and release archives.
+- `patches/<upstream>/` patches fetched dependencies, `3rd-party/` holds BUILD
+  overlays for them, and `third_party/` vendors source in-tree.
+
 ## Workflow
 
 - In a jj checkout, if a jujutsu (jj) skill is available, load it before the
