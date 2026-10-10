@@ -1,5 +1,5 @@
 use super::{Shown, Slow, Timecard, words};
-use crate::column::{Folding, line};
+use crate::column::{Folding, line, scrolling};
 use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
@@ -9,12 +9,10 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{
-    Button, ListScroll, SCROLLBAR_THICKNESS, TextTooltip, TooltipColors, list_scrollbar,
-};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, TooltipColors};
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, MouseButton, MouseDownEvent,
-    Stateful, div, prelude::*, px, uniform_list,
+    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
+    uniform_list,
 };
 
 /// What the card does for a gesture in [`GESTURES`].
@@ -142,56 +140,34 @@ fn row(
     }
 }
 
-/// The `rows` slowest actions, as tall as they stand until the card runs out
-/// of room for them, and from there scrolling under a bar the rows keep clear
-/// of.
+/// The `rows` slowest actions.
 fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphPanel>) -> Div {
     let (entity, palette) = (cx.entity(), *palette);
-    let rows = uniform_list("timecard-rows", rows, {
-        let entity = entity.clone();
-        move |range, _, cx| {
-            let Some(loaded) = timed(entity.read(cx), cx) else {
-                return Vec::new();
-            };
-            range
-                .clone()
-                .zip(loaded.timecard().listed(range))
-                .map(|(index, slow)| {
-                    let mnemonic = match slow.shown {
-                        Shown::Action(node) => mnemonic(loaded, node),
-                        Shown::Owner { .. } | Shown::Off => None,
-                    };
-                    row(index, slow, mnemonic, &entity, &palette)
-                })
-                .collect::<Vec<_>>()
-        }
+    let rows = uniform_list("timecard-rows", rows, move |range, _, cx| {
+        let Some(loaded) = timed(entity.read(cx), cx) else {
+            return Vec::new();
+        };
+        range
+            .clone()
+            .zip(loaded.timecard().listed(range))
+            .map(|(index, slow)| {
+                let mnemonic = match slow.shown {
+                    Shown::Action(node) => mnemonic(loaded, node),
+                    Shown::Owner { .. } | Shown::Off => None,
+                };
+                row(index, slow, mnemonic, &entity, &palette)
+            })
+            .collect::<Vec<_>>()
     })
     .with_sizing_behavior(ListSizingBehavior::Infer)
-    .w_full()
-    .pr(px(SCROLLBAR_THICKNESS))
     .track_scroll(view.timecard.scroll.uniform_handle());
-    div()
-        .relative()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .text_xs()
-        .text_color(palette.label)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                view.timecard.scroll.press(e.position);
-                cx.notify();
-            }),
-        )
-        .child(rows)
-        .child(list_scrollbar(
-            entity,
-            |view: &GraphPanel| &view.timecard.scroll,
-            |view: &mut GraphPanel| &mut view.timecard.scroll,
-            palette.scroll,
-        ))
+    scrolling(
+        rows,
+        |view| &view.timecard.scroll,
+        |view| &mut view.timecard.scroll,
+        &palette,
+        cx,
+    )
 }
 
 /// The share each runner holds of `timecard`'s actions, each beside the fill

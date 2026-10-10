@@ -7,15 +7,15 @@
 //! former is something a reader can act on: it is named here with the flag to
 //! pass when the dump is regenerated.
 
-use crate::column::Folding;
+use crate::column::{Folding, scrolling};
 use crate::{GraphPanel, Palette};
 use bviz_bazel_flags::Flag;
 use bviz_graph_layout::{Axis, Capabilities, Support};
+use bviz_ui_components::ListScroll;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
-use gpui::{ClickEvent, Context, Div, MouseButton, MouseDownEvent, div, prelude::*, px};
+use gpui::{ClickEvent, Context, Div, div, prelude::*};
 
 /// What the card does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -149,40 +149,23 @@ pub(crate) fn card(
     Some(Folding::new(head, readings, palette))
 }
 
-/// The reading of each gap, scrollable within whatever height the card is
-/// left, with a scroll bar over their right edge that they keep clear of.
+/// The reading of each gap.
 fn listed(view: &GraphPanel, gaps: &[Gap], palette: &Palette, cx: &Context<GraphPanel>) -> Div {
     let readings = div()
         .id("missing-list")
         .flex()
         .flex_col()
         .gap_1()
-        .w_full()
-        .pr(px(SCROLLBAR_THICKNESS))
         .overflow_y_scroll()
         .track_scroll(view.missing.scroll.handle())
-        .text_xs()
-        .text_color(palette.label)
         .children(gaps.iter().map(Gap::reading));
-    div()
-        .relative()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, e: &MouseDownEvent, _, cx| {
-                view.missing.scroll.press(e.position);
-                cx.notify();
-            }),
-        )
-        .child(readings)
-        .child(list_scrollbar(
-            cx.entity(),
-            |view: &GraphPanel| &view.missing.scroll,
-            |view: &mut GraphPanel| &mut view.missing.scroll,
-            palette.scroll,
-        ))
+    scrolling(
+        readings,
+        |view| &view.missing.scroll,
+        |view| &mut view.missing.scroll,
+        palette,
+        cx,
+    )
 }
 
 #[cfg(test)]

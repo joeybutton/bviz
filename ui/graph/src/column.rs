@@ -1,7 +1,10 @@
 //! The cards standing down the canvas's right edge.
 
-use crate::{CARD_MAX_SHARE, Palette};
-use gpui::{Div, Pixels, SharedString, div, prelude::*, px, relative};
+use crate::{CARD_MAX_SHARE, GraphPanel, Palette};
+use bviz_ui_components::{ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
+use gpui::{
+    Context, Div, MouseButton, MouseDownEvent, Pixels, SharedString, div, prelude::*, px, relative,
+};
 
 /// Width of the column, wide enough for a package path and a target.
 const WIDTH: Pixels = px(360.);
@@ -14,6 +17,41 @@ pub(crate) fn line(text: impl Into<SharedString>) -> Div {
         .whitespace_nowrap()
         .text_ellipsis()
         .child(text.into())
+}
+
+/// A card's `rows`, as tall as they stand until the card runs out of room for
+/// them and from there scrolling under a bar over their right edge that they
+/// keep clear of, where `scroll` and `scroll_mut` reach the [`ListScroll`]
+/// they scroll by.
+pub(crate) fn scrolling(
+    rows: impl Styled + IntoElement,
+    scroll: fn(&GraphPanel) -> &ListScroll,
+    scroll_mut: fn(&mut GraphPanel) -> &mut ListScroll,
+    palette: &Palette,
+    cx: &Context<GraphPanel>,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .text_xs()
+        .text_color(palette.label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |view, e: &MouseDownEvent, _, cx| {
+                scroll_mut(view).press(e.position);
+                cx.notify();
+            }),
+        )
+        .child(rows.w_full().pr(px(SCROLLBAR_THICKNESS)))
+        .child(list_scrollbar(
+            cx.entity(),
+            scroll,
+            scroll_mut,
+            palette.scroll,
+        ))
 }
 
 /// A card that gives way where the column runs short of height: its head
