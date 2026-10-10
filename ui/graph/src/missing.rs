@@ -7,13 +7,15 @@
 //! former is something a reader can act on: it is named here with the flag to
 //! pass when the dump is regenerated.
 
+use crate::column::Folding;
 use crate::{GraphPanel, Palette};
 use bviz_bazel_flags::Flag;
 use bviz_graph_layout::{Axis, Capabilities, Support};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use gpui::{ClickEvent, Context, Div, Stateful, div, prelude::*};
+use bviz_ui_components::{ListScroll, SCROLLBAR_THICKNESS, list_scrollbar};
+use gpui::{ClickEvent, Context, Div, MouseButton, MouseDownEvent, div, prelude::*, px};
 
 /// What the card does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -31,6 +33,22 @@ const GESTURES: Gestures<MissingIntent> = Gestures::new(&[Entry::new(
 /// The gestures the card answers to.
 pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
     GESTURES.rows()
+}
+
+/// Whether the card is unfolded past its one-line reading, and how far what
+/// it unfolds has scrolled.
+pub(crate) struct Missing {
+    open: bool,
+    scroll: ListScroll,
+}
+
+impl Missing {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: false,
+            scroll: ListScroll::new(),
+        }
+    }
 }
 
 /// How a reader knows the property `axis` selects nodes by.
@@ -96,7 +114,7 @@ pub(crate) fn gaps(capabilities: &Capabilities) -> Vec<Gap> {
 }
 
 fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.missing_open = !view.missing_open;
+    view.missing.open = !view.missing.open;
     cx.notify();
 }
 
@@ -105,30 +123,18 @@ fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 pub(crate) fn card(
     view: &GraphPanel,
     palette: &Palette,
-    cx: &mut Context<GraphPanel>,
-) -> Option<Stateful<Div>> {
+    cx: &Context<GraphPanel>,
+) -> Option<Folding> {
     let loaded = view.model.read(cx).loaded()?;
     let gaps = gaps(&loaded.shared.capabilities);
     if gaps.is_empty() {
         return None;
     }
-    let readings: Vec<String> = match view.missing_open {
-        true => gaps.iter().map(Gap::reading).collect(),
-        false => Vec::new(),
-    };
-    Some(
+    let head = div().text_xs().text_color(palette.label).child(
         div()
             .id("missing-data")
-            .block_mouse_except_scroll()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
+            .w_full()
             .cursor_pointer()
-            .bg(palette.container)
-            .text_xs()
-            .text_color(palette.label)
             .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
                 GESTURES.dispatch(Pointer::click(event), |intent| match intent {
                     MissingIntent::Toggle => {
@@ -137,9 +143,46 @@ pub(crate) fn card(
                     }
                 });
             }))
-            .child(unavailable(&gaps))
-            .children(readings),
-    )
+            .child(unavailable(&gaps)),
+    );
+    let readings = view.missing.open.then(|| listed(view, &gaps, palette, cx));
+    Some(Folding::new(head, readings, palette))
+}
+
+/// The reading of each gap, scrollable within whatever height the card is
+/// left, with a scroll bar over their right edge that they keep clear of.
+fn listed(view: &GraphPanel, gaps: &[Gap], palette: &Palette, cx: &Context<GraphPanel>) -> Div {
+    let readings = div()
+        .id("missing-list")
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .pr(px(SCROLLBAR_THICKNESS))
+        .overflow_y_scroll()
+        .track_scroll(view.missing.scroll.handle())
+        .text_xs()
+        .text_color(palette.label)
+        .children(gaps.iter().map(Gap::reading));
+    div()
+        .relative()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, e: &MouseDownEvent, _, cx| {
+                view.missing.scroll.press(e.position);
+                cx.notify();
+            }),
+        )
+        .child(readings)
+        .child(list_scrollbar(
+            cx.entity(),
+            |view: &GraphPanel| &view.missing.scroll,
+            |view: &mut GraphPanel| &mut view.missing.scroll,
+            palette.scroll,
+        ))
 }
 
 #[cfg(test)]

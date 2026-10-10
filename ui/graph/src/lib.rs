@@ -343,9 +343,7 @@ pub struct GraphPanel {
     /// Whether the boxes standing for the invocation's critical path wear its
     /// halo.
     critical_path_enabled: bool,
-    /// Whether the card naming what the inputs cannot be filtered on is unfolded
-    /// past its one-line reading.
-    missing_open: bool,
+    missing: missing::Missing,
     /// How the card listing the overrides in force is scrolled.
     pins: pins::Pins,
     reveal: reveal::Reveal,
@@ -541,7 +539,7 @@ impl GraphPanel {
             _relation_choices: relations,
             neighborhood_enabled: false,
             critical_path_enabled: true,
-            missing_open: false,
+            missing: missing::Missing::new(),
             pins: pins::Pins::new(),
             reveal: reveal::Reveal::Idle,
             jumps: reveal::Jumps::default(),
@@ -667,19 +665,6 @@ impl GraphPanel {
                             .child(bviz_ui_components::centered_notice(notice, &palette.colors))
                     }),
             )
-            .child(
-                // What the drawing itself cannot state, held clear of the graph
-                // at the foot of the canvas.
-                div()
-                    .absolute()
-                    .left_2()
-                    .bottom_2()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap_2()
-                    .children(missing::card(self, &palette, cx)),
-            )
             .child(cached_layer(self.overlays.clone()))
             .children(chips::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
@@ -788,6 +773,7 @@ impl GraphPanel {
                     .held(pins::panel(self, palette, cx))
                     .folding(report::card(self, palette, cx))
                     .folding(timecard::card(self, palette, cx))
+                    .folding(missing::card(self, palette, cx))
                     .foot(why::card(self, palette, cx)),
             )
             .children(jump::overlay(self, palette, window, cx))
