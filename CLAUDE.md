@@ -310,5 +310,3 @@ text that Bazel already fetches.
   repo by its apparent name, or where that is not resolvable (e.g. from a
   generated repo that lacks the mapping) alias the target in a package and
   reference the alias as a main-repo label.
-- `sh_binary`/`sh_library`/`sh_test` come from `rules_shell`; the built-ins are
-  deprecated.
