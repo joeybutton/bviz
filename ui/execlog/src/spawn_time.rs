@@ -6,7 +6,8 @@ use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
-    Dropdown, DropdownEvent, KeyScope, ListScroll, SCROLLBAR_THICKNESS, Sort, TextTooltip,
+    Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
+    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, legend_gestures,
     list_scrollbar, sort_gesture, sort_header,
 };
 use bviz_ui_spawn_phase::phase_name;
@@ -33,7 +34,6 @@ const SEGMENT_GAP: Pixels = px(2.);
 /// hovered for its time.
 const MIN_SEGMENT_WIDTH: Pixels = px(4.);
 const CELL_PAD: Pixels = px(6.);
-const SWATCH: Pixels = px(10.);
 const CARET: Pixels = px(12.);
 const NAME_WIDTH: Pixels = px(220.);
 const NUMBER_WIDTH: Pixels = px(110.);
@@ -116,6 +116,7 @@ pub struct SpawnTimePanel {
     /// `None` until the log is loaded, the model's placeholder showing instead.
     shown: Option<Shown>,
     scroll: ListScroll,
+    legend: Entity<LegendState>,
     _model_observer: Subscription,
 }
 
@@ -125,11 +126,14 @@ impl SpawnTimePanel {
             this.show_loaded(cx);
             cx.notify();
         });
+        let focus = cx.focus_handle();
+        let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
         let mut panel = Self {
-            focus: cx.focus_handle(),
+            focus,
             model,
             shown: None,
             scroll: ListScroll::new(),
+            legend,
             _model_observer: model_observer,
         };
         panel.show_loaded(cx);
@@ -195,7 +199,6 @@ impl SpawnTimePanel {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(self.scroll.handle())
-            .child(header(summary, palette))
             .map(|content| {
                 if summary.spawns == 0 {
                     return content.child(
@@ -256,41 +259,30 @@ impl SpawnTimePanel {
     }
 }
 
-/// What the log holds in sum, how to read a sum of spawn time, and which
-/// colour is which phase.
-fn header(summary: &Summary, palette: &Palette) -> Div {
-    let legend = Phase::ALL.into_iter().map(|phase| {
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(div().size(SWATCH).bg(palette.phase(phase)))
-            .child(phase_name(phase))
-    });
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().text_base().child(format!(
+/// What the log holds in sum, explaining on hover how to read a sum of spawn
+/// time, and the legend naming which colour is which phase.
+fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) -> OneRow {
+    let caveats = "Spawns overlap, so summed spawn time is not wall time.\n\
+                   Spawns answered from the action cache are not logged.";
+    let totals = div()
+        .id("spawn-time-summary")
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(format!(
             "{} spawns, {} of spawn time",
             summary.spawns,
             duration(summary.timing.total())
-        )))
-        .child(
-            div()
-                .text_color(palette.colors.text_muted)
-                .child("Spawns overlap, so summed spawn time is not wall time.")
-                .child("Spawns answered from the action cache are not logged."),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_3()
-                .pt_1()
-                .text_color(palette.colors.text_muted)
-                .children(legend),
-        )
+        ))
+        .tooltip(TextTooltip::builder(caveats.into(), palette.tooltip));
+    let phases = Phase::ALL
+        .into_iter()
+        .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
+    Toolbar::new()
+        .one_row("spawn-time-header")
+        .child(totals)
+        .child(Legend::new("spawn-time-legend", legend).entries(phases))
 }
 
 /// `control` behind a label naming what it picks.
@@ -638,7 +630,7 @@ impl Panel for SpawnTimePanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().collect()
+        GESTURES.rows().chain(legend_gestures()).collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -665,6 +657,11 @@ impl Render for SpawnTimePanel {
         let panel = div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|panel, _: &ShowLegend, window, cx| {
+                panel
+                    .legend
+                    .update(cx, |legend, cx| legend.show(window, cx));
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -673,7 +670,9 @@ impl Render for SpawnTimePanel {
             .text_color(palette.colors.text)
             .text_sm();
         match &self.shown {
-            Some(shown) => panel.child(self.body(shown, &palette, cx)),
+            Some(shown) => panel
+                .child(header(&shown.summary, &self.legend, &palette))
+                .child(self.body(shown, &palette, cx)),
             None => panel.children(self.model.read(cx).source().placeholder(&palette.colors)),
         }
     }

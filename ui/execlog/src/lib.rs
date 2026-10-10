@@ -13,7 +13,7 @@ pub use spawn_time::SpawnTimePanel;
 
 use bviz_execlog::ExecLog;
 use bviz_invocation::{InvocationId, Session};
-use bviz_ui_components::{Pending, declare_scopes};
+use bviz_ui_components::{Pending, declare_scopes, legend_key_bindings};
 use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
@@ -24,6 +24,7 @@ use summary::Summary;
 
 pub fn register_keys(cx: &mut App) {
     declare_scopes(cx, [spawn_time::KEY_CONTEXT]);
+    cx.bind_keys(legend_key_bindings(spawn_time::KEY_CONTEXT));
 }
 
 /// An execution log being read.
