@@ -188,42 +188,6 @@ fn tooltip(
     })
 }
 
-/// Whether a press has put a button's tooltip away. It stays away until the
-/// pointer leaves the button, so it does not stand over what the press opened.
-struct TooltipDismissed(bool);
-
-/// Shows `tooltip` over the button while it is hovered, from its arrival until
-/// a press.
-fn with_tooltip(
-    el: Stateful<Div>,
-    id: ElementId,
-    tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
-    window: &mut Window,
-    cx: &mut App,
-) -> Stateful<Div> {
-    let dismissed = window.use_keyed_state(id, cx, |_, _| TooltipDismissed(false));
-    let shown = !dismissed.read(cx).0;
-    let set = |dismissed: &Entity<TooltipDismissed>, to: bool, cx: &mut App| {
-        dismissed.update(cx, |dismissed, cx| {
-            if dismissed.0 != to {
-                dismissed.0 = to;
-                cx.notify();
-            }
-        });
-    };
-    let el = el
-        .on_any_mouse_down({
-            let dismissed = dismissed.clone();
-            move |_, _, cx| set(&dismissed, true, cx)
-        })
-        .on_hover(move |hovered, _, cx| {
-            if !hovered {
-                set(&dismissed, false, cx);
-            }
-        });
-    if shown { el.tooltip(tooltip) } else { el }
-}
-
 fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
     if button.compact {
         el.px_2()
@@ -449,7 +413,7 @@ impl RenderOnce for Button {
             self.keys.take(),
             TooltipColors::from_colors(&colors),
         ) {
-            Some(tooltip) => with_tooltip(el, self.id.clone(), tooltip, window, cx),
+            Some(tooltip) => el.tooltip(tooltip),
             None => el,
         };
         let el = styled_variant(el, &self, focused, held, ink, &colors);
