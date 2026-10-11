@@ -528,7 +528,7 @@ fn counters_divider(
 fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<String> {
     let window = window.filter(|w| !w.is_empty())?;
     let mut text = format!(
-        "Window: {} of {}",
+        "window: {} of {}",
         format_duration(window.total_us()),
         format_duration(span_us)
     );
@@ -2191,7 +2191,7 @@ mod tests {
     fn a_one_region_window_reads_as_a_share_of_the_build() {
         assert_eq!(
             time_window_summary(Some(&selection(&[(0, 2_500_000)])), BUILD_US).as_deref(),
-            Some("Window: 2.50s of 40.00s")
+            Some("window: 2.50s of 40.00s")
         );
     }
 
@@ -2204,7 +2204,7 @@ mod tests {
         ]);
         assert_eq!(
             time_window_summary(Some(&three), BUILD_US).as_deref(),
-            Some("Window: 3.00s of 40.00s · 3 regions")
+            Some("window: 3.00s of 40.00s · 3 regions")
         );
     }
 
@@ -2212,7 +2212,7 @@ mod tests {
     fn a_window_far_shorter_than_the_build_keeps_its_own_unit() {
         assert_eq!(
             time_window_summary(Some(&selection(&[(0, 4_200)])), BUILD_US).as_deref(),
-            Some("Window: 4.20ms of 40.00s")
+            Some("window: 4.20ms of 40.00s")
         );
     }
 
