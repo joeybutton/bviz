@@ -9,7 +9,8 @@ use crate::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
-    Button, Hint, ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, list_scrollbar,
+    Button, Hint, ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TruncatingLabel,
+    list_scrollbar,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
@@ -366,15 +367,7 @@ impl TracksMenu {
                 cx.notify();
             }))
             .child(check)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(label.to_string()),
-            )
+            .child(TruncatingLabel::new("label", label.to_string()).flex_1())
     }
 
     /// The menu container over the built rows: the filter field, the order
