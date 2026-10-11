@@ -1,8 +1,8 @@
 use crate::{CloseWindow, KEY_CONTEXT, Quit, Tab, TabPrev};
-use bviz_ui_components::Button;
 use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
+use bviz_ui_components::{Button, TruncatingLabel};
 use bviz_ui_theme::{ThemeColors, mix};
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, Div, Edges, Entity, FocusHandle,
@@ -40,7 +40,7 @@ pub struct Chrome {
     focus_handle: FocusHandle,
     title: SharedString,
     menu: Option<AnyElement>,
-    status: Option<AnyElement>,
+    status: Option<SharedString>,
     body: Option<AnyElement>,
 }
 
@@ -67,8 +67,8 @@ impl Chrome {
         self
     }
 
-    pub fn status(mut self, status: impl IntoElement) -> Self {
-        self.status = Some(status.into_any_element());
+    pub fn status(mut self, status: impl Into<SharedString>) -> Self {
+        self.status = Some(status.into());
         self
     }
 
@@ -341,7 +341,7 @@ fn status_bar(
     radius: Pixels,
     band: Rgba,
     menu: Option<AnyElement>,
-    status: Option<AnyElement>,
+    status: Option<SharedString>,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -358,7 +358,11 @@ fn status_bar(
         .text_color(colors.text_muted)
         .text_sm()
         .children(menu)
-        .child(div().font_family(bviz_ui_assets::MONO).children(status))
+        .children(
+            status.map(|status| {
+                TruncatingLabel::new("status", status).font_family(bviz_ui_assets::MONO)
+            }),
+        )
 }
 
 /// A behind-the-content canvas that updates the resize cursor near the edges.
