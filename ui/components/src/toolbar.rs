@@ -143,6 +143,7 @@ pub struct OneRow {
     leading: Vec<Item>,
     trailing: Vec<Item>,
     status: Vec<AnyElement>,
+    text_size: Option<Pixels>,
 }
 
 /// What a [`OneRow`] lays out side by side.
@@ -159,7 +160,15 @@ impl OneRow {
             leading: Vec::new(),
             trailing: Vec::new(),
             status: Vec::new(),
+            text_size: None,
         }
+    }
+
+    /// Sets everything the row reads in `size`, for a view whose text runs
+    /// apart from the window's.
+    pub fn text_size(mut self, size: Pixels) -> Self {
+        self.text_size = Some(size);
+        self
     }
 
     /// The strip's height, so a layout can reserve its room without building it.
@@ -246,6 +255,7 @@ impl RenderOnce for OneRow {
             menu,
         };
         strip(window, cx)
+            .when_some(self.text_size, Div::text_size)
             .items_center()
             .h(Self::height())
             .child(fitting)
