@@ -1,6 +1,6 @@
 use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood};
-use bviz_ui_components::{Button, OneRow, Toolbar, spinner};
-use gpui::{ClickEvent, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
+use bviz_ui_components::{OneRow, Switch, ToggleGroup, ToggleSegment, Toolbar, spinner};
+use gpui::{Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
 /// How many strips [`toolbar`] stacks.
 const STRIPS: usize = 2;
@@ -19,32 +19,14 @@ pub(crate) fn toolbar(
     focus: &FocusHandle,
     cx: &Context<GraphPanel>,
 ) -> Div {
+    let marks = marks(&controls, focus, cx);
     let mut view = Toolbar::new()
         .one_row("graph-view-controls")
         .child(group("layout", palette).child(controls.layout_picker))
         .child(controls.reduce_toggle)
         .child(group("colour", palette).child(controls.colour_picker))
         .when_some(controls.boxes, |view, boxes| view.child(boxes))
-        .child(
-            Button::new(
-                "neighborhood-toggle",
-                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_neighborhood(cx)),
-            )
-            .label("neighbors")
-            .selected(controls.neighborhood_enabled)
-            .keys_for(&ToggleNeighborhood, focus),
-        );
-    if let Some(enabled) = controls.critical_path {
-        view = view.child(
-            Button::new(
-                "critical-path-toggle",
-                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_critical_path(cx)),
-            )
-            .label("critical path")
-            .tooltip("Toggle critical path")
-            .selected(enabled),
-        );
-    }
+        .child(group("mark", palette).child(marks));
     for card in [controls.report_control, controls.timecard_control]
         .into_iter()
         .flatten()
@@ -72,6 +54,31 @@ pub(crate) fn toolbar(
         .when_some(controls.legend, OneRow::child);
     let strips: [OneRow; STRIPS] = [view, query];
     div().size_full().flex().flex_col().children(strips)
+}
+
+/// The toggles choosing what the drawing marks.
+fn marks(controls: &Controls, focus: &FocusHandle, cx: &Context<GraphPanel>) -> ToggleGroup {
+    let panel = cx.entity();
+    let neighborhood = Switch::new(
+        ToggleSegment::new("neighbors").keys_for(&ToggleNeighborhood, focus),
+        controls.neighborhood_enabled,
+        {
+            let panel = panel.clone();
+            move |_, _, cx| panel.update(cx, |view, cx| view.toggle_neighborhood(cx))
+        },
+    );
+    let critical_path = controls.critical_path.map(|enabled| {
+        Switch::new(
+            ToggleSegment::new("critical path").tooltip("Toggle critical path"),
+            enabled,
+            move |_, _, cx| panel.update(cx, |view, cx| view.toggle_critical_path(cx)),
+        )
+    });
+    ToggleGroup::any_of(
+        "graph-marks",
+        "mark",
+        std::iter::once(neighborhood).chain(critical_path),
+    )
 }
 
 /// A strip's controls grouped under the word `name`.
