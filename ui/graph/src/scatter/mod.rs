@@ -26,14 +26,14 @@ use axis::{Axes, Axis, Clocks};
 use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
-use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
+use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState,
-    ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip, Toolbar,
-    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
-    list_scrollbar, load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box,
+    Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
+    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip,
+    Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
+    list_scrollbar, load_in_background, menu_chrome, paint_hover_card, paint_tooltip,
     tooltip_extent, track_drag,
 };
 use bviz_ui_components::{KeyStyle, key_text_within};
@@ -104,6 +104,8 @@ pub struct ScatterPanel {
     bounds: Option<Bounds<Pixels>>,
     /// The press over the plot, until the button comes up again.
     press: Option<Press>,
+    /// The card describing the point under the pointer.
+    card: HoverCard<Id>,
     /// How far the list of the points under a click has scrolled.
     pick_scroll: ListScroll,
     /// Whether the last click revealed a row of the list of points, whose
@@ -160,6 +162,7 @@ impl ScatterPanel {
             canvas: cx.new(|_| ScatterCanvas { parent }),
             bounds: None,
             press: None,
+            card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             pick_scroll: ListScroll::new(),
             row_revealed: false,
             closes_on_blur: None,
@@ -464,6 +467,10 @@ impl ScatterPanel {
     /// pointer, which names nothing else while it is up.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let picked = self.pick(at);
+        let point = picked
+            .as_ref()
+            .and_then(|picked| self.point_of(picked.mark));
+        self.card.hover(at, point.as_ref());
         let model = self.model.read(cx);
         let Some(plot) = &mut self.plot else {
             return;
@@ -490,8 +497,7 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Carries the zoom along with a press dragged past a click's reach, which
-    /// puts away the tooltip until the release.
+    /// Carries the zoom along with a press dragged past a click's reach.
     fn drag_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(press) = &mut self.press else {
             return;
@@ -503,8 +509,9 @@ impl ScatterPanel {
         }
         let by = at - press.last;
         press.last = at;
+        self.card.drag(at);
         if starts {
-            self.clear_hover(cx);
+            cx.notify();
         }
         if let Some(area) = self.area() {
             self.zoom_to(area.panned(by), at, cx);
@@ -553,14 +560,32 @@ impl ScatterPanel {
         self.model.update(cx, |model, cx| model.reveal(id, cx));
     }
 
-    /// Drops the tooltip, which names the mark under a pointer that has left.
+    /// Drops the card, which names the mark under a pointer that has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        let mut cleared = self.card.leave();
         if let Some(plot) = &mut self.plot
             && let Pointer::Hover(_) = plot.pointer
         {
             plot.pointer = Pointer::Away;
+            cleared = true;
+        }
+        if cleared {
             cx.notify();
         }
+    }
+
+    /// The point the card describes.
+    fn carded(&self, _: &App) -> Option<Id> {
+        match &self.plot.as_ref()?.pointer {
+            Pointer::Hover(hover) => self.point_of(hover.mark),
+            Pointer::Away | Pointer::Picking(_) => None,
+        }
+    }
+
+    /// The point the plotted mark `mark` stands for, which names it across
+    /// replots that renumber the marks.
+    fn point_of(&self, mark: usize) -> Option<Id> {
+        Some(self.plot.as_ref()?.plotted.marks[mark].target.id)
     }
 
     /// Whether a list of the points under a click is up.
@@ -1280,7 +1305,11 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         let described = panel.plot.as_ref().and_then(|plot| {
             let (mark, lines) = match &plot.pointer {
                 Pointer::Away => return None,
-                Pointer::Hover(hover) => (hover.mark, Some(hover.lines.clone())),
+                Pointer::Hover(hover) => {
+                    let point = plot.plotted.marks[hover.mark].target.id;
+                    let lines = panel.card.shows(&point).then(|| hover.lines.clone());
+                    (hover.mark, lines)
+                }
                 Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
             };
             Some((Arc::clone(&plot.plotted), mark, lines))
@@ -1299,10 +1328,10 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         let Some(area) = paint::data_area(&plotted, zoom, bounds) else {
             return;
         };
-        let center = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
+        let ring = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
         if let Some(lines) = lines {
             let tooltip = palette.colors.tooltip();
-            paint_tooltip_box(&lines, center, bounds, tooltip, window, cx);
+            paint_hover_card(&lines, CardAnchor::Item(ring), bounds, tooltip, window, cx);
         }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()

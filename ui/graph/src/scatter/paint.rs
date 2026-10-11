@@ -5,8 +5,8 @@ use crate::Palette;
 use crate::paint::UNMARKED_FADE;
 use bviz_ui_theme::mix;
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Hsla, Pixels, Point, Rgba, ShapedLine, TextAlign,
-    Window, fill, point, px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, Pixels, Rgba, ShapedLine, TextAlign, Window, fill,
+    point, px, quad, size,
 };
 
 /// Room left of the axes for the vertical tick labels.
@@ -110,24 +110,25 @@ pub(crate) fn paint_plot(
 const RING_GAP: f32 = 2.0;
 const RING_WIDTH: f32 = 1.5;
 
-/// Rings `mark`, placed through `area`, and gives where its centre lies.
+/// Rings `mark`, placed through `area`, and gives the bounds of the ring.
 pub(crate) fn paint_ring(
     mark: &Mark,
     area: &DataArea,
     palette: &Palette,
     window: &mut Window,
-) -> Point<Pixels> {
+) -> Bounds<Pixels> {
     let center = area.place(mark);
     let r = px(mark.radius + RING_GAP + RING_WIDTH);
+    let ring = Bounds::new(center - point(r, r), size(r * 2., r * 2.));
     window.paint_quad(quad(
-        Bounds::new(center - point(r, r), size(r * 2., r * 2.)),
+        ring,
         r,
         Hsla::transparent_black(),
         px(RING_WIDTH),
         palette.label,
         BorderStyle::Solid,
     ));
-    center
+    ring
 }
 
 /// The colours the plot's frame is drawn in.
