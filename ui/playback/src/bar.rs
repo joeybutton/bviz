@@ -3,7 +3,8 @@ use crate::{
 };
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
-    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, TextTooltip, scrubber,
+    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, TextTooltip, TruncatingLabel,
+    scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -171,15 +172,11 @@ impl Render for PlaybackBar {
             .font_family(bviz_ui_assets::UI)
             .text_color(colors.text)
             .child(
-                div()
+                TruncatingLabel::new("playback-name", self.name.clone())
                     .max_w(NAME_MAX_WIDTH)
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
                     .text_size(TEXT_SIZE)
-                    .text_color(colors.text_muted)
-                    .child(self.name.clone()),
+                    .text_color(colors.text_muted),
             )
             .children(self.transport(playing))
             .child(self.scrubber(fraction, &colors, cx))
