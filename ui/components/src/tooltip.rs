@@ -88,24 +88,6 @@ pub fn room_beside(at: Point<Pixels>, bounds: Bounds<Pixels>) -> Size<Pixels> {
     )
 }
 
-/// Paints `lines` in a tooltip panel beside `at` inside `bounds`.
-pub fn paint_tooltip_box(
-    lines: &[String],
-    at: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    colors: TooltipColors,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    paint_tooltip(
-        lines,
-        |extent| beside_anchor(at, extent, bounds),
-        colors,
-        window,
-        cx,
-    );
-}
-
 /// The rows of `text` as a tooltip panel reads them: in the UI face whatever
 /// the face of the panel it is painted over, wrapped at [`TOOLTIP_MAX_WIDTH`].
 fn shape_rows(text: &str, color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
@@ -177,7 +159,7 @@ pub fn place_tooltips(cx: &mut App) {
     cx.set_tooltip_offset(px(TOOLTIP_OFFSET));
 }
 
-/// Text in the panel [`paint_tooltip_box`] paints, as a view an element's own
+/// Text in the panel [`paint_tooltip`] paints, as a view an element's own
 /// tooltip can show. Each `\n` in it starts a line.
 pub struct TextTooltip {
     text: SharedString,

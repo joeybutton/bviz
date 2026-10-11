@@ -64,8 +64,7 @@ pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
-    TextTooltip, beside_anchor, paint_tooltip, paint_tooltip_box, place_tooltips, room_beside,
-    tooltip_extent,
+    TextTooltip, beside_anchor, paint_tooltip, place_tooltips, room_beside, tooltip_extent,
 };
 pub use zoom_keys::{ZOOM_KEY_STEP, ZoomIn, ZoomOut, zoom_key_bindings};
 
