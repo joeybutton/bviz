@@ -76,10 +76,7 @@ pub(crate) fn toolbar(
         .group(marks)
         .when(view.derived.deriving(), |row| {
             // The prior layout stays interactive while a relayout runs.
-            row.status([
-                busy("relaying-spinner", "laying out…", palette).into_any_element(),
-                spinner("relaying-spinner", SPINNER_SIZE, palette.label).into_any_element(),
-            ])
+            row.busy("relaying-spinner", "laying out…")
         })
         .trailing(panel_toggles(view, controls.legend, cx));
     let query = OneRow::new("graph-query-bar")

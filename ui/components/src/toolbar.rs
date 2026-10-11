@@ -2,7 +2,7 @@ mod fit;
 
 use crate::button::ICON_SIZE;
 use crate::menu::{Menu, MenuEvent, MenuItem, over_window};
-use crate::{Button, CONTROL_HEIGHT};
+use crate::{Button, CONTROL_HEIGHT, spinner};
 use fit::{Fitted, Kind, Measure, Room, Side, Spot};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Div, ElementId, Empty, Entity,
@@ -29,6 +29,9 @@ const SEPARATOR_SPAN: f32 = 0.6;
 /// The icon of a [`OneRow`]'s overflow menu trigger, the one every menu of
 /// further controls is opened by.
 const OVERFLOW_ICON: &str = "dots-three-vertical";
+
+/// Size of the spinner cueing work in flight.
+const BUSY_SPINNER: Pixels = px(14.);
 
 /// Diameter of the dot marking an overflow menu trigger whose menu holds a
 /// control standing other than at rest.
@@ -152,8 +155,15 @@ pub struct OneRow {
     id: ElementId,
     leading: Vec<Item>,
     trailing: Vec<Item>,
-    status: Vec<AnyElement>,
+    busy: Option<Busy>,
     text_size: Option<Pixels>,
+}
+
+/// Work in flight a [`OneRow`] cues.
+struct Busy {
+    /// Keys the cue's spinner.
+    id: ElementId,
+    doing: SharedString,
 }
 
 /// What a [`OneRow`] lays out side by side.
@@ -179,7 +189,7 @@ impl OneRow {
             id: id.into(),
             leading: Vec::new(),
             trailing: Vec::new(),
-            status: Vec::new(),
+            busy: None,
             text_size: None,
         }
     }
@@ -220,11 +230,15 @@ impl OneRow {
         self
     }
 
-    /// A cue of work in flight, standing in the widest of `presentations` that
-    /// fits the room the row's controls leave, against the right-hand groups,
+    /// A cue that the work `doing` names is in flight, its spinner keyed by
+    /// `id`: the spinner beside the words, or alone where the room the row's
+    /// controls leave is too narrow for them, against the right-hand groups,
     /// so that it never moves a control as it comes and goes.
-    pub fn status(mut self, presentations: impl IntoIterator<Item = AnyElement>) -> Self {
-        self.status = presentations.into_iter().collect();
+    pub fn busy(mut self, id: impl Into<ElementId>, doing: impl Into<SharedString>) -> Self {
+        self.busy = Some(Busy {
+            id: id.into(),
+            doing: doing.into(),
+        });
         self
     }
 }
@@ -266,11 +280,21 @@ impl RenderOnce for OneRow {
                 })
                 .into_any_element()
         };
+        let status = match self.busy {
+            Some(Busy { id, doing }) => {
+                let spinner = || spinner(id.clone(), BUSY_SPINNER, colors.text);
+                vec![
+                    beside().child(spinner()).child(doing).into_any_element(),
+                    spinner().into_any_element(),
+                ]
+            }
+            None => Vec::new(),
+        };
         let fitting = Fitting {
             id: self.id,
             leading: self.leading,
             trailing: self.trailing,
-            status: self.status,
+            status,
             trigger: Trigger {
                 unmarked: trigger(false),
                 marked: trigger(true),
