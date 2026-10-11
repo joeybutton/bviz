@@ -425,7 +425,7 @@ impl TracksMenu {
                         this.reflow_timeline(cx);
                         cx.notify();
                     }))
-                    .child(if all_visible { "Hide all" } else { "Show all" })
+                    .child(if all_visible { "hide all" } else { "show all" })
             })
             .child(self.menu_list(rows, palette, cx))
     }
