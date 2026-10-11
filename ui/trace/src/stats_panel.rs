@@ -12,8 +12,8 @@ use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip,
-    Toolbar, centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header,
-    sort_hint, track_drag,
+    Toolbar, TruncatingLabel, centered_spinner, load_in_background, overlay_canvas, sort_gesture,
+    sort_header, sort_hint, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -399,7 +399,6 @@ impl StatsPanel {
         let row_hover = palette.hover;
         let row_pick = palette.selection;
         let row_pick_hover = palette.picked_hover();
-        let tooltip = palette.colors.tooltip();
         let picked = self.picked_row(&order);
         let version = order.aggregate_version;
         let entity = cx.entity();
@@ -421,13 +420,11 @@ impl StatsPanel {
                     let cells = STATS_COLUMNS.iter().map(|spec| {
                         let text: SharedString = match spec.column {
                             StatsColumn::Key => {
-                                let key = SharedString::from(key.to_string());
-                                let named = div()
-                                    .id(("stats-key", index as usize))
-                                    .w_full()
-                                    .min_w_0()
-                                    .tooltip(TextTooltip::builder(key.clone(), tooltip))
-                                    .child(line(key));
+                                let named = TruncatingLabel::new(
+                                    ("stats-key", index as usize),
+                                    key.to_string(),
+                                )
+                                .w_full();
                                 return table_cell(spec.width, [named.into_any_element()]);
                             }
                             StatsColumn::Count => row.count.to_string().into(),

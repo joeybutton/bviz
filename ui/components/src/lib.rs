@@ -29,6 +29,7 @@ mod spinner;
 pub mod text_input;
 mod toolbar;
 mod tooltip;
+mod truncating_label;
 mod zoom_keys;
 
 pub use background::{Pending, load_in_background};
@@ -68,6 +69,7 @@ pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
     TextTooltip, beside_anchor, paint_tooltip, place_tooltips, room_beside, tooltip_extent,
 };
+pub use truncating_label::TruncatingLabel;
 pub use zoom_keys::{ZOOM_KEY_STEP, ZoomIn, ZoomOut, zoom_key_bindings};
 
 use gpui::{App, Pixels, px};

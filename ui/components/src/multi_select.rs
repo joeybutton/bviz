@@ -5,7 +5,7 @@ use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
 use crate::scrollbar::ScrollbarColors;
-use crate::{Hint, KeyScope};
+use crate::{Hint, KeyScope, TruncatingLabel};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -377,7 +377,11 @@ impl MultiSelect {
             cx.notify();
         }))
         .child(menu_chrome::check(colors, option.checked))
-        .child(menu_chrome::reading(label_width, option.label.clone()))
+        .child(
+            TruncatingLabel::new(("multi-select-label", index), option.label.clone())
+                .w(label_width)
+                .flex_none(),
+        )
     }
 }
 
