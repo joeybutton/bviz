@@ -4,7 +4,8 @@
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use crate::{
-    Button, CONTROL_HEIGHT, KeyScope, TextTooltip, action_label, key_text_in, menu_chrome,
+    Button, CONTROL_HEIGHT, KeyScope, Priority, TextTooltip, ToolbarGroup, action_label,
+    key_text_in, menu_chrome,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -61,6 +62,10 @@ const GESTURES: Gestures<LegendIntent> = Gestures::new(&[Entry::new(
 pub fn legend_gestures() -> impl Iterator<Item = GestureRow> {
     GESTURES.rows()
 }
+
+/// How long a legend's toolbar group holds out against its row narrowing:
+/// less than any other group.
+const LEGEND_PRIORITY: Priority = 0;
 
 /// What a [`LegendToggle`] reads, and the icon it carries.
 const TOGGLE_LABEL: &str = "legend";
@@ -398,6 +403,15 @@ impl Legend {
             legend: self,
             labelled: true,
         }
+    }
+
+    /// The legend as the group ending a toolbar: its toggle, standing icon-only
+    /// once the row has no room for its name, parted from the controls before
+    /// it.
+    pub fn toolbar_group(self) -> ToolbarGroup {
+        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle())
+            .or(self.toggle().icon_only())
+            .parted()
     }
 
     /// What this frame reads of the legend's state.
