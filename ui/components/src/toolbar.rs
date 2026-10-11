@@ -149,7 +149,17 @@ pub struct OneRow {
 /// What a [`OneRow`] lays out side by side.
 enum Item {
     Group(ToolbarGroup),
-    Filling(AnyElement),
+    Filling(Filling),
+}
+
+/// The element a [`OneRow`] fills its room with, built twice: once to measure
+/// its least width, once to stand. Text cut short to fit keeps the cut of the
+/// last layout to measure it, and a second layout of one element in a frame
+/// may reuse a size the first measured without measuring again, so one
+/// element measured and then laid out could stand cut to its least width.
+struct Filling {
+    measured: AnyElement,
+    standing: AnyElement,
 }
 
 impl OneRow {
@@ -182,12 +192,15 @@ impl OneRow {
         self
     }
 
-    /// Adds `element` to the left-hand controls, laid out across the room the
-    /// row's groups leave. It holds its min-content width while any group
-    /// stands in the row, every group giving way first, and never leaves the
-    /// row: narrower still, it takes the whole of it.
-    pub fn filling(mut self, element: impl IntoElement) -> Self {
-        self.leading.push(Item::Filling(element.into_any_element()));
+    /// Adds the element `build` builds to the left-hand controls, laid out
+    /// across the room the row's groups leave. It holds its min-content width
+    /// while any group stands in the row, every group giving way first, and
+    /// never leaves the row: narrower still, it takes the whole of it.
+    pub fn filling<E: IntoElement>(mut self, mut build: impl FnMut() -> E) -> Self {
+        self.leading.push(Item::Filling(Filling {
+            measured: build().into_any_element(),
+            standing: build().into_any_element(),
+        }));
         self
     }
 
@@ -375,19 +388,21 @@ impl Measured {
                 };
                 (measured, measure)
             }
-            Item::Filling(element) => {
-                let mut element = div()
-                    .w_full()
-                    .h(CONTROL_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .child(element)
-                    .into_any_element();
+            Item::Filling(Filling { measured, standing }) => {
+                let held = |element: AnyElement| {
+                    div()
+                        .w_full()
+                        .h(CONTROL_HEIGHT)
+                        .flex()
+                        .items_center()
+                        .child(element)
+                        .into_any_element()
+                };
                 let least = size(
                     AvailableSpace::MinContent,
                     AvailableSpace::Definite(CONTROL_HEIGHT),
                 );
-                let extent = element.layout_as_root(least, window, cx);
+                let extent = held(measured).layout_as_root(least, window, cx);
                 let measure = Measure {
                     kind: Kind::Filling {
                         least: extent.width,
@@ -395,7 +410,7 @@ impl Measured {
                     side,
                 };
                 let measured = Measured {
-                    widest: (element, extent),
+                    widest: (held(standing), extent),
                     narrower: Vec::new(),
                     overflow: None,
                     fills: true,

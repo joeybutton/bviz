@@ -766,7 +766,6 @@ impl GraphPanel {
     ) -> AnyElement {
         let controls = Controls {
             legend: self.legend(palette, cx),
-            chips: chips::bar(self, palette, window, cx),
         };
         toolbar::toolbar(self, controls, palette, window, cx).into_any_element()
     }
@@ -1295,10 +1294,8 @@ impl Render for GraphCanvas {
 }
 
 /// The toolbar's parts that take more to build than a shared borrow of the
-/// panel: the window, or the panel itself mutably.
+/// panel: the panel itself mutably.
 struct Controls {
-    /// The query bar.
-    chips: AnyElement,
     legend: bviz_ui_components::Legend,
 }
 

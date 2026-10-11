@@ -2,7 +2,7 @@ use crate::colour::{self, Colouring};
 use crate::mode::{self, LayoutMode};
 use crate::{
     CRITICAL_PATH_AT_REST, Controls, CycleColouring, GraphPanel, NEIGHBOURHOOD_AT_REST, Palette,
-    ToggleCriticalPath, ToggleMap, ToggleNeighborhood, boxes, report, timecard,
+    ToggleCriticalPath, ToggleMap, ToggleNeighborhood, boxes, chips, report, timecard,
 };
 use bviz_ui_components::{
     Dropdown, Legend, MenuItem, MultiSelect, OneRow, Presentation, Priority, Switch, ToggleGroup,
@@ -28,7 +28,7 @@ pub(crate) fn toolbar(
     view: &GraphPanel,
     controls: Controls,
     palette: &Palette,
-    window: &Window,
+    window: &mut Window,
     cx: &Context<GraphPanel>,
 ) -> Div {
     let layout = ToolbarGroup::new(
@@ -106,7 +106,7 @@ pub(crate) fn toolbar(
                 boxes::any_hidden(view.derived.filter()),
             ))
         })
-        .filling(controls.chips);
+        .filling(|| chips::bar(view, palette, window, cx));
     let strips: [OneRow; STRIPS] = [drawing, query];
     div().size_full().flex().flex_col().children(strips)
 }

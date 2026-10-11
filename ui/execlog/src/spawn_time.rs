@@ -266,33 +266,37 @@ impl SpawnTimePanel {
 /// time, and the legend naming which colour is which phase.
 fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) -> OneRow {
     let caveats = "spawns overlap · not wall time\naction-cache hits not logged";
-    let totals = div()
-        .id("spawn-time-summary")
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(format!(
-            "{} spawns, {} of spawn time",
-            summary.spawns,
-            duration(summary.timing.total())
-        ))
-        .tooltip(TextTooltip::builder(
-            caveats.into(),
-            palette.colors.tooltip(),
-        ));
-    let phases = spent_in(&summary.timing)
-        .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
-    OneRow::new("spawn-time-header").filling(
+    let totals = || {
+        div()
+            .id("spawn-time-summary")
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(format!(
+                "{} spawns, {} of spawn time",
+                summary.spawns,
+                duration(summary.timing.total())
+            ))
+            .tooltip(TextTooltip::builder(
+                caveats.into(),
+                palette.colors.tooltip(),
+            ))
+    };
+    let phases = || {
+        spent_in(&summary.timing)
+            .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)))
+    };
+    OneRow::new("spawn-time-header").filling(|| {
         div()
             .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .gap_2()
-            .child(totals)
-            .child(Legend::new("spawn-time-legend", legend).entries(phases)),
-    )
+            .child(totals())
+            .child(Legend::new("spawn-time-legend", legend).entries(phases()))
+    })
 }
 
 /// `control` behind a label naming what it picks.
