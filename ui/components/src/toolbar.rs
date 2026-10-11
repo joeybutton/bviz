@@ -55,7 +55,7 @@ pub struct ToolbarGroup {
 
 /// How a [`ToolbarGroup`] stands in its row's overflow menu.
 struct Overflow {
-    item: MenuItem,
+    items: Vec<MenuItem>,
     /// Whether the group stands other than at rest.
     set: bool,
 }
@@ -93,8 +93,21 @@ impl ToolbarGroup {
     /// Lets the group leave the row for its overflow menu once it stands at
     /// its narrowest, as the menu row `item`; `set` says the group stands
     /// other than at rest, which marks the menu's trigger while it is there.
-    pub fn overflow(mut self, item: MenuItem, set: bool) -> Self {
-        self.overflow = Some(Overflow { item, set });
+    pub fn overflow(self, item: MenuItem, set: bool) -> Self {
+        self.overflow_rows(item, [], set)
+    }
+
+    /// Lets the group leave the row for its overflow menu as
+    /// [`overflow`](Self::overflow) does, as the menu row `first` followed by
+    /// `rest`, one for each of its controls.
+    pub fn overflow_rows(
+        mut self,
+        first: MenuItem,
+        rest: impl IntoIterator<Item = MenuItem>,
+        set: bool,
+    ) -> Self {
+        let items = std::iter::once(first).chain(rest).collect();
+        self.overflow = Some(Overflow { items, set });
         self
     }
 
@@ -554,7 +567,7 @@ impl Element for Fitting {
                     Spot::Menu => {
                         if let Some(overflow) = item.overflow {
                             set |= overflow.set;
-                            overflowed.push(overflow.item);
+                            overflowed.extend(overflow.items);
                         }
                     }
                     Spot::Out => {}
