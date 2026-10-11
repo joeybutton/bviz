@@ -252,6 +252,7 @@ fn styled_variant(
                 let fill = disabled_fill(colors);
                 el.bg(fill).border_2().border_color(fill)
             }
+            _ if button.ghost => el.border_2().border_color(transparent_black()),
             _ => el.border_2().border_color(colors.border_variant),
         };
     }
