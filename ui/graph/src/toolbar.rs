@@ -21,9 +21,9 @@ pub(crate) fn toolbar(
 ) -> Div {
     let mut view = Toolbar::new()
         .one_row("graph-view-controls")
-        .child(controls.layout_picker)
+        .child(group("layout", palette).child(controls.layout_picker))
         .child(controls.reduce_toggle)
-        .child(controls.colour_picker)
+        .child(group("colour", palette).child(controls.colour_picker))
         .when_some(controls.boxes, |view, boxes| view.child(boxes))
         .child(
             Button::new(

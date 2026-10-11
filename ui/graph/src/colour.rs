@@ -28,10 +28,10 @@ impl Colouring {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Kind => "colour: kind",
-            Self::Time => "colour: time",
-            Self::Runner => "colour: runner",
-            Self::Playback => "colour: playback",
+            Self::Kind => "kind",
+            Self::Time => "time",
+            Self::Runner => "runner",
+            Self::Playback => "playback",
         }
     }
 
