@@ -11,7 +11,6 @@ mod reorder;
 
 pub(crate) use complete::Completions;
 
-use crate::menu::over_window;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::Input;
 use bviz_graph_layout::query_lang::{
@@ -21,7 +20,7 @@ use bviz_graph_layout::select::{Filter, Scope};
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
     Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
-    load_in_background, text_input,
+    load_in_background, over_window, text_input,
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,

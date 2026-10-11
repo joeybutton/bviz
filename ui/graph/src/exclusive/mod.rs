@@ -14,7 +14,6 @@ pub(crate) use roots::NOTICE_SEPARATOR;
 use crate::Palette;
 use crate::history::History;
 use crate::hue::{Colouring, Hue};
-use crate::menu::over_window;
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
@@ -33,6 +32,7 @@ use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
     QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
     centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
+    over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};

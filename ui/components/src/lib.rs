@@ -58,7 +58,7 @@ pub use legend::{
     legend_gestures, legend_key_bindings,
 };
 pub use list_scroll::{ListScroll, list_scrollbar};
-pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem};
+pub use menu::{Menu, MenuEvent, MenuItem, SubmenuItem, over_window};
 pub use multi_select::{MultiOption, MultiSelect, MultiSelectEvent};
 pub use notice::{Source, centered_notice, centered_spinner, cut_off_note, note_strip};
 pub use query_field::{QueryField, QueryFieldEvent};

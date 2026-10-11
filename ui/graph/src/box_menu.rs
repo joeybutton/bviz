@@ -2,12 +2,11 @@
 //! on the box puts up, and a key for the selected box.
 
 use crate::camera::{Rect, to_screen};
-use crate::menu::over_window;
 use crate::relation::Relation;
 use crate::{GraphPanel, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
-use bviz_ui_components::{Menu, MenuEvent, MenuItem, SubmenuItem};
+use bviz_ui_components::{Menu, MenuEvent, MenuItem, SubmenuItem, over_window};
 use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, Pixels, Point, SharedString, Subscription,
     WeakEntity, Window, point,
