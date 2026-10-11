@@ -21,8 +21,9 @@ use bviz_critical_path::{
 use bviz_invocation::Chosen;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Button, KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip,
-    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header, sort_hint,
+    KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip, ToggleGroup,
+    ToggleSegment, centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header,
+    sort_hint,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use by_height::ByHeight;
@@ -425,37 +426,26 @@ impl CriticalPathPanel {
     /// The choice of what the table lists, in place of its first column's
     /// title.
     fn listing_choice(&self, modeled: &Modeled, listing: Listing, cx: &Context<Self>) -> Div {
-        let button = |id: &'static str, label: String, tip: &'static str, shows: Listing| {
-            let panel = cx.entity();
-            Button::new(id, move |_, _, cx| {
+        let panel = cx.entity();
+        let segment = |shows: Listing| match shows {
+            Listing::Steps => ToggleSegment::new(words::STEPS_TITLE).tooltip(words::STEPS_TIP),
+            Listing::NearlyCritical => ToggleSegment::new(words::nearly_critical_title(modeled))
+                .tooltip(words::NEARLY_CRITICAL_TIP),
+        };
+        let choice = ToggleGroup::one_of(
+            "critical-path-list-choice",
+            "list",
+            [Listing::Steps, Listing::NearlyCritical],
+            listing,
+            segment,
+            move |shows, _, cx| {
                 panel.update(cx, |panel, cx| {
                     panel.listing = shows;
                     cx.notify();
                 })
-            })
-            .compact()
-            .selected(listing == shows)
-            .label(label)
-            .tooltip(tip)
-        };
-        div()
-            .flex()
-            .flex_row()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1()
-            .child(button(
-                "critical-path-list-steps",
-                words::STEPS_TITLE.to_owned(),
-                words::STEPS_TIP,
-                Listing::Steps,
-            ))
-            .child(button(
-                "critical-path-list-nearly-critical",
-                words::nearly_critical_title(modeled),
-                words::NEARLY_CRITICAL_TIP,
-                Listing::NearlyCritical,
-            ))
+            },
+        );
+        div().flex_shrink_0().child(choice)
     }
 
     /// The actions nearly critical, one row each.
