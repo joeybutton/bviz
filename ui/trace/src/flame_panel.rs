@@ -14,9 +14,10 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, Legend, LegendState, SCROLLBAR_THICKNESS,
-    Scrollbar, ShowLegend, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner,
-    legend_gestures, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
+    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
+    cached_layer, centered_spinner, legend_gestures, overlay_canvas, paint_hover_card,
+    paint_labeled_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -409,7 +410,7 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     }
 }
 
-/// Paints `hovered`'s tooltip near `at`.
+/// Paints `hovered`'s card beside the pointer at `at`.
 fn paint_flame_tooltip(
     hovered: &HoveredBox,
     at: Point<Pixels>,
@@ -419,7 +420,8 @@ fn paint_flame_tooltip(
     cx: &mut App,
 ) {
     let lines = flame_tooltip_lines(hovered);
-    paint_tooltip_box(&lines, at, bounds, palette.colors.tooltip(), window, cx);
+    let anchor = CardAnchor::Pointer(at);
+    paint_hover_card(&lines, anchor, bounds, palette.colors.tooltip(), window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
@@ -447,9 +449,8 @@ pub struct FlamePanel {
     flame_bounds: Option<Bounds<Pixels>>,
     /// The panel's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Option<FlameBoxCache>,
-    /// The cursor position while it hovers the graph, anchoring the box tooltip;
-    /// `None` otherwise.
-    flame_hover: Option<Point<Pixels>>,
+    /// The card describing the box under the pointer.
+    card: HoverCard<FlameBoxContent>,
     drag: FlameDrag,
     last_mouse: Point<Pixels>,
     legend: Entity<LegendState>,
@@ -490,7 +491,7 @@ impl FlamePanel {
             flame_scroll_y: 0.0,
             flame_bounds: None,
             flame_boxes: None,
-            flame_hover: None,
+            card: HoverCard::new(cx, |panel| &mut panel.card, Self::carded),
             drag: FlameDrag::None,
             last_mouse: Point::default(),
             canvas,
@@ -525,7 +526,7 @@ impl FlamePanel {
     /// Clears the box tooltip, so a pane bringing another panel forward drops it
     /// instead of leaving it until the next mouse move.
     fn clear_hover(&mut self) {
-        self.flame_hover = None;
+        self.card.leave();
     }
 
     /// The panel's toolbar: the window the graph covers, then the controls that
@@ -717,25 +718,28 @@ impl FlamePanel {
             .hit(&aggregates, fl, self.flame_scroll(cx), pos)
     }
 
-    /// Tracks the cursor for the box tooltip: the position is recorded across the
-    /// whole graph rect so the tooltip follows the cursor, while only a move that
-    /// draws or erases one repaints.
+    /// Tracks the cursor for the box card.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let drawn_before = self.hovered_box(cx).is_some();
-        self.flame_hover = self
-            .layout(cx)
-            .filter(|fl| fl.rect().contains(&pos))
-            .map(|_| pos);
-        if drawn_before || self.hovered_box(cx).is_some() {
+        let boxed = self.box_at(pos, cx).map(|hovered| hovered.boxed.content);
+        if self.card.hover(pos, boxed.as_ref()) {
             cx.notify();
         }
     }
 
-    /// The hovered box, with the graph the tooltip names it through, and the
-    /// position the tooltip anchors at, when the hover lands on one.
+    /// What the box under the pointer stands for, which the card describes.
+    fn carded(&self, cx: &App) -> Option<FlameBoxContent> {
+        let at = self.card.pointer()?;
+        Some(self.box_at(at, cx)?.boxed.content)
+    }
+
+    /// The box the card describes, with the graph it names the box through,
+    /// and the pointer it stands beside, while the card is shown.
     fn hovered_box(&self, cx: &App) -> Option<(Point<Pixels>, HoveredBox)> {
-        let at = self.flame_hover?;
-        Some((at, self.box_at(at, cx)?))
+        let at = self.card.pointer()?;
+        let hovered = self.box_at(at, cx)?;
+        self.card
+            .shows(&hovered.boxed.content)
+            .then_some((at, hovered))
     }
 
     /// Whether `pos` lies over the graph clear of every box and scroll bar.
@@ -897,7 +901,7 @@ impl FlamePanel {
             }
         }))
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !*hovered && this.flame_hover.take().is_some() {
+            if !*hovered && this.card.leave() {
                 cx.notify();
             }
         }))
@@ -1059,18 +1063,19 @@ fn flame_on_drag(
         FlameDrag::HThumb(grab) => panel.hthumb_to(position, grab, cx),
         FlameDrag::None => {}
     }
-    panel.update_hover(position, cx);
+    panel.card.drag(position);
     panel.invalidate_canvas(cx);
 }
 
 fn flame_end_drag(
     panel: &mut FlamePanel,
-    _: Point<Pixels>,
+    position: Point<Pixels>,
     _: DragEnd,
     _: &mut Window,
     cx: &mut Context<FlamePanel>,
 ) {
     panel.drag = FlameDrag::None;
+    panel.update_hover(position, cx);
     panel.invalidate_canvas(cx);
 }
 
