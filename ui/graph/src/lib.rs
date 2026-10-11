@@ -927,7 +927,7 @@ impl GraphPanel {
         let hit = self.box_id_at(position, cx);
         if hit != self.hovered {
             self.hovered = hit;
-            self.invalidate_canvas_only(cx);
+            self.repaint_hover(cx);
         }
     }
 
@@ -938,6 +938,14 @@ impl GraphPanel {
     /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
+            self.repaint_hover(cx);
+        }
+    }
+
+    /// Repaints the drawing for a change of the hovered box, which it shows
+    /// only while hovering marks a neighborhood.
+    fn repaint_hover(&self, cx: &mut Context<Self>) {
+        if self.neighborhood_enabled {
             self.invalidate_canvas_only(cx);
         }
     }
