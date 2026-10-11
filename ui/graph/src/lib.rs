@@ -423,13 +423,15 @@ impl GraphPanel {
         });
         let colouring = Colouring::default();
         let offered = colour::Offered::by(model.read(cx));
+        let hint = colour::hint(model.read(cx));
         let colour_picker = cx.new(|cx| {
             let mut picker = Dropdown::new(
                 "colouring",
                 Colouring::ALL.map(Colouring::label),
                 colouring.index(),
                 cx,
-            );
+            )
+            .tooltip(hint);
             colour::offer(&mut picker, offered, cx);
             picker
         });
@@ -747,7 +749,7 @@ impl GraphPanel {
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
             why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
-            colour_picker: colour::control(self, &palette.colors, cx).into_any_element(),
+            colour_picker: self.colour_picker.clone(),
             report_control: report::control(self, cx).map(IntoElement::into_any_element),
             timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
             neighborhood_enabled: self.neighborhood_enabled,
@@ -1225,7 +1227,7 @@ struct Controls {
     /// The questions asked of the selected box, which stand beside the pin.
     why_controls: Option<AnyElement>,
     /// Chooses what the boxes' fills say.
-    colour_picker: AnyElement,
+    colour_picker: Entity<Dropdown>,
     /// Puts the card reading what the build reported up and away, offered
     /// where the build reported anything.
     report_control: Option<AnyElement>,

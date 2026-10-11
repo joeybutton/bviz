@@ -31,8 +31,8 @@ use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
     Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
-    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip,
-    Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
+    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Toolbar,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
     list_scrollbar, load_in_background, menu_chrome, paint_hover_card, paint_tooltip,
     tooltip_extent, track_drag,
 };
@@ -127,6 +127,9 @@ pub struct ScatterPanel {
 impl ScatterPanel {
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |view, _, cx| {
+            if let Some(choice) = &view.choice {
+                choice.explain_times(&view.model, cx);
+            }
             view.replot(cx);
             cx.notify();
         });
@@ -196,6 +199,7 @@ impl ScatterPanel {
     fn choose_unit(&mut self, cx: &mut Context<Self>) {
         if let Some(choice) = &self.choice {
             choice.name_colourings(cx);
+            choice.explain_times(&self.model, cx);
         }
         self.measure(cx);
         cx.notify();
@@ -237,7 +241,9 @@ impl ScatterPanel {
         let Some(choice) = &mut self.choice else {
             return;
         };
-        if choice.offer_times(timed, cx) {
+        let fell_back = choice.offer_times(timed, cx);
+        choice.explain_times(&self.model, cx);
+        if fell_back {
             self.close_pick(cx);
             cx.notify();
         }
@@ -775,7 +781,28 @@ impl Choice {
             _colour_picked: colour_picked,
         };
         choice.offer_times(timed, cx);
+        choice.explain_times(model, cx);
         Some(choice)
+    }
+
+    /// Has each picker offering a choice that reads action time say what the
+    /// graph `model` holds of them.
+    fn explain_times(&self, model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) {
+        let unit = self.picker.chosen(cx).unit();
+        let times = (model.read(cx).loaded()).map_or(Err(Untimed::NoProfile), Loaded::times);
+        let note = |read| times_note(times, self.timed, unit, read);
+        let time_axis = "place points by their action time";
+        let notes = [
+            (&self.across_picker, note(time_axis)),
+            (&self.up_picker, note(time_axis)),
+            (
+                &self.colour_picker,
+                note("colour points by where their actions ran"),
+            ),
+        ];
+        for (picker, note) in notes {
+            picker.update(cx, |picker, cx| picker.set_tooltip(note, cx));
+        }
     }
 
     /// Names each colouring the picker offers as it reads for the unit
@@ -1189,10 +1216,7 @@ impl Render for ScatterPanel {
                 .plot
                 .as_ref()
                 .is_some_and(|plot| plot.scope != scope || plot.plotted.axes != choice.axes);
-            let times = model
-                .loaded()
-                .map_or(Err(Untimed::NoProfile), Loaded::times);
-            strip(choice, scope, times, measuring, legend, &palette, cx)
+            strip(choice, scope, measuring, legend, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = scope.zip(capabilities);
@@ -1658,38 +1682,19 @@ const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 fn strip(
     choice: &Choice,
     scope: Scope,
-    times: Result<&NodeTimes, Untimed>,
     measuring: bool,
     legend: Option<Legend>,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
     let unit = group("points", palette).child(choice.picker.dropdown());
-    let tip = palette.colors.tooltip();
-    let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
-        let note = times_note(times, choice.timed, scope.unit(), read);
-        div()
-            .id(id)
-            .tooltip(TextTooltip::builder(note, tip))
-            .child(picker.clone())
-    };
-    let time_axis = "place points by their action time";
-    let across = group("across", palette).child(timed_picker(
-        "scatter-across-why",
-        &choice.across_picker,
-        time_axis,
-    ));
-    let up =
-        group("up", palette).child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
-    let colour = group("colour", palette).child(timed_picker(
-        "scatter-colour-why",
-        &choice.colour_picker,
-        "colour points by where their actions ran",
-    ));
+    let across = group("across", palette).child(choice.across_picker.clone());
+    let up = group("up", palette).child(choice.up_picker.clone());
+    let colour = group("colour", palette).child(choice.colour_picker.clone());
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
-        .map(|input| input_toggle(input, scope, palette, cx))
+        .map(|input| input_toggle(input, scope, cx))
         .collect();
     let inputs = group("inputs", palette).children(toggles);
     Toolbar::new()
@@ -1737,12 +1742,7 @@ fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
 
 /// Turns the loaded `input`'s share in the measure in `scope` on and off, and
 /// says why where it cannot.
-fn input_toggle(
-    input: Input,
-    scope: Scope,
-    palette: &Palette,
-    cx: &Context<ScatterPanel>,
-) -> Stateful<Div> {
+fn input_toggle(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Button {
     let name = input_name(input);
     let toggle = Toggle::of(scope, input);
     let many = unit_names(scope.unit()).many;
@@ -1761,13 +1761,10 @@ fn input_toggle(
     .selected(matches!(toggle, Toggle::On | Toggle::Lone))
     .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
     .compact();
-    let tip = palette.colors.tooltip();
-    div()
-        .id(("scatter-input-why", input as usize))
-        .child(control)
-        .when_some(why, |el, why| {
-            el.tooltip(TextTooltip::builder(why.into(), tip))
-        })
+    match why {
+        Some(why) => control.tooltip(why),
+        None => control,
+    }
 }
 
 /// What the status says of the points of `plot` left unplotted, where any are.

@@ -4,9 +4,8 @@ use crate::GraphPanel;
 use crate::model::GraphModel;
 use crate::timing::{NodeTimes, Untimed};
 use bviz_bazel_flags::{PROFILE_PRIMARY_OUTPUT, PROFILE_TARGET_LABEL};
-use bviz_ui_components::{Dropdown, TextTooltip};
-use bviz_ui_theme::ThemeColors;
-use gpui::{Context, IntoElement, SharedString, div, prelude::*};
+use bviz_ui_components::Dropdown;
+use gpui::{Context, SharedString};
 
 /// What a box's fill says.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -103,8 +102,11 @@ pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedStri
 /// them.
 pub(crate) fn sync(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let offered = Offered::by(view.model.read(cx));
-    view.colour_picker
-        .update(cx, |picker, cx| offer(picker, offered, cx));
+    let hint = hint(view.model.read(cx));
+    view.colour_picker.update(cx, |picker, cx| {
+        offer(picker, offered, cx);
+        picker.set_tooltip(hint, cx);
+    });
     if !view.colouring.available(offered) {
         set(view, Colouring::Kind, cx);
     }
@@ -129,25 +131,12 @@ pub(crate) fn set(view: &mut GraphPanel, colouring: Colouring, cx: &mut Context<
     view.invalidate_canvas(cx);
 }
 
-/// The picker, carrying what [`note`] says of the loaded graph's times.
-pub(crate) fn control(
-    view: &GraphPanel,
-    colors: &ThemeColors,
-    cx: &Context<GraphPanel>,
-) -> impl IntoElement + use<> {
-    let times = view
-        .model
-        .read(cx)
+/// What the picker's hint says of the action times `model` holds.
+pub(crate) fn hint(model: &GraphModel) -> SharedString {
+    let times = model
         .loaded()
         .map_or(Err(Untimed::NoProfile), |loaded| loaded.times());
-    div()
-        .id("colour-picker")
-        .flex_none()
-        .tooltip(TextTooltip::builder(
-            note(times, "colour its boxes by their actions"),
-            colors.tooltip(),
-        ))
-        .child(view.colour_picker.clone())
+    note(times, "colour its boxes by their actions")
 }
 
 #[cfg(test)]

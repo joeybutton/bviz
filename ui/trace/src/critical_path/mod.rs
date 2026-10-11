@@ -336,8 +336,7 @@ impl CriticalPathPanel {
                 .child(lead(path, legends, palette))
                 .child(self.summary(path, legends, palette, fills, cx))
                 .children(modeled.map(|modeled| modeled_caption(path, modeled, palette)));
-            let choice =
-                || modeled.map(|modeled| self.listing_choice(modeled, listing, palette, cx));
+            let choice = || modeled.map(|modeled| self.listing_choice(modeled, listing, cx));
             match (listing, modeled) {
                 (Listing::NearlyCritical, Some(modeled)) => {
                     let header = header_row(
@@ -382,29 +381,19 @@ impl CriticalPathPanel {
 
     /// The choice of what the table lists, in place of its first column's
     /// title.
-    fn listing_choice(
-        &self,
-        modeled: &Modeled,
-        listing: Listing,
-        palette: &Palette,
-        cx: &Context<Self>,
-    ) -> Div {
+    fn listing_choice(&self, modeled: &Modeled, listing: Listing, cx: &Context<Self>) -> Div {
         let button = |id: &'static str, label: String, tip: &'static str, shows: Listing| {
             let panel = cx.entity();
-            div()
-                .id(("critical-path-list-choice", shows as usize))
-                .tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
-                .child(
-                    Button::new(id, move |_, _, cx| {
-                        panel.update(cx, |panel, cx| {
-                            panel.listing = shows;
-                            cx.notify();
-                        })
-                    })
-                    .compact()
-                    .selected(listing == shows)
-                    .label(label),
-                )
+            Button::new(id, move |_, _, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.listing = shows;
+                    cx.notify();
+                })
+            })
+            .compact()
+            .selected(listing == shows)
+            .label(label)
+            .tooltip(tip)
         };
         div()
             .flex()
