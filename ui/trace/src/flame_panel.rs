@@ -367,7 +367,7 @@ fn paint_remainder(
     paint_labeled_box(
         rect,
         wash,
-        &remainder_label(remainder),
+        remainder_label(remainder).as_str(),
         bviz_ui_theme::label_on(wash),
         palette.label_box(),
         window,

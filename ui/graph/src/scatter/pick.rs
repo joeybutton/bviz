@@ -2,6 +2,7 @@
 //! marks at once, of every point under it.
 
 use super::plot::Spot;
+use bviz_graph_layout::shown::name_start;
 use bviz_ui_components::menu_chrome::sheet_height;
 use bviz_ui_components::{beside_anchor, room_beside};
 use gpui::{Bounds, Pixels, Point, SharedString, Size, point, px, size};
@@ -56,12 +57,12 @@ pub(super) struct PickRow {
     pub(super) tooltip: Vec<String>,
 }
 
-/// `label` parted into its package and the target's name, `:name`, at the last
-/// colon, so that each can be cut short apart; all of it names the target
-/// where it has no colon.
+/// `label`, as it is shown, parted where [`name_start`] parts it into where
+/// its target lives and the target's name, so that each can be cut short
+/// apart; all of it names the target where it is no label.
 pub(super) fn split_label(label: &str) -> (&str, &str) {
-    match label.rfind(':') {
-        Some(colon) => label.split_at(colon),
+    match name_start(label) {
+        Some(start) => label.split_at(start),
         None => ("", label),
     }
 }
@@ -260,13 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn a_label_parts_at_the_colon_naming_the_target() {
+    fn a_label_parts_where_the_target_s_name_starts() {
         assert_eq!(
             split_label("//third_party:protobuf_package_metadata"),
             ("//third_party", ":protobuf_package_metadata")
         );
-        assert_eq!(split_label("@repo//a/b:c:d"), ("@repo//a/b:c", ":d"));
-        assert_eq!(split_label("//pkg"), ("", "//pkg"));
+        assert_eq!(split_label("//a/pkg"), ("//a/", "pkg"));
+        assert_eq!(split_label("action7"), ("", "action7"));
     }
 
     #[test]

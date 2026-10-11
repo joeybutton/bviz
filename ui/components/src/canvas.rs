@@ -2,6 +2,7 @@
 //! filled, bordered, labeled quad.
 
 use gpui::{App, Bounds, Hsla, Pixels, Rgba, TextAlign, Window, fill, point, px, size};
+use std::ops::Range;
 
 /// Shapes `text` at `fs`, truncated with an ellipsis to fit `avail` pixels.
 pub fn shape_truncated(
@@ -15,6 +16,31 @@ pub fn shape_truncated(
     truncated(text, avail, |s| {
         bviz_ui_assets::shape_line(window, s, font.clone(), fs, color)
     })
+}
+
+/// Text set in two inks: the bytes `muted` of it in a muted one, the rest in
+/// the ink it is set in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inked<'a> {
+    pub text: &'a str,
+    pub muted: Range<usize>,
+}
+
+impl<'a> From<&'a str> for Inked<'a> {
+    fn from(text: &'a str) -> Self {
+        Self { text, muted: 0..0 }
+    }
+}
+
+impl Inked<'_> {
+    /// The runs of colour a line of the first `len` bytes of this, followed
+    /// by whatever cuts it short, is set in: `muted` over the muted bytes,
+    /// `ink` over the rest.
+    fn runs(&self, len: usize, ink: Hsla, muted: Hsla) -> Vec<(usize, Hsla)> {
+        let (start, end) = (self.muted.start.min(len), self.muted.end.min(len));
+        let runs = [(start, ink), (end - start, muted), (len - end, ink)];
+        runs.into_iter().filter(|&(len, _)| len > 0).collect()
+    }
 }
 
 const ELLIPSIS: char = '…';
@@ -96,11 +122,12 @@ impl LabelBoxStyle {
 
 /// Paints a filled box and, if it is wide enough, its name truncated to fit and
 /// centered vertically — the shared shape behind a flame-chart slice and a
-/// flame-graph node.
-pub fn paint_labeled_box(
+/// flame-graph node. The muted part of the name is set in the muted ink of
+/// the fill as it is seen opaque, faded as far as `label_color` is.
+pub fn paint_labeled_box<'a>(
     rect: Bounds<Pixels>,
     fill_color: Hsla,
-    name: &str,
+    name: impl Into<Inked<'a>>,
     label_color: Hsla,
     style: LabelBoxStyle,
     window: &mut Window,
@@ -136,7 +163,19 @@ pub fn paint_labeled_box(
     }
     let (avail, fs) = style.label_room(rect);
     let font = bviz_ui_assets::text_metrics(window).font;
-    let line = shape_truncated(name, avail, font, fs, label_color, window);
+    let name = name.into();
+    let opaque = Hsla {
+        a: 1.0,
+        ..fill_color
+    };
+    let muted = Hsla {
+        a: label_color.a,
+        ..bviz_ui_theme::muted_label_on(opaque)
+    };
+    let line = truncated(name.text, avail, |s| {
+        let runs = name.runs(s.len(), label_color, muted);
+        bviz_ui_assets::shape_runs(window, s, font.clone(), fs, &runs)
+    });
     let ty = rect.origin.y + px((h - f32::from(fs)) / 2.);
     let _ = line.paint(
         point(rect.origin.x + px(text_pad), ty),

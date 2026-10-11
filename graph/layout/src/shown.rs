@@ -130,6 +130,24 @@ pub fn written_by_place(label: &str) -> bool {
     shorthand(label).is_some()
 }
 
+/// Where the name of the target `shown` labels starts, `shown` being a label
+/// as it is shown: at the `:` before the name, or for a target written by its
+/// package or repository alone, where the last component of that reads it.
+/// What leads up to it is where the target lives. `None` for text that is no
+/// label.
+pub fn name_start(shown: &str) -> Option<usize> {
+    let Some((_, path)) = shown.split_once("//") else {
+        let repo = shown.trim_start_matches('@');
+        return (repo.len() < shown.len()).then_some(shown.len() - repo.len());
+    };
+    let path_start = shown.len() - path.len();
+    let start = match path.find(':') {
+        Some(colon) => colon,
+        None => path.rfind('/').map_or(0, |slash| slash + 1),
+    };
+    Some(path_start + start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +183,19 @@ mod tests {
         assert_eq!(shortened.text(), "@tools");
         assert_eq!(shortened.at(14), Some(1));
         assert_eq!(shortened.at(18), Some(5));
+    }
+
+    #[test]
+    fn a_label_s_name_starts_at_its_colon_or_its_package_s_last_component() {
+        fn place(shown: &str) -> Option<&str> {
+            name_start(shown).map(|start| &shown[..start])
+        }
+        assert_eq!(place("@r//foo/bar:baz"), Some("@r//foo/bar"));
+        assert_eq!(place("//:baz"), Some("//"));
+        assert_eq!(place("//foo/bar"), Some("//foo/"));
+        assert_eq!(place("@r//bar"), Some("@r//"));
+        assert_eq!(place("@@crates+"), Some("@@"));
+        assert_eq!(place("action7"), None);
     }
 
     /// The chars of the name left out stand for the last component of the

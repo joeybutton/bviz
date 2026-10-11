@@ -249,6 +249,38 @@ pub fn label_on(fill: impl Into<Rgba>) -> Hsla {
     }
 }
 
+/// The ink the secondary part of a name set on `fill` takes: [`label_on`]
+/// carried towards the fill as far as it can go, up to [`MUTED_LABEL_MIX`],
+/// while it still holds [`MIN_SECONDARY_CONTRAST`] against the fill. That
+/// part only says where the name stands, which the name's full reading
+/// elsewhere repeats, so it is held to the contrast of what is seen, which
+/// leaves it room to recede on a fill of middle lightness too.
+pub fn muted_label_on(fill: impl Into<Rgba>) -> Hsla {
+    let fill = fill.into();
+    let ink = label_on(fill);
+    let carried = |t: f32| mix(ink, fill, t);
+    let (mut held, mut lost) = (0.0, MUTED_LABEL_MIX);
+    if contrast_ratio(carried(lost), fill) >= MIN_SECONDARY_CONTRAST {
+        return carried(lost).into();
+    }
+    for _ in 0..MUTED_LABEL_STEPS {
+        let mid = (held + lost) / 2.0;
+        match contrast_ratio(carried(mid), fill) >= MIN_SECONDARY_CONTRAST {
+            true => held = mid,
+            false => lost = mid,
+        }
+    }
+    carried(held).into()
+}
+
+/// The furthest [`muted_label_on`] carries a name's ink towards its fill:
+/// far enough to read as receding, short of fading out of reach.
+pub const MUTED_LABEL_MIX: f32 = 0.45;
+
+/// How many halvings [`muted_label_on`] narrows the mix it can take down by,
+/// finer than a step of an 8-bit channel.
+const MUTED_LABEL_STEPS: u32 = 8;
+
 /// A stable hue in [0, 1) for `s`: FNV-1a over the bytes folded onto the wheel.
 /// The same string always maps to the same hue.
 pub fn hue_of(s: &str) -> f32 {
@@ -263,6 +295,29 @@ pub fn hue_of(s: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a fill of any lightness the muted ink of a name still reads, and on
+    /// the darkest and lightest it recedes as far as it may.
+    #[test]
+    fn a_muted_name_reads_on_every_fill() {
+        const SHADES: u8 = 32;
+        for shade in 0..=SHADES {
+            let level = f32::from(shade) / f32::from(SHADES);
+            let fill = Rgba {
+                r: level,
+                g: level,
+                b: level,
+                a: 1.0,
+            };
+            let contrast = contrast_ratio(muted_label_on(fill), fill);
+            assert!(contrast >= MIN_SECONDARY_CONTRAST, "{level}: {contrast}");
+        }
+        for extreme in [gpui::black(), gpui::white()] {
+            let muted = Rgba::from(muted_label_on(extreme));
+            let carried = mix(label_on(extreme), extreme, MUTED_LABEL_MIX);
+            assert!((muted.r - carried.r).abs() < CHANNEL_SLACK, "{muted:?}");
+        }
+    }
 
     /// Slack allowed on an [`Oklch`] coordinate compared across a conversion to
     /// sRGB and back, covering the rounding of the f32 arithmetic between them.

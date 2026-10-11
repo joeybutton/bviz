@@ -52,6 +52,29 @@ pub fn shape_line(
         .shape_line(text, font_size, &[run], None)
 }
 
+/// Shape `text` in a single font and size as runs of colour, each a byte
+/// length of it and the colour that stretch is set in, the lengths summing to
+/// the length of `text`.
+pub fn shape_runs(
+    window: &mut Window,
+    text: impl Into<SharedString>,
+    font: Font,
+    font_size: Pixels,
+    runs: &[(usize, Hsla)],
+) -> ShapedLine {
+    let text = text.into();
+    let runs: Vec<TextRun> = runs
+        .iter()
+        .map(|&(len, color)| TextRun {
+            len,
+            ..plain_run("", font.clone(), color)
+        })
+        .collect();
+    window
+        .text_system()
+        .shape_line(text, font_size, &runs, None)
+}
+
 /// Shape `text` as [`shape_line`] does, one line per row of it: each
 /// `\n`-separated line broken into rows at most `wrap_width` wide where
 /// [`wrap::rows`] breaks it.

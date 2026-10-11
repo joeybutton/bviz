@@ -14,6 +14,7 @@ use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::facets::{ConfigRef, Sym, WrittenRepos};
 use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::package_label;
+use bviz_graph_layout::shown::name_start;
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
 use bviz_ui_components::{
@@ -134,8 +135,11 @@ fn name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> Named {
             .map(|mnemonic| facets.strings().resolve(mnemonic).to_string().into()),
         checksum: facets.strings().resolve(config.sym()).to_string().into(),
     });
-    let (package, target) = match label.rsplit_once(':') {
-        Some((package, target)) => (Some(package), format!(":{target}")),
+    let (package, target) = match name_start(&label) {
+        Some(start) => {
+            let (package, target) = label.split_at(start);
+            (Some(package), target.to_owned())
+        }
         None => (None, label.clone()),
     };
     Named {

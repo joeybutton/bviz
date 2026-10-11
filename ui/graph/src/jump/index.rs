@@ -150,16 +150,17 @@ fn dependents(shared: &Shared) -> Vec<u32> {
 }
 
 /// The chars of `text`, the text of a node of `kind`, that lead up to the
-/// node's name: up to the last `:` of a label or the last `/` of a path, and
-/// for an action, the directories of the output following the space after its
-/// mnemonic.
+/// node's name: up to the `:` starting a label's name or past the last `/` of
+/// a path, and for an action, the directories of the output following the
+/// space after its mnemonic.
 fn path(text: &str, kind: Kind) -> Range<u32> {
     let mut start = 0;
     let mut end = 0;
     for (index, c) in (0u32..).zip(text.chars()) {
         match c {
             ' ' if kind == Kind::Action && start == 0 => (start, end) = (index + 1, index + 1),
-            ':' | '/' => end = index + 1,
+            ':' => return start..index,
+            '/' => end = index + 1,
             _ => {}
         }
     }
@@ -373,7 +374,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_path_leads_up_to_the_name() {
-        assert_eq!(path("//app:lib", Kind::Target), 0..6);
+        assert_eq!(path("//app:lib", Kind::Target), 0..5);
+        assert_eq!(path("//app:sub/lib.cc", Kind::Source), 0..5);
         assert_eq!(path("//app/sub", Kind::Package), 0..6);
         assert_eq!(path("liblib.a", Kind::Artifact), 0..0);
         assert_eq!(path("//app/my lib.a", Kind::Artifact), 0..6);

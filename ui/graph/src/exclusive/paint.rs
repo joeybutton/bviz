@@ -14,14 +14,16 @@ use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
+use bviz_graph_layout::shown::name_start;
 use bviz_ui_assets::shape_line;
-use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
+use bviz_ui_components::{Inked, LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix, over};
 use gpui::{
     App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point,
     px, quad, size,
 };
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -166,27 +168,26 @@ fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut A
         let fill = fill(scene, cell.holds);
         let (rect, label) = (drawn_rect(&cell), label_on(fill));
         let name = match (on_top, cell.holds) {
-            _ if cell.rect.size.width < LABEL_MIN_WIDTH => String::new(),
-            (true, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, scene.by, run),
+            _ if cell.rect.size.width < LABEL_MIN_WIDTH => CellName::default(),
+            (true, Holds::Rest(run)) => {
+                CellName::plain(run_name(&scene.tree, &scene.shared, scene.by, run))
+            }
             (_, Holds::Rest(run)) => {
                 let (room, font_size) = style.label_room(rect);
                 let width = text_width(window, font_size, label);
-                rest_name(run.count(), room, width)
+                CellName::plain(rest_name(run.count(), room, width))
             }
             (_, Holds::Shared) => {
                 let (room, font_size) = style.label_room(rect);
                 let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
                 let count = scene.tree.shared_tops().len();
                 let width = text_width(window, font_size, label);
-                shared_cell_name(whole, count, room, width)
+                CellName::plain(shared_cell_name(whole, count, room, width))
             }
-            (_, holds) => {
-                let name = cell_name(&scene.tree, &scene.shared, scene.by, holds);
-                let hint = match holds {
-                    Holds::Node(node) => hints.get(&node),
-                    Holds::Build | Holds::Shared | Holds::Rest(_) => None,
-                };
-                match hint {
+            (_, Holds::Node(node)) => {
+                let tree = &scene.tree;
+                let name = point_cell_name(tree.id(node), tree.scope().unit(), &scene.shared);
+                match hints.get(&node) {
                     Some(hint) => {
                         let (room, font_size) = style.label_room(rect);
                         fit_apart(&name, hint, room, text_width(window, font_size, label))
@@ -194,6 +195,7 @@ fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut A
                     None => name,
                 }
             }
+            (_, holds) => CellName::plain(cell_name(&scene.tree, &scene.shared, scene.by, holds)),
         };
         let strength = match cell.holds {
             Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
@@ -206,7 +208,7 @@ fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut A
         paint_labeled_box(
             rect,
             drawn_fill.into(),
-            &name,
+            name.inked(),
             Hsla {
                 a: label.a * strength,
                 ..label
@@ -375,17 +377,25 @@ pub(crate) const HINT_SEPARATOR: &str = " · ";
 /// where it fits, else with `name` cut short so the hint still reads beside
 /// it, and where that leaves the name less than [`NAME_SHARE`] of the room,
 /// `name` alone.
-fn fit_apart(name: &str, hint: &str, room: f32, mut width: impl FnMut(&str) -> f32) -> String {
-    let whole = format!("{name}{HINT_SEPARATOR}{hint}");
+fn fit_apart(
+    name: &CellName,
+    hint: &str,
+    room: f32,
+    mut width: impl FnMut(&str) -> f32,
+) -> CellName {
+    let whole = format!("{}{HINT_SEPARATOR}{hint}", name.text);
     if width(&whole) <= room {
-        return whole;
+        return CellName {
+            text: whole,
+            muted: name.muted.clone(),
+        };
     }
     let tail = format!("{ELLIPSIS}{HINT_SEPARATOR}{hint}");
     let name_room = room - width(&tail);
     if name_room < room * NAME_SHARE {
-        return name.to_owned();
+        return name.clone();
     }
-    let chars: Vec<char> = name.chars().collect();
+    let chars: Vec<char> = name.text.chars().collect();
     // Bisects for the most characters of `name` fitting `name_room`.
     let (mut fits, mut over) = (0, chars.len());
     while over - fits > 1 {
@@ -396,7 +406,11 @@ fn fit_apart(name: &str, hint: &str, room: f32, mut width: impl FnMut(&str) -> f
         }
     }
     let kept: String = chars[..fits].iter().collect();
-    format!("{kept}{tail}")
+    let muted = name.muted.start.min(kept.len())..name.muted.end.min(kept.len());
+    CellName {
+        text: format!("{kept}{tail}"),
+        muted,
+    }
 }
 
 /// The least of a cell's room a name keeps beside the hint telling it apart,
@@ -459,10 +473,47 @@ fn first_fitting<const N: usize>(
 
 /// How a cell names the point `id` of `unit`.
 pub(crate) fn point_name(id: Id, unit: Unit, shared: &Shared) -> String {
+    point_cell_name(id, unit, shared).text
+}
+
+/// What a cell reads, the part of it saying where a label's target lives
+/// muted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CellName {
+    text: String,
+    /// The bytes of `text` set in the muted ink.
+    muted: Range<usize>,
+}
+
+impl CellName {
+    fn plain(text: String) -> Self {
+        Self { text, muted: 0..0 }
+    }
+
+    fn inked(&self) -> Inked<'_> {
+        Inked {
+            text: &self.text,
+            muted: self.muted.clone(),
+        }
+    }
+}
+
+/// How a cell names the point `id` of `unit`, and what of that is muted.
+fn point_cell_name(id: Id, unit: Unit, shared: &Shared) -> CellName {
     let label = point_label(id, shared);
+    let place = name_start(&label).unwrap_or(0);
     match unit {
-        Unit::Action => format!("{} {label}", mnemonic(id, shared)),
-        Unit::ConfiguredTarget | Unit::Target => label,
+        Unit::Action => {
+            let lead = format!("{} ", mnemonic(id, shared));
+            CellName {
+                muted: lead.len()..lead.len() + place,
+                text: lead + &label,
+            }
+        }
+        Unit::ConfiguredTarget | Unit::Target => CellName {
+            text: label,
+            muted: 0..place,
+        },
     }
 }
 
@@ -571,12 +622,19 @@ mod tests {
     #[test]
     fn a_name_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
         let label = "@llvm//toolchain:linux_x86_64_cc_toolchain";
-        let fit = |room| fit_apart(label, "k8", room, chars);
-        assert_eq!(fit(100.0), format!("{label} · k8"));
-        assert_eq!(fit(40.0), "@llvm//toolchain:linux_x86_64_cc_t… · k8");
-        assert_eq!(fit(20.0), "@llvm//toolcha… · k8");
+        let name = CellName {
+            text: label.to_owned(),
+            muted: 0..16,
+        };
+        let fit = |room| fit_apart(&name, "k8", room, chars);
+        assert_eq!(fit(100.0).text, format!("{label} · k8"));
+        assert_eq!(fit(100.0).muted, 0..16);
+        assert_eq!(fit(40.0).text, "@llvm//toolchain:linux_x86_64_cc_t… · k8");
+        let cut = fit(20.0);
+        assert_eq!(cut.text, "@llvm//toolcha… · k8");
+        assert_eq!(cut.muted, 0..14);
         let long = "a-long-configuration-name (exec, 3f2a)";
-        assert_eq!(fit_apart(label, long, 60.0, chars), label);
+        assert_eq!(fit_apart(&name, long, 60.0, chars), name);
     }
 
     #[test]
