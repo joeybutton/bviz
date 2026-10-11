@@ -290,8 +290,8 @@ impl TracksMenu {
             standing,
             |sort| {
                 let (label, hint) = match sort {
-                    TrackSort::Name => ("Name", "Sort tracks by name"),
-                    TrackSort::Weight => ("Busiest", "Busiest tracks first"),
+                    TrackSort::Name => ("name", "Sort tracks by name"),
+                    TrackSort::Weight => ("busiest", "Busiest tracks first"),
                 };
                 ToggleSegment::new(label).tooltip(hint)
             },
@@ -308,7 +308,7 @@ impl TracksMenu {
             .mx_1()
             .px_2()
             .py_1()
-            .child(div().text_color(palette.muted_label).child("Order"))
+            .child(div().text_color(palette.muted_label).child("order"))
             .child(choice)
     }
 

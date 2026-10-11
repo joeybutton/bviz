@@ -89,8 +89,8 @@ const DIRECTIONS: [FlameDirection; 2] = [FlameDirection::TopDown, FlameDirection
 
 fn direction_segment(direction: FlameDirection) -> ToggleSegment {
     let (label, hint) = match direction {
-        FlameDirection::TopDown => ("Top-down", "Top-down: callees"),
-        FlameDirection::BottomUp => ("Bottom-up", "Bottom-up: callers"),
+        FlameDirection::TopDown => ("top-down", "Top-down: callees"),
+        FlameDirection::BottomUp => ("bottom-up", "Bottom-up: callers"),
     };
     ToggleSegment::new(label).tooltip(hint)
 }
@@ -100,8 +100,8 @@ const WEIGHTS: [FlameWeight; 2] = [FlameWeight::Duration, FlameWeight::WallShare
 
 fn weight_segment(weight: FlameWeight) -> ToggleSegment {
     let (label, hint) = match weight {
-        FlameWeight::Duration => ("Summed time", "Size by summed time"),
-        FlameWeight::WallShare => ("Wall time", "Size by wall time"),
+        FlameWeight::Duration => ("summed time", "Size by summed time"),
+        FlameWeight::WallShare => ("wall time", "Size by wall time"),
     };
     ToggleSegment::new(label).tooltip(hint)
 }
@@ -573,7 +573,7 @@ impl FlamePanel {
             "flame-kinds",
             "labels",
             [Switch::new(
-                ToggleSegment::new("Kinds").tooltip("Merge spans by kind"),
+                ToggleSegment::new("kinds").tooltip("Merge spans by kind"),
                 mode.labels == FlameLabels::Kind,
                 move |kinds, _, cx| {
                     let labels = match kinds {

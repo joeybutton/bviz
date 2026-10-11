@@ -400,7 +400,7 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
 
 /// The title of the list of a path's steps, beside that of the actions
 /// nearly critical.
-pub(crate) const STEPS_TITLE: &str = "Steps";
+pub(crate) const STEPS_TITLE: &str = "steps";
 
 /// The tooltip of the choice of the list of a path's steps.
 pub(crate) const STEPS_TIP: &str = "Critical path steps";
@@ -410,7 +410,7 @@ pub(crate) const NEARLY_CRITICAL_TIP: &str = "Nearly critical actions";
 
 /// The title of the list of actions nearly critical.
 pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {
-    format!("Nearly critical ({})", modeled.nearly_critical().len())
+    format!("nearly critical ({})", modeled.nearly_critical().len())
 }
 
 /// What stands in the list of actions nearly critical where it holds none.
@@ -651,7 +651,7 @@ pub(super) mod tests {
     fn an_action_nearly_critical_says_what_it_is_and_its_slack() {
         let path = modeled_path(&MODELED_OUTPUTS);
         let modeled = path.modeled().expect("modeled");
-        assert_eq!(nearly_critical_title(modeled), "Nearly critical (2)");
+        assert_eq!(nearly_critical_title(modeled), "nearly critical (2)");
         assert_eq!(
             nearly_critical_tip(&modeled.nearly_critical()[1]),
             "Compiling b.c\nCppCompile\n//b\nbazel-out/b.o\n1.50ms · slack 800µs"
