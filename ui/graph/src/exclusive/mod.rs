@@ -32,7 +32,7 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, cached_layer,
+    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
     centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
     over_window,
 };
@@ -1820,9 +1820,14 @@ impl Render for ExclusivePanel {
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
+            let travels = drawn.map_or_else(Travels::default, |drawn| Travels {
+                back: drawn.history.has_back(),
+                up: drawn.focused().is_some(),
+            });
             let scoping = Scoping {
                 roots: &self.roots_field,
                 computing,
+                travels,
             };
             let legend = legend(&self.legend, drawn, &palette);
             strip(
@@ -1919,7 +1924,65 @@ struct Scoping<'a> {
     /// Whether the roots of a new choice are chosen and its tree computed over
     /// the one drawn for the last.
     computing: bool,
+    travels: Travels,
 }
+
+/// Where the focus of the tree drawn can be taken from where it stands.
+#[derive(Clone, Copy, Default)]
+struct Travels {
+    /// Back to the focus drawn before it.
+    back: bool,
+    /// Up to what it stands under.
+    up: bool,
+}
+
+/// How long the back and up buttons hold out against the panel narrowing.
+const TRAVEL: Priority = 1;
+
+/// The buttons taking the focus back or up as `travels` allows, their keys
+/// named where `focus` stands, leaving for the overflow menu as a row each.
+fn travel(
+    travels: Travels,
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &Context<ExclusivePanel>,
+) -> ToolbarGroup {
+    let back = bviz_ui_components::Button::new(
+        "exclusive-back",
+        cx.listener(|view, _, _, cx| view.go_back(cx)),
+    )
+    .ghost()
+    .icon(BACK_ICON)
+    .keys_for(&FocusBack, focus)
+    .disabled(!travels.back);
+    let up = bviz_ui_components::Button::new(
+        "exclusive-up",
+        cx.listener(|view, _, _, cx| view.focus_up(cx)),
+    )
+    .ghost()
+    .icon(UP_ICON)
+    .keys_for(&FocusUp, focus)
+    .disabled(!travels.up);
+    let row = |action: &dyn Action,
+               can: bool,
+               does: fn(&mut ExclusivePanel, &mut Context<ExclusivePanel>)| {
+        let panel = cx.weak_entity();
+        let item = MenuItem::action(action, Some(focus), window, cx, move |_, cx: &mut App| {
+            panel.update(cx, does).ok();
+        });
+        if can { item } else { item.disabled() }
+    };
+    let back_row = row(&FocusBack, travels.back, ExclusivePanel::go_back);
+    let up_row = row(&FocusUp, travels.up, ExclusivePanel::focus_up);
+    ToolbarGroup::new(TRAVEL, div().flex().items_center().child(back).child(up)).overflow_rows(
+        back_row,
+        [up_row],
+        false,
+    )
+}
+
+const BACK_ICON: &str = "arrow-left";
+const UP_ICON: &str = "arrow-up";
 
 /// The strip choosing the unit drawn and the roots, its picker's keys named
 /// where `focus` stands, ending in the toggle opening the tree's `legend`.
@@ -1934,6 +1997,7 @@ fn strip(
 ) -> OneRow {
     let points = picker.group(POINTS, focus, window, cx);
     OneRow::new("exclusive-controls")
+        .group(travel(scoping.travels, focus, window, cx))
         .group(points)
         .filling(|| roots::field(scoping.roots, palette, cx))
         .when(scoping.computing, |row| {

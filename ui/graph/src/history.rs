@@ -40,6 +40,11 @@ impl<T: PartialEq> History<T> {
         self.at = self.steps.len() - 1;
     }
 
+    /// Whether there is a step before the current one to step back to.
+    pub(crate) fn has_back(&self) -> bool {
+        self.at > 0
+    }
+
     /// Steps back to the step before the current one, where there is one.
     pub(crate) fn back(&mut self) -> Option<&T> {
         self.at = self.at.checked_sub(1)?;
@@ -89,6 +94,16 @@ mod tests {
         assert_eq!(history.forward(), None);
         assert_eq!(history.back(), Some(&0));
         assert_eq!(history.forward(), Some(&3));
+    }
+
+    #[test]
+    fn there_is_a_step_back_only_past_the_first() {
+        let mut history = History::new(0);
+        assert!(!history.has_back());
+        history.push(1);
+        assert!(history.has_back());
+        history.back();
+        assert!(!history.has_back());
     }
 
     #[test]
