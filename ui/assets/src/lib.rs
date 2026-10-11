@@ -139,6 +139,7 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "skip-back.svg" => embedded!("skip-back.svg"),
         "skip-forward.svg" => embedded!("skip-forward.svg"),
         "square.svg" => embedded!("square.svg"),
+        "swatches.svg" => embedded!("swatches.svg"),
         "x.svg" => embedded!("x.svg"),
         _ => return None,
     })

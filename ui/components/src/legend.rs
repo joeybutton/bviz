@@ -3,13 +3,15 @@
 //! whole key.
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
-use crate::{CONTROL_HEIGHT, KeyScope, TextTooltip, action_label, key_text_in, menu_chrome};
+use crate::{
+    Button, CONTROL_HEIGHT, KeyScope, TextTooltip, action_label, key_text_in, menu_chrome,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, Context, Div, Element, ElementId, Entity,
     FocusHandle, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
-    LayoutId, Length, Pixels, SharedString, Style, Subscription, Window, div, prelude::*, px,
-    relative, size,
+    LayoutId, Length, MouseButton, Pixels, SharedString, Style, Subscription, Window, div,
+    prelude::*, px, relative, size,
 };
 use std::panic::Location;
 use std::rc::Rc;
@@ -59,6 +61,10 @@ const GESTURES: Gestures<LegendIntent> = Gestures::new(&[Entry::new(
 pub fn legend_gestures() -> impl Iterator<Item = GestureRow> {
     GESTURES.rows()
 }
+
+/// What a [`LegendToggle`] reads, and the icon it carries.
+const TOGGLE_LABEL: &str = "legend";
+const TOGGLE_ICON: &str = "swatches";
 
 /// Every swatch's box, so a swatch of one kind lines up with one of another.
 const SWATCH_WIDTH: Pixels = px(16.);
@@ -384,6 +390,12 @@ impl Legend {
         self
     }
 
+    /// The legend standing as a toggle that opens the whole key under itself,
+    /// to sit among a toolbar's toggles putting panels up and away.
+    pub fn toggle(self) -> LegendToggle {
+        LegendToggle { legend: self }
+    }
+
     /// What this frame reads of the legend's state.
     fn seen(&self, cx: &App) -> Seen {
         let state = self.state.read(cx);
@@ -516,6 +528,53 @@ impl Legend {
             .children(unchipped)
             .child(seen.drawn.mark())
             .into_any_element()
+    }
+}
+
+/// A [`Legend`] standing as a toggle, made by [`Legend::toggle`].
+#[derive(IntoElement)]
+pub struct LegendToggle {
+    legend: Legend,
+}
+
+impl RenderOnce for LegendToggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let legend = self.legend;
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        let measured = legend.widths(window, cx);
+        let seen = legend.seen(cx);
+        let popover = seen.open.then(|| {
+            let inset = window.client_inset().unwrap_or_default();
+            let room = window.viewport_size().width - inset * 2.;
+            let columns = popover_columns(&measured.entry_widths, room);
+            legend.popover(&seen, columns, &measured, &colors)
+        });
+        let state = legend.state.clone();
+        let toggle = Button::new(legend.id.clone(), move |event, window, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                LegendIntent::Toggle => {
+                    state.update(cx, |state, cx| state.toggle(window, cx));
+                    true
+                }
+            });
+        })
+        .label(TOGGLE_LABEL)
+        .icon(TOGGLE_ICON)
+        .selected(seen.open)
+        .disabled(measured.keys_nothing())
+        // A tooltip would cover the popover the toggle holds open.
+        .when(!seen.open, |toggle| {
+            toggle.keys_for(&ShowLegend, &seen.view_focus)
+        });
+        div()
+            .relative()
+            .flex_none()
+            // Keeps the press from an ancestor that focuses on it, which would
+            // close the popover just before the click toggles it open again.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(toggle)
+            .children(popover)
+            .child(seen.drawn.mark())
     }
 }
 

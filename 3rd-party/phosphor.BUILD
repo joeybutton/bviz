@@ -38,6 +38,7 @@ filegroup(
         "assets/regular/skip-back.svg",
         "assets/regular/skip-forward.svg",
         "assets/regular/square.svg",
+        "assets/regular/swatches.svg",
         "assets/regular/x.svg",
     ],
     visibility = ["//visibility:public"],

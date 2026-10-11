@@ -54,7 +54,7 @@ pub use keys_help::{
 };
 pub use layer::{cached_layer, overlay_canvas};
 pub use legend::{
-    CloseLegend, Legend, LegendEntry, LegendState, PaintSwatch, ShowLegend, Swatch,
+    CloseLegend, Legend, LegendEntry, LegendState, LegendToggle, PaintSwatch, ShowLegend, Swatch,
     legend_gestures, legend_key_bindings,
 };
 pub use list_scroll::{ListScroll, list_scrollbar};
