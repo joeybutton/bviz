@@ -178,6 +178,12 @@ pub fn paint_tooltip(
     }
 }
 
+/// Places each element's own tooltip as [`beside_anchor`] places a painted
+/// one, [`TOOLTIP_OFFSET`] clear of the pointer.
+pub fn place_tooltips(cx: &mut App) {
+    cx.set_tooltip_offset(px(TOOLTIP_OFFSET));
+}
+
 /// Text in the panel [`paint_tooltip_box`] paints, as a view an element's own
 /// tooltip can show. Each `\n` in it starts a line.
 pub struct TextTooltip {

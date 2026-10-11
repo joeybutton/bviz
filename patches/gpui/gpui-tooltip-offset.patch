@@ -1,0 +1,80 @@
+Make the tooltip's offset from the pointer settable
+
+gpui places an element's tooltip one pixel past the pointer, so the
+pointer's arrow lands on the tooltip's corner and covers its first
+letters. Give the app a setting for how far past the pointer the tooltip
+goes, flipping before the pointer by the same distance at the window's
+edges; it is one pixel until the app sets it.
+
+diff --git a/crates/gpui/src/app.rs b/crates/gpui/src/app.rs
+--- a/crates/gpui/src/app.rs
++++ b/crates/gpui/src/app.rs
+@@ -54,7 +54,7 @@ use crate::{
+     ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
+     WindowInvalidator,
+     colors::{Colors, GlobalColors},
+-    hash, init_app_menus,
++    hash, init_app_menus, px,
+ };
+ 
+ mod async_context;
+@@ -685,6 +685,7 @@ pub struct App {
+     pub(crate) window_update_stack: Vec<WindowId>,
+     pub(crate) mode: GpuiMode,
+     pub(crate) cursor_hide_mode: CursorHideMode,
++    pub(crate) tooltip_offset: Pixels,
+     /// Whether the app was created by [`Application::new_inaccessible`]. No
+     /// accesskit APIs will be called when this flag is set.
+     pub(crate) accessibility_force_disabled: bool,
+@@ -777,6 +778,7 @@ impl App {
+                 quit_mode: QuitMode::default(),
+                 quitting: false,
+                 cursor_hide_mode: CursorHideMode::default(),
++                tooltip_offset: px(1.),
+                 accessibility_force_disabled: false,
+ 
+                 #[cfg(any(test, feature = "test-support", debug_assertions))]
+@@ -930,6 +932,12 @@ impl App {
+         self.cursor_hide_mode = mode;
+     }
+ 
++    /// Sets how far past the pointer, along each axis, an element's tooltip
++    /// is placed, or before it where the window's edge leaves no room past it.
++    pub fn set_tooltip_offset(&mut self, offset: Pixels) {
++        self.tooltip_offset = offset;
++    }
++
+     /// Returns whether the cursor is currently visible according to the
+     /// platform. This will report `false` after a keyboard input has hidden
+     /// the cursor and the user has not yet moved the mouse to restore it.
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2865,15 +2865,16 @@ impl Window {
+             let mouse_position = tooltip_request.tooltip.mouse_position;
+             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
+ 
++            let offset = cx.tooltip_offset;
+             let mut tooltip_bounds =
+-                Bounds::new(mouse_position + point(px(1.), px(1.)), tooltip_size);
++                Bounds::new(mouse_position + point(offset, offset), tooltip_size);
+             let window_bounds = Bounds {
+                 origin: Point::default(),
+                 size: self.viewport_size(),
+             };
+ 
+             if tooltip_bounds.right() > window_bounds.right() {
+-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
++                let new_x = mouse_position.x - tooltip_bounds.size.width - offset;
+                 if new_x >= Pixels::ZERO {
+                     tooltip_bounds.origin.x = new_x;
+                 } else {
+@@ -2885,7 +2886,7 @@ impl Window {
+             }
+ 
+             if tooltip_bounds.bottom() > window_bounds.bottom() {
+-                let new_y = mouse_position.y - tooltip_bounds.size.height - px(1.);
++                let new_y = mouse_position.y - tooltip_bounds.size.height - offset;
+                 if new_y >= Pixels::ZERO {
+                     tooltip_bounds.origin.y = new_y;
+                 } else {
