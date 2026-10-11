@@ -1,6 +1,8 @@
 use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood};
-use bviz_ui_components::{OneRow, Switch, ToggleGroup, ToggleSegment, Toolbar, spinner};
-use gpui::{Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
+use bviz_ui_components::{
+    OneRow, Switch, ToggleGroup, ToggleSegment, Toolbar, ToolbarSeparator, spinner,
+};
+use gpui::{AnyElement, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
 /// How many strips [`toolbar`] stacks.
 const STRIPS: usize = 2;
@@ -26,11 +28,12 @@ pub(crate) fn toolbar(
         .child(group("layout", palette).child(controls.layout_picker))
         .child(controls.reduce_toggle)
         .child(group("colour", palette).child(controls.colour_picker))
+        .child(ToolbarSeparator)
         .child(group("mark", palette).child(marks));
     // Last, past the controls that are always up, so the strip's standing shape
     // holds still as a selection comes and goes.
     if let Some(picker) = controls.relation_picker {
-        view = view.child(picker);
+        view = view.child(ToolbarSeparator).child(picker);
     }
     if let Some(pin) = controls.pin_control {
         view = view.child(pin);
@@ -42,15 +45,21 @@ pub(crate) fn toolbar(
         // The prior layout stays interactive while a relayout runs.
         view.trailing(busy("relaying-spinner", "laying out…", palette))
     });
-    for panel in [controls.report_control, controls.timecard_control]
+    let panels: Vec<AnyElement> = [controls.report_control, controls.timecard_control]
         .into_iter()
         .flatten()
-    {
+        .chain(
+            controls
+                .legend
+                .map(|legend| legend.toggle().into_any_element()),
+        )
+        .collect();
+    if !panels.is_empty() {
+        view = view.trailing(ToolbarSeparator);
+    }
+    for panel in panels {
         view = view.trailing(panel);
     }
-    let view = view.when_some(controls.legend, |view, legend| {
-        view.trailing(legend.toggle())
-    });
     let query = Toolbar::new()
         .one_row("graph-query-bar")
         .when_some(controls.boxes, OneRow::child)

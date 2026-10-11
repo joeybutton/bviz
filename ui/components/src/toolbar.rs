@@ -9,6 +9,10 @@ const PADDING: Pixels = px(4.);
 /// The rule drawn along the strip's foot.
 const RULE: Pixels = px(1.);
 
+/// How much of a control's height a [`ToolbarSeparator`] spans, short of the
+/// whole so it parts the groups beside it without boxing them in.
+const SEPARATOR_SPAN: f32 = 0.6;
+
 /// A horizontal strip of controls acting on the content below it.
 #[derive(IntoElement, Default)]
 pub struct Toolbar {
@@ -90,6 +94,21 @@ impl RenderOnce for OneRow {
             .min_w_0()
             .overflow_x_scroll();
         strip(leading, self.strip.trailing, window, cx).h(Self::height())
+    }
+}
+
+/// A rule parting one group of a strip's controls from the next.
+#[derive(IntoElement)]
+pub struct ToolbarSeparator;
+
+impl RenderOnce for ToolbarSeparator {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        div()
+            .flex_none()
+            .w(RULE)
+            .h(CONTROL_HEIGHT * SEPARATOR_SPAN)
+            .bg(colors.border)
     }
 }
 
