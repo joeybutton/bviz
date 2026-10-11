@@ -47,7 +47,7 @@ const PANEL_WIDTH: Pixels = px(320.);
 /// the canvas's foot and every row it lists can be reached.
 const MAX_HEIGHT_SHARE: f32 = 0.6;
 
-/// How a reader is offered the override `pin`, and how it is listed.
+/// How the override `pin` is listed.
 fn label(pin: Pin) -> &'static str {
     match pin {
         Pin::Set(Visibility::Shown) => "always show",
@@ -190,22 +190,6 @@ fn clear_all(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let filter = unrevealed(view.derived.filter());
     derive::set_filter(view, filter, cx);
-}
-
-/// The override offered on the box a secondary click has selected: dropping it
-/// from the drawing, which is what a reader reaches for on a box in front of
-/// them. `None` while no box is selected.
-pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
-    let node = view.selection.node()?;
-    Some(
-        Button::new(
-            "pin-selected",
-            cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, Visibility::Hidden, cx)),
-        )
-        .ghost()
-        .label(label(Pin::Set(Visibility::Hidden)))
-        .tooltip("Always hide box"),
-    )
 }
 
 /// The overrides in force, for the caller to place over the drawing; `None`

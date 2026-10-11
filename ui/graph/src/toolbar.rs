@@ -12,10 +12,9 @@ pub(crate) fn height() -> Pixels {
     OneRow::height() * STRIPS as f32
 }
 
-/// The panel's controls in two strips, each one row tall, so that neither
-/// a selection coming and going nor chips being added moves the drawing:
-/// how the graph is drawn, ending in the toggles putting panels up and away,
-/// then what it holds.
+/// The panel's controls in two strips, each one row tall, so that chips being
+/// added do not move the drawing: how the graph is drawn, ending in the toggles
+/// putting panels up and away, then what it holds.
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
@@ -29,22 +28,11 @@ pub(crate) fn toolbar(
         .child(controls.reduce_toggle)
         .child(group("colour", palette).child(controls.colour_picker))
         .child(ToolbarSeparator)
-        .child(group("mark", palette).child(marks));
-    // Last, past the controls that are always up, so the strip's standing shape
-    // holds still as a selection comes and goes.
-    if let Some(picker) = controls.relation_picker {
-        view = view.child(ToolbarSeparator).child(picker);
-    }
-    if let Some(pin) = controls.pin_control {
-        view = view.child(pin);
-    }
-    if let Some(why) = controls.why_controls {
-        view = view.child(why);
-    }
-    let mut view = view.when(controls.relaying, |view| {
-        // The prior layout stays interactive while a relayout runs.
-        view.trailing(busy("relaying-spinner", "laying out…", palette))
-    });
+        .child(group("mark", palette).child(marks))
+        .when(controls.relaying, |view| {
+            // The prior layout stays interactive while a relayout runs.
+            view.trailing(busy("relaying-spinner", "laying out…", palette))
+        });
     let panels: Vec<AnyElement> = [controls.report_control, controls.timecard_control]
         .into_iter()
         .flatten()

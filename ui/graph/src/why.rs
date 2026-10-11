@@ -475,41 +475,6 @@ pub(crate) fn reset(view: &mut GraphPanel) {
     view.why = Why::new();
 }
 
-/// The controls asking about the box a secondary click has selected: why it is
-/// in the build and, while a dependency is asked about, the paths from it down
-/// to that dependency. `None` while no box is selected.
-pub(crate) fn controls(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Div> {
-    let node = view.selection.node()?;
-    let asking = view
-        .why
-        .dependency()
-        .filter(|&dependency| dependency != node);
-    Some(
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new(
-                    "why-selected",
-                    cx.listener(move |view, _: &ClickEvent, _, cx| ask_why(view, node, cx)),
-                )
-                .ghost()
-                .label("why")
-                .tooltip("Show why box is in build"),
-            )
-            .children(asking.map(|_| {
-                Button::new(
-                    "from-selected",
-                    cx.listener(move |view, _: &ClickEvent, _, cx| ask_from(view, node, cx)),
-                )
-                .ghost()
-                .label("from here")
-                .tooltip("Show only paths from box")
-            })),
-    )
-}
-
 /// An endpoint of the question: its name after `lead`, over the package holding
 /// it, with its full label on hover.
 fn endpoint(

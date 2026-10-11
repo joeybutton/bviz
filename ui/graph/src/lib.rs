@@ -336,11 +336,6 @@ pub struct GraphPanel {
     /// set by a secondary click, which puts up the box's menu.
     selection: Selection,
     box_menu: Option<box_menu::BoxMenu>,
-    /// Outlives the stretches where the strip leaves it out, so the option it
-    /// stands on is still the one chosen when the next selection brings it back.
-    relation_picker: Entity<Dropdown>,
-    /// Carries the picker's selections into [`GraphPanel::set_relation`].
-    _relation_choices: Subscription,
     /// Whether hovering a box marks its neighborhood; off until the `h` key or
     /// the toolbar toggle turns it on.
     neighborhood_enabled: bool,
@@ -446,22 +441,6 @@ impl GraphPanel {
                 colour::set(view, colouring, cx);
             }
         });
-        let selection = Selection::none();
-        let relation_picker = cx.new(|cx| {
-            Dropdown::new(
-                "selection-relation",
-                Relation::ALL.map(Relation::label),
-                selection.relation().index(),
-                cx,
-            )
-            .tooltip("Marked with selection")
-        });
-        let relations = cx.subscribe(&relation_picker, |view, _, event, cx| {
-            let DropdownEvent::Changed(index) = event;
-            if let Some(relation) = Relation::at(*index) {
-                view.set_relation(relation, cx);
-            }
-        });
         let boxes = cx.new(|cx| {
             MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx).tooltip("Box types drawn")
         });
@@ -547,10 +526,8 @@ impl GraphPanel {
             box_card: hover::BoxCard::new(cx),
             hover_marking: MarkingMemo::default(),
             spatial: SpatialMemo::default(),
-            selection,
+            selection: Selection::none(),
             box_menu: None,
-            relation_picker,
-            _relation_choices: relations,
             neighborhood_enabled: false,
             critical_path_enabled: true,
             missing: missing::Missing::new(),
@@ -771,9 +748,6 @@ impl GraphPanel {
             layout_picker: mode::control(self).into_any_element(),
             reduce_toggle: mode::reduce_toggle(self, cx),
             boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
-            relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
-            pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
-            why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
             colour_picker: self.colour_picker.clone(),
             report_control: report::control(self, cx).map(IntoElement::into_any_element),
             timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
@@ -1296,14 +1270,6 @@ struct Controls {
     reduce_toggle: ToggleGroup,
     /// The boxes menu, offered only where the loaded graph carries a box class.
     boxes: Option<Entity<MultiSelect>>,
-    /// The picker naming what the selected box marks, offered only while a box
-    /// is selected: with none there is no marking for it to widen or narrow.
-    relation_picker: Option<Entity<Dropdown>>,
-    /// The override offered on the selected box, which stands beside that
-    /// picker.
-    pin_control: Option<AnyElement>,
-    /// The questions asked of the selected box, which stand beside the pin.
-    why_controls: Option<AnyElement>,
     /// Chooses what the boxes' fills say.
     colour_picker: Entity<Dropdown>,
     /// Puts the card reading what the build reported up and away, offered
