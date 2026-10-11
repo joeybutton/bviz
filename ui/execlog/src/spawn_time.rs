@@ -7,8 +7,8 @@ use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
-    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, TruncatingLabel,
-    cut_off_note, legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
+    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, TruncatingLabel, cut_off_note,
+    legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -283,10 +283,16 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
         ));
     let phases = spent_in(&summary.timing)
         .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
-    Toolbar::new()
-        .one_row("spawn-time-header")
-        .child(totals)
-        .child(Legend::new("spawn-time-legend", legend).entries(phases))
+    OneRow::new("spawn-time-header").filling(
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(totals)
+            .child(Legend::new("spawn-time-legend", legend).entries(phases)),
+    )
 }
 
 /// `control` behind a label naming what it picks.

@@ -1,6 +1,6 @@
 use crate::{Controls, GraphPanel, Palette, ToggleCriticalPath, ToggleNeighborhood};
 use bviz_ui_components::{
-    OneRow, Switch, ToggleGroup, ToggleSegment, Toolbar, ToolbarSeparator, spinner,
+    OneRow, Priority, Switch, ToggleGroup, ToggleSegment, ToolbarGroup, ToolbarSeparator, spinner,
 };
 use gpui::{AnyElement, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
@@ -22,16 +22,23 @@ pub(crate) fn toolbar(
     cx: &Context<GraphPanel>,
 ) -> Div {
     let marks = marks(&controls, focus, cx);
-    let mut view = Toolbar::new()
-        .one_row("graph-view-controls")
-        .child(group("layout", palette).child(controls.layout_picker))
-        .child(controls.reduce_toggle)
-        .child(group("colour", palette).child(controls.colour_picker))
-        .child(ToolbarSeparator)
-        .child(group("mark", palette).child(marks))
+    let mut view = OneRow::new("graph-view-controls")
+        .group(ToolbarGroup::new(
+            LAYOUT,
+            group("layout", palette).child(controls.layout_picker),
+        ))
+        .group(ToolbarGroup::new(EDGES, controls.reduce_toggle))
+        .group(ToolbarGroup::new(
+            COLOUR,
+            group("colour", palette).child(controls.colour_picker),
+        ))
+        .group(ToolbarGroup::new(
+            MARK,
+            parted(group("mark", palette).child(marks)),
+        ))
         .when(controls.relaying, |view| {
             // The prior layout stays interactive while a relayout runs.
-            view.trailing(busy("relaying-spinner", "laying out…", palette))
+            view.status([busy("relaying-spinner", "laying out…", palette).into_any_element()])
         });
     let panels: Vec<AnyElement> = [controls.report_control, controls.timecard_control]
         .into_iter()
@@ -43,17 +50,34 @@ pub(crate) fn toolbar(
         )
         .collect();
     if !panels.is_empty() {
-        view = view.trailing(ToolbarSeparator);
+        view = view.trailing(ToolbarGroup::new(PANELS, parted(row().children(panels))));
     }
-    for panel in panels {
-        view = view.trailing(panel);
-    }
-    let query = Toolbar::new()
-        .one_row("graph-query-bar")
-        .when_some(controls.boxes, OneRow::child)
-        .child(controls.chips);
+    let query = OneRow::new("graph-query-bar")
+        .when_some(controls.boxes, |query, boxes| {
+            query.group(ToolbarGroup::new(BOXES, boxes))
+        })
+        .filling(controls.chips);
     let strips: [OneRow; STRIPS] = [view, query];
     div().size_full().flex().flex_col().children(strips)
+}
+
+/// How long each group of the toolbar holds out against the window narrowing,
+/// the views it chooses longest and the panel toggles least.
+const LAYOUT: Priority = 4;
+const EDGES: Priority = 4;
+const COLOUR: Priority = 3;
+const MARK: Priority = 2;
+const PANELS: Priority = 1;
+const BOXES: Priority = 1;
+
+/// Controls laid side by side.
+fn row() -> Div {
+    div().flex().items_center().gap_2()
+}
+
+/// `controls` parted by a rule from the group before them.
+fn parted(controls: impl IntoElement) -> Div {
+    row().child(ToolbarSeparator).child(controls)
 }
 
 /// The toggles choosing what the drawing marks.

@@ -4,13 +4,16 @@ use crate::hint::Hint;
 use bviz_ui_theme::{ThemeColors, label_on, level_step, luminance, mix, over};
 use gpui::{
     Action, App, ClickEvent, Div, ElementId, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent,
-    KeyUpEvent, RenderOnce, Rgba, SharedString, Stateful, Window, div, prelude::*, px, relative,
-    transparent_black,
+    KeyUpEvent, Pixels, RenderOnce, Rgba, SharedString, Stateful, Window, div, prelude::*, px,
+    relative, transparent_black,
 };
 
 /// A compact button's line box as a multiple of its font size, tight enough that
 /// the label's own leading does not set the button's height.
 const COMPACT_LINE_HEIGHT: f32 = 1.2;
+
+/// The width and height of a button's icon.
+pub(crate) const ICON_SIZE: Pixels = px(16.);
 
 /// Whether a key activates a focused button (enter or space).
 fn is_activate(key: &str) -> bool {
@@ -367,7 +370,7 @@ impl RenderOnce for Button {
         match self.icon {
             Some(name) => el.child(
                 bviz_ui_assets::icon(name.as_ref())
-                    .size(px(16.))
+                    .size(ICON_SIZE)
                     .text_color(ink),
             ),
             None => el,
