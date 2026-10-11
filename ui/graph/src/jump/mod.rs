@@ -29,8 +29,10 @@ use gpui::{
     Subscription, TextStyleRefinement, Window, actions, div, prelude::*, px, relative, rems,
     uniform_list,
 };
+#[cfg(test)]
+pub(crate) use index::tests::shared as fixture;
 use index::{Candidate, Scope};
-pub(crate) use index::{Candidates, labelled, package_of};
+pub(crate) use index::{Candidates, container, labelled, node_text, package_of};
 use rustc_hash::FxHashSet;
 
 actions!(
@@ -744,13 +746,15 @@ fn listed(
             .flex_grow_1()
             .text_ellipsis_start(),
     )
-    .children(index::container(shared, candidate).map(|container| {
-        TruncatingLabel::new("container", container)
-            .flex_shrink(CONTAINER_SHRINK)
-            .text_ellipsis_start()
-            .text_xs()
-            .text_color(colors.text_muted)
-    }))
+    .children(
+        index::container(shared, candidate.id, candidate.kind).map(|container| {
+            TruncatingLabel::new("container", container)
+                .flex_shrink(CONTAINER_SHRINK)
+                .text_ellipsis_start()
+                .text_xs()
+                .text_color(colors.text_muted)
+        }),
+    )
     .child(badge(kind_names(candidate.kind).one, colors.text_muted))
     .children(
         index::configuration(shared, candidate)

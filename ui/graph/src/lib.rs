@@ -46,6 +46,7 @@ mod framing;
 mod fuzzy;
 mod hints;
 mod history;
+mod hover;
 mod hue;
 mod jump;
 mod legend;
@@ -325,8 +326,10 @@ pub struct GraphPanel {
     /// Derives the levels of the panel's restriction as the map lands.
     _map_placed: Subscription,
     _reveal_requested: Subscription,
-    /// Box under the cursor.
+    /// The box whose neighborhood a hover marks: the box under the cursor,
+    /// or the one the jump palette previews.
     hovered: Option<Id>,
+    box_card: hover::BoxCard,
     hover_marking: MarkingMemo,
     spatial: SpatialMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
@@ -480,6 +483,7 @@ impl GraphPanel {
         let chrome_follows = cx.observe_self(|view, cx| {
             view.toolbar.update(cx, |_, cx| cx.notify());
             view.overlays.update(cx, |_, cx| cx.notify());
+            view.box_card.restate(cx);
         });
         let changed = cx.observe(&model, |view, _, cx| {
             colour::sync(view, cx);
@@ -538,6 +542,7 @@ impl GraphPanel {
             _map_placed: map_placed,
             _reveal_requested: reveal_requested,
             hovered: None,
+            box_card: hover::BoxCard::new(cx),
             hover_marking: MarkingMemo::default(),
             spatial: SpatialMemo::default(),
             selection,
@@ -597,6 +602,16 @@ impl GraphPanel {
         step(&mut self.framing);
         if self.camera() != before {
             self.invalidate_canvas_only(cx);
+            self.drawing_moved(cx);
+        }
+    }
+
+    /// Lets go of the box the card describes as the drawing moves under a
+    /// pointer that did not move it, which need not rest on that box any more.
+    /// A drag keeps it, as the drawing carries the box along with the pointer.
+    pub(crate) fn drawing_moved(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.drag, Drag::None) {
+            self.box_card.forget(cx);
         }
     }
 
@@ -672,6 +687,7 @@ impl GraphPanel {
                     }),
             )
             .child(cached_layer(self.overlays.clone()))
+            .child(cached_layer(self.box_card.layer()))
             .children(chips::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
@@ -813,6 +829,7 @@ impl GraphPanel {
         self.mode_picker
             .update(cx, |picker, cx| picker.set_selected(mode.index(), cx));
         self.hovered = None;
+        self.box_card.forget(cx);
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
@@ -900,16 +917,22 @@ impl GraphPanel {
             return;
         }
         GESTURES.dispatch(Pointer::HOVER, |intent| match intent {
-            CanvasIntent::Mark => {
-                self.mark_box_at(e.position, cx);
+            CanvasIntent::Hover => {
+                self.hover_box_at(e.position, cx);
                 true
             }
             _ => false,
         });
     }
 
-    /// The box drawn under the window-space `position`, if any.
-    fn box_id_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> Option<Id> {
+    /// What `read` reads of the box drawn under the window-space `position`,
+    /// if any.
+    fn read_box_at<T>(
+        &mut self,
+        position: Point<Pixels>,
+        read: impl FnOnce(&bviz_graph_layout::Box) -> T,
+        cx: &mut Context<Self>,
+    ) -> Option<T> {
         let drawn = self.drawn()?;
         let camera = self.camera();
         let vp = self.framing.viewport();
@@ -917,14 +940,31 @@ impl GraphPanel {
         self.spatial
             .indexed(&drawn, camera.zoom, cx)
             .and_then(|(_, g)| box_at(&self.titles, &g, morph.as_ref(), vp, camera, position))
-            .map(|b| b.id)
+            .map(read)
     }
 
-    fn mark_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// The box drawn under the window-space `position`, if any.
+    fn box_id_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> Option<Id> {
+        self.read_box_at(position, |b| b.id, cx)
+    }
+
+    /// Takes the pointer at `position` to be over the box drawn there, which
+    /// the card describes and a hover marks the neighborhood of.
+    fn hover_box_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         if self.drawn().is_none() {
             return;
         }
-        let hit = self.box_id_at(position, cx);
+        let described = self.box_card.described();
+        let landed = self.read_box_at(
+            position,
+            |b| match described == Some(b.id) {
+                true => hover::Landed::Described(b.id),
+                false => hover::Landed::Fresh(hover::Pointed::of(b)),
+            },
+            cx,
+        );
+        let hit = landed.as_ref().map(hover::Landed::id);
+        self.box_card.hover(position, landed, cx);
         if hit != self.hovered {
             self.hovered = hit;
             self.repaint_hover(cx);
@@ -937,7 +977,11 @@ impl GraphPanel {
     /// gpui reports the canvas unhovered while a button is held, so the drag guard
     /// keeps a pan from dropping the marked set it started with.
     fn on_hover(&mut self, over: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if !over && matches!(self.drag, Drag::None) && self.hovered.take().is_some() {
+        if *over || !matches!(self.drag, Drag::None) {
+            return;
+        }
+        self.box_card.forget(cx);
+        if self.hovered.take().is_some() {
             self.repaint_hover(cx);
         }
     }
@@ -953,7 +997,7 @@ impl GraphPanel {
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let delta = scroll_pixels(e);
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
-        GESTURES.dispatch(Pointer::scroll(e), |intent| {
+        let moved = GESTURES.dispatch(Pointer::scroll(e), |intent| {
             match intent {
                 CanvasIntent::Zoom => self.zoom_about(e.position, wheel_zoom_factor(e), cx),
                 CanvasIntent::PanAcross => pan_by(self, (dx + dy, 0.0), cx),
@@ -962,16 +1006,22 @@ impl GraphPanel {
             }
             true
         });
+        if moved {
+            self.hover_box_at(e.position, cx);
+        }
     }
 
     fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
-        GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
+        let moved = GESTURES.dispatch(Pointer::pinch(e), |intent| match intent {
             CanvasIntent::Zoom => {
                 self.zoom_about(e.position, pinch_factor(e), cx);
                 true
             }
             _ => false,
         });
+        if moved {
+            self.hover_box_at(e.position, cx);
+        }
     }
 
     /// Zooms `factor` times closer about the middle of the view.
@@ -1076,6 +1126,13 @@ impl Panel for GraphPanel {
         if active {
             self.focus_handle.focus(window, cx);
             derive::publish_filter(self, cx);
+        } else {
+            // The card and the hover belong to a pointer no longer over the
+            // drawing.
+            self.box_card.forget(cx);
+            if self.hovered.take().is_some() {
+                self.repaint_hover(cx);
+            }
         }
     }
 }
@@ -1311,6 +1368,7 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     // The relayout places the boxes afresh, so the box resolved here need not be
     // the one the cursor ends up over.
     view.hovered = None;
+    view.box_card.forget(cx);
     derive::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
     view.invalidate_canvas(cx);

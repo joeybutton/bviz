@@ -386,15 +386,21 @@ pub(crate) fn build_prepaint(
 ) -> impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) {
     move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
         let _span = pan_bench::span(Phase::CanvasPrepaint);
-        let redraw = parent.update(cx, |view, _| {
+        let (redraw, moved) = parent.update(cx, |view, _| {
+            let before = view.camera();
             let stale = view.framing.fit_or_rescale(bounds, content);
             let target = frame_target(view);
             view.framing.arm_frame(content, target);
             view.framing.arm_settle(content, recenter_target);
-            stale | view.framing.step_settle()
+            let redraw = stale | view.framing.step_settle();
+            (redraw, view.camera() != before)
         });
         if redraw {
             window.request_animation_frame();
+        }
+        if moved {
+            // A notify made while the frame is drawn draws no frame of its own.
+            cx.defer(move |cx| parent.update(cx, GraphPanel::drawing_moved));
         }
     }
 }
