@@ -574,7 +574,7 @@ impl RenderOnce for LegendToggle {
             });
         })
         .when(self.labelled, |toggle| toggle.label(TOGGLE_LABEL))
-        .icon(TOGGLE_ICON)
+        .leading_icon(TOGGLE_ICON)
         .selected(open)
         .disabled(measured.keys_nothing())
         // A tooltip would cover the popover the toggle holds open.

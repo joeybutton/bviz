@@ -110,7 +110,7 @@ pub(crate) fn control(
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .when(labelled, |toggle| toggle.label("outcomes"))
-        .icon("list-checks")
+        .leading_icon("list-checks")
         .keys_for(&ToggleOutcomes, &view.focus_handle)
         .selected(view.report.is_up(report)),
     )

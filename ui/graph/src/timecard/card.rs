@@ -79,7 +79,7 @@ pub(crate) fn control(
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .when(labelled, |toggle| toggle.label("timing"))
-        .icon("timer")
+        .leading_icon("timer")
         .keys_for(&ToggleTiming, &view.focus_handle)
         .selected(view.timecard.up),
     )

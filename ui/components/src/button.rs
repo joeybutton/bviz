@@ -30,7 +30,7 @@ type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub struct Button {
     id: ElementId,
     label: Option<SharedString>,
-    icon: Option<SharedString>,
+    icon: Option<(SharedString, IconSide)>,
     ghost: bool,
     /// Whether the button reads as on, for one built as a toggle; `None` for a
     /// button that is not one.
@@ -43,6 +43,13 @@ pub struct Button {
     focus_handle: Option<FocusHandle>,
     hint: Hint,
     on_click: OnClick,
+}
+
+/// Which side of a button's label its icon stands on.
+#[derive(Clone, Copy)]
+enum IconSide {
+    Before,
+    After,
 }
 
 impl Button {
@@ -69,8 +76,15 @@ impl Button {
         self
     }
 
+    /// Shows `icon` after any label, where a disclosure caret stands.
     pub fn icon(mut self, icon: impl Into<SharedString>) -> Self {
-        self.icon = Some(icon.into());
+        self.icon = Some((icon.into(), IconSide::After));
+        self
+    }
+
+    /// Shows `icon` before any label, for an icon naming what the button does.
+    pub fn leading_icon(mut self, icon: impl Into<SharedString>) -> Self {
+        self.icon = Some((icon.into(), IconSide::Before));
         self
     }
 
@@ -364,18 +378,18 @@ impl RenderOnce for Button {
                 .on_click(self.on_click),
         };
 
-        let el = match self.label {
-            Some(label) => el.child(label),
-            None => el,
+        let icon = self.icon.map(|(name, side)| {
+            let icon = bviz_ui_assets::icon(name.as_ref())
+                .size(ICON_SIZE)
+                .text_color(ink);
+            (icon, side)
+        });
+        let (before, after) = match icon {
+            Some((icon, IconSide::Before)) => (Some(icon), None),
+            Some((icon, IconSide::After)) => (None, Some(icon)),
+            None => (None, None),
         };
-        match self.icon {
-            Some(name) => el.child(
-                bviz_ui_assets::icon(name.as_ref())
-                    .size(ICON_SIZE)
-                    .text_color(ink),
-            ),
-            None => el,
-        }
+        el.children(before).children(self.label).children(after)
     }
 }
 
