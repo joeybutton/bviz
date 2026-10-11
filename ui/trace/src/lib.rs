@@ -120,6 +120,9 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("escape", Unchoose, stats),
         KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
         KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
+        KeyBinding::new("d", flame_panel::CycleDirection, flame_canvas),
+        KeyBinding::new("w", flame_panel::CycleWeight, flame_canvas),
+        KeyBinding::new("k", flame_panel::ToggleKinds, flame_canvas),
     ]);
     cx.bind_keys(zoom_key_bindings(TIMELINE_KEY_CONTEXT));
     cx.bind_keys(zoom_key_bindings(flame_panel::FLAME_KEY_CONTEXT));
@@ -539,11 +542,7 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
 /// The window the flame graph and stats cover, as a chip carrying the control
 /// that widens the next aggregate back to the whole timeline. Absent while no
 /// aggregate is shown, or the shown one covers the whole build.
-pub(crate) fn time_window_chip(
-    model: &Entity<TraceModel>,
-    palette: Palette,
-    cx: &App,
-) -> Option<Div> {
+fn time_window_chip(model: &Entity<TraceModel>, palette: Palette, cx: &App) -> Option<Div> {
     let summary = {
         let m = model.read(cx);
         let profile = m.profile()?;
@@ -567,7 +566,6 @@ pub(crate) fn time_window_chip(
             .bg(palette.selection)
             .border_1()
             .border_color(palette.accent)
-            .text_size(px(STATS_TEXT_SIZE))
             .text_color(palette.label)
             .child(summary)
             .child(
