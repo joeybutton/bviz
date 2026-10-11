@@ -3,7 +3,7 @@ use crate::{
 };
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
-    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, scrubber,
+    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, TextTooltip, scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -24,6 +24,12 @@ const NAME_MAX_WIDTH: Pixels = px(240.);
 const READOUT_WIDTH: Pixels = px(128.);
 
 const SECONDS_PER_MINUTE: u64 = 60;
+
+/// What the readout leads an approximate time with.
+const APPROXIMATE_MARK: &str = "~";
+
+/// What the readout's hint says of an approximate time.
+const APPROXIMATE_HINT: &str = "Approximate time";
 
 /// The transport driving a document's [`Clock`], labelled with the document's
 /// name. Draws nothing while the clock has no time.
@@ -147,6 +153,7 @@ impl Render for PlaybackBar {
         let now = timeline.now();
         let fraction = timeline.range().fraction_at(now);
         let readout = readout(timeline, now);
+        let approximate = timeline.approximate();
         let playing = timeline.is_playing();
         let colors = bviz_ui_theme::theme(window, cx).colors;
         div()
@@ -178,9 +185,14 @@ impl Render for PlaybackBar {
             .child(self.scrubber(fraction, &colors, cx))
             .child(
                 div()
+                    .id("playback-readout")
                     .w(READOUT_WIDTH)
                     .flex_none()
                     .text_size(TEXT_SIZE)
+                    .when(approximate, |readout| {
+                        let hint = TextTooltip::builder(APPROXIMATE_HINT.into(), colors.tooltip());
+                        readout.tooltip(hint)
+                    })
                     .child(readout),
             )
             .child(self.speed.clone())
@@ -201,7 +213,11 @@ fn readout(timeline: &Timeline, now: EpochMicros) -> SharedString {
     let range = timeline.range();
     let elapsed = minutes_seconds(range.elapsed_micros(now));
     let total = minutes_seconds(range.length_micros());
-    let approximate = if timeline.approximate() { "~" } else { "" };
+    let approximate = if timeline.approximate() {
+        APPROXIMATE_MARK
+    } else {
+        ""
+    };
     format!("{approximate}{elapsed} / {total}").into()
 }
 
