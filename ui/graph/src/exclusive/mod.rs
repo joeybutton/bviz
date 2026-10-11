@@ -32,23 +32,20 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, TruncatingLabel,
-    cached_layer, centered_notice, centered_spinner, defer_hover_card, legend_gestures,
-    load_in_background, over_window,
+    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, cached_layer,
+    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
+    over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
 use gpui::{
-    Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Subscription, Task, WeakEntity,
-    Window, canvas, div, prelude::*, px, relative,
+    Action, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, NavigationDirection, Pixels, Point,
+    Render, Rgba, SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*,
+    px,
 };
 use icicle::{Cell, Holds, Parent, Run};
-use paint::{
-    HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,
-    shared_name,
-};
+use paint::{MIN_CELL_WIDTH, Scene, point_name, run_name, shared_name};
 use roots::{Found, Within};
 use selection::{LaidOut, Step};
 use std::collections::HashMap;
@@ -73,7 +70,6 @@ enum ExclusiveIntent {
     OpenMenu,
     GoBack,
     GoForward,
-    FocusCrumb,
     SelectCell,
 }
 
@@ -129,12 +125,6 @@ const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
         Place::Anywhere,
         "Go forward",
         ExclusiveIntent::GoForward,
-    ),
-    Entry::new(
-        Input::click(Button::Left),
-        Place::On("a breadcrumb"),
-        "Focus what it names",
-        ExclusiveIntent::FocusCrumb,
     ),
     Entry::new(
         Input::HOVER,
@@ -814,22 +804,14 @@ impl ExclusivePanel {
         (self.drawn.as_ref()).is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
     }
 
-    /// Focuses `on` of `tree` as [`Self::focus_on`] does, where `tree` is
-    /// still the tree drawn.
-    fn focus_on_in(&mut self, tree: &Arc<Dominators>, on: Option<Focused>, cx: &mut Context<Self>) {
-        if self.draws(tree) {
-            self.focus_on(on, cx);
-        }
-    }
-
     /// Draws the icicle from what the focus stands under.
     fn focus_up(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
         if let Some(on) = drawn.focused() {
-            let up = Crumb::of(on.parent(&drawn.coloured.tree));
-            self.focus_on(up.map(Focused::from), cx);
+            let up = on.holds().parent(&*drawn.coloured.tree);
+            self.focus_on(up.and_then(Focused::of), cx);
         }
     }
 
@@ -1340,29 +1322,12 @@ impl Focused {
         }
     }
 
-    /// The node this is, where it is one.
-    fn node(self) -> Option<u32> {
-        match self {
-            Self::Node(node) => Some(node),
-            Self::Shared | Self::Run(_) => None,
-        }
-    }
-
-    /// What this stands under in `tree`.
-    fn parent(self, tree: &Dominators) -> Parent {
-        match self {
-            Self::Shared => Crumb::Shared.parent(tree),
-            Self::Node(node) => Crumb::Node(node).parent(tree),
-            Self::Run(run) => run.parent(),
-        }
-    }
-
     /// The points of `tree` this stands over.
     fn weight(self, tree: &Dominators) -> u32 {
         self.holds().weight(tree)
     }
 
-    /// How a tooltip or the breadcrumb names this in `tree`, whose roots
+    /// How a tooltip names this in `tree`, whose roots
     /// were chosen `by`.
     fn name(self, tree: &Dominators, shared: &Shared, by: RootedBy) -> String {
         match self {
@@ -1373,70 +1338,19 @@ impl Focused {
     }
 }
 
-/// What a focus stands under short of the whole build, which the breadcrumb
-/// names a step for.
-#[derive(Clone, Copy, PartialEq)]
-enum Crumb {
-    /// The shared tops.
-    Shared,
-    Node(u32),
-}
-
-impl Crumb {
-    /// The step for `parent`; none for the whole build.
-    fn of(parent: Parent) -> Option<Self> {
-        match parent {
-            Parent::Build => None,
-            Parent::Shared => Some(Self::Shared),
-            Parent::Node(node) => Some(Self::Node(node)),
-        }
-    }
-
-    /// What this stands under in `tree`.
-    fn parent(self, tree: &Dominators) -> Parent {
-        match self {
-            Self::Shared => Parent::Build,
-            Self::Node(node) => icicle::Tree::parent(tree, node),
-        }
-    }
-}
-
-impl From<Crumb> for Focused {
-    fn from(crumb: Crumb) -> Self {
-        match crumb {
-            Crumb::Shared => Self::Shared,
-            Crumb::Node(node) => Self::Node(node),
-        }
-    }
-}
-
 /// Where the icicle is drawn from, with what is read of the tree for it
 /// taken once as the focus is set.
 #[derive(Clone, PartialEq)]
 struct Focus {
     on: Focused,
-    /// Top first, those nearest `on` at most [`CRUMBS`] of them.
-    above: Vec<Crumb>,
-    /// Whether more steps stand above those of `above`.
-    elided: bool,
     /// Whether a cell drawn from `on` can stand for a root the build also
     /// reaches as a dependency: `on` itself, or where it is a run of roots,
     /// one it gathers.
     reached: bool,
 }
 
-/// The most steps above the focus the breadcrumb names.
-const CRUMBS: usize = 4;
-
 impl Focus {
     fn on(tree: &Dominators, on: Focused) -> Self {
-        let mut above: Vec<Crumb> = Vec::with_capacity(CRUMBS + 1);
-        let nearest = Crumb::of(on.parent(tree));
-        let up = std::iter::successors(nearest, |above| Crumb::of(above.parent(tree)));
-        above.extend(up.take(CRUMBS + 1));
-        let elided = above.len() > CRUMBS;
-        above.truncate(CRUMBS);
-        above.reverse();
         let reached = match on {
             Focused::Node(node) => paint::reached(tree, node),
             Focused::Run(run) if run.parent() == Parent::Build => {
@@ -1444,12 +1358,7 @@ impl Focus {
             }
             Focused::Shared | Focused::Run(_) => false,
         };
-        Self {
-            on,
-            above,
-            elided,
-            reached,
-        }
+        Self { on, reached }
     }
 }
 
@@ -1913,7 +1822,6 @@ impl Render for ExclusivePanel {
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
             let scoping = Scoping {
                 roots: &self.roots_field,
-                drawn,
                 computing,
             };
             let legend = legend(&self.legend, drawn, &palette);
@@ -2008,8 +1916,6 @@ const POINTS: Priority = 2;
 struct Scoping<'a> {
     /// The field choosing the roots of the tree.
     roots: &'a Entity<QueryField>,
-    /// The tree drawn, whose focus the breadcrumb names the path down to.
-    drawn: Option<&'a Drawn>,
     /// Whether the roots of a new choice are chosen and its tree computed over
     /// the one drawn for the last.
     computing: bool,
@@ -2017,7 +1923,6 @@ struct Scoping<'a> {
 
 /// The strip choosing the unit drawn and the roots, its picker's keys named
 /// where `focus` stands, ending in the toggle opening the tree's `legend`.
-/// The roots field shares the room the controls leave with the breadcrumb.
 fn strip(
     picker: &UnitPicker,
     scoping: Scoping,
@@ -2028,24 +1933,9 @@ fn strip(
     cx: &Context<ExclusivePanel>,
 ) -> OneRow {
     let points = picker.group(POINTS, focus, window, cx);
-    let crumbs = || {
-        let crumbs = scoping
-            .drawn
-            .and_then(|drawn| breadcrumb(drawn, palette, cx));
-        crumbs.map(|crumbs| div().flex_1().min_w_0().child(crumbs))
-    };
     OneRow::new("exclusive-controls")
         .group(points)
-        .filling(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .flex_1()
-                .min_w_0()
-                .child(roots::field(scoping.roots, palette, cx))
-                .children(crumbs())
-        })
+        .filling(|| roots::field(scoping.roots, palette, cx))
         .when(scoping.computing, |row| {
             row.busy("exclusive-computing", "computing…")
         })
@@ -2101,95 +1991,6 @@ fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Lege
         LegendEntry::new(cell(false), roots),
         LegendEntry::new(cell(true), reached),
     ]
-}
-
-/// The path from the whole build down to the focus of `drawn`, each step but
-/// the focus a click away; absent at the whole build. Where the path outgrows
-/// its room the dominators above the focus give way first, and the focus is
-/// cut short only once they are gone. A name reading alike with another
-/// crumb's is followed by what tells it apart.
-fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) -> Option<Div> {
-    let focus = drawn.focus()?;
-    let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
-    let by = drawn.coloured.by();
-    // A row whose steps shrink to fit it.
-    let row = || div().flex().items_center().min_w_0().overflow_hidden();
-    // A name and the hint telling it apart give way in proportion to their
-    // lengths, so neither is cut away before the other.
-    let crumb = |index: usize, name: String, hint: Option<String>| {
-        let hint = hint.map(|hint| {
-            TruncatingLabel::new(
-                ("exclusive-crumb-hint", index),
-                format!("{HINT_SEPARATOR}{hint}"),
-            )
-        });
-        div()
-            .flex()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(TruncatingLabel::new(("exclusive-crumb-name", index), name))
-            .children(hint)
-    };
-    let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
-    let link = |index: usize, name: String, hint: Option<String>, to: Option<Focused>| {
-        // A click landing once another tree is drawn names none of its nodes.
-        let tree = Arc::clone(&drawn.coloured.tree);
-        crumb(index, name, hint)
-            .id(("exclusive-crumb", index))
-            .cursor_pointer()
-            .text_color(palette.colors.text_muted)
-            .hover(|style| style.text_color(palette.label))
-            .on_click(cx.listener(move |view, e: &ClickEvent, _, cx| {
-                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
-                    ExclusiveIntent::FocusCrumb => {
-                        view.focus_on_in(&tree, to, cx);
-                        true
-                    }
-                    _ => false,
-                });
-            }))
-    };
-    let mut above: Vec<Div> = Vec::with_capacity(CRUMBS + 1);
-    if focus.elided {
-        above.push(after(ELIDED.into_any_element()));
-    }
-    let above_focus = focus.above.iter().map(|&above| Focused::from(above));
-    let steps = above_focus.chain([focus.on]);
-    let crumbs: Vec<u32> = steps.filter_map(Focused::node).collect();
-    let hints = hints_among(tree, shared, &crumbs, &[]);
-    let hint = |step: Focused| step.node().and_then(|node| hints.get(&node).cloned());
-    for (index, &step) in focus.above.iter().enumerate() {
-        let step = Focused::from(step);
-        let step = link(
-            index + 1,
-            step.name(tree, shared, by),
-            hint(step),
-            Some(step),
-        );
-        above.push(after(step.into_any_element()));
-    }
-    let focused = cell_name(tree, shared, by, focus.on.holds());
-    let last = after(crumb(focus.above.len() + 1, focused, hint(focus.on)).into_any_element())
-        .flex_shrink_0()
-        .max_w(relative(1.));
-    Some(
-        row()
-            .text_sm()
-            .text_color(palette.label)
-            .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None, None).flex_shrink_0())
-            .child(row().child(row().children(above)).child(last)),
-    )
-}
-
-/// What the breadcrumb names the whole build.
-const WHOLE_BUILD_CRUMB: &str = "Whole build";
-
-/// Stands in the breadcrumb for the dominators it leaves out.
-const ELIDED: &str = "…";
-
-fn separator() -> AnyElement {
-    "›".into_any_element()
 }
 
 /// The layer over the cells that rings and describes the one selected,

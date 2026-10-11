@@ -463,7 +463,7 @@ fn rest_fill(palette: &Palette) -> Rgba {
 
 /// What the cell holding `holds` of `tree`, whose roots were chosen `by`,
 /// reads.
-pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
+fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
@@ -492,23 +492,23 @@ fn text_width(window: &mut Window, font_size: Pixels, ink: Hsla) -> impl FnMut(&
     }
 }
 
-/// What tells apart, by node, the names that read alike among the crumbs
-/// naming `crumbs` and the cells `cells` of `tree` wide enough to name. Each
+/// What tells apart, by node, the names that read alike among the nodes
+/// `named` of `tree` and the cells `cells` wide enough to name. Each
 /// such name is told apart by its configuration, as
 /// [`configuration_readings`] reads it, and an action's also by the file it
 /// writes first. A node whose name no other reads alike has none.
 pub(crate) fn hints_among(
     tree: &Dominators,
     shared: &Shared,
-    crumbs: &[u32],
+    named: &[u32],
     cells: &[Cell],
 ) -> HashMap<u32, String> {
     let unit = tree.scope().unit();
-    let named = cells.iter().filter_map(|cell| match cell.holds {
+    let wide = cells.iter().filter_map(|cell| match cell.holds {
         Holds::Node(node) if cell.rect.size.width >= LABEL_MIN_WIDTH => Some(node),
         _ => None,
     });
-    let nodes: Vec<u32> = crumbs.iter().copied().chain(named).collect();
+    let nodes: Vec<u32> = named.iter().copied().chain(wide).collect();
     let names: Vec<String> = nodes
         .iter()
         .map(|&node| point_name(tree.id(node), unit, shared))
