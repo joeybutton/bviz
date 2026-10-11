@@ -8,6 +8,7 @@ mod drag;
 mod dropdown;
 mod find_keys;
 pub mod gesture;
+mod hover_card;
 mod key_scope;
 pub mod keymap_probe;
 mod keys;
@@ -36,6 +37,7 @@ pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use find_keys::find_key_bindings;
+pub use hover_card::{CardAnchor, paint_hover_card};
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{
     KeyStyle, action_label, binding_text, binding_within, key_text, key_text_in, key_text_within,

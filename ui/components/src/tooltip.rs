@@ -60,6 +60,22 @@ pub fn beside_anchor(
     )
 }
 
+/// Where a box of `extent` describing the item at `rect` goes inside `bounds`:
+/// beside the middle of the item's bottom edge, or of its top edge where there
+/// is no room below, so that it covers none of the item.
+pub fn beside_item(
+    rect: Bounds<Pixels>,
+    extent: Size<Pixels>,
+    bounds: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let x = rect.center().x;
+    let below = beside_anchor(point(x, rect.bottom()), extent, bounds);
+    match below.y >= rect.bottom() {
+        true => below,
+        false => beside_anchor(point(x, rect.top()), extent, bounds),
+    }
+}
+
 /// The largest extent [`beside_anchor`] places clear of an anchor at `at`
 /// inside `bounds`, on whichever side of it holds more on each axis.
 pub fn room_beside(at: Point<Pixels>, bounds: Bounds<Pixels>) -> Size<Pixels> {
@@ -236,6 +252,17 @@ mod tests {
     fn a_tooltip_neither_side_holds_is_slid_inside_the_span() {
         assert_eq!(beside(50.0, 80.0, 0.0, 100.0), 20.0);
         assert_eq!(beside(50.0, 120.0, 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn a_tooltip_stands_below_its_item_or_above_where_there_is_no_room() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let extent = size(px(120.), px(60.));
+        let high = Bounds::new(point(px(100.), px(20.)), size(px(80.), px(20.)));
+        assert!(beside_item(high, extent, bounds).y >= high.bottom());
+        let low = Bounds::new(point(px(100.), px(270.)), size(px(80.), px(20.)));
+        let placed = beside_item(low, extent, bounds);
+        assert!(placed.y + extent.height <= low.top(), "{placed:?}");
     }
 
     #[test]

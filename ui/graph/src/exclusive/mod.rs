@@ -30,17 +30,17 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem, QueryField,
-    QueryFieldEvent, ShowLegend, Swatch, Toolbar, beside_anchor, cached_layer, centered_notice,
-    centered_spinner, key_text_in, legend_gestures, load_in_background, paint_tooltip,
+    CardAnchor, KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
+    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, cached_layer, centered_notice,
+    centered_spinner, key_text_in, legend_gestures, load_in_background, paint_hover_card,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
 use gpui::{
     Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
-    WeakEntity, Window, canvas, div, point, prelude::*, px, relative,
+    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Subscription, Task, WeakEntity,
+    Window, canvas, div, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -2096,37 +2096,16 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
         let (cell, by, pointer) = (*cell, *by, drawn.pointer);
         paint::paint_ring(&cell, &palette, window);
-        let at = match (by, pointer) {
+        let anchor = match (by, pointer) {
             // The menu stands in for the cell's description.
             (Picked::Menu, _) => return,
-            (Picked::Pointer, Some(at)) => Some(at),
-            (Picked::Pointer, None) | (Picked::Keys, _) => None,
-        };
-        let place = |extent: Size<Pixels>| match at {
-            Some(at) => beside_anchor(at, extent, bounds),
-            None => beside_cell(cell.rect, extent, bounds),
+            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
+            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
         };
         let tooltip = palette.colors.tooltip();
-        paint_tooltip(&lines, place, tooltip, window, cx);
+        paint_hover_card(&lines, anchor, bounds, tooltip, window, cx);
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
-}
-
-/// Where a tooltip of `extent` describing the cell at `rect` goes inside
-/// `bounds`: beside the middle of the cell's bottom edge, or of its top edge
-/// where there is no room below, so that it covers neither the cell nor its
-/// ring.
-fn beside_cell(
-    rect: Bounds<Pixels>,
-    extent: Size<Pixels>,
-    bounds: Bounds<Pixels>,
-) -> Point<Pixels> {
-    let x = rect.center().x;
-    let below = beside_anchor(point(x, rect.bottom()), extent, bounds);
-    match below.y >= rect.bottom() {
-        true => below,
-        false => beside_anchor(point(x, rect.top()), extent, bounds),
-    }
 }
 
 /// The layer the cells are drawn in, cached across frames that leave the tree
@@ -2186,7 +2165,6 @@ impl Render for IcicleCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::size;
 
     #[test]
     fn every_gesture_is_reachable() {
@@ -2196,19 +2174,6 @@ mod tests {
     #[test]
     fn every_gesture_fits_the_keys_help() {
         assert_eq!(GESTURES.overlong(), []);
-    }
-
-    /// A tooltip for a cell with no room below it stands above the cell
-    /// rather than over it.
-    #[test]
-    fn a_cell_s_tooltip_stands_below_it_or_above_where_there_is_no_room() {
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
-        let extent = size(px(120.), px(60.));
-        let high = Bounds::new(point(px(100.), px(20.)), size(px(80.), px(20.)));
-        assert!(beside_cell(high, extent, bounds).y >= high.bottom());
-        let low = Bounds::new(point(px(100.), px(270.)), size(px(80.), px(20.)));
-        let placed = beside_cell(low, extent, bounds);
-        assert!(placed.y + extent.height <= low.top(), "{placed:?}");
     }
 
     #[test]
