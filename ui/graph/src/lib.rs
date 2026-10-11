@@ -9,9 +9,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, LegendState, MultiSelect, MultiSelectEvent,
-    Pending, ScrollbarColors, ShowLegend, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
-    declare_scopes, find_key_bindings, legend_gestures, legend_key_bindings, overlay_canvas,
-    text_input, zoom_key_bindings,
+    Pending, ScrollbarColors, ShowLegend, ToggleGroup, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
+    cached_layer, declare_scopes, find_key_bindings, legend_gestures, legend_key_bindings,
+    overlay_canvas, text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -762,9 +762,9 @@ impl GraphPanel {
             .loaded()
             .is_some_and(|loaded| loaded.critical().any());
         let controls = Controls {
-            mode: self.mode,
             chips: chips::bar(self, palette, window, cx),
-            picker: self.layout_picker.clone(),
+            layout_picker: mode::control(self).into_any_element(),
+            reduce_toggle: mode::reduce_toggle(self, cx),
             boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
@@ -774,7 +774,6 @@ impl GraphPanel {
             timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
             neighborhood_enabled: self.neighborhood_enabled,
             critical_path: traced.then_some(self.critical_path_enabled),
-            reduced: self.derived.reduced(),
             relaying: self.derived.deriving(),
             legend,
         };
@@ -1065,13 +1064,6 @@ impl GraphPanel {
         self.selection.set_relation(relation);
         self.invalidate_canvas(cx);
     }
-
-    fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.honors_reduce() || self.derived.reduced().is_none() {
-            return;
-        }
-        derive::toggle_reduce(self, cx);
-    }
 }
 
 impl EventEmitter<PanelEvent> for GraphPanel {}
@@ -1151,7 +1143,9 @@ impl Render for GraphPanel {
             .on_action(
                 cx.listener(|view, _: &ToggleNeighborhood, _, cx| view.toggle_neighborhood(cx)),
             )
-            .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
+            .on_action(
+                cx.listener(|view, _: &ToggleReduce, _, cx| mode::toggle_reduction(view, cx)),
+            )
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
@@ -1279,10 +1273,11 @@ impl Render for GraphCanvas {
 
 /// What the toolbar's controls show.
 struct Controls {
-    mode: LayoutMode,
     /// The query bar.
     chips: AnyElement,
-    picker: Entity<Dropdown>,
+    /// Chooses the layout drawn.
+    layout_picker: AnyElement,
+    reduce_toggle: ToggleGroup,
     /// The boxes menu, offered only where the loaded graph carries a box class.
     boxes: Option<Entity<MultiSelect>>,
     /// The picker naming what the selected box marks, offered only while a box
@@ -1305,8 +1300,6 @@ struct Controls {
     /// Whether the critical path's halo is drawn, offered only where a path
     /// lands on the graph.
     critical_path: Option<bool>,
-    /// `None` where the drawing offers no choice of edge set.
-    reduced: Option<bool>,
     relaying: bool,
     legend: Option<bviz_ui_components::Legend>,
 }

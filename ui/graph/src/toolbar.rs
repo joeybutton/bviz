@@ -1,4 +1,4 @@
-use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood, ToggleReduce};
+use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood};
 use bviz_ui_components::{Button, OneRow, Toolbar, spinner};
 use gpui::{ClickEvent, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
 
@@ -21,7 +21,8 @@ pub(crate) fn toolbar(
 ) -> Div {
     let mut view = Toolbar::new()
         .one_row("graph-view-controls")
-        .child(controls.picker)
+        .child(controls.layout_picker)
+        .child(controls.reduce_toggle)
         .child(controls.colour_picker)
         .when_some(controls.boxes, |view, boxes| view.child(boxes))
         .child(
@@ -33,19 +34,6 @@ pub(crate) fn toolbar(
             .selected(controls.neighborhood_enabled)
             .keys_for(&ToggleNeighborhood, focus),
         );
-    // The strip only ever offers a control the mode's layout can answer, so
-    // everything on it acts on what is drawn.
-    if let Some(reduced) = controls.reduced.filter(|_| controls.mode.honors_reduce()) {
-        view = view.child(
-            Button::new(
-                "reduce-toggle",
-                cx.listener(|view, _: &ClickEvent, _, cx| view.toggle_reduce(cx)),
-            )
-            .label("reduce")
-            .selected(reduced)
-            .keys_for(&ToggleReduce, focus),
-        );
-    }
     if let Some(enabled) = controls.critical_path {
         view = view.child(
             Button::new(

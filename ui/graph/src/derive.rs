@@ -961,11 +961,18 @@ fn open_onto(base: &Graph, expanded: &mut HashSet<Id>, id: Id, names: &mut Names
     }
 }
 
-/// Flips whether the layered layout keeps every edge or only the transitive
-/// reduction, and lays the graph out over the edge set that leaves.
-pub(crate) fn toggle_reduce(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.derived.reduced = !view.derived.reduced;
-    request(view, cx);
+/// Has the layered layout keep only the transitive reduction of the edges where
+/// `reduced`, and every edge otherwise, and lays the graph out over the edge set
+/// that leaves. A drawing offering no reduction is left as it is.
+pub(crate) fn set_reduced(view: &mut GraphPanel, reduced: bool, cx: &mut Context<GraphPanel>) {
+    if view
+        .derived
+        .reduced()
+        .is_some_and(|standing| standing != reduced)
+    {
+        view.derived.reduced = reduced;
+        request(view, cx);
+    }
 }
 
 /// Draws the graph through `filter` from here on.
