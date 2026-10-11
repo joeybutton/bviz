@@ -251,6 +251,7 @@ filegroup(
     patches = [
         "//patches/gpui:gpui-platform-drag.patch",
         "//patches/gpui:gpui-tooltip-offset.patch",
+        "//patches/gpui:gpui-tooltip-skip-delay.patch",
     ],
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/gpui"},
 )

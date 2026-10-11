@@ -1,0 +1,172 @@
+Skip the tooltip delay while another tooltip is showing
+
+Every tooltip waits out the show delay, including when the pointer
+moves from one control to the next while reading tooltips, so sweeping
+a toolbar shows each one only after a pause. Show a tooltip at once
+while the window shows another, and for a short time after the last
+one hid in any window.
+
+diff --git a/crates/gpui/src/app.rs b/crates/gpui/src/app.rs
+--- a/crates/gpui/src/app.rs
++++ b/crates/gpui/src/app.rs
+@@ -686,6 +686,8 @@ pub struct App {
+     pub(crate) mode: GpuiMode,
+     pub(crate) cursor_hide_mode: CursorHideMode,
+     pub(crate) tooltip_offset: Pixels,
++    /// When a window last drew a frame without the tooltip its previous frame showed.
++    pub(crate) tooltip_hidden_at: Option<Instant>,
+     /// Whether the app was created by [`Application::new_inaccessible`]. No
+     /// accesskit APIs will be called when this flag is set.
+     pub(crate) accessibility_force_disabled: bool,
+@@ -779,6 +781,7 @@ impl App {
+                 quitting: false,
+                 cursor_hide_mode: CursorHideMode::default(),
+                 tooltip_offset: px(1.),
++                tooltip_hidden_at: None,
+                 accessibility_force_disabled: false,
+ 
+                 #[cfg(any(test, feature = "test-support", debug_assertions))]
+diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -47,6 +47,9 @@ use super::ImageCacheProvider;
+ 
+ const DRAG_THRESHOLD: f64 = 2.;
+ const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
++/// How long after a tooltip hides another shows without [`TOOLTIP_SHOW_DELAY`],
++/// so the pointer can sweep across a row of controls reading each one's.
++const TOOLTIP_SKIP_DELAY: Duration = Duration::from_millis(300);
+ const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
+ 
+ /// The styling information for a given group.
+@@ -3314,6 +3317,13 @@ fn handle_tooltip_mouse_move(
+             // Cancel waiting to show tooltip when it is no longer hovered.
+             active_tooltip.borrow_mut().take();
+         }
++        Action::ScheduleShow if skips_show_delay(window, cx) => show_tooltip(
++            active_tooltip,
++            build_tooltip,
++            check_is_hovered_during_prepaint,
++            window,
++            cx,
++        ),
+         Action::ScheduleShow => {
+             let delayed_show_task = window.spawn(cx, {
+                 let weak_active_tooltip = Rc::downgrade(active_tooltip);
+@@ -3325,36 +3335,13 @@ fn handle_tooltip_mouse_move(
+                         return;
+                     };
+                     cx.update(|window, cx| {
+-                        let new_tooltip =
+-                            build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
+-                                let weak_active_tooltip = Rc::downgrade(&active_tooltip);
+-                                ActiveTooltip::Visible {
+-                                    tooltip: AnyTooltip {
+-                                        view,
+-                                        mouse_position: window.mouse_position(),
+-                                        check_visible_and_update: Rc::new(
+-                                            move |tooltip_bounds, window, cx| {
+-                                                let Some(active_tooltip) =
+-                                                    weak_active_tooltip.upgrade()
+-                                                else {
+-                                                    return false;
+-                                                };
+-                                                handle_tooltip_check_visible_and_update(
+-                                                    &active_tooltip,
+-                                                    tooltip_is_hoverable,
+-                                                    &check_is_hovered_during_prepaint,
+-                                                    tooltip_bounds,
+-                                                    window,
+-                                                    cx,
+-                                                )
+-                                            },
+-                                        ),
+-                                    },
+-                                    is_hoverable: tooltip_is_hoverable,
+-                                }
+-                            });
+-                        *active_tooltip.borrow_mut() = new_tooltip;
+-                        window.refresh();
++                        show_tooltip(
++                            &active_tooltip,
++                            &build_tooltip,
++                            &check_is_hovered_during_prepaint,
++                            window,
++                            cx,
++                        )
+                     })
+                     .ok();
+                 }
+@@ -3369,6 +3356,50 @@ fn handle_tooltip_mouse_move(
+     }
+ }
+ 
++/// Whether a tooltip is showing in `window`, or hid in any window within
++/// [`TOOLTIP_SKIP_DELAY`].
++fn skips_show_delay(window: &Window, cx: &App) -> bool {
++    window.tooltip_bounds.is_some()
++        || cx.tooltip_hidden_at.is_some_and(|hidden_at| {
++            cx.background_executor().now().duration_since(hidden_at) < TOOLTIP_SKIP_DELAY
++        })
++}
++
++fn show_tooltip(
++    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
++    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
++    check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
++    window: &mut Window,
++    cx: &mut App,
++) {
++    let new_tooltip = build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
++        let weak_active_tooltip = Rc::downgrade(active_tooltip);
++        let check_is_hovered_during_prepaint = check_is_hovered_during_prepaint.clone();
++        ActiveTooltip::Visible {
++            tooltip: AnyTooltip {
++                view,
++                mouse_position: window.mouse_position(),
++                check_visible_and_update: Rc::new(move |tooltip_bounds, window, cx| {
++                    let Some(active_tooltip) = weak_active_tooltip.upgrade() else {
++                        return false;
++                    };
++                    handle_tooltip_check_visible_and_update(
++                        &active_tooltip,
++                        tooltip_is_hoverable,
++                        &check_is_hovered_during_prepaint,
++                        tooltip_bounds,
++                        window,
++                        cx,
++                    )
++                }),
++            },
++            is_hoverable: tooltip_is_hoverable,
++        }
++    });
++    *active_tooltip.borrow_mut() = new_tooltip;
++    window.refresh();
++}
++
+ /// Returns a callback which will be called by window prepaint to update tooltip visibility. The
+ /// purpose of doing this logic here instead of the mouse move handler is that the mouse move
+ /// handler won't get called when the element is not painted (e.g. via use of `visible_on_hover`).
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2754,7 +2754,7 @@ impl Window {
+ 
+     fn draw_roots(&mut self, cx: &mut App) {
+         self.invalidator.set_phase(DrawPhase::Prepaint);
+-        self.tooltip_bounds.take();
++        let showed_tooltip = self.tooltip_bounds.take().is_some();
+ 
+         self.a11y.sync_active_flag();
+         if self.a11y.is_active() {
+@@ -2805,6 +2805,9 @@ impl Window {
+         } else {
+             tooltip_element = self.prepaint_tooltip(cx);
+         }
++        if showed_tooltip && tooltip_element.is_none() {
++            cx.tooltip_hidden_at = Some(cx.background_executor.now());
++        }
+ 
+         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+ 
