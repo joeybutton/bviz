@@ -1,0 +1,100 @@
+Put a tooltip away at Escape
+
+A key press hides a tooltip only for as long as the keyboard was the
+last input: the next nudge of the pointer over the element shows it
+again. Have Escape, pressed without modifiers, put away a tooltip that
+is showing or waiting out its delay, as a press on its element does,
+until the pointer leaves the element.
+
+diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -3140,8 +3140,8 @@ pub(crate) enum ActiveTooltip {
+         tooltip: AnyTooltip,
+         _task: Task<()>,
+     },
+-    /// A press on the element put the tooltip away, and it stays away until the pointer leaves
+-    /// the element, so it does not stand over what the press opened.
++    /// A press on the element, or Escape, put the tooltip away. It stays away until the pointer
++    /// leaves the element, so a tooltip put away does not come back while the pointer rests there.
+     Dismissed,
+ }
+ 
+@@ -3342,6 +3342,7 @@ fn handle_tooltip_mouse_move(
+             cx,
+         ),
+         Action::ScheduleShow => {
++            let escapes = window.tooltip_escapes;
+             let delayed_show_task = window.spawn(cx, {
+                 let weak_active_tooltip = Rc::downgrade(active_tooltip);
+                 let build_tooltip = build_tooltip.clone();
+@@ -3352,6 +3353,10 @@ fn handle_tooltip_mouse_move(
+                         return;
+                     };
+                     cx.update(|window, cx| {
++                        if window.tooltip_escapes != escapes {
++                            dismiss_tooltip(&active_tooltip, window);
++                            return;
++                        }
+                         show_tooltip(
+                             &active_tooltip,
+                             &build_tooltip,
+@@ -3395,6 +3400,7 @@ fn show_tooltip(
+     let new_tooltip = build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
+         let weak_active_tooltip = Rc::downgrade(active_tooltip);
+         let check_is_hovered_during_prepaint = check_is_hovered_during_prepaint.clone();
++        let escapes = window.tooltip_escapes;
+         ActiveTooltip::Visible {
+             tooltip: AnyTooltip {
+                 view,
+@@ -3403,6 +3409,10 @@ fn show_tooltip(
+                     let Some(active_tooltip) = weak_active_tooltip.upgrade() else {
+                         return false;
+                     };
++                    if window.tooltip_escapes != escapes {
++                        dismiss_tooltip(&active_tooltip, window);
++                        return false;
++                    }
+                     handle_tooltip_check_visible_and_update(
+                         &active_tooltip,
+                         tooltip_is_hoverable,
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -995,6 +995,9 @@ pub struct Window {
+     next_hitbox_id: HitboxId,
+     pub(crate) next_tooltip_id: TooltipId,
+     pub(crate) tooltip_bounds: Option<TooltipBounds>,
++    /// Counts presses of Escape without modifiers. A tooltip shown or scheduled before the count
++    /// last rose is put away until the pointer leaves its element.
++    pub(crate) tooltip_escapes: usize,
+     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+     pub(crate) dirty_views: FxHashSet<EntityId>,
+     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
+@@ -1695,6 +1698,7 @@ impl Window {
+             next_hitbox_id: HitboxId(0),
+             next_tooltip_id: TooltipId::default(),
+             tooltip_bounds: None,
++            tooltip_escapes: 0,
+             dirty_views: FxHashSet::default(),
+             focus_listeners: SubscriberSet::new(),
+             focus_lost_listeners: SubscriberSet::new(),
+@@ -4600,7 +4604,17 @@ impl Window {
+                 }
+                 PlatformInput::PlatformDrag(drag)
+             }
+-            PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
++            PlatformInput::KeyDown(key_down) => {
++                let keystroke = &key_down.keystroke;
++                if keystroke.key == "escape" && !keystroke.modifiers.modified() {
++                    self.tooltip_escapes = self.tooltip_escapes.wrapping_add(1);
++                    if self.tooltip_bounds.is_some() {
++                        self.refresh();
++                    }
++                }
++                PlatformInput::KeyDown(key_down)
++            }
++            PlatformInput::KeyUp(_) => event,
+         };
+ 
+         if let Some(any_mouse_event) = event.mouse_event() {
