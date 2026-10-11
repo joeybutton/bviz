@@ -17,7 +17,7 @@ pub(crate) const AROUND_SPAWNS: &str = "around spawns";
 /// What a step's Waited cell shows where it waited no time.
 const NO_WAIT: &str = "—";
 /// The share of the profile's action spans under which so few match the
-/// action graph that the modeled build's tooltip warns of it.
+/// action graph that the modelled build's tooltip warns of it.
 const FEW_MATCHED: f64 = 0.5;
 
 pub(crate) fn part_name(part: Part) -> &'static str {
@@ -190,7 +190,7 @@ pub(crate) fn folded(names: &[&str]) -> String {
 /// What opens the line of levers.
 pub(crate) const LEVERS: &str = "Levers:";
 
-/// The most pulling a lever acting on `time` can shorten the modeled build
+/// The most pulling a lever acting on `time` can shorten the modelled build
 /// by, its `ceiling`, where that falls short of the time.
 pub(crate) fn lever_bound(ceiling: Option<Duration>, time: Duration) -> Option<Duration> {
     ceiling.filter(|&ceiling| ceiling < time)
@@ -341,13 +341,13 @@ pub(crate) fn could_save_tip(step: &Step) -> Option<String> {
         ceiling,
     } = step.model()?;
     if modeled.is_zero() {
-        return Some("no action span · modeled as zero".to_owned());
+        return Some("no action span · modelled as zero".to_owned());
     }
     let (modeled, ceiling) = (duration(modeled), duration(ceiling));
     // A ceiling that reads the same as the duration shows the reader no bound.
     Some(match ceiling == modeled {
-        true => format!("modeled {modeled}"),
-        false => format!("modeled {modeled} · capped by another chain"),
+        true => format!("modelled {modeled}"),
+        false => format!("modelled {modeled} · capped by another chain"),
     })
 }
 
@@ -365,7 +365,7 @@ pub(crate) fn modeled_line(path: &CriticalPath, modeled: &Modeled) -> String {
 /// and where it holds too little of the build or the path to go by, what.
 pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
     let mut tip = format!(
-        "modeled build {} · path's actions {}\n\
+        "modelled build {} · path's actions {}\n\
          match: \"Could save\" holds\n\
          well below: scheduling held the build back\n\
          graph from aquery · times from profile · untimed as zero",
@@ -385,7 +385,7 @@ pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
             modeled.spanned(),
         ));
     } else if unmodeled > 0 {
-        tip.push_str(&format!("\n{unmodeled} of {steps} steps unmodeled"));
+        tip.push_str(&format!("\n{unmodeled} of {steps} steps unmodelled"));
     }
     tip
 }
@@ -612,9 +612,9 @@ pub(super) mod tests {
         assert_eq!(could_save(compile), "800µs");
         assert_eq!(
             could_save_tip(compile).as_deref(),
-            Some("modeled 2.00ms · capped by another chain")
+            Some("modelled 2.00ms · capped by another chain")
         );
-        assert_eq!(could_save_tip(link).as_deref(), Some("modeled 400µs"));
+        assert_eq!(could_save_tip(link).as_deref(), Some("modelled 400µs"));
         assert_eq!(could_save(written), "0µs");
         assert!(could_save_tip(written).is_some_and(|tip| tip.starts_with("no action span")));
         assert_eq!(could_save(checked), "");
@@ -631,10 +631,10 @@ pub(super) mod tests {
         );
         let tip = modeled_tip(&path, modeled);
         assert!(
-            tip.starts_with("modeled build 2.70ms · path's actions 2.40ms\n"),
+            tip.starts_with("modelled build 2.70ms · path's actions 2.40ms\n"),
             "{tip}"
         );
-        assert!(tip.ends_with("\n1 of 4 steps unmodeled"), "{tip}");
+        assert!(tip.ends_with("\n1 of 4 steps unmodelled"), "{tip}");
     }
 
     #[test]

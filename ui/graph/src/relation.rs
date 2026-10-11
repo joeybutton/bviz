@@ -44,10 +44,10 @@ impl Relation {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::None => "no highlight",
-            Self::Direct(Direction::Both) => "direct neighbors",
+            Self::Direct(Direction::Both) => "direct neighbours",
             Self::Direct(Direction::In) => "direct inputs",
             Self::Direct(Direction::Out) => "direct outputs",
-            Self::Transitive(Direction::Both) => "all neighbors",
+            Self::Transitive(Direction::Both) => "all neighbours",
             Self::Transitive(Direction::In) => "all inputs",
             Self::Transitive(Direction::Out) => "all outputs",
         }

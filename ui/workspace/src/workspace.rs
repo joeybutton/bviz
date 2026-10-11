@@ -42,7 +42,7 @@ actions!(
         ClosePanel,
         /// Move panel to new window
         DetachPanel,
-        /// Maximize or restore pane
+        /// Maximise or restore pane
         ToggleMaximize,
         /// Open or close Documents menu
         ToggleDocuments,

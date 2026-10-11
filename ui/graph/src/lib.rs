@@ -98,7 +98,7 @@ use spatial::{Indexed, SpatialMemo};
 actions!(
     bviz_graph,
     [
-        /// Toggle neighbor highlighting
+        /// Toggle neighbour highlighting
         ToggleNeighborhood,
         /// Toggle transitive reduction
         ToggleReduce,

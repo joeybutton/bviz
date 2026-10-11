@@ -72,7 +72,7 @@ pub(crate) fn toolbar(
 fn marks(controls: &Controls, focus: &FocusHandle, cx: &Context<GraphPanel>) -> ToggleGroup {
     let panel = cx.entity();
     let neighborhood = Switch::new(
-        ToggleSegment::new("neighbors").keys_for(&ToggleNeighborhood, focus),
+        ToggleSegment::new("neighbours").keys_for(&ToggleNeighborhood, focus),
         controls.neighborhood_enabled,
         {
             let panel = panel.clone();

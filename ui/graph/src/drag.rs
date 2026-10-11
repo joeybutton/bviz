@@ -67,7 +67,7 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
     Entry::new(
         Input::HOVER,
         BOX,
-        "Describe; highlight neighbors",
+        "Describe; highlight neighbours",
         CanvasIntent::Hover,
     ),
     Entry::new(

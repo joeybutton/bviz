@@ -36,7 +36,7 @@ fn box_label(class: BoxClass) -> &'static str {
     match class {
         BoxClass::Package => "packages",
         BoxClass::Target => "targets",
-        BoxClass::LabeledOutput => "labeled outputs",
+        BoxClass::LabeledOutput => "labelled outputs",
         BoxClass::ConfiguredTarget => "configured targets",
     }
 }
@@ -185,7 +185,7 @@ mod tests {
             [
                 "packages",
                 "targets",
-                "labeled outputs",
+                "labelled outputs",
                 "configured targets"
             ]
         );

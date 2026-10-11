@@ -31,7 +31,7 @@ pub(crate) const CHROME_GESTURES: Gestures<ChromeIntent> = Gestures::new(&[
     Entry::new(
         Input::new(Motion::Click(Button::Left, Clicks::Double)),
         TAB_OR_HANDLE,
-        "Maximize or restore pane",
+        "Maximise or restore pane",
         ChromeIntent::Maximize,
     ),
     Entry::new(
