@@ -45,6 +45,17 @@ impl Colouring {
         Self::ALL.get(index).copied()
     }
 
+    /// The colouring offered after this one, wrapping round to the first,
+    /// passing over those a graph carrying what `offered` says cannot answer.
+    fn next(self, offered: Offered) -> Self {
+        let after = Self::ALL.iter().cycle().skip(self.index() + 1);
+        after
+            .take(Self::ALL.len())
+            .copied()
+            .find(|colouring| colouring.available(offered))
+            .unwrap_or(self)
+    }
+
     /// Whether a graph carrying what `offered` says can be coloured so.
     fn available(self, offered: Offered) -> bool {
         match self {
@@ -125,6 +136,12 @@ pub(crate) fn set(view: &mut GraphPanel, colouring: Colouring, cx: &mut Context<
     view.invalidate_canvas(cx);
 }
 
+/// Colours the boxes by the colouring offered after the one standing.
+pub(crate) fn cycle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let offered = Offered::by(view.model.read(cx));
+    set(view, view.colouring.next(offered), cx);
+}
+
 /// What the picker's hint says of the action times `model` holds.
 pub(crate) fn hint(model: &GraphModel) -> SharedString {
     let times = model
@@ -143,6 +160,29 @@ mod tests {
             assert_eq!(Colouring::at(colouring.index()), Some(colouring));
         }
         assert_eq!(Colouring::at(Colouring::ALL.len()), None);
+    }
+
+    /// The colourings are taken in the picker's order, round to the first,
+    /// a colouring the graph cannot answer passed over.
+    #[test]
+    fn cycling_passes_over_the_colourings_the_graph_cannot_answer() {
+        let timed = Offered {
+            timed: true,
+            playable: false,
+        };
+        assert_eq!(Colouring::Kind.next(timed), Colouring::Time);
+        assert_eq!(Colouring::Runner.next(timed), Colouring::Kind);
+        let bare = Offered {
+            timed: false,
+            playable: false,
+        };
+        assert_eq!(Colouring::Kind.next(bare), Colouring::Kind);
+        let playable = Offered {
+            timed: false,
+            playable: true,
+        };
+        assert_eq!(Colouring::Kind.next(playable), Colouring::Playback);
+        assert_eq!(Colouring::Playback.next(playable), Colouring::Kind);
     }
 
     #[test]

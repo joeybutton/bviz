@@ -5,8 +5,8 @@ use crate::popup::{self, Popup};
 use crate::{Hint, KeyScope, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    Action, App, ClickEvent, Context, ElementId, Entity, EventEmitter, IntoElement, KeyBinding,
-    Pixels, Render, SharedString, Window, div, prelude::*,
+    Action, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, IntoElement,
+    KeyBinding, Pixels, Render, SharedString, Window, div, prelude::*,
 };
 
 gpui::actions!(
@@ -78,6 +78,13 @@ impl Dropdown {
     /// The tooltip reading `text`.
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.hint = self.hint.text(text);
+        self
+    }
+
+    /// The tooltip naming the keys that run `action` where `focus` stands, as
+    /// [`Hint::keys_for`] names them.
+    pub fn keys_for(mut self, action: &dyn Action, focus: &FocusHandle) -> Self {
+        self.hint = self.hint.keys_for(action, focus);
         self
     }
 

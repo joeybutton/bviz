@@ -94,6 +94,15 @@ pub(crate) fn reduction(view: &GraphPanel) -> Reduction {
     Reduction::of(view.mode, view.derived.reduced())
 }
 
+/// Switches between the map and a layered layout.
+pub(crate) fn toggle_map(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let mode = match view.mode {
+        LayoutMode::Map => LayoutMode::Layered,
+        LayoutMode::Layered => LayoutMode::Map,
+    };
+    view.set_mode(mode, cx);
+}
+
 pub(crate) fn toggle_reduction(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if let Ok(reduce) = reduction(view).switched() {
         derive::set_reduced(view, reduce, cx);

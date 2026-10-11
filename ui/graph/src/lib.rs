@@ -103,6 +103,10 @@ actions!(
         ToggleNeighborhood,
         /// Toggle transitive reduction
         ToggleReduce,
+        /// Toggle map layout
+        ToggleMap,
+        /// Cycle colouring
+        CycleColouring,
         /// Toggle critical path
         ToggleCriticalPath,
         /// Toggle build outcomes
@@ -158,6 +162,8 @@ fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
+        KeyBinding::new("m", ToggleMap, unless_typing),
+        KeyBinding::new("c", CycleColouring, unless_typing),
         KeyBinding::new("p", ToggleCriticalPath, unless_typing),
         KeyBinding::new("o", ToggleOutcomes, unless_typing),
         KeyBinding::new("t", ToggleTiming, unless_typing),
@@ -416,6 +422,7 @@ impl GraphPanel {
     }
 
     fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let mode = LayoutMode::default();
         let layout_picker = cx.new(|cx| {
             Dropdown::new(
@@ -425,6 +432,7 @@ impl GraphPanel {
                 cx,
             )
             .tooltip("Graph layout")
+            .keys_for(&ToggleMap, &focus_handle)
         });
         // The picker notifies on every repaint it makes, and only a selection
         // should move the view off its layout.
@@ -444,7 +452,8 @@ impl GraphPanel {
                 colouring.index(),
                 cx,
             )
-            .tooltip(hint);
+            .tooltip(hint)
+            .keys_for(&CycleColouring, &focus_handle);
             colour::offer(&mut picker, offered, cx);
             picker
         });
@@ -505,7 +514,6 @@ impl GraphPanel {
             }
         });
         let derived = Derived::new();
-        let focus_handle = cx.focus_handle();
         let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         let (panel, filter) = (cx.entity(), derived.filter().clone());
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
@@ -1156,6 +1164,8 @@ impl Render for GraphPanel {
             .on_action(
                 cx.listener(|view, _: &ToggleReduce, _, cx| mode::toggle_reduction(view, cx)),
             )
+            .on_action(cx.listener(|view, _: &ToggleMap, _, cx| mode::toggle_map(view, cx)))
+            .on_action(cx.listener(|view, _: &CycleColouring, _, cx| colour::cycle(view, cx)))
             .on_action(
                 cx.listener(|view, _: &ToggleCriticalPath, _, cx| view.toggle_critical_path(cx)),
             )
@@ -1530,8 +1540,10 @@ mod tests {
         assert!(is(dispatched("p", IN_PANEL), ToggleCriticalPath));
         assert!(is(dispatched("o", IN_PANEL), ToggleOutcomes));
         assert!(is(dispatched("t", IN_PANEL), ToggleTiming));
+        assert!(is(dispatched("m", IN_PANEL), ToggleMap));
+        assert!(is(dispatched("c", IN_PANEL), CycleColouring));
         for field in [IN_CHIP_FIELD, IN_FIELD] {
-            for letter in ["h", "r", "p", "o", "t"] {
+            for letter in ["h", "r", "p", "o", "t", "m", "c"] {
                 assert!(dispatched(letter, field).is_none(), "{letter}");
             }
         }
