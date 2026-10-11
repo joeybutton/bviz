@@ -172,6 +172,14 @@ impl Dropdown {
         }
     }
 
+    /// Picks the option after the chosen one, round to the first, as a user's
+    /// choice, passing over those that cannot be picked.
+    pub fn cycle(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = next_available(&self.options, self.selected) {
+            self.pick(index, cx);
+        }
+    }
+
     /// The options of `dropdown` as the rows of a submenu, the chosen one
     /// checked, each picking its option as a choice in the dropdown's own menu
     /// does, and each that cannot be picked explained by `unavailable`.
@@ -252,5 +260,40 @@ impl Render for Dropdown {
         popup::holder(&self.popup, cx)
             .child(self.trigger(&colors, option_width, cx))
             .children(open.then(|| self.menu(&colors, cx)))
+    }
+}
+
+/// The place of the option after `selected` among `options` that can be
+/// picked, round to the first; none where no other can.
+fn next_available(options: &[Choice], selected: usize) -> Option<usize> {
+    let count = options.len();
+    (1..count)
+        .map(|step| (selected + step) % count)
+        .find(|&index| options[index].available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(available: &[bool]) -> Vec<Choice> {
+        (available.iter())
+            .map(|&available| Choice {
+                label: SharedString::default(),
+                available,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stepping_wraps_round_to_the_first_option() {
+        assert_eq!(next_available(&options(&[true, true, true]), 0), Some(1));
+        assert_eq!(next_available(&options(&[true, true, true]), 2), Some(0));
+    }
+
+    #[test]
+    fn stepping_passes_over_an_option_that_cannot_be_picked() {
+        assert_eq!(next_available(&options(&[true, false, true]), 0), Some(2));
+        assert_eq!(next_available(&options(&[true, false, false]), 0), None);
     }
 }
