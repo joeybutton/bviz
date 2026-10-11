@@ -84,11 +84,21 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
     ),
 ]);
 
-/// The weights the toolbar offers, each with its button's id and label, in the
-/// order the buttons stand.
-pub(crate) const WEIGHT_CHOICES: [(&str, &str, FlameWeight); 2] = [
-    ("flame-summed-time", "Summed time", FlameWeight::Duration),
-    ("flame-wall-time", "Wall time", FlameWeight::WallShare),
+/// The weights the toolbar offers, each with its button's id, label and hint,
+/// in the order the buttons stand.
+pub(crate) const WEIGHT_CHOICES: [(&str, &str, &str, FlameWeight); 2] = [
+    (
+        "flame-summed-time",
+        "Summed time",
+        "Size by summed time",
+        FlameWeight::Duration,
+    ),
+    (
+        "flame-wall-time",
+        "Wall time",
+        "Size by wall time",
+        FlameWeight::WallShare,
+    ),
 ];
 
 /// Whether the toolbar's button for `weight` reads as chosen while `mode`
@@ -547,16 +557,18 @@ impl FlamePanel {
     fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
         let kinds = mode.labels == FlameLabels::Kind;
-        let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
-            let view = cx.entity();
-            Button::new(id, move |_, _, cx| {
-                view.update(cx, |this, cx| this.set_mode(to, cx));
-            })
-            .ghost()
-            .compact()
-            .selected(on)
-            .label(label)
-        };
+        let button =
+            |id: &'static str, label: &'static str, hint: &'static str, on: bool, to: FlameMode| {
+                let view = cx.entity();
+                Button::new(id, move |_, _, cx| {
+                    view.update(cx, |this, cx| this.set_mode(to, cx));
+                })
+                .ghost()
+                .compact()
+                .selected(on)
+                .label(label)
+                .tooltip(hint)
+            };
         let group = || {
             div()
                 .flex()
@@ -578,6 +590,7 @@ impl FlamePanel {
                 .child(button(
                     "flame-top-down",
                     "Top-down",
+                    "Top-down: callees",
                     mode.direction == FlameDirection::TopDown,
                     FlameMode {
                         direction: FlameDirection::TopDown,
@@ -587,19 +600,21 @@ impl FlamePanel {
                 .child(button(
                     "flame-bottom-up",
                     "Bottom-up",
+                    "Bottom-up: callers",
                     mode.direction == FlameDirection::BottomUp,
                     FlameMode {
                         direction: FlameDirection::BottomUp,
                         ..mode
                     },
                 )),
-            pair().children(WEIGHT_CHOICES.map(|(id, label, weight)| {
+            pair().children(WEIGHT_CHOICES.map(|(id, label, hint, weight)| {
                 let (chosen, to) = weight_choice(mode, weight);
-                button(id, label, chosen, to)
+                button(id, label, hint, chosen, to)
             })),
             group().child(button(
                 "flame-kinds",
                 "Kinds",
+                "Merge spans by kind",
                 kinds,
                 FlameMode {
                     labels: if kinds {

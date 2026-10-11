@@ -492,11 +492,10 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
 pub(crate) const STEPS_TITLE: &str = "Steps";
 
 /// The tooltip of the choice of the list of a path's steps.
-pub(crate) const STEPS_TIP: &str = "The critical path's steps.";
+pub(crate) const STEPS_TIP: &str = "Critical path steps";
 
 /// The tooltip of the choice of the list of actions nearly critical.
-pub(crate) const NEARLY_CRITICAL_TIP: &str =
-    "Actions off the path that turn critical as the path's actions shorten.";
+pub(crate) const NEARLY_CRITICAL_TIP: &str = "Nearly critical actions";
 
 /// The title of the list of actions nearly critical.
 pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {

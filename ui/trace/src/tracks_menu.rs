@@ -4,11 +4,13 @@ use crate::theme::Palette;
 use crate::track_label::track_label;
 use crate::track_order::TrackSort;
 use crate::{
-    CloseTracksMenu, GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE,
+    CloseTracksMenu, FilterTracks, GUTTER_LABEL_SIZE, TICK_BAND_HEIGHT, TRACKS_MENU_FOLD_ABOVE,
     TRACKS_MENU_KEY_CONTEXT, TRACKS_MENU_MAX_LIST, TRACKS_MENU_WIDTH, TracePanel,
 };
 use bviz_trace_profile::{LaneClass, Profile};
-use bviz_ui_components::{Button, ListScroll, SCROLLBAR_THICKNESS, TextInput, list_scrollbar};
+use bviz_ui_components::{
+    Button, Hint, ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, list_scrollbar,
+};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
     Pixels, Render, SharedString, Subscription, WeakEntity, Window, deferred, div, prelude::*, px,
@@ -280,18 +282,30 @@ impl TracksMenu {
     /// group's tracks in, the standing one filled in.
     fn sort_row(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let standing = self.model.read(cx).track_sort();
-        let choice = |id: &'static str, label: &'static str, sort: TrackSort| {
-            Button::new(
-                id,
-                cx.listener(move |this, _, _, cx| this.choose_sort(sort, cx)),
-            )
-            .ghost()
-            .compact()
-            .selected(standing == sort)
-            .label(label)
-        };
-        let by_name = choice("tracks-sort-name", "Name", TrackSort::Name);
-        let by_weight = choice("tracks-sort-weight", "Busiest", TrackSort::Weight);
+        let choice =
+            |id: &'static str, label: &'static str, hint: &'static str, sort: TrackSort| {
+                Button::new(
+                    id,
+                    cx.listener(move |this, _, _, cx| this.choose_sort(sort, cx)),
+                )
+                .ghost()
+                .compact()
+                .selected(standing == sort)
+                .label(label)
+                .tooltip(hint)
+            };
+        let by_name = choice(
+            "tracks-sort-name",
+            "Name",
+            "Sort tracks by name",
+            TrackSort::Name,
+        );
+        let by_weight = choice(
+            "tracks-sort-weight",
+            "Busiest",
+            "Busiest tracks first",
+            TrackSort::Weight,
+        );
         div()
             .flex()
             .flex_row()
@@ -402,6 +416,10 @@ impl TracksMenu {
             .child({
                 let (nvis, ntot) = self.model.read(cx).visible_count();
                 let all_visible = ntot > 0 && nvis == ntot;
+                let hint = match all_visible {
+                    true => "Hide all tracks",
+                    false => "Show all tracks",
+                };
                 div()
                     .id("tracks-toggle-all")
                     .flex()
@@ -415,6 +433,7 @@ impl TracksMenu {
                     .border_b_1()
                     .border_color(palette.border)
                     .hover(move |s| s.bg(palette.hover))
+                    .tooltip(TextTooltip::builder(hint.into(), palette.colors.tooltip()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.model
                             .update(cx, |m, _| m.set_all_visible(!all_visible));
@@ -488,10 +507,18 @@ impl Render for TracksMenu {
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
-        let (gutter_width, viewport) = {
+        let (gutter_width, viewport, focus) = {
             let s = shell.read(cx);
-            (s.gutter_width, s.timeline.read(cx).viewport())
+            (
+                s.gutter_width,
+                s.timeline.read(cx).viewport(),
+                s.focus_handle(cx),
+            )
         };
+        let menu = cx.weak_entity();
+        let hint = Hint::default()
+            .text("Tracks shown")
+            .keys_for(&FilterTracks, &focus);
         let (nvis, ntot) = self.model.read(cx).visible_count();
         let trigger = div()
             .id("tracks-menu")
@@ -507,6 +534,10 @@ impl Render for TracksMenu {
             .text_color(palette.label)
             .bg(palette.header_band)
             .hover(move |s| s.bg(palette.hover))
+            .map(|trigger| {
+                let open = |menu: &Self| menu.open;
+                hint.on_picker(trigger, palette.colors.tooltip(), menu, open)
+            })
             // Keep the press off the chart handlers underneath.
             .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
                 cx.stop_propagation()

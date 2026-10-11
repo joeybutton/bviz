@@ -1639,7 +1639,7 @@ mod tests {
     fn chosen_weights(mode: FlameMode) -> Vec<FlameWeight> {
         WEIGHT_CHOICES
             .into_iter()
-            .map(|(_, _, weight)| weight)
+            .map(|(_, _, _, weight)| weight)
             .filter(|&weight| weight_choice(mode, weight).0)
             .collect()
     }
