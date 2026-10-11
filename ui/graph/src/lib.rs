@@ -712,8 +712,15 @@ impl GraphPanel {
             .into_any_element()
     }
 
-    /// The key to the view drawn, placed in the toolbar.
-    fn legend(
+    /// The key to the view drawn, placed in the toolbar, blank where nothing
+    /// drawn is keyed.
+    fn legend(&mut self, palette: &Palette, cx: &Context<Self>) -> bviz_ui_components::Legend {
+        self.keyed(palette, cx)
+            .unwrap_or_else(|| legend::blank(&self.legend_state))
+    }
+
+    /// The key to the view drawn, where it keys anything.
+    fn keyed(
         &mut self,
         palette: &Palette,
         cx: &Context<Self>,
@@ -1292,7 +1299,7 @@ impl Render for GraphCanvas {
 struct Controls {
     /// The query bar.
     chips: AnyElement,
-    legend: Option<bviz_ui_components::Legend>,
+    legend: bviz_ui_components::Legend,
 }
 
 /// Whether a freshly opened graph marks the neighbourhood of the box under

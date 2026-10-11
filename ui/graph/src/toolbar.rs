@@ -85,7 +85,7 @@ pub(crate) fn toolbar(
         MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
         marking.set(),
     );
-    let mut drawing = OneRow::new("graph-view-controls")
+    let drawing = OneRow::new("graph-view-controls")
         .group(layout)
         .group(edges)
         .group(colour)
@@ -96,10 +96,8 @@ pub(crate) fn toolbar(
                 busy("relaying-spinner", "laying out…", palette).into_any_element(),
                 spinner("relaying-spinner", SPINNER_SIZE, palette.label).into_any_element(),
             ])
-        });
-    if let Some(panels) = panel_toggles(view, controls.legend, cx) {
-        drawing = drawing.trailing(panels);
-    }
+        })
+        .trailing(panel_toggles(view, controls.legend, cx));
     let query = OneRow::new("graph-query-bar")
         .when(!view.box_classes.is_empty(), |query| {
             query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
@@ -147,34 +145,25 @@ const EDGES_NAME: &str = "edges";
 const COLOUR_NAME: &str = "colour";
 const MARK_NAME: &str = "mark";
 
-/// The toggles putting panels up and away, labelled and then icon-only, where
-/// the graph offers any.
-fn panel_toggles(
-    view: &GraphPanel,
-    legend: Option<Legend>,
-    cx: &Context<GraphPanel>,
-) -> Option<ToolbarGroup> {
+/// The toggles putting panels up and away, labelled and then icon-only.
+fn panel_toggles(view: &GraphPanel, legend: Legend, cx: &Context<GraphPanel>) -> ToolbarGroup {
     let toggles = |labelled: bool| -> Vec<AnyElement> {
         let report = report::control(view, labelled, cx).map(IntoElement::into_any_element);
         let timecard = timecard::control(view, labelled, cx).map(IntoElement::into_any_element);
-        let legend = legend.clone().map(|legend| {
-            let toggle = legend.toggle();
-            match labelled {
-                true => toggle,
-                false => toggle.icon_only(),
-            }
-            .into_any_element()
-        });
-        [report, timecard, legend].into_iter().flatten().collect()
+        let toggle = legend.clone().toggle();
+        let legend = match labelled {
+            true => toggle,
+            false => toggle.icon_only(),
+        }
+        .into_any_element();
+        [report, timecard]
+            .into_iter()
+            .flatten()
+            .chain([legend])
+            .collect()
     };
-    let labelled = toggles(true);
-    if labelled.is_empty() {
-        return None;
-    }
-    Some(
-        ToolbarGroup::new(PANELS, parted(row().children(labelled)))
-            .or(parted(row().children(toggles(false)))),
-    )
+    ToolbarGroup::new(PANELS, parted(row().children(toggles(true))))
+        .or(parted(row().children(toggles(false))))
 }
 
 /// Controls laid side by side.

@@ -556,7 +556,9 @@ impl RenderOnce for LegendToggle {
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let measured = legend.widths(window, cx);
         let seen = legend.seen(cx);
-        let popover = seen.open.then(|| {
+        // A legend keying nothing has nothing to show, whatever its state.
+        let open = seen.open && !measured.keys_nothing();
+        let popover = open.then(|| {
             let inset = window.client_inset().unwrap_or_default();
             let room = window.viewport_size().width - inset * 2.;
             let columns = popover_columns(&measured.entry_widths, room);
@@ -573,10 +575,10 @@ impl RenderOnce for LegendToggle {
         })
         .when(self.labelled, |toggle| toggle.label(TOGGLE_LABEL))
         .icon(TOGGLE_ICON)
-        .selected(seen.open)
+        .selected(open)
         .disabled(measured.keys_nothing())
         // A tooltip would cover the popover the toggle holds open.
-        .when(!seen.open, |toggle| {
+        .when(!open, |toggle| {
             toggle.keys_for(&ShowLegend, &seen.view_focus)
         });
         div()
