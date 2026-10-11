@@ -186,5 +186,11 @@ impl AssetSource for Assets {
 
 /// A regular-weight Phosphor icon, tinted by the element's text color.
 pub fn icon(name: &str) -> Svg {
-    svg().path(format!("assets/regular/{name}.svg"))
+    svg().path(icon_path(name))
+}
+
+/// Where the asset source serves the regular-weight Phosphor icon `name`,
+/// for a canvas painting it with `Window::paint_svg`.
+pub fn icon_path(name: &str) -> SharedString {
+    format!("assets/regular/{name}.svg").into()
 }

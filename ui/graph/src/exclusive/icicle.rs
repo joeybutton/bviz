@@ -66,6 +66,14 @@ pub(crate) enum Holds {
 }
 
 impl Holds {
+    /// The node this is, where it is one.
+    pub(crate) fn node(self) -> Option<u32> {
+        match self {
+            Holds::Node(node) => Some(node),
+            Holds::Build | Holds::Shared | Holds::Rest(_) => None,
+        }
+    }
+
     /// The points of `tree` the cell holding this stands over.
     pub(crate) fn weight(self, tree: &impl Tree) -> u32 {
         match self {

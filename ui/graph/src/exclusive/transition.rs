@@ -77,6 +77,16 @@ impl Transition {
         })
     }
 
+    /// The cell the higher icicle is drawn from.
+    pub(crate) fn higher(&self) -> Holds {
+        self.higher
+    }
+
+    /// The cell the lower icicle is drawn from.
+    pub(crate) fn lower(&self) -> Holds {
+        self.path[0]
+    }
+
     /// How far the move has come at `now` from the higher icicle towards the
     /// lower, eased: 0 at the higher, 1 at the lower.
     pub(crate) fn lowered(&self, now: Instant) -> f32 {
@@ -106,12 +116,13 @@ impl Transition {
     /// the lower icicle is laid out under it at the width it is drawn, so
     /// that it gathers what is too narrow to draw apart as either icicle
     /// does at rest. The lower icicle stands in for the cells the higher
-    /// draws in its place, and what either lays out beyond `bounds` is left
-    /// out.
+    /// draws in its place, and what either lays out beyond `seen_in` is left
+    /// out, which may reach above `bounds`.
     pub(crate) fn cells(
         &self,
         tree: &impl Tree,
         bounds: Bounds<Pixels>,
+        seen_in: Bounds<Pixels>,
         row: Pixels,
         min_width: Pixels,
         lowered: f32,
@@ -132,9 +143,9 @@ impl Transition {
         let mut cells = Vec::with_capacity(higher.len() + lower.len());
         let higher = Placed::still(higher).into_iter();
         let kept = higher.filter(|placed| !replaced(placed.cell.rect));
-        cells.extend(kept.filter_map(|placed| carried(placed, anchor, moved, bounds)));
+        cells.extend(kept.filter_map(|placed| carried(placed, anchor, moved, seen_in)));
         let lower = Placed::still(lower).into_iter();
-        cells.extend(lower.filter_map(|placed| seen(placed, placed.cell.rect, bounds)));
+        cells.extend(lower.filter_map(|placed| seen(placed, placed.cell.rect, seen_in)));
         cells
     }
 
@@ -266,7 +277,7 @@ mod tests {
         bounds: Bounds<Pixels>,
         lowered: f32,
     ) -> Vec<Placed> {
-        transition.cells(tree, bounds, ROW, px(1.), lowered)
+        transition.cells(tree, bounds, bounds, ROW, px(1.), lowered)
     }
 
     /// Whether two cells hold the same and lie within a hair of each other.
@@ -335,10 +346,17 @@ mod tests {
         assert_eq!(rest.count(), 1, "{at_rest:#?}");
         let start = Instant::now();
         let down = Transition::between(&tree, Holds::Build, Holds::Node(0), start).unwrap();
-        let started = down.cells(&tree, bounds, ROW, MIN, 0.);
+        let started = down.cells(&tree, bounds, bounds, ROW, MIN, 0.);
         assert!(same_cells(&started, &at_rest), "{started:#?}");
         let up = Transition::between(&tree, Holds::Node(0), Holds::Build, start).unwrap();
-        let ended = up.cells(&tree, bounds, ROW, MIN, up.lowered(start + DURATION));
+        let ended = up.cells(
+            &tree,
+            bounds,
+            bounds,
+            ROW,
+            MIN,
+            up.lowered(start + DURATION),
+        );
         assert!(same_cells(&ended, &at_rest), "{ended:#?}");
     }
 
@@ -413,7 +431,7 @@ mod tests {
             .rect;
         let down =
             Transition::between(&tree, Holds::Build, Holds::Node(2), Instant::now()).unwrap();
-        let started = down.cells(&tree, bounds, ROW, MIN, 0.);
+        let started = down.cells(&tree, bounds, bounds, ROW, MIN, 0.);
         let lower_top = started
             .iter()
             .find(|placed| placed.on_top && placed.cell.holds == Holds::Node(2));
@@ -455,7 +473,7 @@ mod tests {
             holds: Holds::Node(2),
         };
         assert!(near(anchored, expected), "{anchor:?}");
-        let started = down.cells(&tree, bounds, ROW, min, 0.);
+        let started = down.cells(&tree, bounds, bounds, ROW, min, 0.);
         assert!(same_cells(&started, &at_rest), "{started:#?}");
     }
 
