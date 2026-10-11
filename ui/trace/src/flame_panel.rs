@@ -14,10 +14,10 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
-    Axis, Button, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
-    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, ShownCard, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
-    cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
-    paint_labeled_box, spinner, track_drag,
+    Axis, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
+    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, ShownCard, Switch, ToggleGroup, ToggleSegment,
+    Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, hover_card_canvas,
+    legend_gestures, overlay_canvas, paint_labeled_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -84,27 +84,26 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
     ),
 ]);
 
-/// The weights the toolbar offers, each with its button's id, label and hint,
-/// in the order the buttons stand.
-pub(crate) const WEIGHT_CHOICES: [(&str, &str, &str, FlameWeight); 2] = [
-    (
-        "flame-summed-time",
-        "Summed time",
-        "Size by summed time",
-        FlameWeight::Duration,
-    ),
-    (
-        "flame-wall-time",
-        "Wall time",
-        "Size by wall time",
-        FlameWeight::WallShare,
-    ),
-];
+/// The directions the toolbar offers, in the order it shows them.
+const DIRECTIONS: [FlameDirection; 2] = [FlameDirection::TopDown, FlameDirection::BottomUp];
 
-/// Whether the toolbar's button for `weight` reads as chosen while `mode`
-/// stands, and the mode a click on it asks for.
-pub(crate) fn weight_choice(mode: FlameMode, weight: FlameWeight) -> (bool, FlameMode) {
-    (mode.weight == weight, FlameMode { weight, ..mode })
+fn direction_segment(direction: FlameDirection) -> ToggleSegment {
+    let (label, hint) = match direction {
+        FlameDirection::TopDown => ("Top-down", "Top-down: callees"),
+        FlameDirection::BottomUp => ("Bottom-up", "Bottom-up: callers"),
+    };
+    ToggleSegment::new(label).tooltip(hint)
+}
+
+/// The weights the toolbar offers, in the order it shows them.
+const WEIGHTS: [FlameWeight; 2] = [FlameWeight::Duration, FlameWeight::WallShare];
+
+fn weight_segment(weight: FlameWeight) -> ToggleSegment {
+    let (label, hint) = match weight {
+        FlameWeight::Duration => ("Summed time", "Size by summed time"),
+        FlameWeight::WallShare => ("Wall time", "Size by wall time"),
+    };
+    ToggleSegment::new(label).tooltip(hint)
 }
 
 /// The flame graph's laid-out boxes together with the inputs that determine
@@ -527,28 +526,19 @@ impl FlamePanel {
             Legend::new("flame-legend", &self.legend).entries(theme::role_legend(&palette));
         time_window_chip(&self.model, palette, cx)
             .into_iter()
-            .chain(self.mode_controls(palette, cx))
+            .chain(self.mode_controls(cx))
             .fold(Toolbar::new(), Toolbar::child)
             .child(legend)
     }
 
     /// The graph's mode controls, one group for each choice they offer, so that
     /// a toolbar wrapping them keeps the buttons of one choice on one row.
-    fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
+    fn mode_controls(&self, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
-        let kinds = mode.labels == FlameLabels::Kind;
-        let button =
-            |id: &'static str, label: &'static str, hint: &'static str, on: bool, to: FlameMode| {
-                let view = cx.entity();
-                Button::new(id, move |_, _, cx| {
-                    view.update(cx, |this, cx| this.set_mode(to, cx));
-                })
-                .ghost()
-                .compact()
-                .selected(on)
-                .label(label)
-                .tooltip(hint)
-            };
+        let view = cx.entity();
+        let set_mode = move |to: FlameMode, cx: &mut App| {
+            view.update(cx, |this, cx| this.set_mode(to, cx));
+        };
         let group = || {
             div()
                 .flex()
@@ -557,54 +547,47 @@ impl FlamePanel {
                 .gap_1()
                 .text_size(px(STATS_TEXT_SIZE))
         };
-        // The outline holds an exclusive pair together, so two pairs side by
-        // side read as two choices.
-        let pair = || {
-            group()
-                .rounded_md()
-                .border_1()
-                .border_color(palette.divider)
-        };
-        [
-            pair()
-                .child(button(
-                    "flame-top-down",
-                    "Top-down",
-                    "Top-down: callees",
-                    mode.direction == FlameDirection::TopDown,
-                    FlameMode {
-                        direction: FlameDirection::TopDown,
-                        ..mode
-                    },
-                ))
-                .child(button(
-                    "flame-bottom-up",
-                    "Bottom-up",
-                    "Bottom-up: callers",
-                    mode.direction == FlameDirection::BottomUp,
-                    FlameMode {
-                        direction: FlameDirection::BottomUp,
-                        ..mode
-                    },
-                )),
-            pair().children(WEIGHT_CHOICES.map(|(id, label, hint, weight)| {
-                let (chosen, to) = weight_choice(mode, weight);
-                button(id, label, hint, chosen, to)
-            })),
-            group().child(button(
-                "flame-kinds",
-                "Kinds",
-                "Merge spans by kind",
-                kinds,
-                FlameMode {
-                    labels: if kinds {
-                        FlameLabels::Name
-                    } else {
-                        FlameLabels::Kind
-                    },
-                    ..mode
+        let direction = ToggleGroup::one_of(
+            "flame-direction",
+            "direction",
+            DIRECTIONS,
+            mode.direction,
+            direction_segment,
+            {
+                let set_mode = set_mode.clone();
+                move |direction, _, cx| set_mode(FlameMode { direction, ..mode }, cx)
+            },
+        );
+        let weight = ToggleGroup::one_of(
+            "flame-weight",
+            "weight",
+            WEIGHTS,
+            mode.weight,
+            weight_segment,
+            {
+                let set_mode = set_mode.clone();
+                move |weight, _, cx| set_mode(FlameMode { weight, ..mode }, cx)
+            },
+        );
+        let kinds = ToggleGroup::any_of(
+            "flame-kinds",
+            "labels",
+            [Switch::new(
+                ToggleSegment::new("Kinds").tooltip("Merge spans by kind"),
+                mode.labels == FlameLabels::Kind,
+                move |kinds, _, cx| {
+                    let labels = match kinds {
+                        true => FlameLabels::Kind,
+                        false => FlameLabels::Name,
+                    };
+                    set_mode(FlameMode { labels, ..mode }, cx)
                 },
-            )),
+            )],
+        );
+        [
+            group().child(direction),
+            group().child(weight),
+            group().child(kinds),
         ]
     }
 

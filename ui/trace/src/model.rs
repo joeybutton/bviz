@@ -1272,7 +1272,6 @@ mod tests {
         Chosen, Derivations, HeldChoice, Joined, LoadedProfile, Recorded, TraceModel, TracedPath,
         Tracing, clock_source, critical_steps, nearly_critical_actions, step_slices,
     };
-    use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::groups::STACKED_GROUPS;
     use crate::track_order::TrackSort;
     use crate::{Source, TOP_N_PER_GROUP};
@@ -1697,36 +1696,22 @@ mod tests {
         assert_eq!(model.aggregate_key, key);
     }
 
-    /// The weights whose toolbar buttons read as chosen while `mode` stands.
-    fn chosen_weights(mode: FlameMode) -> Vec<FlameWeight> {
-        WEIGHT_CHOICES
-            .into_iter()
-            .map(|(_, _, _, weight)| weight)
-            .filter(|&weight| weight_choice(mode, weight).0)
-            .collect()
-    }
-
     #[test]
-    fn a_weight_chosen_on_the_toolbar_keys_a_rebuild_and_reads_as_chosen() {
+    fn a_weight_chosen_keys_a_rebuild() {
         let mut model = model();
         let key = model.aggregate_key;
         let standing = model.flame_mode();
-        assert_eq!(chosen_weights(standing), [FlameWeight::Duration]);
+        assert_eq!(standing.weight, FlameWeight::Duration);
 
-        let (_, asked) = weight_choice(standing, FlameWeight::WallShare);
-        assert_eq!(
-            asked,
-            FlameMode {
-                weight: FlameWeight::WallShare,
-                ..standing
-            }
-        );
+        let asked = FlameMode {
+            weight: FlameWeight::WallShare,
+            ..standing
+        };
         assert!(model.adopt_flame_mode(asked));
         assert_eq!(model.aggregate_key, key + 1);
-        assert_eq!(chosen_weights(model.flame_mode()), [FlameWeight::WallShare]);
+        assert_eq!(model.flame_mode().weight, FlameWeight::WallShare);
 
-        let (_, again) = weight_choice(model.flame_mode(), FlameWeight::WallShare);
-        assert!(!model.adopt_flame_mode(again));
+        assert!(!model.adopt_flame_mode(asked));
         assert_eq!(model.aggregate_key, key + 1);
     }
 
