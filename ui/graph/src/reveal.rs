@@ -4,8 +4,9 @@
 use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::history::History;
+use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
-use crate::point::point_label;
+use crate::point::{point_label, written_name};
 use crate::rules;
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
@@ -307,6 +308,7 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
     let loaded = view.model.read(cx).loaded()?;
     let shared = &loaded.shared;
     let name = point_label(node, shared);
+    let written = written_name(&shared.names, &shared.facets, shared.labels.repos(), node);
     Some(
         div()
             .w_full()
@@ -319,7 +321,7 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
             .bg(palette.container)
             .text_xs()
             .text_color(palette.label)
-            .child(TruncatingLabel::new("reveal-name", name))
+            .child(LabelLine::new(name, palette.colors.text_muted).hinted("reveal-name", written))
             .child(TruncatingLabel::new("reveal-reason", by.describe()))
             .child(
                 div()

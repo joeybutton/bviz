@@ -14,7 +14,7 @@ use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
-use bviz_graph_layout::shown::name_start;
+use bviz_graph_layout::shown::{fit_label, name_start};
 use bviz_ui_assets::shape_line;
 use bviz_ui_components::{Inked, LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix, over};
@@ -186,14 +186,10 @@ fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut A
             }
             (_, Holds::Node(node)) => {
                 let tree = &scene.tree;
-                let name = point_cell_name(tree.id(node), tree.scope().unit(), &scene.shared);
-                match hints.get(&node) {
-                    Some(hint) => {
-                        let (room, font_size) = style.label_room(rect);
-                        fit_apart(&name, hint, room, text_width(window, font_size, label))
-                    }
-                    None => name,
-                }
+                let name = PointName::of(tree.id(node), tree.scope().unit(), &scene.shared);
+                let (room, font_size) = style.label_room(rect);
+                let hint = hints.get(&node).map(String::as_str);
+                name.fitted(hint, room, text_width(window, font_size, label))
             }
             (_, holds) => CellName::plain(cell_name(&scene.tree, &scene.shared, scene.by, holds)),
         };
@@ -373,53 +369,6 @@ pub(crate) fn hints_among(
 /// Between a name and what tells it apart from others reading alike.
 pub(crate) const HINT_SEPARATOR: &str = " · ";
 
-/// `name` followed by `hint` within `room` as `width` measures text: whole
-/// where it fits, else with `name` cut short so the hint still reads beside
-/// it, and where that leaves the name less than [`NAME_SHARE`] of the room,
-/// `name` alone.
-fn fit_apart(
-    name: &CellName,
-    hint: &str,
-    room: f32,
-    mut width: impl FnMut(&str) -> f32,
-) -> CellName {
-    let whole = format!("{}{HINT_SEPARATOR}{hint}", name.text);
-    if width(&whole) <= room {
-        return CellName {
-            text: whole,
-            muted: name.muted.clone(),
-        };
-    }
-    let tail = format!("{ELLIPSIS}{HINT_SEPARATOR}{hint}");
-    let name_room = room - width(&tail);
-    if name_room < room * NAME_SHARE {
-        return name.clone();
-    }
-    let chars: Vec<char> = name.text.chars().collect();
-    // Bisects for the most characters of `name` fitting `name_room`.
-    let (mut fits, mut over) = (0, chars.len());
-    while over - fits > 1 {
-        let mid = (fits + over) / 2;
-        match width(&chars[..mid].iter().collect::<String>()) <= name_room {
-            true => fits = mid,
-            false => over = mid,
-        }
-    }
-    let kept: String = chars[..fits].iter().collect();
-    let muted = name.muted.start.min(kept.len())..name.muted.end.min(kept.len());
-    CellName {
-        text: format!("{kept}{tail}"),
-        muted,
-    }
-}
-
-/// The least of a cell's room a name keeps beside the hint telling it apart,
-/// so a long hint never reads in place of the name.
-const NAME_SHARE: f32 = 0.5;
-
-/// Ends a name cut short.
-const ELLIPSIS: char = '…';
-
 /// What a run of `tree`, whose roots were chosen `by`, reads drawn on top,
 /// naming what its siblings stand under.
 pub(crate) fn run_name(tree: &Dominators, shared: &Shared, by: RootedBy, run: Run) -> String {
@@ -473,8 +422,71 @@ fn first_fitting<const N: usize>(
 
 /// How a cell names the point `id` of `unit`.
 pub(crate) fn point_name(id: Id, unit: Unit, shared: &Shared) -> String {
-    point_cell_name(id, unit, shared).text
+    let PointName { lead, label } = PointName::of(id, unit, shared);
+    lead + &label
 }
+
+/// How a cell names a point: by the label it carries, or failing that its
+/// node's name, led for an action by its mnemonic.
+struct PointName {
+    lead: String,
+    label: String,
+}
+
+impl PointName {
+    fn of(id: Id, unit: Unit, shared: &Shared) -> Self {
+        let lead = match unit {
+            Unit::Action => format!("{} ", mnemonic(id, shared)),
+            Unit::ConfiguredTarget | Unit::Target => String::new(),
+        };
+        let label = point_label(id, shared);
+        Self { lead, label }
+    }
+
+    /// What a cell reads of this followed by `hint` within `room` as `width`
+    /// measures text. Whole where it fits; else the label is cut short as
+    /// [`fit_label`] cuts it so the hint still reads beside it, unless that
+    /// leaves the label less than [`NAME_SHARE`] of the room, where it is cut
+    /// short alone.
+    fn fitted(
+        &self,
+        hint: Option<&str>,
+        room: f32,
+        mut width: impl FnMut(&str) -> f32,
+    ) -> CellName {
+        let tail = hint.map_or_else(String::new, |hint| format!("{HINT_SEPARATOR}{hint}"));
+        let whole = format!("{}{}{tail}", self.lead, self.label);
+        if width(&whole) <= room {
+            let place = name_start(&self.label).unwrap_or(0);
+            return self.inked(whole, 0..place);
+        }
+        let lead = width(&self.lead);
+        let beside = room - lead - width(&tail);
+        let (room, tail) = match beside >= room * NAME_SHARE {
+            true => (beside, tail),
+            false => (room - lead, String::new()),
+        };
+        let label = fit_label(&self.label, room, &mut width);
+        self.inked(
+            format!("{}{}{tail}", self.lead, label.text()),
+            label.muted(),
+        )
+    }
+
+    /// `text`, led by this's lead, with the `place` bytes of the label
+    /// following the lead muted.
+    fn inked(&self, text: String, place: Range<usize>) -> CellName {
+        let lead = self.lead.len();
+        CellName {
+            text,
+            muted: lead + place.start..lead + place.end,
+        }
+    }
+}
+
+/// The least of a cell's room a label keeps beside the hint telling it
+/// apart, so a long hint never reads in place of the label.
+const NAME_SHARE: f32 = 0.5;
 
 /// What a cell reads, the part of it saying where a label's target lives
 /// muted.
@@ -495,25 +507,6 @@ impl CellName {
             text: &self.text,
             muted: self.muted.clone(),
         }
-    }
-}
-
-/// How a cell names the point `id` of `unit`, and what of that is muted.
-fn point_cell_name(id: Id, unit: Unit, shared: &Shared) -> CellName {
-    let label = point_label(id, shared);
-    let place = name_start(&label).unwrap_or(0);
-    match unit {
-        Unit::Action => {
-            let lead = format!("{} ", mnemonic(id, shared));
-            CellName {
-                muted: lead.len()..lead.len() + place,
-                text: lead + &label,
-            }
-        }
-        Unit::ConfiguredTarget | Unit::Target => CellName {
-            text: label,
-            muted: 0..place,
-        },
     }
 }
 
@@ -619,22 +612,42 @@ mod tests {
         assert!(along(name.origin) >= NOTCH);
     }
 
+    fn named(label: &str) -> PointName {
+        PointName {
+            lead: String::new(),
+            label: label.to_owned(),
+        }
+    }
+
     #[test]
-    fn a_name_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
+    fn a_label_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
         let label = "@llvm//toolchain:linux_x86_64_cc_toolchain";
-        let name = CellName {
-            text: label.to_owned(),
-            muted: 0..16,
-        };
-        let fit = |room| fit_apart(&name, "k8", room, chars);
+        let fit = |room| named(label).fitted(Some("k8"), room, chars);
         assert_eq!(fit(100.0).text, format!("{label} · k8"));
         assert_eq!(fit(100.0).muted, 0..16);
-        assert_eq!(fit(40.0).text, "@llvm//toolchain:linux_x86_64_cc_t… · k8");
-        let cut = fit(20.0);
-        assert_eq!(cut.text, "@llvm//toolcha… · k8");
-        assert_eq!(cut.muted, 0..14);
+        let cut = fit(40.0);
+        assert_eq!(cut.text, "@llvm//t…:linux_x86_64_cc_toolchain · k8");
+        assert_eq!(cut.muted, 0..11);
         let long = "a-long-configuration-name (exec, 3f2a)";
-        assert_eq!(fit_apart(&name, long, 60.0, chars), name);
+        let alone = named(label).fitted(Some(long), 40.0, chars);
+        assert_eq!(alone.text, "@llvm//too…ain:linux_x86_64_cc_toolchain");
+    }
+
+    #[test]
+    fn an_action_keeps_its_mnemonic_ahead_of_its_label_cut_short() {
+        let name = PointName {
+            lead: "CppCompile ".to_owned(),
+            label: "@r//a/b/c:lib".to_owned(),
+        };
+        let cut = name.fitted(None, 21.0, chars);
+        assert_eq!(cut.text, "CppCompile @r//a…:lib");
+        assert_eq!(cut.muted, 11..19);
+    }
+
+    #[test]
+    fn a_name_that_is_no_label_is_cut_short_at_its_end() {
+        let cut = named("action:bazel-out/k8/bin/a.o").fitted(None, 10.0, chars);
+        assert_eq!((cut.text.as_str(), cut.muted), ("action:ba…", 0..0));
     }
 
     #[test]

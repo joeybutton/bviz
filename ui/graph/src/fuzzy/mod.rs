@@ -346,22 +346,27 @@ pub(crate) fn highlights(
                     color: Some(muted),
                     ..HighlightStyle::default()
                 },
-                // Picked out by colour and an underline but in the row's own
-                // weight: a row is cut to fit as measured in that weight, so a
-                // wider one would run past the cut and be clipped unmarked.
-                Style::Matched => HighlightStyle {
-                    color: Some(picked),
-                    underline: Some(UnderlineStyle {
-                        thickness: MATCH_UNDERLINE,
-                        color: Some(picked),
-                        wavy: false,
-                    }),
-                    ..HighlightStyle::default()
-                },
+                Style::Matched => matched_style(picked),
             };
             (range, highlight)
         })
         .collect()
+}
+
+/// How the chars a query matched are picked out, in `picked`: by colour and
+/// an underline but in the row's own weight, since a row is cut to fit as
+/// measured in that weight, so a wider one would run past the cut and be
+/// clipped unmarked.
+pub(crate) fn matched_style(picked: Hsla) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(picked),
+        underline: Some(UnderlineStyle {
+            thickness: MATCH_UNDERLINE,
+            color: Some(picked),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
+    }
 }
 
 /// How a run of a row's text is drawn apart from the candidate's name.

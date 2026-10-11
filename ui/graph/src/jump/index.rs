@@ -2,11 +2,9 @@
 //! it is matched by.
 
 use crate::model::Shared;
-use crate::point::{
-    configuration_readings, mnemonic, primary_output, target_label, written_target_label,
-};
+use crate::point::{configuration_readings, mnemonic, primary_output, written_target_label};
 use bviz_graph_layout::select::labels::package_label;
-use bviz_graph_layout::shown::Shown;
+use bviz_graph_layout::shown::{Parts, Shown};
 use bviz_graph_layout::{Id, Kind};
 use std::ops::Range;
 
@@ -215,32 +213,42 @@ fn package_path(shared: &Shared, id: Id) -> Option<String> {
     Some(shared.labels.written(&path).into_owned())
 }
 
-/// What holds the node `id` of `kind`, where its [text](node_text) does not
-/// already read it: the package holding a package, and the target owning an
-/// action or a file that is no target itself.
+/// What holds the node `id` of `kind`, as a reader writes it, where its
+/// [text](node_text) does not already read it: the package holding a
+/// package, and the target owning an action or a file that is no target
+/// itself.
 pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
     match kind {
         Kind::Package => {
             let parent = shared.base.nodes.get(id.0 as usize)?.parent?;
-            Some(shown(shared, &package_path(shared, parent)?))
+            package_path(shared, parent)
         }
-        Kind::Action => target_label(id, shared),
-        Kind::Source | Kind::Artifact if !labelled(shared, id) => target_label(id, shared),
+        Kind::Action => written_target_label(id, shared),
+        Kind::Source | Kind::Artifact if !labelled(shared, id) => written_target_label(id, shared),
         _ => None,
     }
 }
 
 /// How the row offering `candidate` reads its text: as the graph shows it,
-/// with the chars of that leading up to the node's own name.
-pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Range<u32>) {
+/// parted where that leads up to the node's own name.
+pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Parts) {
     let shown = shared.labels.repos().show(&candidate.text);
-    let path = path(shown.text(), candidate.kind);
-    (shown, path)
+    let parts = Parts::of_label(shown.text()).or_else(|| {
+        let text = shown.text();
+        let path = path(text, candidate.kind);
+        let byte = |char: u32| {
+            text.char_indices()
+                .nth(char as usize)
+                .map_or(text.len(), |(byte, _)| byte)
+        };
+        Parts::led(text, byte(path.start), byte(path.end))
+    });
+    (shown, parts.unwrap_or_default())
 }
 
 /// `written`, a label or package path as a reader writes it, as the graph
 /// shows it.
-fn shown(shared: &Shared, written: &str) -> String {
+pub(crate) fn shown(shared: &Shared, written: &str) -> String {
     shared.labels.repos().show(written).into_text()
 }
 

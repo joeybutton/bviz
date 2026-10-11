@@ -7,6 +7,7 @@ mod index;
 use crate::derive::Drawn;
 use crate::framing::{Frame, Held};
 use crate::fuzzy::{self, Matching, Row, Standing, TEXT_SIZE};
+use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
@@ -734,33 +735,27 @@ fn listed(
             }
         });
     })
-    .child({
-        let (shown, path) = index::reading(shared, candidate);
+    .child(div().flex_grow_1().min_w_0().child({
+        let (shown, parts) = index::reading(shared, candidate);
         // A shorthand shows a name's chars where its place reads them, ahead
         // of the chars of the place matched before them.
         let mut matched: Vec<u32> = row.matched.iter().filter_map(|&at| shown.at(at)).collect();
         matched.sort_unstable();
         matched.dedup();
-        let text = shown.into_text();
-        let highlights = fuzzy::highlights(
-            &text,
-            &path,
-            &matched,
-            colors.text_muted,
-            palette.highlight.into(),
-        );
-        TruncatingLabel::new("text", text)
-            .highlights(highlights)
-            .flex_grow_1()
-            .text_ellipsis_start()
-    })
+        let picked = fuzzy::matched_style(palette.highlight.into());
+        LabelLine::parted(shown.into_text(), parts, colors.text_muted)
+            .picked(matched, picked)
+            .hinted("jump-text", candidate.text.to_string())
+    }))
     .children(
-        index::container(shared, candidate.id, candidate.kind).map(|container| {
-            TruncatingLabel::new("container", container)
+        index::container(shared, candidate.id, candidate.kind).map(|written| {
+            let shown = index::shown(shared, &written);
+            div()
                 .flex_shrink(CONTAINER_SHRINK)
-                .text_ellipsis_start()
+                .min_w_0()
                 .text_xs()
                 .text_color(colors.text_muted)
+                .child(LabelLine::new(shown, colors.text_muted).hinted("jump-container", written))
         }),
     )
     .child(badge(kind_names(candidate.kind).one, colors.text_muted))

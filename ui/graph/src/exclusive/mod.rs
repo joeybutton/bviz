@@ -16,13 +16,13 @@ use crate::history::History;
 use crate::hue::{Colouring, Hue};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
-    KindNames, built_for_tool, configuration, identify, target_label, unit_names,
-    written_target_label,
+    KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
 };
 use crate::unit_picker::{CyclePoints, UnitPicker};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
+use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::gesture::{
@@ -891,7 +891,7 @@ impl ExclusivePanel {
         let facts = |node: u32| {
             let id = tree.id(node);
             PointFacts {
-                labelled: target_label(id, shared).is_some(),
+                labelled: carried_label(&shared.names, &shared.facets, id).is_some(),
                 copies: targets.map_or(1, |targets| targets.copies(node)),
                 for_tool: built_for_tool(id, shared),
             }

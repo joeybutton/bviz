@@ -2,7 +2,6 @@
 //! marks at once, of every point under it.
 
 use super::plot::Spot;
-use bviz_graph_layout::shown::name_start;
 use bviz_ui_components::menu_chrome::sheet_height;
 use bviz_ui_components::{beside_anchor, room_beside};
 use gpui::{Bounds, Pixels, Point, SharedString, Size, point, px, size};
@@ -39,11 +38,8 @@ pub(super) struct PickRow {
     pub(super) mark: usize,
     /// The mnemonic of the action the point is.
     pub(super) mnemonic: Option<SharedString>,
-    /// The part of the point's label that names its package, read muted and
-    /// cut short first.
-    pub(super) package: SharedString,
-    /// The rest of the point's label.
-    pub(super) name: SharedString,
+    /// The point's label as it is shown.
+    pub(super) label: SharedString,
     /// What tells the point apart from the others whose rows read alike, as
     /// [`hints`] chooses it.
     pub(super) hint: Option<SharedString>,
@@ -55,16 +51,6 @@ pub(super) struct PickRow {
     pub(super) y: u32,
     /// What the tooltip for the point reads while the row is aimed at.
     pub(super) tooltip: Vec<String>,
-}
-
-/// `label`, as it is shown, parted where [`name_start`] parts it into where
-/// its target lives and the target's name, so that each can be cut short
-/// apart; all of it names the target where it is no label.
-pub(super) fn split_label(label: &str) -> (&str, &str) {
-    match name_start(label) {
-        Some(start) => label.split_at(start),
-        None => ("", label),
-    }
 }
 
 /// `path` within the output tree of the configuration it is built in,
@@ -88,8 +74,7 @@ pub(super) fn order(rows: &mut [PickRow]) {
         key(a)
             .cmp(&key(b))
             .then_with(|| a.mnemonic.cmp(&b.mnemonic))
-            .then_with(|| a.package.cmp(&b.package))
-            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.label.cmp(&b.label))
             .then_with(|| a.hint.cmp(&b.hint))
             .then_with(|| a.mark.cmp(&b.mark))
     });
@@ -250,24 +235,13 @@ mod tests {
         PickRow {
             mark,
             mnemonic: None,
-            package: SharedString::default(),
-            name: label.to_owned().into(),
+            label: label.to_owned().into(),
             hint,
             measures: SharedString::default(),
             x,
             y,
             tooltip: Vec::new(),
         }
-    }
-
-    #[test]
-    fn a_label_parts_where_the_target_s_name_starts() {
-        assert_eq!(
-            split_label("//third_party:protobuf_package_metadata"),
-            ("//third_party", ":protobuf_package_metadata")
-        );
-        assert_eq!(split_label("//a/pkg"), ("//a/", "pkg"));
-        assert_eq!(split_label("action7"), ("", "action7"));
     }
 
     #[test]

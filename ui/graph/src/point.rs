@@ -127,13 +127,6 @@ pub(crate) fn shown_name(names: &Names, facets: &Facets, repos: &WrittenRepos, i
         .into_text()
 }
 
-/// The label of the target the node `id` is or belongs to as it is shown,
-/// where one is carried.
-pub(crate) fn target_label(id: Id, shared: &Shared) -> Option<String> {
-    let label = carried_label(&shared.names, &shared.facets, id)?;
-    Some(shared.labels.shown(label))
-}
-
 /// The label of the target the node `id` is or belongs to as a command line
 /// takes it, where one is carried.
 pub(crate) fn written_target_label(id: Id, shared: &Shared) -> Option<String> {

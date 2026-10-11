@@ -15,6 +15,7 @@ use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
 use crate::hue::Hue;
+use crate::label_line::LabelLine;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
@@ -42,10 +43,10 @@ use bviz_ui_components::{
 use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
-    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Rems,
-    Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful, Subscription,
-    Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
+    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Render,
+    Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful, Subscription, Task,
+    WeakEntity, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -659,12 +660,10 @@ impl ScatterPanel {
             .map(|((mark, mnemonic, label), hint)| {
                 let drawn = &plot.plotted.marks[*mark];
                 let point = &drawn.target;
-                let (package, name) = pick::split_label(label);
                 PickRow {
                     mark: *mark,
                     mnemonic: mnemonic.map(|mnemonic| mnemonic.to_owned().into()),
-                    package: package.to_owned().into(),
-                    name: name.to_owned().into(),
+                    label: label.clone().into(),
                     hint: hint.map(SharedString::from),
                     measures: plot.plotted.axes.values(point, drawn.time).into(),
                     x: drawn.x,
@@ -1471,10 +1470,6 @@ fn pick_layer(
 /// Room between the parts a row of the list of points under a click reads.
 const PICK_GAP: Pixels = px(8.);
 
-/// The least room the package of a row of the list of points is shown in, cut
-/// short from its start; with less, the row leaves the package out.
-const PACKAGE_MIN_WIDTH: Rems = rems(2.5);
-
 /// What the header of a list of `rows` points of `unit` reads over the points.
 fn pick_heading(rows: usize, unit: Unit) -> String {
     format!("{rows} {} here", unit_names(unit).many)
@@ -1501,7 +1496,7 @@ fn pick_width(rows: &[PickRow], unit: Unit, axes: Axes, window: &mut Window) -> 
     let heading =
         measure(&pick_heading(rows.len(), unit).into()) + PICK_GAP + measure(&axes.names().into());
     let widest = rows.iter().fold(heading, |widest, row| {
-        let label = measure(&row.package) + measure(&row.name);
+        let label = measure(&row.label);
         let parts = [
             row.mnemonic.as_ref(),
             row.hint.as_ref(),
@@ -1609,53 +1604,6 @@ fn pick_part(text: SharedString) -> Div {
         .child(text)
 }
 
-/// The label of the row `listed`, its package and name abutting on a `line`
-/// tall, the package read in `muted`.
-///
-/// Laid out right to left and wrapping, the package goes onto a second, clipped
-/// line when less than its least room is left beside the name, and otherwise
-/// grows into what the name leaves. Its flex basis is that least room, all the
-/// label would ask of the row, so the label stands over an unseen copy of
-/// itself asking for its whole width.
-fn pick_label(listed: &PickRow, muted: Hsla, line: Pixels) -> Div {
-    let package = pick_part(listed.package.clone())
-        .flex_basis(PACKAGE_MIN_WIDTH)
-        .flex_grow_1()
-        .text_ellipsis_start()
-        // An elided line falls short of its box by up to a glyph; aligned
-        // right, that slack stands before the ellipsis, not before the name.
-        .text_right()
-        .text_color(muted);
-    let name = pick_part(listed.name.clone()).text_ellipsis();
-    let whole = div()
-        .flex()
-        .min_w_0()
-        .h(px(0.))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .child(div().min_w(PACKAGE_MIN_WIDTH).child(listed.package.clone()))
-        .child(listed.name.clone());
-    let label = div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_row_reverse()
-        .flex_wrap()
-        .justify_start()
-        .content_start()
-        .overflow_hidden()
-        .child(name)
-        .child(package);
-    div()
-        .relative()
-        .flex()
-        .min_w_0()
-        .mr_auto()
-        .h(line)
-        .child(whole)
-        .child(label)
-}
-
 /// The row `index` of a list of points, reading `listed`: the colour its mark
 /// is drawn in, what its point is, what tells it apart from the rows reading
 /// alike, and its measures.
@@ -1710,7 +1658,15 @@ fn pick_row(
             .clone()
             .map(|mnemonic| div().flex_none().whitespace_nowrap().child(mnemonic)),
     )
-    .child(pick_label(listed, colors.text_muted, style.line))
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .mr_auto()
+            .h(style.line)
+            .child(LabelLine::new(listed.label.clone(), colors.text_muted)),
+    )
     .children(listed.hint.clone().map(|hint| {
         pick_part(hint)
             .text_ellipsis_start()

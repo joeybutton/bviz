@@ -6,6 +6,7 @@
 //! returns to it along with the filter.
 
 use crate::column::{Folding, line, scrolling};
+use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::point::{shown_name, written_name};
@@ -80,13 +81,14 @@ enum Answering {
 }
 
 /// A node as the card names it: by the target name and configuration that tell
-/// it from its neighbours on a path, over the package holding it, with its full
-/// label for the reader who needs the rest.
+/// it from its neighbours on a path, or by its whole label, with the label as
+/// written for the reader who needs to take it elsewhere.
 #[derive(Clone)]
 struct Named {
     id: Id,
     target: SharedString,
-    package: Option<SharedString>,
+    /// The label as it is shown.
+    label: SharedString,
     /// The label as a command line takes it, which the hover reads.
     written: SharedString,
     config: Option<Config>,
@@ -118,15 +120,6 @@ enum Answer {
 fn name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> Named {
     let label = shown_name(names, facets, repos, id);
     let written = written_name(names, facets, repos, id).into();
-    if package_label(names, id).is_some() {
-        return Named {
-            id,
-            target: label.into(),
-            package: None,
-            written,
-            config: None,
-        };
-    }
     let config = facets.config(id).map(|config| Config {
         handle: config,
         mnemonic: facets
@@ -135,17 +128,14 @@ fn name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> Named {
             .map(|mnemonic| facets.strings().resolve(mnemonic).to_string().into()),
         checksum: facets.strings().resolve(config.sym()).to_string().into(),
     });
-    let (package, target) = match name_start(&label) {
-        Some(start) => {
-            let (package, target) = label.split_at(start);
-            (Some(package), target.to_owned())
-        }
-        None => (None, label.clone()),
+    let target = match package_label(names, id) {
+        Some(_) => &label[..],
+        None => &label[name_start(&label).unwrap_or(0)..],
     };
     Named {
         id,
-        target: target.into(),
-        package: package.map(|package| package.to_string().into()),
+        target: target.to_owned().into(),
+        label: label.into(),
         written,
         config,
     }
@@ -200,10 +190,15 @@ impl Spelling {
     /// `named`'s target and configuration, where `named` is one of the nodes
     /// this was spelled for.
     fn name(&self, named: &Named) -> SharedString {
-        match &named.config {
-            Some(config) => format!("{} ({})", named.target, self.spelled[&config.handle]).into(),
-            None => named.target.clone(),
-        }
+        let config = self.config(named).unwrap_or_default();
+        format!("{}{config}", named.target).into()
+    }
+
+    /// The configuration `named` is built in as [`Self::name`] reads it,
+    /// where it states one.
+    fn config(&self, named: &Named) -> Option<String> {
+        let config = named.config.as_ref()?;
+        Some(format!(" ({})", self.spelled[&config.handle]))
     }
 
     /// `named`'s label as a command line takes it, with its configuration's
@@ -484,8 +479,8 @@ pub(crate) fn reset(view: &mut GraphPanel) {
     view.why = Why::new();
 }
 
-/// An endpoint of the question: its name after `lead`, over the package holding
-/// it, with its full label on hover.
+/// An endpoint of the question: its label and configuration after `lead`, with
+/// its label as written on hover.
 fn endpoint(
     key: &'static str,
     lead: &str,
@@ -494,19 +489,18 @@ fn endpoint(
     palette: &Palette,
 ) -> Stateful<Div> {
     let tip = palette.colors.tooltip();
+    let fixed = |text: String| div().flex_none().whitespace_nowrap().child(text);
     div()
         .id(key)
         .flex()
-        .flex_col()
         .min_w_0()
         .tooltip(TextTooltip::builder(spelling.full(named), tip))
-        .child(line(format!("{lead}{}", spelling.name(named))))
-        .children(named.package.clone().map(|package| {
-            // Packages sharing a prefix differ at their tails.
-            line(package)
-                .text_ellipsis_start()
-                .text_color(palette.colors.text_muted)
-        }))
+        .child(fixed(lead.to_owned()))
+        .child(div().min_w_0().child(LabelLine::new(
+            named.label.clone(),
+            palette.colors.text_muted,
+        )))
+        .children(spelling.config(named).map(fixed))
 }
 
 /// The shortest chain's links, from the dependent down to the dependency,
@@ -724,10 +718,7 @@ mod tests {
         let named = worker(&mut names, &mut facets, "0123456789", "k8-opt-exec");
         let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), ":worker (k8-opt-exec)");
-        assert_eq!(
-            named.package.as_deref(),
-            Some("//src/main/java/com/example")
-        );
+        assert_eq!(&*named.label, "//src/main/java/com/example:worker");
         assert_eq!(
             spelling.full(&named),
             "//src/main/java/com/example:worker (k8-opt-exec, 0123456789)"
@@ -735,10 +726,7 @@ mod tests {
 
         let action = names.intern("action7");
         let unlabelled = name(&names, &facets, &WrittenRepos::default(), action);
-        assert_eq!(
-            (spelling.name(&unlabelled).as_ref(), unlabelled.package),
-            ("action7", None)
-        );
+        assert_eq!(spelling.name(&unlabelled), "action7");
     }
 
     #[test]
@@ -748,7 +736,6 @@ mod tests {
         let named = name(&names, &facets, &WrittenRepos::default(), package);
         let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), "//ui/components");
-        assert_eq!(named.package, None);
         assert_eq!(spelling.full(&named), "//ui/components");
     }
 

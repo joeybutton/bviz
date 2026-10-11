@@ -36,7 +36,7 @@ impl Inked<'_> {
     /// The runs of colour a line of the first `len` bytes of this, followed
     /// by whatever cuts it short, is set in: `muted` over the muted bytes,
     /// `ink` over the rest.
-    fn runs(&self, len: usize, ink: Hsla, muted: Hsla) -> Vec<(usize, Hsla)> {
+    pub fn runs(&self, len: usize, ink: Hsla, muted: Hsla) -> Vec<(usize, Hsla)> {
         let (start, end) = (self.muted.start.min(len), self.muted.end.min(len));
         let runs = [(start, ink), (end - start, muted), (len - end, ink)];
         runs.into_iter().filter(|&(len, _)| len > 0).collect()

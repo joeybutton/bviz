@@ -49,6 +49,7 @@ mod history;
 mod hover;
 mod hue;
 mod jump;
+mod label_line;
 mod legend;
 mod missing;
 mod mode;

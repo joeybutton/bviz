@@ -7,7 +7,8 @@
 //! leave.
 
 use crate::column::scrolling;
-use crate::point::shown_name;
+use crate::label_line::LabelLine;
+use crate::point::written_name;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
@@ -15,7 +16,7 @@ use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TruncatingLabel};
+use bviz_ui_components::{Button, ListScroll};
 use gpui::{
     ClickEvent, Context, Div, IntoElement, Pixels, SharedString, Stateful, div, prelude::*, px,
     relative,
@@ -140,17 +141,24 @@ impl Pins {
 /// One override in force.
 struct Held {
     node: Id,
+    /// The node's name as it is shown.
     label: SharedString,
+    /// The node's name as a reader writes it.
+    written: SharedString,
     pin: Pin,
 }
 
 /// The overrides `filter` holds, by the name each is listed under.
 fn held(filter: &Filter, names: &Names, facets: &Facets, repos: &WrittenRepos) -> Vec<Held> {
     let mut held: Vec<Held> = Vec::with_capacity(filter.pins.len());
-    held.extend(filter.pins.iter().map(|(&node, &pin)| Held {
-        node,
-        label: shown_name(names, facets, repos, node).into(),
-        pin,
+    held.extend(filter.pins.iter().map(|(&node, &pin)| {
+        let written = written_name(names, facets, repos, node);
+        Held {
+            node,
+            label: repos.show(&written).into_text().into(),
+            written: written.into(),
+            pin,
+        }
     }));
     held.sort_by(|one, other| (&one.label, one.node.0).cmp(&(&other.label, other.node.0)));
     held
@@ -296,7 +304,9 @@ fn row(held: Held, palette: &Palette, cx: &Context<GraphPanel>) -> Stateful<Div>
                 }
             });
         }))
-        .child(TruncatingLabel::new("label", held.label).flex_1())
+        .child(div().flex_1().min_w_0().child(
+            LabelLine::new(held.label, palette.colors.text_muted).hinted("label", held.written),
+        ))
         .child(div().flex_none().child(label(held.pin)))
 }
 
