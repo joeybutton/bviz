@@ -6,14 +6,14 @@ use crate::theme::Palette;
 use crate::{
     ChooseNext, ChoosePrevious, STATS_CELL_PAD, STATS_HEADER_HEIGHT, STATS_NUM_COL_WIDTH,
     STATS_ROW_HEIGHT, STATS_TEXT_SIZE, Unchoose, profile_status, set_list_thumb, thumb_offset,
-    time_window_chip,
+    time_window_group,
 };
 use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip,
-    Toolbar, TruncatingLabel, centered_spinner, load_in_background, overlay_canvas, sort_gesture,
-    sort_header, sort_hint, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, OneRow, SCROLLBAR_THICKNESS, Scrollbar, Sort,
+    TextTooltip, TruncatingLabel, centered_spinner, load_in_background, overlay_canvas,
+    sort_gesture, sort_header, sort_hint, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -671,7 +671,11 @@ impl Render for StatsPanel {
         self.ensure_stats_order(cx);
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let toolbar =
-            time_window_chip(&self.model, palette, cx).map(|chip| Toolbar::new().child(chip));
+            time_window_group(&self.model, palette, &self.focus, window, cx).map(|chip| {
+                OneRow::new("stats-controls")
+                    .text_size(px(STATS_TEXT_SIZE))
+                    .group(chip)
+            });
         div()
             .key_context(Self::kind().key_context)
             .track_focus(&self.focus)

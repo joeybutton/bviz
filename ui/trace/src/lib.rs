@@ -41,9 +41,10 @@ use bviz_ui_components::gesture::{
     Button as PointerButton, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, cut_off_note, declare_scopes, find_key_bindings,
-    legend_key_bindings, overlay_canvas, text_input, track_drag, zoom_key_bindings,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, MenuItem, Nesting,
+    Pending, Priority, SCROLLBAR_THICKNESS, Scrollbar, ToolbarGroup, cut_off_note, declare_scopes,
+    find_key_bindings, legend_key_bindings, overlay_canvas, text_input, track_drag,
+    zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
@@ -553,7 +554,7 @@ pub(crate) fn time_window_chip(
             span.end_us - span.start_us,
         )?
     };
-    let clearing = model.clone();
+    let model = model.clone();
     Some(
         div()
             .flex()
@@ -571,9 +572,7 @@ pub(crate) fn time_window_chip(
             .child(summary)
             .child(
                 Button::new("trace-time-window-clear", move |_, _, cx| {
-                    clearing.update(cx, |m, cx| {
-                        m.set_time_selection(TimeSelection::default(), cx);
-                    });
+                    clear_time_window(&model, cx)
                 })
                 .ghost()
                 .compact()
@@ -581,6 +580,39 @@ pub(crate) fn time_window_chip(
                 .keys_for_focused(&ClearTimeSelection),
             ),
     )
+}
+
+/// [`time_window_chip`] as a toolbar group, which leaves the row for the
+/// overflow menu as the row clearing the window, its keys named where `focus`
+/// stands.
+pub(crate) fn time_window_group(
+    model: &Entity<TraceModel>,
+    palette: Palette,
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> Option<ToolbarGroup> {
+    let chip = time_window_chip(model, palette, cx)?;
+    let model = model.clone();
+    let row = MenuItem::action(
+        &ClearTimeSelection,
+        Some(focus),
+        window,
+        cx,
+        move |_, cx| clear_time_window(&model, cx),
+    );
+    Some(ToolbarGroup::new(TIME_WINDOW, chip).overflow(row, true))
+}
+
+/// How long the time window chip holds out against its toolbar narrowing:
+/// past every control, as what the panel shows is read against it.
+const TIME_WINDOW: Priority = Priority::MAX;
+
+/// Widens the next aggregate of `model` back to the whole timeline.
+fn clear_time_window(model: &Entity<TraceModel>, cx: &mut App) {
+    model.update(cx, |m, cx| {
+        m.set_time_selection(TimeSelection::default(), cx);
+    });
 }
 
 /// What the window chrome says about the loaded document, the same from whichever
