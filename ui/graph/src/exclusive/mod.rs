@@ -30,9 +30,10 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    CardAnchor, KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, cached_layer, centered_notice,
-    centered_spinner, key_text_in, legend_gestures, load_in_background, paint_hover_card,
+    CardAnchor, HoverCard, KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent,
+    MenuItem, QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, cached_layer,
+    centered_notice, centered_spinner, key_text_in, legend_gestures, load_in_background,
+    paint_hover_card,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -202,6 +203,8 @@ pub struct ExclusivePanel {
     drawing: Option<Task<()>>,
     /// The menu a right press put up over a cell, while it stands.
     menu: Option<CellMenu>,
+    /// The card describing the cell selected.
+    card: HoverCard<Holds>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -266,6 +269,7 @@ impl ExclusivePanel {
             coloured: HashMap::new(),
             drawing: None,
             menu: None,
+            card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
@@ -517,7 +521,6 @@ impl ExclusivePanel {
                 as_targets,
                 history: History::new(None),
                 transition: None,
-                pointer: None,
                 selection: None,
                 pressed_clear: false,
             });
@@ -657,7 +660,7 @@ impl ExclusivePanel {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        let (selected, pointer) = (drawn.selection.take(), drawn.pointer);
+        let (selected, pointer) = (drawn.selection.take(), self.card.pointer());
         match selected {
             Some(Selection {
                 cell,
@@ -725,6 +728,7 @@ impl ExclusivePanel {
             None => cells.first().copied(),
         };
         if let Some(to) = to {
+            self.card.pick();
             self.select(to, Picked::Keys, cx);
         }
     }
@@ -946,10 +950,10 @@ impl ExclusivePanel {
     /// go of a cell it selected.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
+        self.card.hover(at, cell.as_ref().map(|cell| &cell.holds));
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        drawn.pointer = Some(at);
         match cell {
             Some(cell) => self.select(cell, Picked::Pointer, cx),
             None if drawn.picked_by_pointer() => self.deselect(cx),
@@ -959,12 +963,19 @@ impl ExclusivePanel {
 
     /// Lets go of the cell the pointer selected, which has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawn) = &mut self.drawn {
-            drawn.pointer = None;
-            if drawn.picked_by_pointer() {
-                self.deselect(cx);
-            }
+        if self.card.leave() {
+            cx.notify();
         }
+        if self.drawn.as_ref().is_some_and(Drawn::picked_by_pointer) {
+            self.deselect(cx);
+        }
+    }
+
+    /// The cell the card describes: the cell selected, unless its menu stands
+    /// in for the card.
+    fn carded(&self, _: &App) -> Option<Holds> {
+        let selection = self.drawn.as_ref()?.selection.as_ref()?;
+        (selection.by != Picked::Menu).then_some(selection.cell.holds)
     }
 
     /// Repaints the cells along with the layer over them; every change to what
@@ -1142,8 +1153,6 @@ struct Drawn {
     /// The move to the focus drawn from the one drawn before, while it is
     /// under way.
     transition: Option<Transition>,
-    /// Where the pointer rests over the icicle, while it does.
-    pointer: Option<Point<Pixels>>,
     selection: Option<Selection>,
     /// Whether the last press landed clear of every cell, starting a click.
     pressed_clear: bool,
@@ -1721,9 +1730,12 @@ impl Panel for ExclusivePanel {
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.shown = active;
-        if active {
-            self.focus_handle.focus(window, cx);
-            self.compute(cx);
+        match active {
+            true => {
+                self.focus_handle.focus(window, cx);
+                self.compute(cx);
+            }
+            false => self.clear_hover(cx),
         }
     }
 }
@@ -2090,18 +2102,18 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         else {
             return;
         };
+        paint::paint_ring(cell, &palette, window);
+        let anchor = match (by, panel.card.pointer()) {
+            // The menu stands in for the cell's description.
+            (Picked::Menu, _) => return,
+            _ if !panel.card.shows(&cell.holds) => return,
+            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
+            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
+        };
         let more = panel.offers(cell.holds, cx).len() > 1;
         let up = key_text_in(&FocusUp, &panel.focus_handle, window);
         let gesture = gesture(cell.holds, drawn.top(), up.as_deref(), more);
         let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
-        let (cell, by, pointer) = (*cell, *by, drawn.pointer);
-        paint::paint_ring(&cell, &palette, window);
-        let anchor = match (by, pointer) {
-            // The menu stands in for the cell's description.
-            (Picked::Menu, _) => return,
-            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
-            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
-        };
         let tooltip = palette.colors.tooltip();
         paint_hover_card(&lines, anchor, bounds, tooltip, window, cx);
     };
