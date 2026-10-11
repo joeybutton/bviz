@@ -463,6 +463,23 @@ mod tests {
     }
 
     #[test]
+    fn lists_every_url_the_viewport_draws() {
+        let output = BuildOutput::from_bytes(
+            20,
+            b"a http://a.example/x and\nwrapped https://b.example/a/long/path.\n".to_vec(),
+        );
+        let mut terminal = Terminal::new(&output, 20, 10);
+        let urls = terminal.urls();
+        let texts: Vec<&str> = urls.iter().map(Url::text).collect();
+        assert_eq!(
+            texts,
+            ["http://a.example/x", "https://b.example/a/long/path"]
+        );
+        let wrapped = &urls[1].spans()[..4];
+        assert_eq!(wrapped, [None, None, Some((8, 19)), Some((0, 16))]);
+    }
+
+    #[test]
     fn trims_trailing_punctuation_from_url() {
         let output = BuildOutput::from_bytes(80, b"go to http://example.com.\n".to_vec());
         let mut terminal = Terminal::new(&output, 80, 10);
