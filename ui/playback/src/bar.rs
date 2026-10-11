@@ -1,4 +1,6 @@
-use crate::{Clock, PlayPause, Speed, StepBack, StepForward, TEXT_SIZE, Timeline};
+use crate::{
+    Clock, PlayPause, Speed, SpeedDown, SpeedUp, StepBack, StepForward, TEXT_SIZE, Timeline,
+};
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
     Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, scrubber,
@@ -39,7 +41,12 @@ impl PlaybackBar {
     pub fn new(name: SharedString, clock: Entity<Clock>, cx: &mut Context<Self>) -> Self {
         let current = speed_of(&clock, cx);
         let labels = Speed::all().map(|speed| format!("{}\u{d7}", speed.factor()));
-        let speed = cx.new(|cx| Dropdown::new("playback-speed", labels, current.index(), cx));
+        let speed = cx.new(|cx| {
+            Dropdown::new("playback-speed", labels, current.index(), cx)
+                .tooltip("Playback speed")
+                .keys_for_focused(&SpeedDown)
+                .keys_for_focused(&SpeedUp)
+        });
         let clock_changed = cx.observe(&clock, |bar, clock, cx| {
             let index = speed_of(&clock, cx).index();
             bar.speed

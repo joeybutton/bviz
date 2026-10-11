@@ -21,10 +21,12 @@ pub(crate) struct UnitPicker {
 impl UnitPicker {
     /// The picker among the units `inputs` describe, each over every input of
     /// `inputs` describing it, which calls `picked` as each unit is chosen
-    /// after; absent where `inputs` describe none. The unit `opening` is
-    /// chosen first where `inputs` describe it, and the finest otherwise.
+    /// after and whose `hint` says what a unit is drawn as; absent where
+    /// `inputs` describe none. The unit `opening` is chosen first where
+    /// `inputs` describe it, and the finest otherwise.
     pub(crate) fn new<V: 'static>(
         id: &'static str,
+        hint: &'static str,
         inputs: InputSet,
         opening: Option<Unit>,
         picked: fn(&mut V, &mut Context<V>),
@@ -43,7 +45,7 @@ impl UnitPicker {
             .position(|unit| Some(unit) == opening)
             .unwrap_or(0);
         let names = units.map(|unit| unit_names(unit).many);
-        let dropdown = cx.new(|cx| Dropdown::new(id, names, opened, cx));
+        let dropdown = cx.new(|cx| Dropdown::new(id, names, opened, cx).tooltip(hint));
         let picked = cx.subscribe(&dropdown, move |view, _, _: &DropdownEvent, cx| {
             picked(view, cx);
         });

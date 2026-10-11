@@ -740,7 +740,14 @@ impl Choice {
         // Until the unit is measured, whether any of its points is timed is
         // taken from whether any node of the graph is.
         let timed = loaded.times().is_ok();
-        let picker = UnitPicker::new("scatter-unit", inputs, None, ScatterPanel::choose_unit, cx)?;
+        let picker = UnitPicker::new(
+            "scatter-unit",
+            "Point unit",
+            inputs,
+            None,
+            ScatterPanel::choose_unit,
+            cx,
+        )?;
         let axes = Axes::OPENING;
         let names = Axis::ALL.map(Axis::name);
         let across_picker =

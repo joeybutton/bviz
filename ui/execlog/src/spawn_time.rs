@@ -157,13 +157,16 @@ impl SpawnTimePanel {
             .iter()
             .map(|runner| runner.sum.name.clone())
             .collect();
-        let runner_picker = cx.new(|cx| Dropdown::new("mnemonic-runner", names, 0, cx));
+        let runner_picker =
+            cx.new(|cx| Dropdown::new("mnemonic-runner", names, 0, cx).tooltip("Runner shown"));
         let runner_picked = cx.subscribe(&runner_picker, |_, _, _: &DropdownEvent, cx| {
             cx.notify();
         });
         let phase = summary.longest_phase();
-        let phase_picker =
-            cx.new(|cx| Dropdown::new("top-phase", Phase::ALL.map(phase_name), phase.index(), cx));
+        let phase_picker = cx.new(|cx| {
+            Dropdown::new("top-phase", Phase::ALL.map(phase_name), phase.index(), cx)
+                .tooltip("Rank by phase")
+        });
         let phase_picked = cx.subscribe(&phase_picker, |_, _, _: &DropdownEvent, cx| {
             cx.notify();
         });

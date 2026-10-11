@@ -412,6 +412,7 @@ impl GraphPanel {
                 mode.index(),
                 cx,
             )
+            .tooltip("Graph layout")
         });
         // The picker notifies on every repaint it makes, and only a selection
         // should move the view off its layout.
@@ -449,6 +450,7 @@ impl GraphPanel {
                 selection.relation().index(),
                 cx,
             )
+            .tooltip("Marked with selection")
         });
         let relations = cx.subscribe(&relation_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
@@ -456,7 +458,9 @@ impl GraphPanel {
                 view.set_relation(relation, cx);
             }
         });
-        let boxes = cx.new(|cx| MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx));
+        let boxes = cx.new(|cx| {
+            MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx).tooltip("Box types drawn")
+        });
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
         });

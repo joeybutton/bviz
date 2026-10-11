@@ -996,6 +996,7 @@ fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> 
     let opening = Some(Unit::ConfiguredTarget);
     UnitPicker::new(
         "exclusive-unit",
+        "Cell unit",
         inputs,
         opening,
         ExclusivePanel::choose,
