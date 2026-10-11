@@ -22,7 +22,7 @@ use bviz_invocation::Chosen;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Button, KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip,
-    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header,
+    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use by_height::ByHeight;
@@ -107,6 +107,8 @@ struct Column<K> {
 #[derive(Clone, Copy)]
 struct Sorts<K> {
     by: K,
+    /// What `by` orders the rows by, as the header's hint names it.
+    what: &'static str,
     /// Whether the column sorts descending on the first click on it.
     descending: bool,
 }
@@ -120,35 +122,76 @@ const fn column<K>(title: &'static str, width: Option<f32>) -> Column<K> {
     }
 }
 
-const fn sorting<K>(title: &'static str, width: f32, by: K, descending: bool) -> Column<K> {
+const fn sorting<K>(
+    title: &'static str,
+    width: f32,
+    by: K,
+    what: &'static str,
+    descending: bool,
+) -> Column<K> {
     Column {
         title,
         width: Some(width),
         modeled: false,
-        sorts: Some(Sorts { by, descending }),
+        sorts: Some(Sorts {
+            by,
+            what,
+            descending,
+        }),
     }
 }
 
 const COLUMNS: [Column<StepKey>; 7] = [
     column("Step", None),
-    sorting("Start", STATS_NUM_COL_WIDTH, StepKey::Start, false),
-    sorting("Waited", STATS_NUM_COL_WIDTH, StepKey::Waited, true),
-    sorting("Own", STATS_NUM_COL_WIDTH, StepKey::Own, true),
+    sorting(
+        "Start",
+        STATS_NUM_COL_WIDTH,
+        StepKey::Start,
+        "start time",
+        false,
+    ),
+    sorting(
+        "Waited",
+        STATS_NUM_COL_WIDTH,
+        StepKey::Waited,
+        "wait time",
+        true,
+    ),
+    sorting("Own", STATS_NUM_COL_WIDTH, StepKey::Own, "own time", true),
     Column {
         modeled: true,
-        ..sorting("Could save", STATS_NUM_COL_WIDTH, StepKey::CouldSave, true)
+        ..sorting(
+            "Could save",
+            STATS_NUM_COL_WIDTH,
+            StepKey::CouldSave,
+            "possible saving",
+            true,
+        )
     },
-    sorting("% of path", SHARE_WIDTH, StepKey::Share, true),
-    sorting("Wait and own time", BAR_COLUMN_WIDTH, StepKey::Total, true),
+    sorting("% of path", SHARE_WIDTH, StepKey::Share, "path share", true),
+    sorting(
+        "Wait and own time",
+        BAR_COLUMN_WIDTH,
+        StepKey::Total,
+        "wait + own time",
+        true,
+    ),
 ];
 
 const NEARLY_CRITICAL_COLUMNS: [Column<NearlyCriticalKey>; 3] = [
     column("Action", None),
-    sorting("Took", STATS_NUM_COL_WIDTH, NearlyCriticalKey::Took, true),
+    sorting(
+        "Took",
+        STATS_NUM_COL_WIDTH,
+        NearlyCriticalKey::Took,
+        "time taken",
+        true,
+    ),
     sorting(
         "Slack",
         STATS_NUM_COL_WIDTH,
         NearlyCriticalKey::Slack,
+        "slack",
         false,
     ),
 ];
@@ -825,7 +868,15 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
         match (column.width, title.take(), column.sorts) {
             (None, Some(title), _) => table_cell(None, [title]).into_any_element(),
             (width, _, None) => table_cell(width, [column.title]).into_any_element(),
-            (width, _, Some(Sorts { by, descending })) => table_cell(
+            (
+                width,
+                _,
+                Some(Sorts {
+                    by,
+                    what,
+                    descending,
+                }),
+            ) => table_cell(
                 width,
                 [sort_header(
                     column.title,
@@ -838,6 +889,10 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
             .id(column.title)
             .cursor_pointer()
             .hover(|cell| cell.bg(palette.hover))
+            .tooltip(TextTooltip::builder(
+                sort_hint(what),
+                palette.colors.tooltip(),
+            ))
             .on_click(cx.listener(move |panel, e, _, cx| {
                 GESTURES.dispatch(Pointer::click(e), |intent| match intent {
                     CriticalPathIntent::Sort => {

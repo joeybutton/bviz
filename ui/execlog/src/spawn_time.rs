@@ -8,7 +8,7 @@ use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
     SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, legend_gestures,
-    list_scrollbar, sort_gesture, sort_header,
+    list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -425,7 +425,7 @@ fn plain_header(name_title: &'static str, palette: &Palette) -> Div {
 fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnTimePanel>) -> Div {
     let [name, spawns, time, bar, note] = GROUP_COLUMNS;
     let [spawns_title, time_title, bar_title, note_title] = GROUP_TITLES;
-    let sorting = |column: Column, title: &'static str, by: SortBy| {
+    let sorting = |column: Column, title: &'static str, by: SortBy, what: &str| {
         let content = sort_header(
             title,
             sort.of(by),
@@ -437,6 +437,10 @@ fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnT
             .id(title)
             .cursor_pointer()
             .hover(|style| style.bg(palette.colors.element_hover))
+            .tooltip(TextTooltip::builder(
+                sort_hint(what),
+                palette.colors.tooltip(),
+            ))
             .on_click(cx.listener(move |panel, e, _, cx| {
                 GESTURES.dispatch(Pointer::click(e), |intent| match intent {
                     SpawnTimeIntent::Sort => {
@@ -449,9 +453,9 @@ fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnT
     };
     header_row(
         [
-            sorting(name, "Mnemonic", SortBy::Name),
-            sorting(spawns, spawns_title, SortBy::Spawns),
-            sorting(time, time_title, SortBy::Time),
+            sorting(name, "Mnemonic", SortBy::Name, "mnemonic"),
+            sorting(spawns, spawns_title, SortBy::Spawns, "spawn count"),
+            sorting(time, time_title, SortBy::Time, "spawn time"),
             cell(bar, bar_title).into_any_element(),
             cell(note, note_title).into_any_element(),
         ],

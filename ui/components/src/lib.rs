@@ -61,7 +61,7 @@ pub use notice::{Source, centered_notice, centered_spinner};
 pub use query_field::{QueryField, QueryFieldEvent};
 pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, ScrollbarColors};
 pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
-pub use sort::{Sort, sort_gesture, sort_header};
+pub use sort::{Sort, sort_gesture, sort_header, sort_hint};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::{OneRow, Toolbar};
