@@ -1334,11 +1334,13 @@ impl Workspace {
     }
 
     /// Makes `pane` the active one, which the panel actions act on and whose
-    /// panel takes focus and titles the window. Every pane goes back on screen
-    /// first: a pane no frame draws is nothing for focus and the window's title
-    /// to follow, so every path that brings a view forward passes through here.
+    /// panel takes focus and titles the window. A pane the arrangement hides
+    /// brings every pane back on screen first: a pane no frame draws is nothing
+    /// for focus and the window's title to follow, so every path that brings a
+    /// view forward passes through here.
     fn activate_pane(&mut self, pane: Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
-        self.restore(cx);
+        let revealed = self.arrangement.uncover(&pane);
+        self.mark_revealed(revealed, cx);
         self.active = pane;
         let panel = self.active_panel(cx);
         window.focus(&panel.focus_handle(cx), cx);

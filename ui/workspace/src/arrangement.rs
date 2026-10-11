@@ -88,6 +88,18 @@ impl<P: Clone + PartialEq> Arrangement<P> {
         }
     }
 
+    /// Puts every pane back where the arrangement hides `pane`, so that a
+    /// frame draws it, reporting the panes this brings back on screen. A pane
+    /// drawn already, the maximized one among them, leaves the arrangement as
+    /// it stands.
+    pub(crate) fn uncover(&mut self, pane: &P) -> Vec<P> {
+        if self.hides(pane) {
+            self.restore()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The arrangement, to change. A pane drawn in place of the whole of it is
     /// put back first, and this is the only way to an arrangement that can be
     /// changed, so no change reaches one part of which is hidden.
@@ -240,6 +252,22 @@ mod tests {
         assert_eq!(arrangement.restore(), ['b', 'c']);
         assert_eq!(arrangement.maximized(), None);
         assert!(arrangement.restore().is_empty());
+    }
+
+    /// Uncovering a pane the arrangement hides puts every pane back, and
+    /// uncovering one it draws — the maximized pane, or any pane where none
+    /// is maximized — changes nothing.
+    #[test]
+    fn uncovering_puts_the_panes_back_only_for_a_hidden_pane() {
+        let mut arrangement = row();
+        assert!(arrangement.uncover(&'a').is_empty());
+        maximize(&mut arrangement, 'b');
+        assert!(arrangement.uncover(&'b').is_empty());
+        assert_eq!(arrangement.maximized(), Some(&'b'));
+        assert!(arrangement.uncover(&'z').is_empty());
+        assert_eq!(arrangement.maximized(), Some(&'b'));
+        assert_eq!(arrangement.uncover(&'a'), ['a', 'c']);
+        assert_eq!(arrangement.maximized(), None);
     }
 
     /// Every pane the arrangement lays out besides the one drawn in place of
