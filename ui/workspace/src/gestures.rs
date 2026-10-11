@@ -20,6 +20,13 @@ pub(crate) enum ChromeIntent {
 const TAB_OR_HANDLE: Place = Place::On("a tab or handle");
 const DIVIDER: Place = Place::On("a divider");
 
+pub(crate) const OPEN_PANEL_MENU: Entry<ChromeIntent> = Entry::new(
+    Input::press(Button::Right),
+    TAB_OR_HANDLE,
+    "Open panel menu",
+    ChromeIntent::OpenMenu,
+);
+
 pub(crate) const CHROME_GESTURES: Gestures<ChromeIntent> = Gestures::new(&[
     Entry::new(
         Input::new(Motion::Click(Button::Left, Clicks::Double)),
@@ -39,12 +46,7 @@ pub(crate) const CHROME_GESTURES: Gestures<ChromeIntent> = Gestures::new(&[
         "Move panel",
         ChromeIntent::Move,
     ),
-    Entry::new(
-        Input::press(Button::Right),
-        TAB_OR_HANDLE,
-        "Open panel menu",
-        ChromeIntent::OpenMenu,
-    ),
+    OPEN_PANEL_MENU,
     Entry::new(
         Input::SCROLL,
         Place::On("a tab strip"),

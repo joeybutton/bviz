@@ -345,6 +345,10 @@ impl<I> Entry<I> {
     pub const fn gesture(&self) -> Gesture {
         self.row.gesture
     }
+
+    pub const fn row(&self) -> GestureRow {
+        self.row
+    }
 }
 
 /// A view's gestures, in the order a pointer tries them.

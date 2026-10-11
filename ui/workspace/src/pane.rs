@@ -1,5 +1,5 @@
 use crate::drop::Band;
-use crate::gestures::{CHROME_GESTURES, ChromeIntent};
+use crate::gestures::{CHROME_GESTURES, ChromeIntent, OPEN_PANEL_MENU};
 use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, Documents, PanelEvent};
@@ -608,8 +608,8 @@ impl Pane {
     }
 
     /// The control that puts up the menu of rearrangements the panel on show
-    /// offers, so the menu is there to be found without knowing that a press of
-    /// the secondary button over a tab or a handle opens it too.
+    /// offers, so the menu is there to be found without knowing the gesture
+    /// that opens it too, which its hint names.
     fn menu_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let pane = cx.entity();
         let panel = self.active_panel().entity_id();
@@ -624,7 +624,7 @@ impl Pane {
             .ghost()
             .icon(MENU_ICON)
             .compact()
-            .tooltip("Panel menu"),
+            .gesture(OPEN_PANEL_MENU.row()),
         )
     }
 
