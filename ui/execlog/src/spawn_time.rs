@@ -283,20 +283,23 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
                 palette.colors.tooltip(),
             ))
     };
-    let phases = || {
-        spent_in(&summary.timing)
-            .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)))
-    };
-    OneRow::new("spawn-time-header").filling(|| {
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(totals())
-            .child(Legend::new("spawn-time-legend", legend).entries(phases()))
-    })
+    let phases = spent_in(&summary.timing)
+        .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
+    let legend = Legend::new("spawn-time-legend", legend).entries(phases);
+    OneRow::new("spawn-time-header")
+        .filling(|| {
+            // Laid over its holder, so the totals ask the row for no room and
+            // take what the legend toggle leaves, cutting themselves short.
+            div().flex_1().h_full().relative().child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .child(totals()),
+            )
+        })
+        .trailing(legend.toolbar_group())
 }
 
 /// `control` behind a label naming what it picks.
