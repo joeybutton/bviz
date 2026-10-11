@@ -1,11 +1,11 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens from it.
 
-use crate::{KeyScope, menu_chrome};
+use crate::{Hint, KeyScope, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement, KeyBinding,
-    Pixels, Render, SharedString, Subscription, Window, div, prelude::*,
+    Action, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement,
+    KeyBinding, Pixels, Render, SharedString, Subscription, Window, div, prelude::*,
 };
 
 gpui::actions!(
@@ -55,6 +55,8 @@ pub struct Dropdown {
     options: Vec<Choice>,
     selected: usize,
     open: Option<Opened>,
+    /// What the trigger's tooltip reads.
+    hint: Hint,
     focus_handle: FocusHandle,
     /// Closes the menu when focus leaves it (an outside click); installed lazily on
     /// the first render, where the window is in hand.
@@ -79,8 +81,31 @@ impl Dropdown {
                 .collect(),
             selected,
             open: None,
+            hint: Hint::default(),
             focus_handle: cx.focus_handle(),
             dismiss: None,
+        }
+    }
+
+    /// The tooltip reading `text`.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.hint = self.hint.text(text);
+        self
+    }
+
+    /// The tooltip naming keys as [`Hint::keys_for_focused`] names them.
+    pub fn keys_for_focused(mut self, action: &dyn Action) -> Self {
+        self.hint = self.hint.keys_for_focused(action);
+        self
+    }
+
+    /// Has the tooltip read `text`, for a hint that follows a state held
+    /// elsewhere.
+    pub fn set_tooltip(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        if !self.hint.reads(&text) {
+            self.hint = std::mem::take(&mut self.hint).text(text);
+            cx.notify();
         }
     }
 
@@ -185,7 +210,10 @@ impl Dropdown {
             .get(self.selected)
             .map(|choice| choice.label.clone())
             .unwrap_or_default();
-        menu_chrome::trigger(self.id.clone(), colors)
+        let trigger = menu_chrome::trigger(self.id.clone(), colors);
+        let open = |dropdown: &Self| dropdown.open.is_some();
+        (self.hint.clone())
+            .on_picker(trigger, colors.tooltip(), cx.weak_entity(), open)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 if this.open.is_some() {
                     this.close(window, cx);

@@ -1,9 +1,11 @@
-use crate::{CONTROL_HEIGHT, TextTooltip, action_label, key_text, key_text_in};
-use bviz_ui_theme::{ThemeColors, TooltipColors, label_on, level_step, luminance, mix, over};
+use crate::CONTROL_HEIGHT;
+use crate::gesture::GestureRow;
+use crate::hint::Hint;
+use bviz_ui_theme::{ThemeColors, label_on, level_step, luminance, mix, over};
 use gpui::{
-    Action, AnyView, App, ClickEvent, Div, ElementId, Entity, FocusHandle, Hsla, IntoElement,
-    KeyDownEvent, KeyUpEvent, RenderOnce, Rgba, SharedString, Stateful, Window, div, prelude::*,
-    px, relative, transparent_black,
+    Action, App, ClickEvent, Div, ElementId, Entity, FocusHandle, Hsla, IntoElement, KeyDownEvent,
+    KeyUpEvent, RenderOnce, Rgba, SharedString, Stateful, Window, div, prelude::*, px, relative,
+    transparent_black,
 };
 
 /// A compact button's line box as a multiple of its font size, tight enough that
@@ -17,34 +19,6 @@ fn is_activate(key: &str) -> bool {
 
 /// What a [`Button`] runs when it is activated.
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
-
-/// Where the keys a [`Button`]'s tooltip names are looked up.
-enum KeysIn {
-    /// The context of that focus handle.
-    Focus(FocusHandle),
-    /// No context: the keys bound to the action act on something other than
-    /// what the button acts on.
-    Nowhere,
-    /// The context focus stands in when the tooltip is shown.
-    Focused,
-}
-
-/// The action whose keys a [`Button`]'s tooltip names, and where they are
-/// looked up.
-struct Keys {
-    action: Box<dyn Action>,
-    within: KeysIn,
-}
-
-impl Keys {
-    fn text(&self, window: &Window) -> Option<SharedString> {
-        match &self.within {
-            KeysIn::Focus(focus) => key_text_in(&*self.action, focus, window),
-            KeysIn::Nowhere => None,
-            KeysIn::Focused => key_text(&*self.action, window),
-        }
-    }
-}
 
 /// A clickable button: filled with a label by default, or `.ghost().icon(..)` for
 /// an icon-only control. Add `.track_focus(handle)` to make it keyboard-focusable,
@@ -64,10 +38,7 @@ pub struct Button {
     /// whether it is on.
     disabled: bool,
     focus_handle: Option<FocusHandle>,
-    /// What the tooltip reads, where it reads other than the help label of
-    /// the action [`Button::keys_for`] names.
-    tooltip: Option<SharedString>,
-    keys: Option<Keys>,
+    hint: Hint,
     on_click: OnClick,
 }
 
@@ -85,8 +56,7 @@ impl Button {
             compact: false,
             disabled: false,
             focus_handle: None,
-            tooltip: None,
-            keys: None,
+            hint: Hint::default(),
             on_click: Box::new(on_click),
         }
     }
@@ -132,60 +102,34 @@ impl Button {
 
     /// The tooltip reading `text`.
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
-        self.tooltip = Some(text.into());
+        self.hint = self.hint.text(text);
         self
     }
 
-    /// The tooltip naming the keys that run `action` where `focus` stands, and
-    /// reading the action's help label unless [`Button::tooltip`] gives it
-    /// other text.
+    /// The tooltip naming the keys that run `action` where `focus` stands, as
+    /// [`Hint::keys_for`] names them.
     pub fn keys_for(mut self, action: &dyn Action, focus: &FocusHandle) -> Self {
-        self.keys = Some(Keys {
-            action: action.boxed_clone(),
-            within: KeysIn::Focus(focus.clone()),
-        });
+        self.hint = self.hint.keys_for(action, focus);
         self
     }
 
-    /// As [`Button::keys_for`], naming no keys where `focus` is `None`: for an
-    /// action whose keys act on what the button acts on only some of the time.
+    /// The tooltip naming keys as [`Hint::keys_in`] names them.
     pub fn keys_in(mut self, action: &dyn Action, focus: Option<&FocusHandle>) -> Self {
-        self.keys = Some(Keys {
-            action: action.boxed_clone(),
-            within: focus.map_or(KeysIn::Nowhere, |focus| KeysIn::Focus(focus.clone())),
-        });
+        self.hint = self.hint.keys_in(action, focus);
         self
     }
 
-    /// As [`Button::keys_for`], the keys looked up from wherever focus stands as
-    /// the tooltip is shown.
+    /// The tooltip naming keys as [`Hint::keys_for_focused`] names them.
     pub fn keys_for_focused(mut self, action: &dyn Action) -> Self {
-        self.keys = Some(Keys {
-            action: action.boxed_clone(),
-            within: KeysIn::Focused,
-        });
+        self.hint = self.hint.keys_for_focused(action);
         self
     }
-}
 
-/// The tooltip a button reading `text` and naming `keys` shows, if either
-/// gives it anything to read.
-fn tooltip(
-    text: Option<SharedString>,
-    keys: Option<Keys>,
-    colors: TooltipColors,
-) -> Option<impl Fn(&mut Window, &mut App) -> AnyView + 'static> {
-    if text.is_none() && keys.is_none() {
-        return None;
+    /// The tooltip naming the pointer gesture `row` lists.
+    pub fn gesture(mut self, row: GestureRow) -> Self {
+        self.hint = self.hint.gesture(row);
+        self
     }
-    Some(move |window: &mut Window, cx: &mut App| {
-        let label = text.clone().or_else(|| {
-            let action = &*keys.as_ref()?.action;
-            action_label(action, cx).map(SharedString::from)
-        });
-        let named = keys.as_ref().and_then(|keys| keys.text(window));
-        TextTooltip::view(label.unwrap_or_default(), named, colors, cx)
-    })
 }
 
 fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
@@ -408,10 +352,7 @@ impl RenderOnce for Button {
             .flex_none()
             .when(!self.disabled, |el| el.cursor_pointer());
 
-        let el = match tooltip(self.tooltip.take(), self.keys.take(), colors.tooltip()) {
-            Some(tooltip) => el.tooltip(tooltip),
-            None => el,
-        };
+        let el = std::mem::take(&mut self.hint).on(el, colors.tooltip());
         let el = styled_variant(el, &self, focused, held, ink, &colors);
         let el = match self.disabled {
             true => el,
