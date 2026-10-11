@@ -579,10 +579,12 @@ impl RenderOnce for ToolbarSeparator {
     }
 }
 
-/// The strip its controls stand in.
+/// The strip its controls stand in, all set in one text size so that every
+/// control of a row reads alike.
 fn strip(window: &mut Window, cx: &mut App) -> Div {
     let colors = bviz_ui_theme::theme(window, cx).colors;
     div()
+        .text_sm()
         .flex()
         .flex_row()
         .gap(GAP)

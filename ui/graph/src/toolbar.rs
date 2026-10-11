@@ -250,12 +250,11 @@ pub(crate) fn busy(id: &'static str, doing: &'static str, palette: &Palette) -> 
 
 const SPINNER_SIZE: Pixels = px(14.);
 
-/// A row of a strip set in the strip's label text.
+/// A row of a strip set in the strip's label colour.
 fn labelled(palette: &Palette) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
-        .text_sm()
         .text_color(palette.label)
 }
