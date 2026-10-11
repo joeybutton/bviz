@@ -131,6 +131,7 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "circle.svg" => embedded!("circle.svg"),
         "dots-three-vertical.svg" => embedded!("dots-three-vertical.svg"),
+        "list-checks.svg" => embedded!("list-checks.svg"),
         "minus.svg" => embedded!("minus.svg"),
         "pause.svg" => embedded!("pause.svg"),
         "play.svg" => embedded!("play.svg"),
@@ -140,6 +141,7 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "skip-forward.svg" => embedded!("skip-forward.svg"),
         "square.svg" => embedded!("square.svg"),
         "swatches.svg" => embedded!("swatches.svg"),
+        "timer.svg" => embedded!("timer.svg"),
         "x.svg" => embedded!("x.svg"),
         _ => return None,
     })

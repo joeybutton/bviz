@@ -104,6 +104,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .label("outcomes")
+        .icon("list-checks")
         .tooltip("Toggle build outcomes")
         .selected(view.report.is_up(report)),
     )

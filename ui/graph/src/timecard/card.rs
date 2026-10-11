@@ -71,6 +71,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
         .label("timing")
+        .icon("timer")
         .tooltip("Toggle action timing")
         .selected(view.timecard.up),
     )

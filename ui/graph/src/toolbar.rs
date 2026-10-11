@@ -12,8 +12,8 @@ pub(crate) fn height() -> Pixels {
 
 /// The panel's controls in two strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
-/// how the graph is drawn, then what it holds: the boxes menu, and the query
-/// bar ending in the legend.
+/// how the graph is drawn, ending in the toggles putting panels up and away,
+/// then what it holds.
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
@@ -27,12 +27,6 @@ pub(crate) fn toolbar(
         .child(controls.reduce_toggle)
         .child(group("colour", palette).child(controls.colour_picker))
         .child(group("mark", palette).child(marks));
-    for card in [controls.report_control, controls.timecard_control]
-        .into_iter()
-        .flatten()
-    {
-        view = view.child(card);
-    }
     // Last, past the controls that are always up, so the strip's standing shape
     // holds still as a selection comes and goes.
     if let Some(picker) = controls.relation_picker {
@@ -44,15 +38,23 @@ pub(crate) fn toolbar(
     if let Some(why) = controls.why_controls {
         view = view.child(why);
     }
-    let view = view.when(controls.relaying, |view| {
+    let mut view = view.when(controls.relaying, |view| {
         // The prior layout stays interactive while a relayout runs.
         view.trailing(busy("relaying-spinner", "laying out…", palette))
+    });
+    for panel in [controls.report_control, controls.timecard_control]
+        .into_iter()
+        .flatten()
+    {
+        view = view.trailing(panel);
+    }
+    let view = view.when_some(controls.legend, |view, legend| {
+        view.trailing(legend.toggle())
     });
     let query = Toolbar::new()
         .one_row("graph-query-bar")
         .when_some(controls.boxes, OneRow::child)
-        .child(controls.chips)
-        .when_some(controls.legend, OneRow::child);
+        .child(controls.chips);
     let strips: [OneRow; STRIPS] = [view, query];
     div().size_full().flex().flex_col().children(strips)
 }
