@@ -6,7 +6,7 @@ use crate::{
 };
 use bviz_ui_components::{
     Dropdown, Legend, MenuItem, MultiSelect, OneRow, Presentation, Priority, Switch, ToggleGroup,
-    ToggleSegment, ToolbarGroup, ToolbarSeparator, spinner,
+    ToggleSegment, ToolbarGroup, spinner,
 };
 use gpui::{
     Action, AnyElement, App, Context, Div, Entity, IntoElement, Pixels, SharedString, Window, div,
@@ -72,19 +72,20 @@ pub(crate) fn toolbar(
     let marking = Marking::of(view, cx);
     let marks = ToolbarGroup::new(
         MARK,
-        parted(group(MARK_NAME, palette).child(marking.toggles(view, cx))),
+        group(MARK_NAME, palette).child(marking.toggles(view, cx)),
     )
-    .or(parted(unnamed(marking.toggles(view, cx), palette)))
-    .or(parted(unnamed(
+    .or(unnamed(marking.toggles(view, cx), palette))
+    .or(unnamed(
         marking
             .toggles(view, cx)
             .presentation(Presentation::Collapsed),
         palette,
-    )))
+    ))
     .overflow(
         MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
         marking.set(),
-    );
+    )
+    .parted();
     let drawing = OneRow::new("graph-view-controls")
         .group(layout)
         .group(edges)
@@ -162,18 +163,14 @@ fn panel_toggles(view: &GraphPanel, legend: Legend, cx: &Context<GraphPanel>) ->
             .chain([legend])
             .collect()
     };
-    ToolbarGroup::new(PANELS, parted(row().children(toggles(true))))
-        .or(parted(row().children(toggles(false))))
+    ToolbarGroup::new(PANELS, row().children(toggles(true)))
+        .or(row().children(toggles(false)))
+        .parted()
 }
 
 /// Controls laid side by side.
 fn row() -> Div {
     div().flex().items_center().gap_2()
-}
-
-/// `controls` parted by a rule from the group before them.
-fn parted(controls: impl IntoElement) -> Div {
-    row().child(ToolbarSeparator).child(controls)
 }
 
 /// What the drawing marks, and whether the graph offers to mark its critical

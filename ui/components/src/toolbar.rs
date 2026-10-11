@@ -85,6 +85,7 @@ pub struct ToolbarGroup {
     widest: AnyElement,
     narrower: Vec<AnyElement>,
     overflow: Option<Overflow>,
+    parted: bool,
 }
 
 /// How a [`ToolbarGroup`] stands in its row's overflow menu.
@@ -103,6 +104,7 @@ impl ToolbarGroup {
             widest: widest.into_any_element(),
             narrower: Vec::new(),
             overflow: None,
+            parted: false,
         }
     }
 
@@ -118,6 +120,13 @@ impl ToolbarGroup {
     /// other than at rest, which marks the menu's trigger while it is there.
     pub fn overflow(mut self, item: MenuItem, set: bool) -> Self {
         self.overflow = Some(Overflow { item, set });
+        self
+    }
+
+    /// Parts the group by a [`ToolbarSeparator`] from the controls standing
+    /// before it, in whichever presentation it stands.
+    pub fn parted(mut self) -> Self {
+        self.parted = true;
         self
     }
 }
@@ -344,6 +353,7 @@ impl Measured {
                             .collect(),
                         priority: group.priority,
                         overflows: group.overflow.is_some(),
+                        parted: group.parted,
                     },
                     side,
                 };
@@ -489,6 +499,7 @@ impl Element for Fitting {
             overflow: (self.trigger.unmarked)
                 .layout_as_root(natural(), window, cx)
                 .width,
+            rule: RULE + GAP,
         };
         let Fitted {
             spots,
@@ -503,8 +514,20 @@ impl Element for Fitting {
             let mut laid = Vec::with_capacity(measured.len() + 2);
             for (item, spot) in measured.into_iter().zip(spots) {
                 match spot {
-                    Spot::Row { stage, x, width } => {
-                        let x = bounds.left() + x;
+                    Spot::Row {
+                        stage,
+                        x,
+                        width,
+                        ruled,
+                    } => {
+                        let mut x = bounds.left() + x;
+                        let mut width = width;
+                        if ruled {
+                            let rule = ToolbarSeparator.into_any_element();
+                            laid.push(prepaint_natural(rule, x, bounds, window, cx));
+                            x += room.rule;
+                            width -= room.rule;
+                        }
                         laid.push(item.prepaint(stage, x, width, bounds, window, cx));
                     }
                     Spot::Menu => {

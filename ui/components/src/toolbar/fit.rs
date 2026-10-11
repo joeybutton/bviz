@@ -21,6 +21,8 @@ pub(crate) enum Kind {
         /// Whether the group moves into the overflow menu once it stands at
         /// its narrowest, rather than staying until the row leaves it out.
         overflows: bool,
+        /// Whether a rule parts the group from a control standing before it.
+        parted: bool,
     },
     /// An item taking the room the groups leave, at `least` through every
     /// step of [`narrowings`] and narrower only past the last.
@@ -43,17 +45,21 @@ pub(crate) struct Room {
     /// The trigger of the overflow menu, an item of the row ending the leading
     /// ones while any group stands in the menu.
     pub overflow: Pixels,
+    /// A rule parting a group from the control before it, with the gap after
+    /// the rule.
+    pub rule: Pixels,
 }
 
 /// Where one item stands.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Spot {
     /// In the row, in its presentation at index `stage`, spanning `width` from
-    /// `x` past the row's left edge.
+    /// `x` past the row's left edge, its rule first where `ruled`.
     Row {
         stage: usize,
         x: Pixels,
         width: Pixels,
+        ruled: bool,
     },
     Menu,
     /// Out of the row and the menu: a group that cannot move into the menu,
@@ -173,8 +179,9 @@ fn narrowings(items: &[Measure]) -> Vec<Step> {
 struct Standing {
     at: usize,
     stage: usize,
-    /// Its width, a filling's at its least.
+    /// Its width, taking in its rule, a filling's at its least.
     width: Pixels,
+    ruled: bool,
     fills: bool,
     side: Side,
 }
@@ -198,8 +205,9 @@ impl State {
         !self.triggerless && self.stands.contains(&Stand::Menu)
     }
 
-    /// The items standing in the row, leading ones first.
-    fn standing(&self, items: &[Measure]) -> Vec<Standing> {
+    /// The items standing in the row, leading ones first, each ruled where it
+    /// is parted from a control standing before it.
+    fn standing(&self, items: &[Measure], room: Room) -> Vec<Standing> {
         let in_order = [Side::Leading, Side::Trailing]
             .into_iter()
             .flat_map(|side| {
@@ -211,14 +219,16 @@ impl State {
             let Stand::Shown(stage) = *stand else {
                 continue;
             };
-            let (width, fills) = match &item.kind {
-                Kind::Group { widths, .. } => (widths[stage], false),
-                Kind::Filling { least } => (*least, true),
+            let (width, parted, fills) = match &item.kind {
+                Kind::Group { widths, parted, .. } => (widths[stage], *parted, false),
+                Kind::Filling { least } => (*least, false, true),
             };
+            let ruled = parted && !standing.is_empty();
             standing.push(Standing {
                 at,
                 stage,
-                width,
+                width: if ruled { width + room.rule } else { width },
+                ruled,
                 fills,
                 side: item.side,
             });
@@ -228,7 +238,7 @@ impl State {
 
     /// The width the row lays out at, its fillings at their least.
     fn taken(&self, items: &[Measure], room: Room) -> Pixels {
-        let standing = self.standing(items);
+        let standing = self.standing(items, room);
         let trigger = self.trigger().then_some(room.overflow);
         spanned(
             standing.iter().map(|item| item.width).chain(trigger),
@@ -237,7 +247,7 @@ impl State {
     }
 
     fn lay_out(&self, items: &[Measure], room: Room) -> Fitted {
-        let standing = self.standing(items);
+        let standing = self.standing(items, room);
         let fillings = standing.iter().filter(|item| item.fills).count();
         let share = match fillings {
             0 => Pixels::ZERO,
@@ -258,6 +268,7 @@ impl State {
                 stage: item.stage,
                 x,
                 width,
+                ruled: item.ruled,
             };
             width
         };
@@ -305,12 +316,14 @@ mod tests {
 
     const GAP_WIDTH: f32 = 8.;
     const OVERFLOW_WIDTH: f32 = 28.;
+    const RULE_WIDTH: f32 = 9.;
 
     fn room(width: f32) -> Room {
         Room {
             width: px(width),
             gap: px(GAP_WIDTH),
             overflow: px(OVERFLOW_WIDTH),
+            rule: px(RULE_WIDTH),
         }
     }
 
@@ -320,6 +333,7 @@ mod tests {
                 widths: widths.iter().map(|&width| px(width)).collect(),
                 priority,
                 overflows,
+                parted: false,
             },
             side: Side::Leading,
         }
@@ -334,6 +348,13 @@ mod tests {
 
     fn trailing(mut item: Measure) -> Measure {
         item.side = Side::Trailing;
+        item
+    }
+
+    fn parted(mut item: Measure) -> Measure {
+        if let Kind::Group { parted, .. } = &mut item.kind {
+            *parted = true;
+        }
         item
     }
 
@@ -461,6 +482,25 @@ mod tests {
         assert_eq!(fitted.trigger, None);
     }
 
+    #[test]
+    fn a_rule_takes_room_only_after_a_control() {
+        let items = [group(&[50.], 1, true), parted(group(&[60.], 2, false))];
+        let whole = 50. + GAP_WIDTH + RULE_WIDTH + 60.;
+        let fitted = fit(&items, room(whole));
+        assert_eq!(
+            fitted.spots[1],
+            Spot::Row {
+                stage: 0,
+                x: px(50. + GAP_WIDTH),
+                width: px(RULE_WIDTH + 60.),
+                ruled: true,
+            }
+        );
+        let fitted = fit(&items, room(whole - 1.));
+        assert_eq!(seen(&fitted), [Menu, Shown(0)]);
+        assert!(matches!(fitted.spots[1], Spot::Row { ruled: false, .. }));
+    }
+
     /// A filling stands at its least while any group stands in the row: every
     /// group gives way first.
     #[test]
@@ -479,6 +519,7 @@ mod tests {
                 stage: 0,
                 x: Pixels::ZERO,
                 width: px(field),
+                ruled: false,
             }
         );
         assert_eq!(fitted.trigger, Some(px(field + GAP_WIDTH)));
@@ -565,6 +606,7 @@ mod tests {
                         widths,
                         priority: rng.below(MOST_PRIORITY) as Priority,
                         overflows: rng.below(3) > 0,
+                        parted: rng.below(2) == 0,
                     },
                     side: match rng.below(3) {
                         0 => Side::Trailing,
