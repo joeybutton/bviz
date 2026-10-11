@@ -8,11 +8,12 @@
 use crate::column::{Folding, line, scrolling};
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
+use crate::point::{shown_name, written_name};
 use crate::{GraphPanel, Palette, derive};
 use bviz_bazel_flags::TRANSITIONS;
-use bviz_graph_layout::facets::{ConfigRef, Sym};
+use bviz_graph_layout::facets::{ConfigRef, Sym, WrittenRepos};
 use bviz_graph_layout::paths::{self, Paths};
-use bviz_graph_layout::select::labels::{carried_label, package_label};
+use bviz_graph_layout::select::labels::package_label;
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
 use bviz_ui_components::{
@@ -85,7 +86,8 @@ struct Named {
     id: Id,
     target: SharedString,
     package: Option<SharedString>,
-    label: SharedString,
+    /// The label as a command line takes it, which the hover reads.
+    written: SharedString,
     config: Option<Config>,
 }
 
@@ -112,18 +114,18 @@ enum Answer {
 /// How the card names `id`: by the label of the target it belongs to, and the
 /// configuration it is built in where it states one, which tells the configured
 /// targets of one label apart. A package box is named whole by its path.
-fn name(names: &Names, facets: &Facets, id: Id) -> Named {
-    if let Some(package) = package_label(names, id) {
-        let package = SharedString::from(package);
+fn name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> Named {
+    let label = shown_name(names, facets, repos, id);
+    let written = written_name(names, facets, repos, id).into();
+    if package_label(names, id).is_some() {
         return Named {
             id,
-            target: package.clone(),
+            target: label.into(),
             package: None,
-            label: package,
+            written,
             config: None,
         };
     }
-    let label = carried_label(names, facets, id).unwrap_or_else(|| names.resolve(id));
     let config = facets.config(id).map(|config| Config {
         handle: config,
         mnemonic: facets
@@ -134,13 +136,13 @@ fn name(names: &Names, facets: &Facets, id: Id) -> Named {
     });
     let (package, target) = match label.rsplit_once(':') {
         Some((package, target)) => (Some(package), format!(":{target}")),
-        None => (None, label.to_string()),
+        None => (None, label.clone()),
     };
     Named {
         id,
         target: target.into(),
         package: package.map(|package| package.to_string().into()),
-        label: label.to_string().into(),
+        written,
         config,
     }
 }
@@ -200,16 +202,17 @@ impl Spelling {
         }
     }
 
-    /// `named`'s full label, with its configuration's whole checksum.
+    /// `named`'s label as a command line takes it, with its configuration's
+    /// whole checksum.
     fn full(&self, named: &Named) -> SharedString {
         match &named.config {
             Some(Config {
                 mnemonic: Some(mnemonic),
                 checksum,
                 ..
-            }) => format!("{} ({mnemonic}, {checksum})", named.label).into(),
-            Some(Config { checksum, .. }) => format!("{} ({checksum})", named.label).into(),
-            None => named.label.clone(),
+            }) => format!("{} ({mnemonic}, {checksum})", named.written).into(),
+            Some(Config { checksum, .. }) => format!("{} ({checksum})", named.written).into(),
+            None => named.written.clone(),
         }
     }
 }
@@ -370,14 +373,16 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
     let Some(shared) = view.model.read(cx).loaded().map(|l| &l.shared) else {
         return;
     };
-    let (base, names, facets) = (
+    let (base, names, facets, labels) = (
         Arc::clone(&shared.base),
         Arc::clone(&shared.names),
         Arc::clone(&shared.facets),
+        Arc::clone(&shared.labels),
     );
+    let repos = labels.repos();
     let question = Question {
-        dependency: name(&names, &facets, dependency),
-        dependent: dependent.map(|dependent| name(&names, &facets, dependent)),
+        dependency: name(&names, &facets, repos, dependency),
+        dependent: dependent.map(|dependent| name(&names, &facets, repos, dependent)),
         switched_from: view
             .why
             .asked
@@ -399,7 +404,7 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
                     .shortest
                     .iter()
                     .rev()
-                    .map(|&id| name(&names, &facets, id))
+                    .map(|&id| name(&names, &facets, labels.repos(), id))
                     .collect();
                 let nodes = between.paths.nodes.len();
                 Some((between.paths, Answer::Between { nodes, shortest }))
@@ -706,7 +711,7 @@ mod tests {
         facets.set_label(configured, target);
         let config = facets.intern_config(checksum, Some(mnemonic), Tri::No);
         facets.set_config(configured, Some(config));
-        name(names, facets, configured)
+        name(names, facets, &WrittenRepos::default(), configured)
     }
 
     #[test]
@@ -725,7 +730,7 @@ mod tests {
         );
 
         let action = names.intern("action7");
-        let unlabelled = name(&names, &facets, action);
+        let unlabelled = name(&names, &facets, &WrittenRepos::default(), action);
         assert_eq!(
             (spelling.name(&unlabelled).as_ref(), unlabelled.package),
             ("action7", None)
@@ -736,7 +741,7 @@ mod tests {
     fn a_package_is_named_whole_by_its_path() {
         let (mut names, facets) = (Names::default(), Facets::default());
         let package = names.intern("pkg:ui/components");
-        let named = name(&names, &facets, package);
+        let named = name(&names, &facets, &WrittenRepos::default(), package);
         let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), "//ui/components");
         assert_eq!(named.package, None);
@@ -867,7 +872,10 @@ mod tests {
             node("app", "a", "fastbuild", "", None),
             node("tool", "b", "opt", &long, Some("//:wrap")),
         );
-        let (app, tool) = (name(&names, &facets, app), name(&names, &facets, tool));
+        let (app, tool) = (
+            name(&names, &facets, &WrittenRepos::default(), app),
+            name(&names, &facets, &WrittenRepos::default(), tool),
+        );
 
         assert_eq!(
             crossing(&facets, Transition::Flag, &tool, &app),

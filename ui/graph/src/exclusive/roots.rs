@@ -4,7 +4,7 @@
 use super::{ExclusivePanel, LeaveRoots, RootedBy};
 use crate::Palette;
 use crate::model::{GraphModel, Prepared};
-use crate::point::{point_label, unit_names};
+use crate::point::{unit_names, written_name};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
@@ -121,7 +121,10 @@ pub(super) fn find(
     } = set.resolve(index)?;
     let mut notices: Vec<String> = Vec::new();
     let shared = targets.shared();
-    let left_out = left_out.iter().map(|&id| point_label(id, shared));
+    let repos = shared.labels.repos();
+    let left_out = left_out
+        .iter()
+        .map(|&id| written_name(&shared.names, &shared.facets, repos, id));
     notices.extend(manual_left_out(left_out.collect()));
     notices.extend(manual_untold(&set, index.tags()).map(str::to_owned));
     let (base, facets) = (&shared.base, &shared.facets);

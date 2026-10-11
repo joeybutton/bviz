@@ -60,7 +60,7 @@ pub fn build_joint(
     let (facets, capabilities) = facets.seal();
     let (mut graph, names, facets, provenance) =
         canonicalize(merge(graphs, names.len()), &names, facets);
-    label::show_written_repositories(&mut graph, &facets);
+    label::show_repositories(&mut graph, &facets);
     Joint {
         graph,
         names,

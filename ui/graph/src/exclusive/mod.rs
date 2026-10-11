@@ -16,7 +16,8 @@ use crate::history::History;
 use crate::hue::{Colouring, Hue};
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
-    KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
+    KindNames, built_for_tool, configuration, identify, target_label, unit_names,
+    written_target_label,
 };
 use crate::unit_picker::{CyclePoints, UnitPicker};
 use bviz_graph_layout::Id;
@@ -906,7 +907,7 @@ impl ExclusivePanel {
         };
         let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
         let offers = self.offers(holds, cx);
-        let label = |node: u32| point_label(tree.id(node), shared);
+        let written = |node: u32| written_target_label(tree.id(node), shared);
         let panel = cx.weak_entity();
         let deed = |deed: Deed| {
             let (panel, tree) = (panel.clone(), Arc::clone(tree));
@@ -920,27 +921,27 @@ impl ExclusivePanel {
         let keys_in = Some(&self.focus_handle);
         let action =
             |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
-        let items = offers.into_iter().map(|offer| match offer {
-            Offer::Focus => action(&FocusSelected, deed(Deed::Click(holds))),
-            Offer::Up => action(&FocusUp, deed(Deed::Click(holds))),
+        let items = offers.into_iter().filter_map(|offer| match offer {
+            Offer::Focus => Some(action(&FocusSelected, deed(Deed::Click(holds)))),
+            Offer::Up => Some(action(&FocusUp, deed(Deed::Click(holds)))),
             Offer::Show { node, can } => {
                 let item = action(&ShowSelected, deed(Deed::Reveal(node)));
-                if can { item } else { item.disabled() }
+                Some(if can { item } else { item.disabled() })
             }
             Offer::Root { node, caveat } => {
-                let label = label(node);
+                let label = written(node)?;
                 let explained = caveat.map(Caveat::explain);
                 let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
-                match explained {
+                Some(match explained {
                     Some(explained) => item.tooltip(explained),
                     None => item,
-                }
+                })
             }
             Offer::CopyLabel { node } => {
-                let label = label(node);
-                MenuItem::new("Copy label", move |_, cx| {
+                let label = written(node)?;
+                Some(MenuItem::new("Copy label", move |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
-                })
+                }))
             }
         });
         items.collect()

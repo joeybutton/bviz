@@ -2,7 +2,11 @@
 //! it is matched by.
 
 use crate::model::Shared;
-use crate::point::{configuration_readings, mnemonic, primary_output, target_label};
+use crate::point::{
+    configuration_readings, mnemonic, primary_output, target_label, written_target_label,
+};
+use bviz_graph_layout::select::labels::package_label;
+use bviz_graph_layout::shown::Shown;
 use bviz_graph_layout::{Id, Kind};
 use std::ops::Range;
 
@@ -73,7 +77,8 @@ impl Scope {
 pub(crate) struct Candidate {
     pub(crate) id: Id,
     pub(crate) kind: Kind,
-    /// What a query is matched against, which is also how the row reads.
+    /// What a query is matched against, as a reader writes it; the row reads
+    /// it as it is shown.
     pub(crate) text: Box<str>,
     /// The chars of `text` that are no part of the node's own name: the
     /// package path leading up to a label's name, and the directories of an
@@ -161,22 +166,24 @@ fn path(text: &str, kind: Kind) -> Range<u32> {
     start..end
 }
 
-/// What the node `id` of `kind` is matched by and read as.
+/// What the node `id` of `kind` is matched by, as a reader writes it.
 pub(crate) fn node_text(shared: &Shared, id: Id, kind: Kind) -> String {
     match kind {
-        Kind::Package => package_path(shared, id),
+        Kind::Package => {
+            package_path(shared, id).unwrap_or_else(|| node_label(shared, id).to_owned())
+        }
         Kind::Action => match primary_output(id, shared) {
             Some(output) => format!("{} {output}", mnemonic(id, shared)),
             None => mnemonic(id, shared).to_owned(),
         },
         Kind::Source | Kind::Artifact if !labelled(shared, id) => {
             let file = node_label(shared, id);
-            match target_label(id, shared) {
+            match written_target_label(id, shared) {
                 Some(owner) => format!("{}/{file}", package_of(&owner)),
                 None => file.to_owned(),
             }
         }
-        _ => target_label(id, shared).unwrap_or_else(|| node_label(shared, id).to_owned()),
+        _ => written_target_label(id, shared).unwrap_or_else(|| node_label(shared, id).to_owned()),
     }
 }
 
@@ -201,25 +208,10 @@ pub(crate) fn package_of(label: &str) -> &str {
     label.split_once(':').map_or(label, |(package, _)| package)
 }
 
-/// The whole path of the package box `id`. A box is captioned relative to the
-/// box holding it, and only an outermost one with its repository, so the path
-/// joins the captions from the outermost box in.
-fn package_path(shared: &Shared, id: Id) -> String {
-    let nodes = &shared.base.nodes;
-    let mut chain: Vec<&str> = Vec::new();
-    let mut at = Some(id);
-    while let Some(node) = at.and_then(|id| nodes.get(id.0 as usize)) {
-        chain.push(&node.label);
-        at = node.parent.filter(|_| node.kind == Kind::Package);
-    }
-    let mut path = String::with_capacity(chain.iter().map(|part| part.len() + 1).sum());
-    for part in chain.into_iter().rev() {
-        if !path.is_empty() && !path.ends_with('/') {
-            path.push('/');
-        }
-        path.push_str(part);
-    }
-    path
+/// The whole path of the package box `id`, as a reader writes it.
+fn package_path(shared: &Shared, id: Id) -> Option<String> {
+    let path = package_label(&shared.names, id)?;
+    Some(shared.labels.written(&path).into_owned())
 }
 
 /// What holds the node `id` of `kind`, where its [text](node_text) does not
@@ -229,12 +221,26 @@ pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
     match kind {
         Kind::Package => {
             let parent = shared.base.nodes.get(id.0 as usize)?.parent?;
-            Some(package_path(shared, parent))
+            Some(shown(shared, &package_path(shared, parent)?))
         }
         Kind::Action => target_label(id, shared),
         Kind::Source | Kind::Artifact if !labelled(shared, id) => target_label(id, shared),
         _ => None,
     }
+}
+
+/// How the row offering `candidate` reads its text: as the graph shows it,
+/// with the chars of that leading up to the node's own name.
+pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Range<u32>) {
+    let shown = shared.labels.repos().show(&candidate.text);
+    let path = path(shown.text(), candidate.kind);
+    (shown, path)
+}
+
+/// `written`, a label or package path as a reader writes it, as the graph
+/// shows it.
+fn shown(shared: &Shared, written: &str) -> String {
+    shared.labels.repos().show(written).into_text()
 }
 
 /// The short name of the configuration the node a row offers is built in.

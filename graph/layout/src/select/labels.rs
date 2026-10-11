@@ -65,6 +65,11 @@ impl LabelIndex {
         self.repos.written_label(label)
     }
 
+    /// The canonical label `label` as it is shown.
+    pub fn shown(&self, label: &str) -> String {
+        self.repos.shown_label(label)
+    }
+
     /// The names the graph's repositories are written by.
     pub fn repos(&self) -> &WrittenRepos {
         &self.repos

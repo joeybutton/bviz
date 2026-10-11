@@ -461,14 +461,14 @@ fn repo_prefix(repo: &str) -> String {
     }
 }
 
-/// Rewrites the boxes that name a repository to name it the way a reader writes
-/// it, which only the outermost box of each repository does.
+/// Rewrites the boxes that name a repository to name it as it is shown, which
+/// only the outermost box of each repository does.
 ///
 /// A box's label is the text the layout measures and the drawing shows, so the
 /// name a reader reads stands in the label itself; and it can only be written
 /// once every input has been read, since which name a repository is reached by
 /// is whatever one of them printed.
-pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
+pub(crate) fn show_repositories(graph: &mut Graph, facets: &Facets) {
     let written = WrittenRepos::of(facets);
     for node in &mut graph.nodes {
         if node.kind != Kind::Package || node.parent.is_some() {
@@ -478,7 +478,7 @@ pub(crate) fn show_written_repositories(graph: &mut Graph, facets: &Facets) {
             continue;
         };
         if let Some((_, path)) = node.label.split_once("//") {
-            node.label = format!("{}{path}", repo_prefix(written.written(repo)));
+            node.label = format!("{}{path}", repo_prefix(&written.shown(repo)));
         }
     }
 }
@@ -683,15 +683,17 @@ mod tests {
     /// part of it: the boxes nested below read their own path component, and a
     /// repository a reader has no other name for keeps its canonical one.
     #[test]
-    fn the_box_naming_a_repository_reads_it_the_way_a_reader_writes_it() {
+    fn the_box_naming_a_repository_reads_it_as_it_is_shown() {
         let (mut graph, _, names, facets) = build_facets(&[
             ("@@rules_foo+", "bar/baz"),
             ("@@rules_foo+", "bar/qux"),
             ("@@rules_foo++ext+gen", "a"),
+            ("@@rules_bar++ext+gen", "a"),
+            ("@@llvm++llvm+llvm-project", "llvm"),
             ("", "a"),
         ]);
 
-        show_written_repositories(&mut graph, &facets);
+        show_repositories(&mut graph, &facets);
 
         let label = |id: &str| node(&graph, &names, id).label.clone();
         assert_eq!(label("pkg:@@rules_foo+//bar"), "@rules_foo//bar");
@@ -699,6 +701,10 @@ mod tests {
         assert_eq!(
             label("pkg:@@rules_foo++ext+gen//a"),
             "@@rules_foo++ext+gen//a"
+        );
+        assert_eq!(
+            label("pkg:@@llvm++llvm+llvm-project//llvm"),
+            "@llvm-project//llvm"
         );
         assert_eq!(label("pkg:a"), "//a");
     }

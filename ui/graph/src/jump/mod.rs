@@ -734,18 +734,22 @@ fn listed(
             }
         });
     })
-    .child(
-        TruncatingLabel::new("text", candidate.text.to_string())
-            .highlights(fuzzy::highlights(
-                &candidate.text,
-                &candidate.path,
-                &row.matched,
-                colors.text_muted,
-                palette.highlight.into(),
-            ))
+    .child({
+        let (shown, path) = index::reading(shared, candidate);
+        let matched: Vec<u32> = row.matched.iter().filter_map(|&at| shown.at(at)).collect();
+        let text = shown.into_text();
+        let highlights = fuzzy::highlights(
+            &text,
+            &path,
+            &matched,
+            colors.text_muted,
+            palette.highlight.into(),
+        );
+        TruncatingLabel::new("text", text)
+            .highlights(highlights)
             .flex_grow_1()
-            .text_ellipsis_start(),
-    )
+            .text_ellipsis_start()
+    })
     .children(
         index::container(shared, candidate.id, candidate.kind).map(|container| {
             TruncatingLabel::new("container", container)

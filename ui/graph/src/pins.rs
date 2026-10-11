@@ -7,8 +7,9 @@
 //! leave.
 
 use crate::column::scrolling;
+use crate::point::shown_name;
 use crate::{GraphPanel, Palette, derive};
-use bviz_graph_layout::select::labels::carried_label;
+use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::gesture::{
@@ -114,15 +115,6 @@ fn unpinned(filter: &Filter, node: Id) -> Filter {
     }
 }
 
-/// The name `node` is listed under: the canonical label of the target it
-/// belongs to, and its node name where it belongs to none.
-pub(crate) fn name(names: &Names, facets: &Facets, node: Id) -> SharedString {
-    carried_label(names, facets, node)
-        .unwrap_or_else(|| names.resolve(node))
-        .to_string()
-        .into()
-}
-
 /// `filter` with every override dropped, leaving each node to the rules again.
 pub(crate) fn cleared(filter: &Filter) -> Filter {
     Filter {
@@ -153,11 +145,11 @@ struct Held {
 }
 
 /// The overrides `filter` holds, by the name each is listed under.
-fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
+fn held(filter: &Filter, names: &Names, facets: &Facets, repos: &WrittenRepos) -> Vec<Held> {
     let mut held: Vec<Held> = Vec::with_capacity(filter.pins.len());
     held.extend(filter.pins.iter().map(|(&node, &pin)| Held {
         node,
-        label: name(names, facets, node),
+        label: shown_name(names, facets, repos, node).into(),
         pin,
     }));
     held.sort_by(|one, other| (&one.label, one.node.0).cmp(&(&other.label, other.node.0)));
@@ -200,6 +192,7 @@ pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPane
         view.derived.filter(),
         &loaded.shared.names,
         &loaded.shared.facets,
+        loaded.shared.labels.repos(),
     );
     if held.is_empty() {
         return None;
@@ -477,10 +470,15 @@ mod tests {
             Visibility::Hidden,
         );
 
-        let listed: Vec<(String, Pin)> = held(&filter, &fixture.names, &fixture.facets)
-            .into_iter()
-            .map(|held| (held.label.to_string(), held.pin))
-            .collect();
+        let listed: Vec<(String, Pin)> = held(
+            &filter,
+            &fixture.names,
+            &fixture.facets,
+            &WrittenRepos::default(),
+        )
+        .into_iter()
+        .map(|held| (held.label.to_string(), held.pin))
+        .collect();
 
         assert_eq!(
             listed,

@@ -31,6 +31,7 @@ mod reach;
 pub mod reduce;
 pub mod repo;
 pub mod select;
+pub mod shown;
 mod sketch;
 pub mod streamed_proto;
 pub mod target_pattern;

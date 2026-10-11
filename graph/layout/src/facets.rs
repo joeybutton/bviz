@@ -18,6 +18,7 @@ use crate::exec_path::{ExecPath, ExecPaths, ExecPathsBuilder, LeftOutInputs};
 use crate::intern::Id;
 use crate::label;
 use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
+use crate::shown::Shown;
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
 /// off one, so the handle is never zero and `Option<Sym>` is as wide as `Sym`
@@ -828,8 +829,8 @@ impl Facets {
 }
 
 /// The repository part a reader writes each of one graph's repositories by,
-/// sigil and all, which is both the name drawn for it and the name a pattern
-/// reaches it by.
+/// sigil and all, which is the name a pattern reaches it by, and the part it
+/// is shown by, which may be shorter.
 ///
 /// A repository is written by the name of the module whose repository it is,
 /// since `@rules_foo` is how that repository is written before a repository
@@ -843,12 +844,17 @@ pub struct WrittenRepos {
     /// The name each repository is written by, at the position its [`RepoRef`]
     /// names.
     written: Vec<String>,
-    /// The canonical name an apparent name written here stands for, which is
-    /// the name labels carry.
+    /// The canonical name an apparent name written or shown here stands for,
+    /// which is the name labels carry.
     canonical: HashMap<String, String>,
     /// The name written for the repository part a label carries, sigil and all,
     /// where the two read differently.
     rewritten: HashMap<String, String>,
+    /// How many chars after its leading `@` the repository part written as
+    /// the key leaves out where it is shown, which only one written by its
+    /// canonical name does, and only where what is left tells it apart from
+    /// every other repository.
+    shortened: HashMap<String, u32>,
 }
 
 impl WrittenRepos {
@@ -863,6 +869,7 @@ impl WrittenRepos {
             written: Vec::with_capacity(facets.repos().len()),
             canonical: HashMap::new(),
             rewritten: HashMap::new(),
+            shortened: HashMap::new(),
         };
         let resolve = |name: Sym| facets.strings().resolve(name);
         for (_, entry) in facets.repos() {
@@ -887,6 +894,14 @@ impl WrittenRepos {
                     canonical => format!("@@{canonical}"),
                 },
             });
+        }
+        repos.shortened = shortened(&repos.written);
+        // A name shown for a repository reaches it as its written name does,
+        // the name being one no other repository reads alike.
+        for (written, &dropped) in &repos.shortened {
+            let shown = Shown::dropping(written, 1..1 + dropped).into_text();
+            let canonical = written.trim_start_matches('@').to_owned();
+            repos.canonical.insert(shown[1..].to_owned(), canonical);
         }
         repos
     }
@@ -913,6 +928,64 @@ impl WrittenRepos {
             None => Cow::Borrowed(label),
         }
     }
+
+    /// The name `repo` is shown by: the name it is written by, or where that
+    /// is a canonical name, the shorter one [`shortened`] finds for it.
+    pub fn shown(&self, repo: RepoRef) -> Cow<'_, str> {
+        let written = self.written(repo);
+        match self.dropped(written) {
+            Some(dropped) => Cow::Owned(Shown::dropping(written, dropped).into_text()),
+            None => Cow::Borrowed(written),
+        }
+    }
+
+    /// The canonical label `label` as it is shown. What is shown is for
+    /// reading only; the written label is what a pattern or a command line
+    /// takes.
+    pub fn shown_label(&self, label: &str) -> String {
+        self.show(&self.written_label(label)).into_text()
+    }
+
+    /// `written`, a label or a package path as a reader writes it, as it is
+    /// shown: by the name its repository is shown by.
+    pub fn show(&self, written: &str) -> Shown {
+        let repo = written.split_once("//").map(|(repo, _)| repo);
+        match repo.and_then(|repo| self.dropped(repo)) {
+            Some(dropped) => Shown::dropping(written, dropped),
+            None => Shown::whole(written),
+        }
+    }
+
+    /// The chars the repository part written `repo` leaves out where it is
+    /// shown, where it leaves any out.
+    fn dropped(&self, repo: &str) -> Option<std::ops::Range<u32>> {
+        let &dropped = self.shortened.get(repo)?;
+        Some(1..1 + dropped)
+    }
+}
+
+/// How many chars after its leading `@` each repository written by its
+/// canonical name in `written` leaves out to be shown as `@` and the name the
+/// module extension that generated it gave it, where neither another such
+/// repository nor any repository written otherwise would read alike. Keyed by
+/// the written name.
+fn shortened(written: &[String]) -> HashMap<String, u32> {
+    let given = |written: &str| {
+        let canonical = written.strip_prefix("@@")?;
+        let given = repo::extension_given_name(canonical)?;
+        Some(format!("@{given}"))
+    };
+    let mut claims: HashMap<String, usize> = HashMap::with_capacity(written.len());
+    for name in written {
+        let reads = given(name).unwrap_or_else(|| name.clone());
+        *claims.entry(reads).or_default() += 1;
+    }
+    let chars = |name: &str| name.chars().count() as u32;
+    let shortened = written.iter().filter_map(|name| {
+        let shown = given(name).filter(|shown| claims[shown] == 1)?;
+        Some((name.clone(), chars(name) - chars(&shown)))
+    });
+    shortened.collect()
 }
 
 /// The name a repository is written by short of a canonical one: the module
@@ -1470,6 +1543,47 @@ mod tests {
             "@crates//serde:lib"
         );
         assert_eq!(written.written_label("action7"), "action7");
+    }
+
+    /// A repository a module extension generated is shown by the name the
+    /// extension gave it wherever no other repository would read alike, and
+    /// is still written by its canonical name, which is what a command line
+    /// reaches it by.
+    #[test]
+    fn an_extension_s_repository_is_shown_by_its_given_name_where_that_is_unambiguous() {
+        let mut facets = Facets::default();
+        let main = facets.intern_repo("");
+        let module = facets.intern_repo("rules_foo+");
+        let unique = facets.intern_repo("llvm++llvm+llvm-project");
+        let twin = facets.intern_repo("rules_a++ext+tools");
+        let other_twin = facets.intern_repo("rules_b++ext+tools");
+        let shadowed = facets.intern_repo("rules_c++ext+crates");
+        let named_apparently = facets.intern_apparent_repo("crates");
+
+        let written = WrittenRepos::of(&facets);
+
+        assert_eq!(written.shown(main), "");
+        assert_eq!(written.shown(module), "@rules_foo");
+        assert_eq!(written.shown(unique), "@llvm-project");
+        assert_eq!(written.written(unique), "@@llvm++llvm+llvm-project");
+        assert_eq!(written.shown(twin), "@@rules_a++ext+tools");
+        assert_eq!(written.shown(other_twin), "@@rules_b++ext+tools");
+        assert_eq!(written.shown(shadowed), "@@rules_c++ext+crates");
+        assert_eq!(written.shown(named_apparently), "@crates");
+        assert_eq!(
+            written.canonical("llvm-project"),
+            Some("llvm++llvm+llvm-project")
+        );
+        assert_eq!(written.canonical("tools"), None);
+        assert_eq!(
+            written.shown_label("@@llvm++llvm+llvm-project//llvm:Support"),
+            "@llvm-project//llvm:Support"
+        );
+        assert_eq!(
+            written.shown_label("@@rules_foo+//bar:lib"),
+            "@rules_foo//bar:lib"
+        );
+        assert_eq!(written.shown_label("//foo:app"), "//foo:app");
     }
 
     /// A name two repositories would be written by says which of them a reader

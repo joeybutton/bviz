@@ -5,6 +5,7 @@ use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
+use crate::point::point_label;
 use crate::rules;
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
@@ -304,7 +305,8 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
         return None;
     };
     let loaded = view.model.read(cx).loaded()?;
-    let name = pins::name(&loaded.shared.names, &loaded.shared.facets, node);
+    let shared = &loaded.shared;
+    let name = point_label(node, shared);
     Some(
         div()
             .w_full()
