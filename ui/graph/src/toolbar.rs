@@ -1,4 +1,4 @@
-use crate::{Controls, GraphPanel, Palette, ToggleNeighborhood};
+use crate::{Controls, GraphPanel, Palette, ToggleCriticalPath, ToggleNeighborhood};
 use bviz_ui_components::{
     OneRow, Switch, ToggleGroup, ToggleSegment, Toolbar, ToolbarSeparator, spinner,
 };
@@ -69,7 +69,7 @@ fn marks(controls: &Controls, focus: &FocusHandle, cx: &Context<GraphPanel>) -> 
     );
     let critical_path = controls.critical_path.map(|enabled| {
         Switch::new(
-            ToggleSegment::new("critical path").tooltip("Toggle critical path"),
+            ToggleSegment::new("critical path").keys_for(&ToggleCriticalPath, focus),
             enabled,
             move |_, _, cx| panel.update(cx, |view, cx| view.toggle_critical_path(cx)),
         )

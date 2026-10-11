@@ -4,7 +4,7 @@ use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
-use crate::{GraphPanel, Palette};
+use crate::{GraphPanel, Palette, ToggleTiming};
 use bviz_graph_layout::Id;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
@@ -56,9 +56,12 @@ fn timed<'a>(view: &GraphPanel, cx: &'a App) -> Option<&'a Loaded> {
     (!loaded.timecard().is_empty()).then_some(loaded)
 }
 
-fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.timecard.up = !view.timecard.up;
-    cx.notify();
+/// Puts the card up or away, where a profile records an action for it to read.
+pub(crate) fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if timed(view, cx).is_some() {
+        view.timecard.up = !view.timecard.up;
+        cx.notify();
+    }
 }
 
 /// The toolbar's control putting the card up and away; `None` where no
@@ -72,7 +75,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
         )
         .label("timing")
         .icon("timer")
-        .tooltip("Toggle action timing")
+        .keys_for(&ToggleTiming, &view.focus_handle)
         .selected(view.timecard.up),
     )
 }

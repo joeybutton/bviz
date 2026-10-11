@@ -103,6 +103,12 @@ actions!(
         ToggleNeighborhood,
         /// Toggle transitive reduction
         ToggleReduce,
+        /// Toggle critical path
+        ToggleCriticalPath,
+        /// Toggle build outcomes
+        ToggleOutcomes,
+        /// Toggle action timing
+        ToggleTiming,
         /// Dismiss card, selection or paths
         Dismiss,
         /// Go back
@@ -152,6 +158,9 @@ fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
+        KeyBinding::new("p", ToggleCriticalPath, unless_typing),
+        KeyBinding::new("o", ToggleOutcomes, unless_typing),
+        KeyBinding::new("t", ToggleTiming, unless_typing),
         KeyBinding::new("escape", Dismiss, unless_typing),
         KeyBinding::new("0", ShowWholeGraph, unless_typing),
         KeyBinding::new("shift-f10", OpenBoxMenu, unless_typing),
@@ -742,11 +751,7 @@ impl GraphPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         let legend = self.legend(palette, cx);
-        let traced = self
-            .model
-            .read(cx)
-            .loaded()
-            .is_some_and(|loaded| loaded.critical().any());
+        let traced = self.traced(cx);
         let controls = Controls {
             chips: chips::bar(self, palette, window, cx),
             layout_picker: mode::control(self).into_any_element(),
@@ -1048,9 +1053,20 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
+    /// Whether the invocation's critical path lands on the graph, which is
+    /// where its halo has anything to draw.
+    fn traced(&self, cx: &App) -> bool {
+        self.model
+            .read(cx)
+            .loaded()
+            .is_some_and(|loaded| loaded.critical().any())
+    }
+
     fn toggle_critical_path(&mut self, cx: &mut Context<Self>) {
-        self.critical_path_enabled = !self.critical_path_enabled;
-        self.invalidate_canvas(cx);
+        if self.traced(cx) {
+            self.critical_path_enabled = !self.critical_path_enabled;
+            self.invalidate_canvas(cx);
+        }
     }
 
     /// Widens or narrows what the selected box marks.
@@ -1140,6 +1156,11 @@ impl Render for GraphPanel {
             .on_action(
                 cx.listener(|view, _: &ToggleReduce, _, cx| mode::toggle_reduction(view, cx)),
             )
+            .on_action(
+                cx.listener(|view, _: &ToggleCriticalPath, _, cx| view.toggle_critical_path(cx)),
+            )
+            .on_action(cx.listener(|view, _: &ToggleOutcomes, _, cx| report::toggle(view, cx)))
+            .on_action(cx.listener(|view, _: &ToggleTiming, _, cx| timecard::toggle(view, cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
@@ -1506,9 +1527,13 @@ mod tests {
     fn the_panels_letters_stand_down_in_any_text_field() {
         assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
         assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
+        assert!(is(dispatched("p", IN_PANEL), ToggleCriticalPath));
+        assert!(is(dispatched("o", IN_PANEL), ToggleOutcomes));
+        assert!(is(dispatched("t", IN_PANEL), ToggleTiming));
         for field in [IN_CHIP_FIELD, IN_FIELD] {
-            assert!(dispatched("h", field).is_none());
-            assert!(dispatched("r", field).is_none());
+            for letter in ["h", "r", "p", "o", "t"] {
+                assert!(dispatched(letter, field).is_none(), "{letter}");
+            }
         }
     }
 
@@ -1738,6 +1763,21 @@ mod tests {
         ));
         assert!(dispatched("secondary-z", IN_PANEL).is_none());
         assert!(dispatched("secondary-shift-c", IN_FIELD).is_none());
+    }
+
+    /// No keystroke is bound twice under one predicate, where the later
+    /// binding would silently take the key from the earlier.
+    #[test]
+    fn no_key_is_bound_twice_in_one_context() {
+        let mut seen = std::collections::HashSet::new();
+        for binding in bindings() {
+            let keys: Vec<String> = binding.keystrokes().iter().map(|k| k.to_string()).collect();
+            let predicate = binding.predicate().map(|p| p.to_string());
+            assert!(
+                seen.insert((keys.clone(), predicate.clone())),
+                "{keys:?} bound twice under {predicate:?}"
+            );
+        }
     }
 
     /// Each key reaching the query bar from the panel and from within the bar

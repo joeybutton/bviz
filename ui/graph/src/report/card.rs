@@ -4,7 +4,7 @@ use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::status::{Status, Statuses};
-use crate::{GraphPanel, Palette, why};
+use crate::{GraphPanel, Palette, ToggleOutcomes, why};
 use bviz_graph_layout::Id;
 use bviz_invocation::Configurations;
 use bviz_ui_components::gesture::{
@@ -87,7 +87,8 @@ impl<'a> Reported<'a> {
     }
 }
 
-fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+/// Puts the card up or away, where the build reported anything for it to read.
+pub(crate) fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if let Some(reported) = Reported::of(view, cx) {
         view.report.toggle(reported.report());
         cx.notify();
@@ -105,7 +106,7 @@ pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<But
         )
         .label("outcomes")
         .icon("list-checks")
-        .tooltip("Toggle build outcomes")
+        .keys_for(&ToggleOutcomes, &view.focus_handle)
         .selected(view.report.is_up(report)),
     )
 }
