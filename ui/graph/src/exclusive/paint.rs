@@ -10,7 +10,9 @@ use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
 use crate::model::Shared;
 use crate::paint::UNMARKED_FADE;
-use crate::point::{configuration_readings, mnemonic, point_label, primary_output, unit_names};
+use crate::point::{
+    KindNames, configuration_readings, mnemonic, point_label, primary_output, unit_names,
+};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::Unit;
@@ -286,7 +288,8 @@ fn paint_cell(
     let name = match (on_top, cell.holds) {
         _ if cell.rect.size.width < LABEL_MIN_WIDTH => CellName::default(),
         (true, Holds::Rest(run)) => {
-            CellName::plain(run_name(&scene.tree, &scene.shared, scene.by, run))
+            let names = unit_names(scene.tree.scope().unit());
+            CellName::plain(run_on_top(run.count(), run.weight(), &names))
         }
         (_, Holds::Rest(run)) => {
             let (room, font_size) = style.label_room(rect);
@@ -381,7 +384,7 @@ const CARET_GAP: f32 = 2.0;
 
 /// What the row gathering `count` hidden ancestors reads, ahead of its caret.
 pub(crate) fn hidden_name(count: u32) -> String {
-    format!("{ELLIPSIS} {count} more")
+    format!("{ELLIPSIS} {}", more(count))
 }
 
 /// The ink of a notch on a cell drawn in `fill` over `background`: the ink a
@@ -472,7 +475,7 @@ fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> 
             format!("{name} · {count}")
         }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
-        Holds::Rest(run) => format!("{} more", run.count()),
+        Holds::Rest(run) => more(run.count()),
     }
 }
 
@@ -529,31 +532,44 @@ pub(crate) fn hints_among(
         .collect()
 }
 
-/// Between a name and what tells it apart from others reading alike.
-pub(crate) const HINT_SEPARATOR: &str = " · ";
+/// Between the parts a cell's name reads: a name and what tells it apart
+/// from others reading alike, or a count and what it weighs.
+pub(crate) const PART_SEPARATOR: &str = " · ";
 
-/// What a run of `tree`, whose roots were chosen `by`, reads drawn on top,
+/// How a name counts `count` siblings or ancestors left out of the cells.
+fn more(count: u32) -> String {
+    format!("{count} more")
+}
+
+/// How a tooltip names a run of `tree`, whose roots were chosen `by`,
 /// naming what its siblings stand under.
 pub(crate) fn run_name(tree: &Dominators, shared: &Shared, by: RootedBy, run: Run) -> String {
     let count = run.count();
     match run.parent() {
         Parent::Node(parent) => {
             let parent = point_name(tree.id(parent), tree.scope().unit(), shared);
-            format!("{count} more under {parent}")
+            format!("{} under {parent}", more(count))
         }
         Parent::Shared => {
             let shared = what_is_shared(by.word(), unit_names(tree.scope().unit()).many);
-            format!("{count} more of {shared}")
+            format!("{} of {shared}", more(count))
         }
-        Parent::Build => format!("{count} more under {WHOLE_BUILD}"),
+        Parent::Build => format!("{} under {WHOLE_BUILD}", more(count)),
     }
+}
+
+/// What a run of `count` siblings weighing `weight` points, named `names`,
+/// reads drawn on top, where the cell over it just above names what they
+/// stand under.
+fn run_on_top(count: u32, weight: u32, names: &KindNames) -> String {
+    format!("{}{PART_SEPARATOR}{}", more(count), names.counted(weight))
 }
 
 /// What a cell gathering `count` siblings reads within `room` as `width`
 /// measures text: a count cut short says nothing, so its name is left whole,
 /// or failing that the bare count, or failing that nothing.
 fn rest_name(count: u32, room: f32, width: impl FnMut(&str) -> f32) -> String {
-    first_fitting([format!("{count} more"), count.to_string()], room, width)
+    first_fitting([more(count), count.to_string()], room, width)
 }
 
 /// What the cell gathering `count` shared tops, named `whole`, reads within
@@ -617,7 +633,7 @@ impl PointName {
         room: f32,
         mut width: impl FnMut(&str) -> f32,
     ) -> CellName {
-        let tail = hint.map_or_else(String::new, |hint| format!("{HINT_SEPARATOR}{hint}"));
+        let tail = hint.map_or_else(String::new, |hint| format!("{PART_SEPARATOR}{hint}"));
         let whole = format!("{}{}{tail}", self.lead, self.label);
         if width(&whole) <= room {
             let place = name_start(&self.label).unwrap_or(0);
@@ -811,6 +827,13 @@ mod tests {
     fn a_name_that_is_no_label_is_cut_short_at_its_end() {
         let cut = named("action:bazel-out/k8/bin/a.o").fitted(None, 10.0, chars);
         assert_eq!((cut.text.as_str(), cut.muted), ("action:ba…", 0..0));
+    }
+
+    #[test]
+    fn a_run_on_top_reads_its_count_and_weight() {
+        let names = unit_names(Unit::Target);
+        assert_eq!(run_on_top(663, 1204, &names), "663 more · 1204 targets");
+        assert_eq!(run_on_top(2, 1, &names), "2 more · 1 target");
     }
 
     #[test]

@@ -910,7 +910,7 @@ impl ExclusivePanel {
                 let name = Focused::of(holds)?.name(tree, shared, by);
                 let hint = holds.node().and_then(|node| hints.get(&node));
                 let name = match hint {
-                    Some(hint) => format!("{name}{}{hint}", paint::HINT_SEPARATOR),
+                    Some(hint) => format!("{name}{}{hint}", paint::PART_SEPARATOR),
                     None => name,
                 };
                 let (panel, tree) = (panel.clone(), Arc::clone(tree));
