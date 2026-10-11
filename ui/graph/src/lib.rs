@@ -463,7 +463,7 @@ impl GraphPanel {
             }
         });
         let boxes = cx.new(|cx| {
-            MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx).tooltip("Box types drawn")
+            MultiSelect::new("graph-boxes", boxes::NAME, Vec::new(), cx).tooltip("Box types drawn")
         });
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);

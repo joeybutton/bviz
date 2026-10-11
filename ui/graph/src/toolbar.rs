@@ -2,11 +2,11 @@ use crate::colour::{self, Colouring};
 use crate::mode::{self, LayoutMode};
 use crate::{
     CRITICAL_PATH_AT_REST, Controls, CycleColouring, GraphPanel, NEIGHBOURHOOD_AT_REST, Palette,
-    ToggleCriticalPath, ToggleMap, ToggleNeighborhood, report, timecard,
+    ToggleCriticalPath, ToggleMap, ToggleNeighborhood, boxes, report, timecard,
 };
 use bviz_ui_components::{
-    Dropdown, Legend, MenuItem, OneRow, Presentation, Priority, Switch, ToggleGroup, ToggleSegment,
-    ToolbarGroup, ToolbarSeparator, spinner,
+    Dropdown, Legend, MenuItem, MultiSelect, OneRow, Presentation, Priority, Switch, ToggleGroup,
+    ToggleSegment, ToolbarGroup, ToolbarSeparator, spinner,
 };
 use gpui::{
     Action, AnyElement, App, Context, Div, Entity, IntoElement, Pixels, SharedString, Window, div,
@@ -102,7 +102,10 @@ pub(crate) fn toolbar(
     }
     let query = OneRow::new("graph-query-bar")
         .when(!view.box_classes.is_empty(), |query| {
-            query.group(ToolbarGroup::new(BOXES, view.boxes.clone()))
+            query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
+                MenuItem::submenu(boxes::NAME, MultiSelect::submenu(&view.boxes, cx)),
+                boxes::any_hidden(view.derived.filter()),
+            ))
         })
         .filling(controls.chips);
     let strips: [OneRow; STRIPS] = [drawing, query];

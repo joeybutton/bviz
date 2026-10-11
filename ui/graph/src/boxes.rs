@@ -14,6 +14,10 @@ use bviz_graph_layout::select::Filter;
 use bviz_ui_components::{MultiOption, MultiSelectEvent};
 use gpui::Context;
 
+/// What the boxes menu is called, on its trigger and as a row of the toolbar's
+/// overflow menu.
+pub(crate) const NAME: &str = "boxes";
+
 /// The box classes of the nodes holding another in `graph`, outermost first.
 pub(crate) fn carried_boxes(graph: &Graph) -> Vec<BoxClass> {
     let mut kinds: Vec<Option<Kind>> = vec![None; id_span(graph)];
@@ -81,6 +85,11 @@ pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let options = box_options(view.derived.filter(), &view.box_classes);
     view.boxes
         .update(cx, |control, cx| control.set_options(options, cx));
+}
+
+/// Whether `filter` unwraps any of the box classes.
+pub(crate) fn any_hidden(filter: &Filter) -> bool {
+    !rules::hidden(filter).is_empty()
 }
 
 /// `filter` with the box classes the boxes menu's `event` names drawn, or
