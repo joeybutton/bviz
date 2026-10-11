@@ -17,6 +17,9 @@ use std::rc::Rc;
 /// many rows leaves the window's own edges in view.
 const MAX_LIST_HEIGHT: Pixels = px(420.);
 
+/// Room between a row's check mark and its label.
+const CHECK_GAP: Pixels = px(4.);
+
 /// What choosing a row does, run on the window the menu stands over.
 type Chosen = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -97,6 +100,9 @@ impl MenuItem {
 pub struct SubmenuItem {
     label: SharedString,
     chosen: Chosen,
+    /// Whether the row names the value that stands, where it names one of a
+    /// set of values; `None` for a row naming no value.
+    checked: Option<bool>,
 }
 
 impl SubmenuItem {
@@ -108,7 +114,15 @@ impl SubmenuItem {
         Self {
             label: label.into(),
             chosen: Rc::new(chosen),
+            checked: None,
         }
+    }
+
+    /// The row naming one of a set of values, marked where it is the one that
+    /// stands.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = Some(checked);
+        self
     }
 }
 
@@ -394,7 +408,18 @@ impl Menu {
                 this.aim_at_cursor(hovered, event.position, cx);
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.take(aim, window, cx)))
-            .child(div().whitespace_nowrap().child(laid.label.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(CHECK_GAP)
+                    .whitespace_nowrap()
+                    .children(
+                        laid.checked
+                            .map(|checked| menu_chrome::check(colors, checked)),
+                    )
+                    .child(laid.label.clone()),
+            )
             .child(
                 div()
                     .flex()
@@ -412,6 +437,8 @@ impl Menu {
 /// One row of a list as a frame lays it out.
 struct Laid<'a> {
     label: &'a SharedString,
+    /// Whether the row's check mark is drawn, where it keeps room for one.
+    checked: Option<bool>,
     keys: Option<&'a SharedString>,
     tooltip: Option<&'a SharedString>,
     opens_submenu: bool,
@@ -616,10 +643,12 @@ fn within(at: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>, c: Point<Pixels
 
 /// How wide the rows reading `labels` and naming `keys` are laid out: room
 /// for the widest of either in the menu's own face, for what a row keeps at
-/// its ends, and for the mark a row opening a submenu carries.
+/// its ends, for the mark a row opening a submenu carries, and where `checks`,
+/// for the check mark leading each row.
 fn list_width<'a>(
     labels: impl IntoIterator<Item = &'a SharedString>,
     keys: impl IntoIterator<Item = &'a SharedString>,
+    checks: bool,
     window: &mut Window,
 ) -> Pixels {
     let mut keys = keys.into_iter().cloned().peekable();
@@ -629,7 +658,11 @@ fn list_width<'a>(
         let keys = named.then(|| menu_chrome::widest(window, keys) + LABEL_GAP);
         (label, keys.unwrap_or_default())
     });
-    label + keys + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
+    let check = match checks {
+        true => MENU_ICON + CHECK_GAP,
+        false => px(0.),
+    };
+    check + label + keys + ROW_INSET * 2. + LABEL_GAP + MENU_ICON + SHEET_BORDER * 2.
 }
 
 /// How tall a list of `rows` rows each `row` tall is laid out in a window of
@@ -683,6 +716,7 @@ impl Render for Menu {
             list_width(
                 self.items.iter().map(|item| &item.label),
                 self.items.iter().filter_map(|item| item.keys.as_ref()),
+                false,
                 window,
             ),
             list_height(self.items.len(), row_height, viewport),
@@ -695,8 +729,9 @@ impl Render for Menu {
         );
         let open = self.aim.on_menu().and_then(|under| {
             let items = self.submenu(under)?;
+            let checks = items.iter().any(|item| item.checked.is_some());
             let extent = size(
-                list_width(items.iter().map(|item| &item.label), [], window),
+                list_width(items.iter().map(|item| &item.label), [], checks, window),
                 list_height(items.len(), row_height, viewport),
             );
             let scrolled = self.list_scroll.offset().y;
@@ -712,6 +747,7 @@ impl Render for Menu {
             .enumerate()
             .map(|(row, item)| Laid {
                 label: &item.label,
+                checked: None,
                 keys: item.keys.as_ref(),
                 tooltip: item.tooltip.as_ref(),
                 opens_submenu: matches!(item.opens, Opens::Submenu(_)),
@@ -726,6 +762,7 @@ impl Render for Menu {
                 .enumerate()
                 .map(|(row, item)| Laid {
                     label: &item.label,
+                    checked: item.checked,
                     keys: None,
                     tooltip: None,
                     opens_submenu: false,
