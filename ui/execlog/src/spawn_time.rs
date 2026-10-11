@@ -7,8 +7,8 @@ use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
-    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, legend_gestures,
-    list_scrollbar, sort_gesture, sort_header, sort_hint,
+    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, TruncatingLabel,
+    legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -477,7 +477,7 @@ fn group_table(id: &'static str, header: Div, rows: &[GroupRow], palette: &Palet
         row(
             (id, index),
             [
-                cell(name, div().text_ellipsis().child(group.name.clone())),
+                cell(name, TruncatingLabel::new("name", group.name.clone())),
                 cell(spawns, group.spawns.to_string()),
                 cell(total, duration(group.timing.total())),
                 cell(bar, phase_bar(&group.timing, longest, palette)),
@@ -501,11 +501,6 @@ const TOP_COLUMNS: [Column; 4] = [
     text(Width::Fixed(NAME_WIDTH)),
     text(Width::Rest),
 ];
-
-/// A line of a cell, cut short where the cell runs out of room for it.
-fn line(text: SharedString) -> Div {
-    div().min_w_0().text_ellipsis().child(text)
-}
 
 /// `spawns`, longest in `phase` first, each named by its target and output.
 fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
@@ -533,8 +528,11 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
             ("top", index),
             [
                 cell(time, duration(spawn.time)),
-                cell(mnemonic, line(spawn.mnemonic.clone())),
-                cell(runner, line(spawn.runner.clone())),
+                cell(
+                    mnemonic,
+                    TruncatingLabel::new("mnemonic", spawn.mnemonic.clone()),
+                ),
+                cell(runner, TruncatingLabel::new("runner", spawn.runner.clone())),
                 cell(
                     made,
                     div()
@@ -542,9 +540,11 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(line(first))
+                        .child(TruncatingLabel::new("first", first))
                         .children(second.map(|output| {
-                            line(output).text_xs().text_color(palette.colors.text_muted)
+                            TruncatingLabel::new("second", output)
+                                .text_xs()
+                                .text_color(palette.colors.text_muted)
                         })),
                 ),
             ],
