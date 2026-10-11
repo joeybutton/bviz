@@ -245,7 +245,7 @@ impl ExclusivePanel {
             view.failed = None;
             view.coloured.clear();
             view.drawing = None;
-            view.picker = unit_picker(&view.model, cx);
+            view.picker = unit_picker(&view.model, &view.focus_handle, cx);
             view.compute(cx);
         });
         let dominators_landed = cx.subscribe(&model, |view, _, landed: &DominatorsLanded, cx| {
@@ -271,10 +271,11 @@ impl ExclusivePanel {
         let parent = cx.entity().downgrade();
         let focus_handle = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
+        let picker = unit_picker(&model, &focus_handle, cx);
         Self {
             focus_handle,
             legend,
-            picker: unit_picker(&model, cx),
+            picker,
             model,
             shown: false,
             drawn: None,
@@ -1011,7 +1012,11 @@ impl ExclusivePanel {
 /// something no other action reads, so they stand directly under the whole
 /// build, each a sliver of its row, while configured targets mostly stand
 /// under one another and leave the row to cells wide enough to name.
-fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> Option<UnitPicker> {
+fn unit_picker(
+    model: &Entity<GraphModel>,
+    focus: &FocusHandle,
+    cx: &mut Context<ExclusivePanel>,
+) -> Option<UnitPicker> {
     let inputs = model.read(cx).loaded()?.shared.inputs;
     let opening = Some(Unit::ConfiguredTarget);
     UnitPicker::new(
@@ -1019,6 +1024,7 @@ fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> 
         "Cell unit",
         inputs,
         opening,
+        focus,
         ExclusivePanel::choose,
         cx,
     )
