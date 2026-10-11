@@ -30,19 +30,19 @@ use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
-    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Toolbar,
-    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, defer_hover_card,
-    defer_tooltip, legend_gestures, list_scrollbar, load_in_background, menu_chrome,
-    tooltip_extent, track_drag,
+    CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
+    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Switch, ToggleGroup,
+    ToggleSegment, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner,
+    defer_hover_card, defer_tooltip, legend_gestures, list_scrollbar, load_in_background,
+    menu_chrome, tooltip_extent, track_drag,
 };
 use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, Rems, Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
-    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
+    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Rems,
+    Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful, Subscription,
+    Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -1702,12 +1702,12 @@ fn strip(
     let across = group("across", palette).child(choice.across_picker.clone());
     let up = group("up", palette).child(choice.up_picker.clone());
     let colour = group("colour", palette).child(choice.colour_picker.clone());
-    let toggles: Vec<_> = choice
+    let switches = choice
         .loaded
         .inputs()
-        .map(|input| input_toggle(input, scope, cx))
-        .collect();
-    let inputs = group("inputs", palette).children(toggles);
+        .map(|input| input_switch(input, scope, cx));
+    let inputs =
+        group("inputs", palette).child(ToggleGroup::any_of("scatter-inputs", "inputs", switches));
     Toolbar::new()
         .child(unit)
         .child(across)
@@ -1753,24 +1753,21 @@ fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
 
 /// Turns the loaded `input`'s share in the measure in `scope` on and off, and
 /// says why where it cannot.
-fn input_toggle(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Button {
+fn input_switch(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Switch {
     let name = input_name(input);
     let toggle = Toggle::of(scope, input);
     let many = unit_names(scope.unit()).many;
-    let hint = match toggle {
-        Toggle::On | Toggle::Off => format!("Include {name}"),
-        Toggle::Lone => "Disabled: only input".to_owned(),
-        Toggle::Ignored => format!("Disabled: no {many}"),
+    let segment = match toggle {
+        Toggle::On | Toggle::Off => ToggleSegment::new(name).tooltip(format!("Include {name}")),
+        Toggle::Lone => ToggleSegment::new(name).unavailable("Disabled: only input"),
+        Toggle::Ignored => ToggleSegment::new(name).unavailable(format!("Disabled: no {many}")),
     };
-    Button::new(
-        ("scatter-input", input as usize),
-        cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_input(input, cx)),
+    let view = cx.entity();
+    Switch::new(
+        segment,
+        matches!(toggle, Toggle::On | Toggle::Lone),
+        move |_, _, cx| view.update(cx, |view, cx| view.toggle_input(input, cx)),
     )
-    .label(name)
-    .selected(matches!(toggle, Toggle::On | Toggle::Lone))
-    .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
-    .compact()
-    .tooltip(hint)
 }
 
 /// What the status says of the points of `plot` left unplotted, where any are.
