@@ -10,7 +10,7 @@ use bviz_invocation::Configurations;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, TruncatingLabel};
 use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
     uniform_list,
@@ -297,7 +297,7 @@ pub(crate) fn card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(line(report.builds.line()))
+                .child(TruncatingLabel::new("report-builds", report.builds.line()))
                 .child(
                     Button::new(
                         "report-close",
@@ -308,7 +308,7 @@ pub(crate) fn card(
                     .compact(),
                 ),
         )
-        .children(report.tests.line().map(line))
+        .children((report.tests.line()).map(|tests| TruncatingLabel::new("report-tests", tests)))
         .children(
             report
                 .mismatches

@@ -15,7 +15,9 @@ use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
-use bviz_ui_components::{Button, ListScroll, TextTooltip, load_in_background, overlay_canvas};
+use bviz_ui_components::{
+    Button, ListScroll, TextTooltip, TruncatingLabel, load_in_background, overlay_canvas,
+};
 use gpui::{ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -667,7 +669,9 @@ pub(crate) fn card(
         .then_some("the map leaves some transitions unmarked; the layered layout marks each");
     let from = match &question.dependent {
         Some(dependent) => endpoint("why-from", "from ", dependent, &spelling, palette),
-        None => div().id("why-from").child(line("from every dependent")),
+        None => div()
+            .id("why-from")
+            .child(TruncatingLabel::new("label", "from every dependent")),
     };
     let head = div()
         .flex()
@@ -681,7 +685,10 @@ pub(crate) fn card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(line("why is this built").text_color(palette.colors.text_muted))
+                .child(
+                    TruncatingLabel::new("why-heading", "why is this built")
+                        .text_color(palette.colors.text_muted),
+                )
                 .child(
                     Button::new(
                         "why-clear",
@@ -700,12 +707,12 @@ pub(crate) fn card(
             palette,
         ))
         .child(from)
-        .child(line(status))
+        .child(TruncatingLabel::new("why-status", status))
         .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
         .children(map_note.map(|note| div().min_w_0().child(note)))
-        .children(
-            (!links.is_empty()).then(|| line("shortest:").text_color(palette.colors.text_muted)),
-        );
+        .children((!links.is_empty()).then(|| {
+            TruncatingLabel::new("why-shortest", "shortest:").text_color(palette.colors.text_muted)
+        }));
     let chain =
         (!links.is_empty()).then(|| listed(view, chain(&links, &spelling, palette), palette, cx));
     Some(Folding::new(head, chain, palette))

@@ -31,9 +31,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent,
-    MenuItem, QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, cached_layer,
-    centered_notice, centered_spinner, key_text_in, legend_gestures, load_in_background,
-    paint_hover_card,
+    MenuItem, QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel,
+    cached_layer, centered_notice, centered_spinner, key_text_in, legend_gestures,
+    load_in_background, paint_hover_card,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -1980,28 +1980,26 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
     // A name and the hint telling it apart give way in proportion to their
     // lengths, so neither is cut away before the other.
-    let part = |text: String| {
-        div()
-            .min_w_0()
-            .overflow_hidden()
-            .text_ellipsis()
-            .child(text)
-    };
-    let crumb = |name: String, hint: Option<String>| {
-        let hint = hint.map(|hint| part(format!("{HINT_SEPARATOR}{hint}")));
+    let crumb = |index: usize, name: String, hint: Option<String>| {
+        let hint = hint.map(|hint| {
+            TruncatingLabel::new(
+                ("exclusive-crumb-hint", index),
+                format!("{HINT_SEPARATOR}{hint}"),
+            )
+        });
         div()
             .flex()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
-            .child(part(name))
+            .child(TruncatingLabel::new(("exclusive-crumb-name", index), name))
             .children(hint)
     };
     let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
     let link = |index: usize, name: String, hint: Option<String>, to: Option<Focused>| {
         // A click landing once another tree is drawn names none of its nodes.
         let tree = Arc::clone(&drawn.coloured.tree);
-        crumb(name, hint)
+        crumb(index, name, hint)
             .id(("exclusive-crumb", index))
             .cursor_pointer()
             .text_color(palette.colors.text_muted)
@@ -2036,7 +2034,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
         above.push(after(step.into_any_element()));
     }
     let focused = cell_name(tree, shared, by, focus.on.holds());
-    let last = after(crumb(focused, hint(focus.on)).into_any_element())
+    let last = after(crumb(focus.above.len() + 1, focused, hint(focus.on)).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
     Some(

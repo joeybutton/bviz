@@ -9,7 +9,7 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, TruncatingLabel};
 use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
     uniform_list,
@@ -174,13 +174,13 @@ fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphP
 /// a box it ran wears.
 fn runners(timecard: &Timecard, palette: &Palette) -> impl Iterator<Item = Div> {
     let palette = *palette;
-    timecard.runner_lines().map(move |(ran, said)| {
+    (timecard.runner_lines().enumerate()).map(move |(index, (ran, said))| {
         div()
             .flex()
             .items_center()
             .gap_1()
             .child(legend::ran(ran, &palette))
-            .child(line(said))
+            .child(TruncatingLabel::new(("timecard-runner", index), said))
     })
 }
 
@@ -243,7 +243,7 @@ pub(crate) fn card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(line(timecard.line()))
+                .child(TruncatingLabel::new("timecard-summary", timecard.line()))
                 .child(
                     Button::new(
                         "timecard-close",

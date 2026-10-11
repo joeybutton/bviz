@@ -20,8 +20,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::text_input::{self, TextEdited};
 use bviz_ui_components::{
-    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, key_text_within, list_scrollbar,
-    menu_chrome, overlay_canvas,
+    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, TruncatingLabel, key_text_within,
+    list_scrollbar, menu_chrome, overlay_canvas,
 };
 use gpui::{
     Action, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, KeyContext,
@@ -659,10 +659,7 @@ fn footer(jump: &Jump, muted: Hsla, cx: &App) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .children(tally),
+                        .children(tally.map(|tally| TruncatingLabel::new("jump-tally", tally))),
                 )
                 .child(first),
         )
@@ -736,30 +733,23 @@ fn listed(
         });
     })
     .child(
-        div()
-            .flex_grow_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis_start()
-            .child(fuzzy::highlighted(
-                SharedString::from(candidate.text.to_string()),
+        TruncatingLabel::new("text", candidate.text.to_string())
+            .highlights(fuzzy::highlights(
+                &candidate.text,
                 &candidate.path,
                 &row.matched,
                 colors.text_muted,
                 palette.highlight.into(),
-            )),
+            ))
+            .flex_grow_1()
+            .text_ellipsis_start(),
     )
     .children(index::container(shared, candidate).map(|container| {
-        div()
+        TruncatingLabel::new("container", container)
             .flex_shrink(CONTAINER_SHRINK)
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
             .text_ellipsis_start()
             .text_xs()
             .text_color(colors.text_muted)
-            .child(container)
     }))
     .child(badge(kind_name(candidate.kind), colors.text_muted))
     .children(
