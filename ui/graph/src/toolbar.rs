@@ -12,7 +12,8 @@ pub(crate) fn height() -> Pixels {
 
 /// The panel's controls in two strips, each one row tall, so that neither
 /// a selection coming and going nor chips being added moves the drawing:
-/// how the graph is drawn, then the query bar ending in the legend.
+/// how the graph is drawn, then what it holds: the boxes menu, and the query
+/// bar ending in the legend.
 pub(crate) fn toolbar(
     controls: Controls,
     palette: &Palette,
@@ -25,7 +26,6 @@ pub(crate) fn toolbar(
         .child(group("layout", palette).child(controls.layout_picker))
         .child(controls.reduce_toggle)
         .child(group("colour", palette).child(controls.colour_picker))
-        .when_some(controls.boxes, |view, boxes| view.child(boxes))
         .child(group("mark", palette).child(marks));
     for card in [controls.report_control, controls.timecard_control]
         .into_iter()
@@ -50,6 +50,7 @@ pub(crate) fn toolbar(
     });
     let query = Toolbar::new()
         .one_row("graph-query-bar")
+        .when_some(controls.boxes, OneRow::child)
         .child(controls.chips)
         .when_some(controls.legend, OneRow::child);
     let strips: [OneRow; STRIPS] = [view, query];
