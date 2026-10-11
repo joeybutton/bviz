@@ -31,12 +31,7 @@ pub(crate) fn toolbar(
     window: &mut Window,
     cx: &Context<GraphPanel>,
 ) -> Div {
-    let layout = ToolbarGroup::new(
-        LAYOUT,
-        group(LAYOUT_NAME, palette).child(mode::control(view)),
-    )
-    .or(unnamed(mode::control(view), palette))
-    .overflow(
+    let layout = ToolbarGroup::named(LAYOUT, LAYOUT_NAME, || mode::control(view)).overflow(
         picker_row(
             LAYOUT_NAME,
             &view.layout_picker,
@@ -48,16 +43,11 @@ pub(crate) fn toolbar(
         ),
         view.mode != LayoutMode::default(),
     );
-    let edges = ToolbarGroup::new(EDGES, unnamed(mode::reduce_toggle(view, cx), palette)).overflow(
+    let edges = ToolbarGroup::new(EDGES, mode::reduce_toggle(view, cx)).overflow(
         mode::reduce_row(view, EDGES_NAME, window, cx),
         mode::reduction(view).set(),
     );
-    let colour = ToolbarGroup::new(
-        COLOUR,
-        group(COLOUR_NAME, palette).child(view.colour_picker.clone()),
-    )
-    .or(unnamed(view.colour_picker.clone(), palette))
-    .overflow(
+    let colour = ToolbarGroup::named(COLOUR, COLOUR_NAME, || view.colour_picker.clone()).overflow(
         picker_row(
             COLOUR_NAME,
             &view.colour_picker,
@@ -70,22 +60,15 @@ pub(crate) fn toolbar(
         view.colouring != Colouring::default(),
     );
     let marking = Marking::of(view, cx);
-    let marks = ToolbarGroup::new(
-        MARK,
-        group(MARK_NAME, palette).child(marking.toggles(view, cx)),
-    )
-    .or(unnamed(marking.toggles(view, cx), palette))
-    .or(unnamed(
-        marking
+    let marks = ToolbarGroup::named(MARK, MARK_NAME, || marking.toggles(view, cx))
+        .or(marking
             .toggles(view, cx)
-            .presentation(Presentation::Collapsed),
-        palette,
-    ))
-    .overflow(
-        MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
-        marking.set(),
-    )
-    .parted();
+            .presentation(Presentation::Collapsed))
+        .overflow(
+            MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
+            marking.set(),
+        )
+        .parted();
     let drawing = OneRow::new("graph-view-controls")
         .group(layout)
         .group(edges)
@@ -229,12 +212,6 @@ const CRITICAL_PATH: &str = "critical path";
 /// A strip's controls grouped under the word `name`.
 pub(crate) fn group(name: &'static str, palette: &Palette) -> Div {
     labelled(palette).child(name)
-}
-
-/// `controls` set as they stand under their group's name, so that they read
-/// alike whether or not the name stands beside them.
-fn unnamed(controls: impl IntoElement, palette: &Palette) -> Div {
-    labelled(palette).child(controls)
 }
 
 /// The cue a strip shows that the work `doing` names is in flight, its spinner

@@ -7,7 +7,7 @@ use fit::{Fitted, Kind, Measure, Room, Side, Spot};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Div, ElementId, Empty, Entity,
     FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, RenderOnce,
-    Size, Style, Subscription, Window, div, point, prelude::*, px, relative, size,
+    SharedString, Size, Style, Subscription, Window, div, point, prelude::*, px, relative, size,
 };
 use std::sync::Arc;
 
@@ -106,6 +106,16 @@ impl ToolbarGroup {
             overflow: None,
             parted: false,
         }
+    }
+
+    /// A group standing as what `build` builds beside the word `name`, then
+    /// without it, holding out by `priority`.
+    pub fn named<E: IntoElement>(
+        priority: Priority,
+        name: impl Into<SharedString>,
+        mut build: impl FnMut() -> E,
+    ) -> Self {
+        Self::new(priority, beside().child(name.into()).child(build())).or(beside().child(build()))
     }
 
     /// Offers `narrower` for the group to stand as once the row has no room
@@ -627,6 +637,11 @@ impl RenderOnce for ToolbarSeparator {
     }
 }
 
+/// Controls laid side by side within one group.
+fn beside() -> Div {
+    div().flex().items_center().gap(GAP)
+}
+
 /// The strip its controls stand in, all set in one text size so that every
 /// control of a row reads alike.
 fn strip(window: &mut Window, cx: &mut App) -> Div {
@@ -642,6 +657,7 @@ fn strip(window: &mut Window, cx: &mut App) -> Div {
         .py(PADDING)
         .px_2()
         .bg(colors.surface)
+        .text_color(colors.text)
         .border_b(RULE)
         .border_color(colors.border)
 }
