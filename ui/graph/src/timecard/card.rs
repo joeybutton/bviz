@@ -212,6 +212,7 @@ fn selected(node: Id, loaded: &Loaded, cx: &Context<GraphPanel>) -> Div {
                 cx.listener(move |view, _: &ClickEvent, _, cx| reveal(view, action, cx)),
             )
             .label(words::slowest(slowest, mnemonic(loaded, action)))
+            .tooltip("Show slowest action")
             .compact()
         }))
 }
