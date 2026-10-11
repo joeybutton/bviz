@@ -320,6 +320,14 @@ fn tally(nodes: usize) -> SharedString {
     }
 }
 
+/// Whether the question open is about a dependency other than `node`, which
+/// [`ask_from`] can narrow to the paths from it.
+pub(crate) fn asking_about_another(view: &GraphPanel, node: Id) -> bool {
+    view.why
+        .dependency()
+        .is_some_and(|dependency| dependency != node)
+}
+
 /// Asks why `dependency` is in the build, keeping the dependent already named.
 pub(crate) fn ask_why(view: &mut GraphPanel, dependency: Id, cx: &mut Context<GraphPanel>) {
     let dependent = view

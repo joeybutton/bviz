@@ -57,6 +57,15 @@ fn label(pin: Pin) -> &'static str {
     }
 }
 
+/// The menu row pinning a box to `visibility`, worded as the pin it sets is
+/// listed.
+pub(crate) fn offer(visibility: Visibility) -> String {
+    let listed = label(Pin::Set(visibility));
+    let mut rest = listed.chars();
+    let first = rest.next().map(|first| first.to_ascii_uppercase());
+    format!("{}{} box", String::from_iter(first), rest.as_str())
+}
+
 /// `filter` with `node` pinned to `visibility`, or with its pin dropped where
 /// it already carries that one, so the same gesture puts the override away.
 pub(crate) fn toggle(filter: &Filter, node: Id, visibility: Visibility) -> Filter {
@@ -447,6 +456,11 @@ mod tests {
             fixture.verdict(&cleared, "//app:main#compile"),
             Verdict::Hidden
         );
+    }
+
+    #[test]
+    fn a_pin_is_offered_on_a_box_in_the_words_it_is_listed_by() {
+        assert_eq!(offer(Visibility::Hidden), "Always hide box");
     }
 
     /// Pinning what is already pinned that way is how an override is taken back

@@ -29,6 +29,7 @@ use gpui::{
 use std::time::{Duration, Instant};
 
 mod actions;
+mod box_menu;
 mod boxes;
 mod build;
 mod camera;
@@ -332,8 +333,9 @@ pub struct GraphPanel {
     hover_marking: MarkingMemo,
     spatial: SpatialMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
-    /// set by a secondary click and offered by the toolbar's relation picker.
+    /// set by a secondary click, which puts up the box's menu.
     selection: Selection,
+    box_menu: Option<box_menu::BoxMenu>,
     /// Outlives the stretches where the strip leaves it out, so the option it
     /// stands on is still the one chosen when the next selection brings it back.
     relation_picker: Entity<Dropdown>,
@@ -546,6 +548,7 @@ impl GraphPanel {
             hover_marking: MarkingMemo::default(),
             spatial: SpatialMemo::default(),
             selection,
+            box_menu: None,
             relation_picker,
             _relation_choices: relations,
             neighborhood_enabled: false,
@@ -575,6 +578,7 @@ impl GraphPanel {
     /// Draws the graph the document holds, once it is read, and offers the box
     /// classes it carries.
     fn take_up_source(&mut self, cx: &mut Context<Self>) {
+        box_menu::close(self, cx);
         derive::opened(self, cx);
         boxes::adopt(self, cx);
     }
@@ -689,6 +693,7 @@ impl GraphPanel {
             .child(cached_layer(self.overlays.clone()))
             .child(cached_layer(self.box_card.layer()))
             .children(chips::menu(self, window))
+            .children(box_menu::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -864,11 +869,22 @@ impl GraphPanel {
         self.invalidate_canvas_only(cx);
     }
 
-    fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_secondary_down(
+        &mut self,
+        e: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         jump::dismiss(self, cx);
-        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
-            CanvasIntent::Select => {
-                select_box_at(self, e.position, cx);
+        let hit = self.box_id_at(e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match (intent, hit) {
+            (CanvasIntent::BoxMenu, Some(node)) => {
+                box_menu::open(self, node, e.position, window, cx);
+                true
+            }
+            (CanvasIntent::Deselect, None) => {
+                self.selection.clear();
+                self.invalidate_canvas(cx);
                 true
             }
             _ => false,
@@ -1362,27 +1378,6 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     view.box_card.forget(cx);
     derive::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
-    view.invalidate_canvas(cx);
-}
-
-/// Selects the box under `pos` (window px), or drops the selection where `pos`
-/// lands on no box or off the canvas. Selecting the already-selected box drops it
-/// too, so the same gesture puts the marking away.
-fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<GraphPanel>) {
-    let vp = view.framing.viewport();
-    let camera = view.camera();
-    let morph = view.morph_frame();
-    let hit = view
-        .drawn()
-        .filter(|_| vp.contains(&pos))
-        .and_then(|drawn| {
-            let (_, g) = view.spatial.indexed(&drawn, camera.zoom, cx)?;
-            box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
-        });
-    match hit {
-        Some(id) => view.selection.toggle(id),
-        None => view.selection.clear(),
-    }
     view.invalidate_canvas(cx);
 }
 

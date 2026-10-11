@@ -1134,6 +1134,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let restricted = restriction.is_some();
             if let Some(restriction) = restriction {
                 view.selection.forget(&restriction.dropped);
+                crate::box_menu::forget(view, &restriction.dropped, cx);
                 if let Some(map) = restriction.map {
                     map.derive_levels(cx);
                 }
@@ -1598,10 +1599,10 @@ mod tests {
         assert_eq!(restricted.expanded, [kept].into_iter().collect());
 
         let mut selection = Selection::none();
-        selection.toggle(kept);
+        selection.select(kept);
         selection.forget(&restricted.dropped);
         assert_eq!(selection.node(), Some(kept));
-        selection.toggle(hidden);
+        selection.select(hidden);
         selection.forget(&restricted.dropped);
         assert_eq!(selection.node(), None);
     }

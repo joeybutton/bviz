@@ -43,13 +43,13 @@ impl Relation {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::None => "no highlight",
-            Self::Direct(Direction::Both) => "direct neighbours",
-            Self::Direct(Direction::In) => "direct inputs",
-            Self::Direct(Direction::Out) => "direct outputs",
-            Self::Transitive(Direction::Both) => "all neighbours",
-            Self::Transitive(Direction::In) => "all inputs",
-            Self::Transitive(Direction::Out) => "all outputs",
+            Self::None => "No highlight",
+            Self::Direct(Direction::Both) => "Direct neighbours",
+            Self::Direct(Direction::In) => "Direct inputs",
+            Self::Direct(Direction::Out) => "Direct outputs",
+            Self::Transitive(Direction::Both) => "All neighbours",
+            Self::Transitive(Direction::In) => "All inputs",
+            Self::Transitive(Direction::Out) => "All outputs",
         }
     }
 

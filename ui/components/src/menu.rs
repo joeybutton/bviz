@@ -233,13 +233,22 @@ impl Menu {
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.closed_holding(self.focus_handle.is_focused(window), cx);
+    }
+
+    /// Closes the menu from outside it, for a holder whose rows have lost what
+    /// they act on. A menu still standing holds focus, since losing it closes
+    /// the menu.
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.closed_holding(true, cx);
+    }
+
+    fn closed_holding(&mut self, holding_focus: bool, cx: &mut Context<Self>) {
         if self.closed {
             return;
         }
         self.closed = true;
-        cx.emit(MenuEvent::Dismissed {
-            holding_focus: self.focus_handle.is_focused(window),
-        });
+        cx.emit(MenuEvent::Dismissed { holding_focus });
     }
 
     /// Aims at `aim`, which puts up the submenu of a row that opens one, takes

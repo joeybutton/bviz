@@ -30,12 +30,6 @@ impl Selection {
         self.relation
     }
 
-    /// Selects `node`, or drops the selection where it is already the selected
-    /// one, so picking the same node twice puts the marking away.
-    pub(crate) fn toggle(&mut self, node: Id) {
-        self.node = (self.node != Some(node)).then_some(node);
-    }
-
     /// Selects `node`, whichever node was selected before.
     pub(crate) fn select(&mut self, node: Id) {
         self.node = Some(node);
@@ -121,17 +115,6 @@ mod tests {
     }
 
     #[test]
-    fn picking_the_selected_node_again_drops_the_selection() {
-        let mut selection = Selection::none();
-        selection.toggle(Id(0));
-        assert_eq!(selection.node(), Some(Id(0)));
-        selection.toggle(Id(1));
-        assert_eq!(selection.node(), Some(Id(1)));
-        selection.toggle(Id(1));
-        assert_eq!(selection.node(), None);
-    }
-
-    #[test]
     fn selecting_the_selected_node_keeps_it_selected() {
         let mut selection = Selection::none();
         selection.select(Id(0));
@@ -147,7 +130,7 @@ mod tests {
     #[test]
     fn a_selection_on_a_node_a_filter_drops_goes_with_it() {
         let mut selection = Selection::none();
-        selection.toggle(Id(0));
+        selection.select(Id(0));
         selection.forget(&[Id(1)].into_iter().collect());
         assert_eq!(selection.node(), Some(Id(0)));
         selection.forget(&[Id(0)].into_iter().collect());
@@ -160,11 +143,11 @@ mod tests {
     #[test]
     fn the_relation_outlives_the_selection_it_was_set_on() {
         let mut selection = Selection::none();
-        selection.toggle(Id(0));
+        selection.select(Id(0));
         selection.set_relation(Relation::Transitive(Direction::In));
         selection.clear();
         assert_eq!(selection.relation(), Relation::Transitive(Direction::In));
-        selection.toggle(Id(1));
+        selection.select(Id(1));
         assert_eq!(selection.relation(), Relation::Transitive(Direction::In));
     }
 
@@ -172,7 +155,7 @@ mod tests {
     fn a_marking_covers_the_relation_it_was_asked_for() {
         let g = pair();
         let mut selection = Selection::none();
-        selection.toggle(Id(0));
+        selection.select(Id(0));
         selection.set_relation(Relation::None);
         assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
         selection.set_relation(Relation::Direct(Direction::Out));
