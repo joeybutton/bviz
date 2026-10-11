@@ -736,7 +736,11 @@ fn listed(
     })
     .child({
         let (shown, path) = index::reading(shared, candidate);
-        let matched: Vec<u32> = row.matched.iter().filter_map(|&at| shown.at(at)).collect();
+        // A shorthand shows a name's chars where its place reads them, ahead
+        // of the chars of the place matched before them.
+        let mut matched: Vec<u32> = row.matched.iter().filter_map(|&at| shown.at(at)).collect();
+        matched.sort_unstable();
+        matched.dedup();
         let text = shown.into_text();
         let highlights = fuzzy::highlights(
             &text,

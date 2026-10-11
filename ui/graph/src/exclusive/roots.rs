@@ -8,6 +8,7 @@ use crate::point::{unit_names, written_name};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
+use bviz_graph_layout::shown::written_by_place;
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
 use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
@@ -180,14 +181,7 @@ fn manual_left_out(mut left_out: Vec<String>) -> Option<String> {
 /// as `//foo/bar:bar` is what `//foo/bar` names, and `@repo//:repo` what
 /// `@repo` does.
 fn names_its_package(label: &str) -> bool {
-    let Some((package, name)) = label.rsplit_once(':') else {
-        return true;
-    };
-    let last = match package.strip_suffix("//") {
-        Some(repo) => repo.trim_start_matches('@'),
-        None => package.rsplit_once('/').map_or(package, |(_, last)| last),
-    };
-    last == name
+    !label.contains(':') || written_by_place(label)
 }
 
 /// What the field notes of `set` where `tags`, how far the inputs state the

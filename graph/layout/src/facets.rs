@@ -947,13 +947,15 @@ impl WrittenRepos {
     }
 
     /// `written`, a label or a package path as a reader writes it, as it is
-    /// shown: by the name its repository is shown by.
+    /// shown: by the name its repository is shown by, and where it names a
+    /// target named after its package or repository, by that alone.
     pub fn show(&self, written: &str) -> Shown {
         let repo = written.split_once("//").map(|(repo, _)| repo);
-        match repo.and_then(|repo| self.dropped(repo)) {
+        let shown = match repo.and_then(|repo| self.dropped(repo)) {
             Some(dropped) => Shown::dropping(written, dropped),
             None => Shown::whole(written),
-        }
+        };
+        shown.named_by_place()
     }
 
     /// The chars the repository part written `repo` leaves out where it is
@@ -1584,6 +1586,10 @@ mod tests {
             "@rules_foo//bar:lib"
         );
         assert_eq!(written.shown_label("//foo:app"), "//foo:app");
+        assert_eq!(
+            written.shown_label("@@llvm++llvm+llvm-project//llvm:llvm"),
+            "@llvm-project//llvm"
+        );
     }
 
     /// A name two repositories would be written by says which of them a reader
