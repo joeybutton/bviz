@@ -1753,25 +1753,20 @@ fn input_toggle(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Butto
     let name = input_name(input);
     let toggle = Toggle::of(scope, input);
     let many = unit_names(scope.unit()).many;
-    let why = match toggle {
-        Toggle::On | Toggle::Off => None,
-        Toggle::Lone => Some(format!(
-            "{name} is the only input on describing {many}, and a plot needs one"
-        )),
-        Toggle::Ignored => Some(format!("{name} describes no {many}")),
+    let hint = match toggle {
+        Toggle::On | Toggle::Off => format!("Include {name}"),
+        Toggle::Lone => "Disabled: only input".to_owned(),
+        Toggle::Ignored => format!("Disabled: no {many}"),
     };
-    let control = Button::new(
+    Button::new(
         ("scatter-input", input as usize),
         cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_input(input, cx)),
     )
     .label(name)
     .selected(matches!(toggle, Toggle::On | Toggle::Lone))
     .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
-    .compact();
-    match why {
-        Some(why) => control.tooltip(why),
-        None => control,
-    }
+    .compact()
+    .tooltip(hint)
 }
 
 /// What the status says of the points of `plot` left unplotted, where any are.
