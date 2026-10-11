@@ -1,6 +1,6 @@
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyView, App, AppContext, BorderStyle, Bounds, Context, Font, Hsla, IntoElement, ParentElement,
+    AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
     Pixels, Point, Render, Rgba, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div,
     font, point, px, quad, size,
 };
@@ -112,13 +112,13 @@ pub fn paint_tooltip_box(
     );
 }
 
-/// The rows of `text` set in `font` as a tooltip panel reads them, wrapped
-/// at [`TOOLTIP_MAX_WIDTH`].
-fn shape_rows(text: &str, font: Font, color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
+/// The rows of `text` as a tooltip panel reads them: in the UI face whatever
+/// the face of the panel it is painted over, wrapped at [`TOOLTIP_MAX_WIDTH`].
+fn shape_rows(text: &str, color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
     bviz_ui_assets::shape_wrapped(
         window,
         text,
-        font,
+        font(bviz_ui_assets::UI),
         px(TOOLTIP_TEXT_SIZE),
         color,
         px(TOOLTIP_MAX_WIDTH),
@@ -127,10 +127,9 @@ fn shape_rows(text: &str, font: Font, color: Hsla, window: &mut Window) -> Vec<S
 
 /// Each of `lines` shaped as [`shape_rows`] shapes it.
 fn shape_lines(lines: &[String], color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
-    let font = bviz_ui_assets::text_metrics(window).font;
     lines
         .iter()
-        .flat_map(|line| shape_rows(line, font.clone(), color, window))
+        .flat_map(|line| shape_rows(line, color, window))
         .collect()
 }
 
@@ -215,12 +214,7 @@ impl TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let rows = shape_rows(
-            &self.text,
-            font(bviz_ui_assets::UI),
-            self.colors.label.into(),
-            window,
-        );
+        let rows = shape_rows(&self.text, self.colors.label.into(), window);
         // A tooltip view is drawn outside the element tree that sets the UI
         // face, so it inherits none.
         div()
