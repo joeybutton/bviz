@@ -26,7 +26,7 @@ use bviz_ui_components::{
 use gpui::{
     Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     KeyBinding, KeyContext, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
-    actions, div, prelude::*, px,
+    actions, div, point, prelude::*, px,
 };
 use std::sync::Arc;
 
@@ -59,6 +59,8 @@ actions!(
         Edit,
         /// Copy chip
         CopyChip,
+        /// Open chip menu
+        OpenChipMenu,
         /// Copy as Bazel query
         CopyStack,
         /// Clear query
@@ -150,6 +152,8 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", Edit, on_chips),
         KeyBinding::new("escape", Leave, on_chips),
         KeyBinding::new("secondary-c", CopyChip, on_chips),
+        KeyBinding::new("shift-f10", OpenChipMenu, on_chips),
+        KeyBinding::new("menu", OpenChipMenu, on_chips),
         KeyBinding::new("secondary-shift-c", CopyStack, panel_or_bar),
         KeyBinding::new(
             "secondary-shift-backspace",
@@ -624,6 +628,20 @@ fn select_last(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<Grap
     }
 }
 
+/// The window point under the pill of the chip `id`, held inside the row of
+/// chips; the row's own corner where the row has not laid the pill out.
+fn foot(chips: &Chips, id: ChipId) -> Point<Pixels> {
+    let row = chips.scroll.bounds();
+    let pill = (chips.stack.position(id)).and_then(|at| chips.scroll.bounds_for_item(at));
+    match pill {
+        Some(pill) => {
+            let left = pill.left() + chips.scroll.offset().x;
+            point(left.max(row.left()).min(row.right()), row.bottom())
+        }
+        None => row.bottom_left(),
+    }
+}
+
 /// Puts up the menu of what can be done with the chip `id` at `at`.
 fn open_menu(
     view: &mut GraphPanel,
@@ -891,6 +909,12 @@ pub(crate) fn bar(
         .on_action(cx.listener(|view, _: &CopyChip, window, cx| {
             if let Some(id) = view.chips.selected {
                 copy_chip(view, id, window, cx);
+            }
+        }))
+        .on_action(cx.listener(|view, _: &OpenChipMenu, window, cx| {
+            if let Some(id) = view.chips.selected {
+                let at = foot(&view.chips, id);
+                open_menu(view, id, at, window, cx);
             }
         }))
         .flex()

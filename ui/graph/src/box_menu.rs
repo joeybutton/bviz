@@ -1,6 +1,7 @@
-//! The menu a right press puts up over a box of the graph, offering what can
-//! be done with the box it selects.
+//! The menu of what can be done with a box of the graph, which a right press
+//! on the box puts up, and a key for the selected box.
 
+use crate::camera::{Rect, to_screen};
 use crate::menu::over_window;
 use crate::relation::Relation;
 use crate::{GraphPanel, pins, why};
@@ -9,7 +10,7 @@ use bviz_graph_layout::select::Visibility;
 use bviz_ui_components::{Menu, MenuEvent, MenuItem, SubmenuItem};
 use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, Pixels, Point, SharedString, Subscription,
-    WeakEntity, Window,
+    WeakEntity, Window, point,
 };
 use std::collections::HashSet;
 
@@ -97,6 +98,37 @@ pub(crate) fn close(view: &GraphPanel, cx: &mut App) {
     if let Some(open) = &view.box_menu {
         open.menu.update(cx, |menu, cx| menu.dismiss(cx));
     }
+}
+
+/// Puts up the menu of the selected box, where one is selected, at the foot
+/// of the box.
+pub(crate) fn open_selected(
+    view: &mut GraphPanel,
+    window: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
+    if let Some(node) = view.selection.node() {
+        let at = foot(view, node);
+        open(view, node, at, window, cx);
+    }
+}
+
+/// The window point at the foot of `node` as the canvas draws it, held inside
+/// the canvas; the canvas's middle where the drawing shows no box for `node`.
+fn foot(view: &GraphPanel, node: Id) -> Point<Pixels> {
+    let canvas = view.framing.viewport();
+    let drawn = view.drawn().and_then(|drawn| {
+        let shown = drawn.view(view.view_zoom(&drawn)?)?;
+        shown.boxes.iter().find(|b| b.id == node).map(Rect::of)
+    });
+    let Some(rect) = drawn else {
+        return canvas.center();
+    };
+    let foot = to_screen(rect.x, rect.y + rect.h, canvas, view.camera());
+    point(
+        foot.x.max(canvas.left()).min(canvas.right()),
+        foot.y.max(canvas.top()).min(canvas.bottom()),
+    )
 }
 
 /// The rows of the menu of `node`.

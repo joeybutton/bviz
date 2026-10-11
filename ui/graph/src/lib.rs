@@ -111,6 +111,8 @@ actions!(
         JumpForward,
         /// Show whole graph
         ShowWholeGraph,
+        /// Open box menu
+        OpenBoxMenu,
     ]
 );
 
@@ -152,6 +154,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("r", ToggleReduce, unless_typing),
         KeyBinding::new("escape", Dismiss, unless_typing),
         KeyBinding::new("0", ShowWholeGraph, unless_typing),
+        KeyBinding::new("shift-f10", OpenBoxMenu, unless_typing),
+        KeyBinding::new("menu", OpenBoxMenu, unless_typing),
         KeyBinding::new("enter", reveal::Accept, unless_typing),
         KeyBinding::new("alt-left", JumpBack, unless_typing),
         KeyBinding::new("alt-right", JumpForward, unless_typing),
@@ -1147,6 +1151,9 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
+            .on_action(cx.listener(|view, _: &OpenBoxMenu, window, cx| {
+                box_menu::open_selected(view, window, cx)
+            }))
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend_state
                     .update(cx, |legend, cx| legend.show(window, cx));
@@ -1502,6 +1509,22 @@ mod tests {
         for field in [IN_CHIP_FIELD, IN_FIELD] {
             assert!(dispatched("h", field).is_none());
             assert!(dispatched("r", field).is_none());
+        }
+    }
+
+    /// The keys opening a context menu open the selected chip's on the chips,
+    /// the selected box's elsewhere, and leave a text field's own to it.
+    #[test]
+    fn the_menu_keys_open_the_menu_of_what_is_selected_outside_a_text_field() {
+        for keys in ["shift-f10", "menu"] {
+            assert!(is(dispatched(keys, IN_PANEL), OpenBoxMenu), "{keys}");
+            assert!(
+                is(dispatched(keys, IN_CHIPS), chips::OpenChipMenu),
+                "{keys}"
+            );
+            for field in [IN_FIELD, IN_CHIP_FIELD, IN_PALETTE] {
+                assert!(dispatched(keys, field).is_none(), "{keys}");
+            }
         }
     }
 
