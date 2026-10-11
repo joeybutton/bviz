@@ -196,6 +196,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
         KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
         KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
+        KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
         KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),

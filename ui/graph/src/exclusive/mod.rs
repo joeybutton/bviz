@@ -18,8 +18,7 @@ use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceRe
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
 };
-use crate::toolbar::{busy, group};
-use crate::unit_picker::UnitPicker;
+use crate::unit_picker::{CyclePoints, UnitPicker};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
@@ -30,9 +29,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
-    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
-    over_window,
+    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, TruncatingLabel,
+    cached_layer, centered_notice, centered_spinner, defer_hover_card, legend_gestures,
+    load_in_background, over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
@@ -263,6 +262,7 @@ impl ExclusivePanel {
                 roots::FIELD_WIDTH,
                 cx,
             )
+            .narrowing_to(roots::FIELD_LEAST)
         });
         let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
             QueryFieldEvent::Edited | QueryFieldEvent::CursorMoved => {}
@@ -1754,6 +1754,11 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend.update(cx, |legend, cx| legend.show(window, cx));
             }))
+            .on_action(cx.listener(|view, _: &CyclePoints, _, cx| {
+                if let Some(picker) = &view.picker {
+                    picker.cycle(cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|view, e: &MouseDownEvent, _, cx| {
@@ -1798,10 +1803,21 @@ impl Render for ExclusivePanel {
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
-            let field = roots::field(&self.roots_field, &palette, cx);
-            let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
+            let scoping = Scoping {
+                roots: &self.roots_field,
+                drawn,
+                computing,
+            };
             let legend = legend(&self.legend, drawn, &palette);
-            strip(picker, field, crumbs, legend, computing, &palette)
+            strip(
+                picker,
+                scoping,
+                legend,
+                &self.focus_handle,
+                &palette,
+                window,
+                cx,
+            )
         }));
         let rooting = self.rooting(cx);
         let report = match self.failure(cx) {
@@ -1875,37 +1891,55 @@ impl Render for ExclusivePanel {
     }
 }
 
-/// The strip choosing the unit drawn and the roots `field`, followed by
-/// `crumbs` and the `legend` of the tree drawn, which reads `computing` while
-/// the roots of a new choice are chosen and its tree is computed over the one
-/// drawn for the last.
+/// How long the points picker holds out against the panel narrowing.
+const POINTS: Priority = 2;
+
+/// What the strip holds past its picker.
+struct Scoping<'a> {
+    /// The field choosing the roots of the tree.
+    roots: &'a Entity<QueryField>,
+    /// The tree drawn, whose focus the breadcrumb names the path down to.
+    drawn: Option<&'a Drawn>,
+    /// Whether the roots of a new choice are chosen and its tree computed over
+    /// the one drawn for the last.
+    computing: bool,
+}
+
+/// The strip choosing the unit drawn and the roots, its picker's keys named
+/// where `focus` stands, ending in the toggle opening the tree's `legend`.
+/// The roots field shares the room the controls leave with the breadcrumb.
 fn strip(
     picker: &UnitPicker,
-    field: impl IntoElement,
-    crumbs: Option<Div>,
+    scoping: Scoping,
     legend: Legend,
-    computing: bool,
+    focus: &FocusHandle,
     palette: &Palette,
-) -> Toolbar {
-    Toolbar::new()
-        .child(group("points", palette).child(picker.dropdown()))
-        .child(field)
-        .child(match crumbs {
-            // The legend takes only the room the crumbs leave.
-            Some(crumbs) => div()
+    window: &Window,
+    cx: &Context<ExclusivePanel>,
+) -> OneRow {
+    let points = picker.group(POINTS, focus, window, cx);
+    let crumbs = || {
+        let crumbs = scoping
+            .drawn
+            .and_then(|drawn| breadcrumb(drawn, palette, cx));
+        crumbs.map(|crumbs| div().flex_1().min_w_0().child(crumbs))
+    };
+    OneRow::new("exclusive-controls")
+        .group(points)
+        .filling(|| {
+            div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .flex_1()
-                .min_w(CRUMBS_MIN_WIDTH)
-                .child(crumbs)
-                .child(legend)
-                .into_any_element(),
-            None => legend.into_any_element(),
+                .min_w_0()
+                .child(roots::field(scoping.roots, palette, cx))
+                .children(crumbs())
         })
-        .when(computing, |bar| {
-            bar.trailing(busy("exclusive-computing", "computing…", palette))
+        .when(scoping.computing, |row| {
+            row.busy("exclusive-computing", "computing…")
         })
+        .trailing(legend.toolbar_group())
 }
 
 /// The legend of `drawn`, open as `state` says: what each hue its cells wear
@@ -2037,11 +2071,6 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
             .child(row().child(row().children(above)).child(last)),
     )
 }
-
-/// The least width the breadcrumb and the legend after it are laid out at:
-/// with less left beside the strip's controls, they take a row of the strip
-/// to themselves.
-const CRUMBS_MIN_WIDTH: Pixels = px(320.);
 
 /// What the breadcrumb names the whole build.
 const WHOLE_BUILD_CRUMB: &str = "Whole build";

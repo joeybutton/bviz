@@ -6,11 +6,11 @@ use crate::{
 };
 use bviz_ui_components::{
     Dropdown, Legend, MenuItem, MultiSelect, OneRow, Presentation, Priority, Switch, ToggleGroup,
-    ToggleSegment, ToolbarGroup, spinner,
+    ToggleSegment, ToolbarGroup,
 };
 use gpui::{
     Action, AnyElement, App, Context, Div, Entity, FocusHandle, IntoElement, Pixels, SharedString,
-    Window, div, prelude::*, px,
+    Window, div, prelude::*,
 };
 
 /// How many strips [`toolbar`] stacks.
@@ -228,28 +228,4 @@ impl PickerGroup<'_> {
         );
         ToolbarGroup::named(priority, self.name, || self.dropdown.clone()).overflow(row, self.set)
     }
-}
-
-/// A strip's controls grouped under the word `name`.
-pub(crate) fn group(name: &'static str, palette: &Palette) -> Div {
-    labelled(palette).child(name)
-}
-
-/// The cue a strip shows that the work `doing` names is in flight, its spinner
-/// keyed by `id`.
-pub(crate) fn busy(id: &'static str, doing: &'static str, palette: &Palette) -> impl IntoElement {
-    labelled(palette)
-        .child(spinner(id, SPINNER_SIZE, palette.label))
-        .child(doing)
-}
-
-const SPINNER_SIZE: Pixels = px(14.);
-
-/// A row of a strip set in the strip's label colour.
-fn labelled(palette: &Palette) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_color(palette.label)
 }

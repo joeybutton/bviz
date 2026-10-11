@@ -111,10 +111,6 @@ impl UnitPicker {
         self.dropdown.read(cx).selected() == self.opened
     }
 
-    pub(crate) fn dropdown(&self) -> Entity<Dropdown> {
-        self.dropdown.clone()
-    }
-
     /// Steps the picker to the unit after the one chosen.
     pub(crate) fn cycle(&self, cx: &mut App) {
         self.dropdown.update(cx, |dropdown, cx| dropdown.cycle(cx));

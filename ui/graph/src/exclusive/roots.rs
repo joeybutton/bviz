@@ -25,6 +25,10 @@ pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
 /// Width the field is drawn at, wide enough for its placeholder.
 pub(super) const FIELD_WIDTH: Pixels = px(380.);
 
+/// The narrowest the field stands in its toolbar, the other controls giving
+/// way before it narrows further.
+pub(super) const FIELD_LEAST: Pixels = px(120.);
+
 pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//tools/...";
 
 /// What the field's tooltip says it takes.
@@ -251,7 +255,8 @@ pub(super) fn field(
             view.focus_handle.focus(window, cx);
         }))
         .tooltip(TextTooltip::builder(HELP.into(), tip))
-        .flex_none()
+        .flex_1()
+        .min_w_0()
         .child(input.clone())
 }
 
