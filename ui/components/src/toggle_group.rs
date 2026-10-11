@@ -4,7 +4,7 @@
 
 use crate::button::Button;
 use crate::popup::{self, Popup};
-use crate::{TextTooltip, key_text_in, menu_chrome};
+use crate::{SubmenuItem, TextTooltip, key_text_in, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, App, ClickEvent, ElementId, Entity, FocusHandle, IntoElement, RenderOnce, SharedString,
@@ -51,6 +51,8 @@ impl ToggleSegment {
 
     /// As [`Button::keys_for`]: the tooltip, and the menu row the toggle stands
     /// as while collapsed, name the keys that run `action` where `focus` stands.
+    /// The row reads the toggle's own label, so that the toggle reads alike in
+    /// every presentation; the action's help label is left to the tooltip.
     pub fn keys_for(mut self, action: &dyn Action, focus: &FocusHandle) -> Self {
         self.keys = Some((action.boxed_clone(), focus.clone()));
         self
@@ -244,6 +246,29 @@ impl ToggleGroup {
         self
     }
 
+    /// The toggles as the rows of a submenu, each checked where it stands on,
+    /// reading as the collapsed group's menu reads them.
+    pub fn submenu(self, window: &Window) -> Vec<SubmenuItem> {
+        (self.toggles.into_entries().into_iter())
+            .map(|(segment, on, click)| {
+                let chosen = move |window: &mut Window, cx: &mut App| click(window, cx);
+                let row = SubmenuItem::new(segment.label, chosen).checked(on);
+                let row = match &segment.keys {
+                    Some((action, focus)) => row.keys_for(&**action, focus, window),
+                    None => row,
+                };
+                let row = match segment.unavailable {
+                    Some(_) => row.disabled(),
+                    None => row,
+                };
+                match segment.unavailable.or(segment.tooltip) {
+                    Some(tip) => row.tooltip(tip),
+                    None => row,
+                }
+            })
+            .collect()
+    }
+
     /// What the collapsed trigger reads: the label, then the value chosen or
     /// how many switches of how many are on.
     fn reading(&self) -> SharedString {
@@ -375,7 +400,7 @@ fn menu(
                         .size(menu_chrome::MENU_ICON)
                         .text_color(colors.text)
                 }))
-                .child(div().whitespace_nowrap().child(segment.label.clone()))
+                .child(div().whitespace_nowrap().child(segment.label))
                 .children(keys.map(|keys| {
                     div()
                         .pl(menu_chrome::LABEL_GAP)

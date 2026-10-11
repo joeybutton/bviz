@@ -5,13 +5,13 @@ use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
 use crate::scrollbar::ScrollbarColors;
-use crate::{Hint, KeyScope, TruncatingLabel};
+use crate::{Hint, KeyScope, SubmenuItem, TruncatingLabel};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Font, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window,
+    div, prelude::*, px,
 };
 
 gpui::actions!(
@@ -214,6 +214,25 @@ impl MultiSelect {
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.hint = self.hint.text(text);
         self
+    }
+
+    /// The values `multi_select` offers as the rows of a submenu, each checked
+    /// as it stands, a click reporting what a click on its row in the
+    /// control's own menu does.
+    pub fn submenu(multi_select: &Entity<Self>, cx: &App) -> Vec<SubmenuItem> {
+        (multi_select.read(cx).rows.options.iter().enumerate())
+            .map(|(index, option)| {
+                let multi_select = multi_select.clone();
+                SubmenuItem::new(option.label.clone(), move |_, cx| {
+                    multi_select.update(cx, |this, cx| {
+                        if let Some(event) = this.rows.clicked(index) {
+                            cx.emit(event);
+                        }
+                    })
+                })
+                .checked(option.checked)
+            })
+            .collect()
     }
 
     /// Restates the values the control offers and which of them are checked.

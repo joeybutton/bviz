@@ -2,7 +2,7 @@
 //! opens from it.
 
 use crate::popup::{self, Popup};
-use crate::{Hint, KeyScope, menu_chrome};
+use crate::{Hint, KeyScope, SubmenuItem, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, IntoElement,
@@ -153,17 +153,48 @@ impl Dropdown {
     }
 
     fn choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self
-            .options
-            .get(index)
-            .is_some_and(|choice| choice.available)
-        {
+        if !self.offers(index) {
             return;
         }
         self.popup.update(cx, |popup, cx| popup.close(window, cx));
-        if self.select(index) {
+        self.pick(index, cx);
+    }
+
+    /// Whether the option at `index` can be picked.
+    fn offers(&self, index: usize) -> bool {
+        (self.options.get(index)).is_some_and(|choice| choice.available)
+    }
+
+    /// Picks the option at `index` as a user's choice, where it can be picked.
+    fn pick(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.offers(index) && self.select(index) {
             cx.emit(DropdownEvent::Changed(index));
         }
+    }
+
+    /// The options of `dropdown` as the rows of a submenu, the chosen one
+    /// checked, each picking its option as a choice in the dropdown's own menu
+    /// does, and each that cannot be picked explained by `unavailable`.
+    pub fn submenu(
+        dropdown: &Entity<Self>,
+        unavailable: Option<SharedString>,
+        cx: &App,
+    ) -> Vec<SubmenuItem> {
+        let this = dropdown.read(cx);
+        (this.options.iter().enumerate())
+            .map(|(index, option)| {
+                let dropdown = dropdown.clone();
+                let row = SubmenuItem::new(option.label.clone(), move |_, cx| {
+                    dropdown.update(cx, |dropdown, cx| dropdown.pick(index, cx))
+                })
+                .checked(index == this.selected);
+                match (option.available, &unavailable) {
+                    (true, _) => row,
+                    (false, None) => row.disabled(),
+                    (false, Some(why)) => row.disabled().tooltip(why.clone()),
+                }
+            })
+            .collect()
     }
 
     fn trigger(
