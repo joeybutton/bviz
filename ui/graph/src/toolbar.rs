@@ -1,8 +1,17 @@
-use crate::{Controls, GraphPanel, Palette, ToggleCriticalPath, ToggleNeighborhood};
-use bviz_ui_components::{
-    OneRow, Priority, Switch, ToggleGroup, ToggleSegment, ToolbarGroup, ToolbarSeparator, spinner,
+use crate::colour::{self, Colouring};
+use crate::mode::{self, LayoutMode};
+use crate::{
+    CRITICAL_PATH_AT_REST, Controls, CycleColouring, GraphPanel, NEIGHBOURHOOD_AT_REST, Palette,
+    ToggleCriticalPath, ToggleMap, ToggleNeighborhood, report, timecard,
 };
-use gpui::{AnyElement, Context, Div, FocusHandle, IntoElement, Pixels, div, prelude::*, px};
+use bviz_ui_components::{
+    Dropdown, Legend, MenuItem, OneRow, Presentation, Priority, Switch, ToggleGroup, ToggleSegment,
+    ToolbarGroup, ToolbarSeparator, spinner,
+};
+use gpui::{
+    Action, AnyElement, App, Context, Div, Entity, IntoElement, Pixels, SharedString, Window, div,
+    prelude::*, px,
+};
 
 /// How many strips [`toolbar`] stacks.
 const STRIPS: usize = 2;
@@ -16,49 +25,107 @@ pub(crate) fn height() -> Pixels {
 /// added do not move the drawing: how the graph is drawn, ending in the toggles
 /// putting panels up and away, then what it holds.
 pub(crate) fn toolbar(
+    view: &GraphPanel,
     controls: Controls,
     palette: &Palette,
-    focus: &FocusHandle,
+    window: &Window,
     cx: &Context<GraphPanel>,
 ) -> Div {
-    let marks = marks(&controls, focus, cx);
-    let mut view = OneRow::new("graph-view-controls")
-        .group(ToolbarGroup::new(
-            LAYOUT,
-            group("layout", palette).child(controls.layout_picker),
-        ))
-        .group(ToolbarGroup::new(EDGES, controls.reduce_toggle))
-        .group(ToolbarGroup::new(
-            COLOUR,
-            group("colour", palette).child(controls.colour_picker),
-        ))
-        .group(ToolbarGroup::new(
-            MARK,
-            parted(group("mark", palette).child(marks)),
-        ))
-        .when(controls.relaying, |view| {
+    let layout = ToolbarGroup::new(
+        LAYOUT,
+        group(LAYOUT_NAME, palette).child(mode::control(view)),
+    )
+    .or(unnamed(mode::control(view), palette))
+    .overflow(
+        picker_row(
+            LAYOUT_NAME,
+            &view.layout_picker,
+            &ToggleMap,
+            None,
+            view,
+            window,
+            cx,
+        ),
+        view.mode != LayoutMode::default(),
+    );
+    let edges = ToolbarGroup::new(EDGES, unnamed(mode::reduce_toggle(view, cx), palette)).overflow(
+        mode::reduce_row(view, EDGES_NAME, window, cx),
+        mode::reduction(view).set(),
+    );
+    let colour = ToolbarGroup::new(
+        COLOUR,
+        group(COLOUR_NAME, palette).child(view.colour_picker.clone()),
+    )
+    .or(unnamed(view.colour_picker.clone(), palette))
+    .overflow(
+        picker_row(
+            COLOUR_NAME,
+            &view.colour_picker,
+            &CycleColouring,
+            Some(colour::hint(view.model.read(cx))),
+            view,
+            window,
+            cx,
+        ),
+        view.colouring != Colouring::default(),
+    );
+    let marking = Marking::of(view, cx);
+    let marks = ToolbarGroup::new(
+        MARK,
+        parted(group(MARK_NAME, palette).child(marking.toggles(view, cx))),
+    )
+    .or(parted(unnamed(marking.toggles(view, cx), palette)))
+    .or(parted(unnamed(
+        marking
+            .toggles(view, cx)
+            .presentation(Presentation::Collapsed),
+        palette,
+    )))
+    .overflow(
+        MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
+        marking.set(),
+    );
+    let mut drawing = OneRow::new("graph-view-controls")
+        .group(layout)
+        .group(edges)
+        .group(colour)
+        .group(marks)
+        .when(view.derived.deriving(), |row| {
             // The prior layout stays interactive while a relayout runs.
-            view.status([busy("relaying-spinner", "laying out…", palette).into_any_element()])
+            row.status([
+                busy("relaying-spinner", "laying out…", palette).into_any_element(),
+                spinner("relaying-spinner", SPINNER_SIZE, palette.label).into_any_element(),
+            ])
         });
-    let panels: Vec<AnyElement> = [controls.report_control, controls.timecard_control]
-        .into_iter()
-        .flatten()
-        .chain(
-            controls
-                .legend
-                .map(|legend| legend.toggle().into_any_element()),
-        )
-        .collect();
-    if !panels.is_empty() {
-        view = view.trailing(ToolbarGroup::new(PANELS, parted(row().children(panels))));
+    if let Some(panels) = panel_toggles(view, controls.legend, cx) {
+        drawing = drawing.trailing(panels);
     }
     let query = OneRow::new("graph-query-bar")
-        .when_some(controls.boxes, |query, boxes| {
-            query.group(ToolbarGroup::new(BOXES, boxes))
+        .when(!view.box_classes.is_empty(), |query| {
+            query.group(ToolbarGroup::new(BOXES, view.boxes.clone()))
         })
         .filling(controls.chips);
-    let strips: [OneRow; STRIPS] = [view, query];
+    let strips: [OneRow; STRIPS] = [drawing, query];
     div().size_full().flex().flex_col().children(strips)
+}
+
+/// `picker` as the row of the overflow menu opening its choices, naming the
+/// keys of the `action` stepping through them, each choice it cannot make
+/// explained by `note`.
+fn picker_row(
+    name: &'static str,
+    picker: &Entity<Dropdown>,
+    action: &dyn Action,
+    note: Option<SharedString>,
+    view: &GraphPanel,
+    window: &Window,
+    cx: &App,
+) -> MenuItem {
+    MenuItem::submenu(name, Dropdown::submenu(picker, note, cx)).keys_for(
+        action,
+        &view.focus_handle,
+        window,
+    )
 }
 
 /// How long each group of the toolbar holds out against the window narrowing,
@@ -70,6 +137,43 @@ const MARK: Priority = 2;
 const PANELS: Priority = 1;
 const BOXES: Priority = 1;
 
+/// The words naming each group, over it in the toolbar and on its row of the
+/// overflow menu.
+const LAYOUT_NAME: &str = "layout";
+const EDGES_NAME: &str = "edges";
+const COLOUR_NAME: &str = "colour";
+const MARK_NAME: &str = "mark";
+
+/// The toggles putting panels up and away, labelled and then icon-only, where
+/// the graph offers any.
+fn panel_toggles(
+    view: &GraphPanel,
+    legend: Option<Legend>,
+    cx: &Context<GraphPanel>,
+) -> Option<ToolbarGroup> {
+    let toggles = |labelled: bool| -> Vec<AnyElement> {
+        let report = report::control(view, labelled, cx).map(IntoElement::into_any_element);
+        let timecard = timecard::control(view, labelled, cx).map(IntoElement::into_any_element);
+        let legend = legend.clone().map(|legend| {
+            let toggle = legend.toggle();
+            match labelled {
+                true => toggle,
+                false => toggle.icon_only(),
+            }
+            .into_any_element()
+        });
+        [report, timecard, legend].into_iter().flatten().collect()
+    };
+    let labelled = toggles(true);
+    if labelled.is_empty() {
+        return None;
+    }
+    Some(
+        ToolbarGroup::new(PANELS, parted(row().children(labelled)))
+            .or(parted(row().children(toggles(false)))),
+    )
+}
+
 /// Controls laid side by side.
 fn row() -> Div {
     div().flex().items_center().gap_2()
@@ -80,34 +184,68 @@ fn parted(controls: impl IntoElement) -> Div {
     row().child(ToolbarSeparator).child(controls)
 }
 
-/// The toggles choosing what the drawing marks.
-fn marks(controls: &Controls, focus: &FocusHandle, cx: &Context<GraphPanel>) -> ToggleGroup {
-    let panel = cx.entity();
-    let neighborhood = Switch::new(
-        ToggleSegment::new("neighbours").keys_for(&ToggleNeighborhood, focus),
-        controls.neighborhood_enabled,
-        {
-            let panel = panel.clone();
-            move |_, _, cx| panel.update(cx, |view, cx| view.toggle_neighborhood(cx))
-        },
-    );
-    let critical_path = controls.critical_path.map(|enabled| {
-        Switch::new(
-            ToggleSegment::new("critical path").keys_for(&ToggleCriticalPath, focus),
-            enabled,
-            move |_, _, cx| panel.update(cx, |view, cx| view.toggle_critical_path(cx)),
-        )
-    });
-    ToggleGroup::any_of(
-        "graph-marks",
-        "mark",
-        std::iter::once(neighborhood).chain(critical_path),
-    )
+/// What the drawing marks, and whether the graph offers to mark its critical
+/// path at all.
+struct Marking {
+    neighbourhood: bool,
+    critical_path: Option<bool>,
 }
+
+impl Marking {
+    fn of(view: &GraphPanel, cx: &Context<GraphPanel>) -> Self {
+        Self {
+            neighbourhood: view.neighborhood_enabled,
+            critical_path: view.traced(cx).then_some(view.critical_path_enabled),
+        }
+    }
+
+    /// Whether the drawing marks other than a freshly opened graph does.
+    fn set(&self) -> bool {
+        self.neighbourhood != NEIGHBOURHOOD_AT_REST
+            || self
+                .critical_path
+                .is_some_and(|on| on != CRITICAL_PATH_AT_REST)
+    }
+
+    /// The toggles choosing what the drawing marks.
+    fn toggles(&self, view: &GraphPanel, cx: &Context<GraphPanel>) -> ToggleGroup {
+        let panel = cx.entity();
+        let focus = &view.focus_handle;
+        let neighbourhood = Switch::new(
+            ToggleSegment::new(NEIGHBOURS).keys_for(&ToggleNeighborhood, focus),
+            self.neighbourhood,
+            {
+                let panel = panel.clone();
+                move |_, _, cx| panel.update(cx, |view, cx| view.toggle_neighborhood(cx))
+            },
+        );
+        let critical_path = self.critical_path.map(|enabled| {
+            Switch::new(
+                ToggleSegment::new(CRITICAL_PATH).keys_for(&ToggleCriticalPath, focus),
+                enabled,
+                move |_, _, cx| panel.update(cx, |view, cx| view.toggle_critical_path(cx)),
+            )
+        });
+        ToggleGroup::any_of(
+            "graph-marks",
+            MARK_NAME,
+            std::iter::once(neighbourhood).chain(critical_path),
+        )
+    }
+}
+
+const NEIGHBOURS: &str = "neighbours";
+const CRITICAL_PATH: &str = "critical path";
 
 /// A strip's controls grouped under the word `name`.
 pub(crate) fn group(name: &'static str, palette: &Palette) -> Div {
     labelled(palette).child(name)
+}
+
+/// `controls` set as they stand under their group's name, so that they read
+/// alike whether or not the name stands beside them.
+fn unnamed(controls: impl IntoElement, palette: &Palette) -> Div {
+    labelled(palette).child(controls)
 }
 
 /// The cue a strip shows that the work `doing` names is in flight, its spinner

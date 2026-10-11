@@ -1,9 +1,10 @@
 //! Which layout the view draws, which edge set it draws them over, and the
 //! toolbar controls choosing both.
 
+use crate::model::OPENS_REDUCED;
 use crate::{GraphPanel, ToggleReduce, derive};
-use bviz_ui_components::{Switch, ToggleGroup, ToggleSegment};
-use gpui::{Context, IntoElement, div, prelude::*};
+use bviz_ui_components::{MenuItem, Switch, ToggleGroup, ToggleSegment};
+use gpui::{Context, IntoElement, Window, div, prelude::*};
 
 /// Which layout the view draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -75,6 +76,15 @@ impl Reduction {
         }
     }
 
+    /// Whether the drawing's reduction stands other than a freshly opened
+    /// graph's.
+    pub(crate) fn set(self) -> bool {
+        match self {
+            Self::Chosen(reduced) => reduced != OPENS_REDUCED,
+            Self::Always | Self::Nothing => false,
+        }
+    }
+
     /// What switching the reduction chooses, or why the reader cannot switch
     /// it.
     pub(crate) fn switched(self) -> Result<bool, &'static str> {
@@ -140,6 +150,21 @@ pub(crate) fn reduce_toggle(view: &GraphPanel, cx: &Context<GraphPanel>) -> Togg
     ToggleGroup::any_of("graph-reduction", REDUCE, [switch])
 }
 
+/// The toggle as the row of the overflow menu reading `name`, opening the
+/// toggle as its submenu and naming its keys where it can be switched.
+pub(crate) fn reduce_row(
+    view: &GraphPanel,
+    name: &'static str,
+    window: &Window,
+    cx: &Context<GraphPanel>,
+) -> MenuItem {
+    let row = MenuItem::submenu(name, reduce_toggle(view, cx).submenu(window));
+    match reduction(view).switched() {
+        Ok(_) => row.keys_for(&ToggleReduce, &view.focus_handle, window),
+        Err(_) => row,
+    }
+}
+
 const REDUCE: &str = "reduce";
 
 #[cfg(test)]
@@ -180,5 +205,13 @@ mod tests {
         assert_eq!(reduction, Reduction::Nothing);
         assert!(!reduction.on());
         assert_eq!(reduction.switched(), Err(NOTHING_TO_REDUCE));
+    }
+
+    #[test]
+    fn only_a_layered_layout_drawing_other_than_it_opens_with_stands_set() {
+        assert!(!Reduction::Chosen(OPENS_REDUCED).set());
+        assert!(Reduction::Chosen(!OPENS_REDUCED).set());
+        assert!(!Reduction::Always.set());
+        assert!(!Reduction::Nothing.set());
     }
 }

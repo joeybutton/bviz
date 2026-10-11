@@ -9,9 +9,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     DragEnd, Dropdown, DropdownEvent, KeyScope, LegendState, MultiSelect, MultiSelectEvent,
-    Pending, ScrollbarColors, ShowLegend, ToggleGroup, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
-    cached_layer, declare_scopes, find_key_bindings, legend_gestures, legend_key_bindings,
-    overlay_canvas, text_input, zoom_key_bindings,
+    Pending, ScrollbarColors, ShowLegend, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    declare_scopes, find_key_bindings, legend_gestures, legend_key_bindings, overlay_canvas,
+    text_input, zoom_key_bindings,
 };
 use bviz_ui_graph_args::{AQUERY_LONG, CQUERY_LONG, GraphArgs, GraphSource, QUERY_LONG};
 use bviz_ui_playback::{Clock, DocumentClock};
@@ -548,8 +548,8 @@ impl GraphPanel {
             spatial: SpatialMemo::default(),
             selection: Selection::none(),
             box_menu: None,
-            neighborhood_enabled: false,
-            critical_path_enabled: true,
+            neighborhood_enabled: NEIGHBOURHOOD_AT_REST,
+            critical_path_enabled: CRITICAL_PATH_AT_REST,
             missing: missing::Missing::new(),
             pins: pins::Pins::new(),
             reveal: reveal::Reveal::Idle,
@@ -757,22 +757,11 @@ impl GraphPanel {
         window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let legend = self.legend(palette, cx);
-        let traced = self.traced(cx);
         let controls = Controls {
+            legend: self.legend(palette, cx),
             chips: chips::bar(self, palette, window, cx),
-            layout_picker: mode::control(self).into_any_element(),
-            reduce_toggle: mode::reduce_toggle(self, cx),
-            boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
-            colour_picker: self.colour_picker.clone(),
-            report_control: report::control(self, cx).map(IntoElement::into_any_element),
-            timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
-            neighborhood_enabled: self.neighborhood_enabled,
-            critical_path: traced.then_some(self.critical_path_enabled),
-            relaying: self.derived.deriving(),
-            legend,
         };
-        toolbar::toolbar(controls, palette, &self.focus_handle, cx).into_any_element()
+        toolbar::toolbar(self, controls, palette, window, cx).into_any_element()
     }
 
     fn draw_overlays(
@@ -1298,30 +1287,20 @@ impl Render for GraphCanvas {
     }
 }
 
-/// What the toolbar's controls show.
+/// The toolbar's parts that take more to build than a shared borrow of the
+/// panel: the window, or the panel itself mutably.
 struct Controls {
     /// The query bar.
     chips: AnyElement,
-    /// Chooses the layout drawn.
-    layout_picker: AnyElement,
-    reduce_toggle: ToggleGroup,
-    /// The boxes menu, offered only where the loaded graph carries a box class.
-    boxes: Option<Entity<MultiSelect>>,
-    /// Chooses what the boxes' fills say.
-    colour_picker: Entity<Dropdown>,
-    /// Puts the card reading what the build reported up and away, offered
-    /// where the build reported anything.
-    report_control: Option<AnyElement>,
-    /// Puts the card saying where the profile's action time went up and
-    /// away, offered where a profile places time on the graph.
-    timecard_control: Option<AnyElement>,
-    neighborhood_enabled: bool,
-    /// Whether the critical path's halo is drawn, offered only where a path
-    /// lands on the graph.
-    critical_path: Option<bool>,
-    relaying: bool,
     legend: Option<bviz_ui_components::Legend>,
 }
+
+/// Whether a freshly opened graph marks the neighbourhood of the box under
+/// the pointer.
+const NEIGHBOURHOOD_AT_REST: bool = false;
+
+/// Whether a freshly opened graph haloes its critical path, where it has one.
+const CRITICAL_PATH_AT_REST: bool = true;
 
 /// The box a pointer at `pos` (window px) resolves to, which every gesture that
 /// names a box — the hover that marks a neighborhood, the click that opens or

@@ -96,15 +96,20 @@ pub(crate) fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 }
 
 /// The toolbar's control putting the card up and away; `None` where the build
-/// reported nothing for the card to read.
-pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
+/// reported nothing for the card to read. It reads its name where `labelled`,
+/// and is icon-only otherwise.
+pub(crate) fn control(
+    view: &GraphPanel,
+    labelled: bool,
+    cx: &Context<GraphPanel>,
+) -> Option<Button> {
     let report = Reported::of(view, cx)?.report();
     Some(
         Button::new(
             "report-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
-        .label("outcomes")
+        .when(labelled, |toggle| toggle.label("outcomes"))
         .icon("list-checks")
         .keys_for(&ToggleOutcomes, &view.focus_handle)
         .selected(view.report.is_up(report)),

@@ -65,15 +65,20 @@ pub(crate) fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 }
 
 /// The toolbar's control putting the card up and away; `None` where no
-/// profile records an action.
-pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
+/// profile records an action. It reads its name where `labelled`, and is
+/// icon-only otherwise.
+pub(crate) fn control(
+    view: &GraphPanel,
+    labelled: bool,
+    cx: &Context<GraphPanel>,
+) -> Option<Button> {
     timed(view, cx)?;
     Some(
         Button::new(
             "timecard-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
-        .label("timing")
+        .when(labelled, |toggle| toggle.label("timing"))
         .icon("timer")
         .keys_for(&ToggleTiming, &view.focus_handle)
         .selected(view.timecard.up),
