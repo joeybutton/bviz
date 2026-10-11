@@ -22,7 +22,9 @@ use gpui::{
 };
 
 mod element;
+mod urls;
 use element::TerminalElement;
+use urls::DrawnUrls;
 
 actions!(
     bviz_console,
@@ -68,6 +70,13 @@ enum ConsoleIntent {
     Scroll,
 }
 
+const OPEN_LINK: Entry<ConsoleIntent> = Entry::new(
+    Input::click(gesture::Button::Left).holding(Held::SECONDARY),
+    Place::On("a link"),
+    "Open link",
+    ConsoleIntent::OpenLink,
+);
+
 const GESTURES: Gestures<ConsoleIntent> = Gestures::new(&[
     Entry::new(
         Input::new(Motion::Press(gesture::Button::Left, Clicks::Triple)),
@@ -87,12 +96,7 @@ const GESTURES: Gestures<ConsoleIntent> = Gestures::new(&[
         "Select text",
         ConsoleIntent::SelectText,
     ),
-    Entry::new(
-        Input::click(gesture::Button::Left).holding(Held::SECONDARY),
-        Place::On("a link"),
-        "Open link",
-        ConsoleIntent::OpenLink,
-    ),
+    OPEN_LINK,
     Entry::new(
         Input::SCROLL,
         Place::Anywhere,
@@ -203,6 +207,7 @@ pub struct ConsolePanel {
     selection_anchor: Option<(i32, usize, Side)>,
     /// The URL under the cursor, highlighted and openable while hovered.
     hovered_url: Option<Url>,
+    drawn_urls: DrawnUrls,
     /// The URL pressed on, with the click a release that selected nothing makes
     /// of the press.
     pressed_url: Option<(String, Pointer)>,
@@ -248,6 +253,7 @@ impl ConsolePanel {
             selection_drag: None,
             selection_anchor: None,
             hovered_url: None,
+            drawn_urls: DrawnUrls::default(),
             pressed_url: None,
             drag_grab: None,
             scrollbar_visible: false,
