@@ -1,11 +1,12 @@
 //! A single-select dropdown: a trigger showing the chosen option and a menu that
 //! opens from it.
 
+use crate::popup::{self, Popup};
 use crate::{Hint, KeyScope, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    Action, App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, IntoElement,
-    KeyBinding, Pixels, Render, SharedString, Subscription, Window, div, prelude::*,
+    Action, App, ClickEvent, Context, ElementId, Entity, EventEmitter, IntoElement, KeyBinding,
+    Pixels, Render, SharedString, Window, div, prelude::*,
 };
 
 gpui::actions!(
@@ -40,13 +41,6 @@ struct Choice {
     available: bool,
 }
 
-/// The list a [`Dropdown`] has open.
-struct Opened {
-    /// Where focus stood when the list opened, which closing it from within
-    /// hands focus back to.
-    from: Option<FocusHandle>,
-}
-
 /// A dropdown over a fixed list of options. The chosen index is read with
 /// [`selected`](Self::selected); subscribe to [`DropdownEvent`] to react to a
 /// user's selection change.
@@ -54,13 +48,9 @@ pub struct Dropdown {
     id: ElementId,
     options: Vec<Choice>,
     selected: usize,
-    open: Option<Opened>,
     /// What the trigger's tooltip reads.
     hint: Hint,
-    focus_handle: FocusHandle,
-    /// Closes the menu when focus leaves it (an outside click); installed lazily on
-    /// the first render, where the window is in hand.
-    dismiss: Option<Subscription>,
+    popup: Entity<Popup>,
 }
 
 impl Dropdown {
@@ -80,10 +70,8 @@ impl Dropdown {
                 })
                 .collect(),
             selected,
-            open: None,
             hint: Hint::default(),
-            focus_handle: cx.focus_handle(),
-            dismiss: None,
+            popup: cx.new(Popup::new),
         }
     }
 
@@ -165,37 +153,9 @@ impl Dropdown {
         {
             return;
         }
-        self.close(window, cx);
+        self.popup.update(cx, |popup, cx| popup.close(window, cx));
         if self.select(index) {
             cx.emit(DropdownEvent::Changed(index));
-        }
-    }
-
-    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open.is_some() {
-            self.close(window, cx);
-        } else {
-            cx.propagate();
-        }
-    }
-
-    /// Takes focus into the list, where an outside click takes it away.
-    fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = Some(Opened {
-            from: window.focused(cx),
-        });
-        self.focus_handle.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Closes the list from within, handing focus back where it stood when the
-    /// list opened.
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Opened { from }) = self.open.take() {
-            if let Some(from) = from {
-                window.focus(&from, cx);
-            }
-            cx.notify();
         }
     }
 
@@ -211,15 +171,11 @@ impl Dropdown {
             .map(|choice| choice.label.clone())
             .unwrap_or_default();
         let trigger = menu_chrome::trigger(self.id.clone(), colors);
-        let open = |dropdown: &Self| dropdown.open.is_some();
+        let popup = self.popup.downgrade();
         (self.hint.clone())
-            .on_picker(trigger, colors.tooltip(), cx.weak_entity(), open)
+            .on_picker(trigger, colors.tooltip(), popup, Popup::is_open)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                if this.open.is_some() {
-                    this.close(window, cx);
-                } else {
-                    this.open(window, cx);
-                }
+                this.popup.update(cx, |popup, cx| popup.toggle(window, cx));
             }))
             .child(menu_chrome::reading(option_width, label))
             .child(menu_chrome::caret(colors))
@@ -248,32 +204,15 @@ impl EventEmitter<DropdownEvent> for Dropdown {}
 
 impl Render for Dropdown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Close on an outside click: the menu holds focus while open, so losing
-        // it means a click landed elsewhere.
-        if self.dismiss.is_none() {
-            self.dismiss = Some(
-                cx.on_focus_out(&self.focus_handle, window, |this, _, _, cx| {
-                    if this.open.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            );
-        }
-
         let colors = bviz_ui_theme::theme(window, cx).colors;
         let option_width = menu_chrome::widest(
             window,
             self.options.iter().map(|choice| choice.label.clone()),
         );
 
-        div()
-            .relative()
-            .key_context(KEY_CONTEXT)
-            // Focusable only while open, so a press on the closed trigger leaves
-            // focus to whatever around it takes it, for the list to hand back.
-            .when(self.open.is_some(), |el| el.track_focus(&self.focus_handle))
-            .on_action(cx.listener(Self::dismiss))
+        let open = self.popup.read(cx).is_open();
+        popup::holder(&self.popup, cx)
             .child(self.trigger(&colors, option_width, cx))
-            .children(self.open.is_some().then(|| self.menu(&colors, cx)))
+            .children(open.then(|| self.menu(&colors, cx)))
     }
 }

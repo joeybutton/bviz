@@ -21,12 +21,14 @@ mod menu;
 pub mod menu_chrome;
 mod multi_select;
 mod notice;
+mod popup;
 mod query_field;
 mod scrollbar;
 mod scrubber;
 mod sort;
 mod spinner;
 pub mod text_input;
+mod toggle_group;
 mod toolbar;
 mod tooltip;
 mod truncating_label;
@@ -65,6 +67,7 @@ pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
 pub use sort::{Sort, sort_gesture, sort_header, sort_hint};
 pub use spinner::spinner;
 pub use text_input::TextInput;
+pub use toggle_group::{Presentation, Switch, ToggleGroup, ToggleSegment};
 pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
     CardAnchor, TextTooltip, beside_anchor, defer_tooltip, place_tooltips, room_beside,
