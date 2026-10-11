@@ -357,6 +357,7 @@ fn chip_label(fold: Fold, entries: usize) -> SharedString {
 /// A view's legend, held to one line of `CONTROL_HEIGHT` that takes the room
 /// left on its row. Entries are given in priority order and fold from the end
 /// into a chip opening the popover, which shows every entry and the notes.
+#[derive(Clone)]
 pub struct Legend {
     id: ElementId,
     state: Entity<LegendState>,
@@ -393,7 +394,10 @@ impl Legend {
     /// The legend standing as a toggle that opens the whole key under itself,
     /// to sit among a toolbar's toggles putting panels up and away.
     pub fn toggle(self) -> LegendToggle {
-        LegendToggle { legend: self }
+        LegendToggle {
+            legend: self,
+            labelled: true,
+        }
     }
 
     /// What this frame reads of the legend's state.
@@ -535,6 +539,15 @@ impl Legend {
 #[derive(IntoElement)]
 pub struct LegendToggle {
     legend: Legend,
+    labelled: bool,
+}
+
+impl LegendToggle {
+    /// The toggle bearing its icon alone, its name left to the tooltip.
+    pub fn icon_only(mut self) -> Self {
+        self.labelled = false;
+        self
+    }
 }
 
 impl RenderOnce for LegendToggle {
@@ -558,7 +571,7 @@ impl RenderOnce for LegendToggle {
                 }
             });
         })
-        .label(TOGGLE_LABEL)
+        .when(self.labelled, |toggle| toggle.label(TOGGLE_LABEL))
         .icon(TOGGLE_ICON)
         .selected(seen.open)
         .disabled(measured.keys_nothing())
