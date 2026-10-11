@@ -1,10 +1,10 @@
 //! Which layout the view draws, which edge set it draws them over, and the
-//! toolbar controls choosing both.
+//! toolbar control choosing the edge set.
 
 use crate::model::OPENS_REDUCED;
 use crate::{GraphPanel, ToggleReduce, derive};
 use bviz_ui_components::{MenuItem, Switch, ToggleGroup, ToggleSegment};
-use gpui::{Context, IntoElement, Window, div, prelude::*};
+use gpui::{Context, Window};
 
 /// Which layout the view draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -124,14 +124,6 @@ pub(crate) fn sync(view: &GraphPanel, cx: &mut Context<GraphPanel>) {
     let index = view.mode.index();
     view.layout_picker
         .update(cx, |picker, cx| picker.set_selected(index, cx));
-}
-
-/// The layout picker.
-pub(crate) fn control(view: &GraphPanel) -> impl IntoElement + use<> {
-    div()
-        .id("layout-picker")
-        .flex_none()
-        .child(view.layout_picker.clone())
 }
 
 /// The toggle switching the reduction, standing as the drawing does and

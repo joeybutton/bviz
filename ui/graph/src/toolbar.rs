@@ -9,8 +9,8 @@ use bviz_ui_components::{
     ToggleSegment, ToolbarGroup, spinner,
 };
 use gpui::{
-    Action, AnyElement, App, Context, Div, Entity, IntoElement, Pixels, SharedString, Window, div,
-    prelude::*, px,
+    Action, AnyElement, App, Context, Div, Entity, FocusHandle, IntoElement, Pixels, SharedString,
+    Window, div, prelude::*, px,
 };
 
 /// How many strips [`toolbar`] stacks.
@@ -31,34 +31,26 @@ pub(crate) fn toolbar(
     window: &mut Window,
     cx: &Context<GraphPanel>,
 ) -> Div {
-    let layout = ToolbarGroup::named(LAYOUT, LAYOUT_NAME, || mode::control(view)).overflow(
-        picker_row(
-            LAYOUT_NAME,
-            &view.layout_picker,
-            &ToggleMap,
-            None,
-            view,
-            window,
-            cx,
-        ),
-        view.mode != LayoutMode::default(),
-    );
+    let layout = PickerGroup {
+        name: LAYOUT_NAME,
+        dropdown: &view.layout_picker,
+        action: &ToggleMap,
+        note: None,
+        set: view.mode != LayoutMode::default(),
+    }
+    .group(LAYOUT, &view.focus_handle, window, cx);
     let edges = ToolbarGroup::new(EDGES, mode::reduce_toggle(view, cx)).overflow(
         mode::reduce_row(view, EDGES_NAME, window, cx),
         mode::reduction(view).set(),
     );
-    let colour = ToolbarGroup::named(COLOUR, COLOUR_NAME, || view.colour_picker.clone()).overflow(
-        picker_row(
-            COLOUR_NAME,
-            &view.colour_picker,
-            &CycleColouring,
-            Some(colour::hint(view.model.read(cx))),
-            view,
-            window,
-            cx,
-        ),
-        view.colouring != Colouring::default(),
-    );
+    let colour = PickerGroup {
+        name: COLOUR_NAME,
+        dropdown: &view.colour_picker,
+        action: &CycleColouring,
+        note: Some(colour::hint(view.model.read(cx))),
+        set: view.colouring != Colouring::default(),
+    }
+    .group(COLOUR, &view.focus_handle, window, cx);
     let marking = Marking::of(view, cx);
     let marks = ToolbarGroup::named(MARK, MARK_NAME, || marking.toggles(view, cx))
         .or(marking
@@ -92,22 +84,18 @@ pub(crate) fn toolbar(
 }
 
 /// `picker` as the row of the overflow menu opening its choices, naming the
-/// keys of the `action` stepping through them, each choice it cannot make
-/// explained by `note`.
+/// keys of the `action` stepping through them where `focus` stands, each
+/// choice it cannot make explained by `note`.
 fn picker_row(
     name: &'static str,
     picker: &Entity<Dropdown>,
     action: &dyn Action,
     note: Option<SharedString>,
-    view: &GraphPanel,
+    focus: &FocusHandle,
     window: &Window,
     cx: &App,
 ) -> MenuItem {
-    MenuItem::submenu(name, Dropdown::submenu(picker, note, cx)).keys_for(
-        action,
-        &view.focus_handle,
-        window,
-    )
+    MenuItem::submenu(name, Dropdown::submenu(picker, note, cx)).keys_for(action, focus, window)
 }
 
 /// How long each group of the toolbar holds out against the window narrowing,
@@ -205,6 +193,42 @@ impl Marking {
 
 const NEIGHBOURS: &str = "neighbours";
 const CRITICAL_PATH: &str = "critical path";
+
+/// A picker as a group of a strip: standing beside the word naming it, then
+/// alone, then as the overflow menu's row opening its choices.
+pub(crate) struct PickerGroup<'a> {
+    pub name: &'static str,
+    pub dropdown: &'a Entity<Dropdown>,
+    /// Steps through the picker's choices.
+    pub action: &'static dyn Action,
+    /// What the overflow menu says of each choice the picker cannot make.
+    pub note: Option<SharedString>,
+    /// Whether the picker stands other than at rest.
+    pub set: bool,
+}
+
+impl PickerGroup<'_> {
+    /// The group, holding out by `priority`, its overflow row naming the
+    /// action's keys where `focus` stands.
+    pub(crate) fn group(
+        self,
+        priority: Priority,
+        focus: &FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> ToolbarGroup {
+        let row = picker_row(
+            self.name,
+            self.dropdown,
+            self.action,
+            self.note.clone(),
+            focus,
+            window,
+            cx,
+        );
+        ToolbarGroup::named(priority, self.name, || self.dropdown.clone()).overflow(row, self.set)
+    }
+}
 
 /// A strip's controls grouped under the word `name`.
 pub(crate) fn group(name: &'static str, palette: &Palette) -> Div {
