@@ -43,44 +43,6 @@ fn badge_inset() -> Pixels {
     (CONTROL_HEIGHT - ICON_SIZE - BADGE) / 2.
 }
 
-/// A horizontal strip of controls acting on the content below it, wrapping
-/// onto as many rows as it takes to hold them.
-#[derive(IntoElement, Default)]
-pub struct Toolbar {
-    leading: Vec<AnyElement>,
-    trailing: Vec<AnyElement>,
-}
-
-impl Toolbar {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add to the group held against the left edge, which wraps so that a
-    /// control is never cut off at the window edge however narrow the window.
-    pub fn child(mut self, child: impl IntoElement) -> Self {
-        self.leading.push(child.into_any_element());
-        self
-    }
-
-    /// Add to the group held against the right edge, which keeps its room
-    /// whatever the leading group holds.
-    pub fn trailing(mut self, child: impl IntoElement) -> Self {
-        self.trailing.push(child.into_any_element());
-        self
-    }
-}
-
-impl RenderOnce for Toolbar {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let leading = group(self.leading).flex_wrap().flex_1().min_w_0();
-        strip(window, cx)
-            .items_start()
-            .child(leading)
-            .child(group(self.trailing).flex_none())
-    }
-}
-
 /// A group of a [`OneRow`]'s controls, standing in the narrowest of its
 /// presentations the row's width calls for.
 pub struct ToolbarGroup {
@@ -684,16 +646,4 @@ fn strip(window: &mut Window, cx: &mut App) -> Div {
         .text_color(colors.text)
         .border_b(RULE)
         .border_color(colors.border)
-}
-
-/// One group's controls, each row of it as tall as a control so the two groups
-/// line up on the strip's first row.
-fn group(items: Vec<AnyElement>) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(GAP)
-        .min_h(CONTROL_HEIGHT)
-        .children(items)
 }
