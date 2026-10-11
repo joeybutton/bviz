@@ -349,8 +349,8 @@ fn fold(
 fn chip_label(fold: Fold, entries: usize) -> SharedString {
     match fold {
         Fold::Leading { shown } if shown < entries => format!("+{}", entries - shown).into(),
-        Fold::Leading { .. } => "Notes".into(),
-        Fold::All | Fold::Whole => "Legend".into(),
+        Fold::Leading { .. } => "notes".into(),
+        Fold::All | Fold::Whole => "legend".into(),
     }
 }
 
@@ -906,7 +906,7 @@ mod tests {
     fn a_strip_with_no_room_for_its_first_entry_stands_as_one_chip() {
         let widths = widths(&[200., 50.]);
         assert_eq!(fold(&widths, px(150.), false, chip), Fold::Whole);
-        assert_eq!(chip_label(Fold::Whole, 2), "Legend");
+        assert_eq!(chip_label(Fold::Whole, 2), "legend");
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
         let widths = widths(&[50., 50.]);
         let fold = fold(&widths, px(1000.), true, chip);
         assert_eq!(fold, Fold::Leading { shown: 2 });
-        assert_eq!(chip_label(fold, 2), "Notes");
+        assert_eq!(chip_label(fold, 2), "notes");
         assert_eq!(chip_label(Fold::Leading { shown: 1 }, 3), "+2");
     }
 
