@@ -12,9 +12,9 @@ use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
 use crate::reveal::{self, hidden_by};
 use crate::{GraphPanel, Palette, chips, pins, why};
+use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
-use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
@@ -751,7 +751,7 @@ fn listed(
             .text_xs()
             .text_color(colors.text_muted)
     }))
-    .child(badge(kind_name(candidate.kind), colors.text_muted))
+    .child(badge(kind_names(candidate.kind).one, colors.text_muted))
     .children(
         index::configuration(shared, candidate)
             .map(|configuration| badge(configuration, colors.text_muted)),
@@ -761,14 +761,6 @@ fn listed(
             .id(("jump-hidden", index))
             .tooltip(TextTooltip::builder(by.describe().into(), tip))
     }))
-}
-
-/// How a row names the kind of its node.
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Package => "package",
-        _ => kind_names(kind).one,
-    }
 }
 
 fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {

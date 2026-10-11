@@ -48,7 +48,9 @@ pub(crate) fn kind_names(kind: Kind) -> KindNames {
             "package or environment group",
             "package and environment groups",
         ),
-        _ => ("rule target", "rule targets"),
+        Kind::Package => ("package", "packages"),
+        Kind::MergeGroup => ("file group", "file groups"),
+        Kind::Target => ("rule target", "rule targets"),
     };
     KindNames { one, many }
 }
