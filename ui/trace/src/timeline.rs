@@ -2275,7 +2275,7 @@ fn overlay_paint(
             );
         }
         if let Some((at, lines)) = hovered {
-            paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
+            paint_tooltip_box(&lines, at, bounds, palette.colors.tooltip(), window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);

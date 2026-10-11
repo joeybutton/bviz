@@ -4,9 +4,7 @@ use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, Documents, PanelEvent};
 use bviz_ui_components::gesture::{Pointer, scroll_pixels};
-use bviz_ui_components::{
-    Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors, overlay_canvas,
-};
+use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, overlay_canvas};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Anchor, AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, Entity, EntityId,
@@ -1013,7 +1011,7 @@ fn naming_tooltip(
     colors: &ThemeColors,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let panel = panel.clone();
-    let colors = TooltipColors::from_colors(colors);
+    let colors = colors.tooltip();
     move |_, cx| {
         let joined = Documents::global(cx).read(cx).joined_name(panel.document());
         let tip = naming_tip(

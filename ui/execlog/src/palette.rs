@@ -1,7 +1,7 @@
 //! The colours the spawn-time view paints with, resolved from the theme.
 
 use bviz_execlog::Phase;
-use bviz_ui_components::{ScrollbarColors, TooltipColors};
+use bviz_ui_components::ScrollbarColors;
 use bviz_ui_spawn_phase::phase_fill;
 use bviz_ui_theme::{Theme, ThemeColors};
 use gpui::Hsla;
@@ -13,7 +13,6 @@ pub(crate) struct Palette {
     /// The fill of a bar of execution alone, outlined in the execution fill: a
     /// neutral wash, which no phase's fill can be taken for.
     pub(crate) unbroken: Hsla,
-    pub(crate) tooltip: TooltipColors,
     pub(crate) scroll: ScrollbarColors,
 }
 
@@ -24,7 +23,6 @@ impl Palette {
             colors: theme.colors,
             phases,
             unbroken: theme.colors.element_hover,
-            tooltip: TooltipColors::from_colors(&theme.colors),
             scroll: ScrollbarColors::from_colors(&theme.colors),
         }
     }

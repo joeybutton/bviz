@@ -275,7 +275,10 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
             summary.spawns,
             duration(summary.timing.total())
         ))
-        .tooltip(TextTooltip::builder(caveats.into(), palette.tooltip));
+        .tooltip(TextTooltip::builder(
+            caveats.into(),
+            palette.colors.tooltip(),
+        ));
     let phases = spent_in(&summary.timing)
         .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
     Toolbar::new()
@@ -596,7 +599,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
         } else {
             segment.bg(palette.phase(phase))
         };
-        segment.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+        segment.tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
     });
     div()
         .flex()

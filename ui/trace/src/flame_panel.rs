@@ -419,7 +419,7 @@ fn paint_flame_tooltip(
     cx: &mut App,
 ) {
     let lines = flame_tooltip_lines(hovered);
-    paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
+    paint_tooltip_box(&lines, at, bounds, palette.colors.tooltip(), window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling

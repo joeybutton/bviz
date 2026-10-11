@@ -4,7 +4,7 @@ use crate::GraphPanel;
 use crate::model::GraphModel;
 use crate::timing::{NodeTimes, Untimed};
 use bviz_bazel_flags::{PROFILE_PRIMARY_OUTPUT, PROFILE_TARGET_LABEL};
-use bviz_ui_components::{Dropdown, TextTooltip, TooltipColors};
+use bviz_ui_components::{Dropdown, TextTooltip};
 use bviz_ui_theme::ThemeColors;
 use gpui::{Context, IntoElement, SharedString, div, prelude::*};
 
@@ -145,7 +145,7 @@ pub(crate) fn control(
         .flex_none()
         .tooltip(TextTooltip::builder(
             note(times, "colour its boxes by their actions"),
-            TooltipColors::from_colors(colors),
+            colors.tooltip(),
         ))
         .child(view.colour_picker.clone())
 }

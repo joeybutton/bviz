@@ -16,9 +16,7 @@ use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
-use bviz_ui_components::{
-    ListScroll, TextTooltip, TooltipColors, key_text_within, list_scrollbar, menu_chrome,
-};
+use bviz_ui_components::{ListScroll, TextTooltip, key_text_within, list_scrollbar, menu_chrome};
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
     MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
@@ -777,10 +775,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         aimed,
     ))
     .when_some(note, |row, note| {
-        row.tooltip(TextTooltip::builder(
-            note.into(),
-            TooltipColors::from_colors(colors),
-        ))
+        row.tooltip(TextTooltip::builder(note.into(), colors.tooltip()))
     })
     .w_full()
     .on_click(move |event: &ClickEvent, window, cx| {

@@ -393,7 +393,7 @@ impl CriticalPathPanel {
             let panel = cx.entity();
             div()
                 .id(("critical-path-list-choice", shows as usize))
-                .tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+                .tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
                 .child(
                     Button::new(id, move |_, _, cx| {
                         panel.update(cx, |panel, cx| {
@@ -672,7 +672,7 @@ fn modeled_caption(path: &CriticalPath, modeled: &Modeled, palette: &Palette) ->
         .text_color(palette.muted_label)
         .tooltip(TextTooltip::builder(
             words::modeled_tip(path, modeled).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(words::modeled_line(path, modeled)))
 }
@@ -734,7 +734,7 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
                 .id(("critical-path-lever", i))
                 .tooltip(TextTooltip::builder(
                     words::lever_account(lever, bound).into(),
-                    palette.tooltip,
+                    palette.colors.tooltip(),
                 ))
                 .child(words::lever(lever, time, bound))
         });
@@ -952,7 +952,7 @@ fn step_row(
         .min_w_0()
         .tooltip(TextTooltip::builder(
             words::step_tip(step, logged.given()).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(step.name().to_owned()))
         .children(tag)
@@ -1005,7 +1005,7 @@ fn step_row(
             let saved = div()
                 .id(("critical-path-could-save", index))
                 .when_some(words::could_save_tip(step), |cell, tip| {
-                    cell.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+                    cell.tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
                 })
                 .child(words::could_save(step));
             row.child(table_cell(could_save.width, [saved]))
@@ -1031,7 +1031,7 @@ fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette)
         .min_w_0()
         .tooltip(TextTooltip::builder(
             words::nearly_critical_tip(action).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(action.description.clone()))
         .when(!ran.is_empty(), |described| {
@@ -1170,7 +1170,7 @@ fn bar(
     gap: Pixels,
     palette: &Palette,
 ) -> Stateful<Div> {
-    let tooltip = palette.tooltip;
+    let tooltip = palette.colors.tooltip();
     let segments = segments.enumerate().map(move |(i, segment)| {
         let drawn = div()
             .id(i)

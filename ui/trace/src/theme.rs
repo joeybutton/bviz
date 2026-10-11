@@ -2,7 +2,7 @@
 //! roles and counter series to fills, resolved from the shared palette.
 
 use bviz_trace_layout::{SpanRole, Workload};
-use bviz_ui_components::{LabelBoxStyle, LegendEntry, ScrollbarColors, Swatch, TooltipColors};
+use bviz_ui_components::{LabelBoxStyle, LegendEntry, ScrollbarColors, Swatch};
 use bviz_ui_theme::{DataColors, Theme, ThemeColors, hue_of, label_on, mix, over};
 use gpui::{BorderStyle, Hsla, Rgba, hsla};
 
@@ -147,7 +147,6 @@ pub(crate) struct Palette {
     /// Accent for the build-phase boundary lines and their labels.
     pub(crate) marker: Rgba,
     pub(crate) scroll: ScrollbarColors,
-    pub(crate) tooltip: TooltipColors,
     /// Fill for a row or control that marks the cursor by lifting off its surface.
     pub(crate) hover: Rgba,
     /// The line at a seam between two of the view's surfaces: the gutter's right
@@ -188,7 +187,6 @@ impl Palette {
             gridline: colors.gridline.into(),
             marker: colors.highlight.into(),
             scroll: ScrollbarColors::from_colors(colors),
-            tooltip: TooltipColors::from_colors(colors),
             hover: colors.element_hover.into(),
             divider: colors.border.into(),
             panel: colors.panel.into(),

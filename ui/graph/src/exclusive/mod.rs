@@ -31,9 +31,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem, QueryField,
-    QueryFieldEvent, ShowLegend, Swatch, Toolbar, TooltipColors, beside_anchor, cached_layer,
-    centered_notice, centered_spinner, key_text_in, legend_gestures, load_in_background,
-    paint_tooltip,
+    QueryFieldEvent, ShowLegend, Swatch, Toolbar, beside_anchor, cached_layer, centered_notice,
+    centered_spinner, key_text_in, legend_gestures, load_in_background, paint_tooltip,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -2107,7 +2106,7 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
             Some(at) => beside_anchor(at, extent, bounds),
             None => beside_cell(cell.rect, extent, bounds),
         };
-        let tooltip = TooltipColors::from_colors(&palette.colors);
+        let tooltip = palette.colors.tooltip();
         paint_tooltip(&lines, place, tooltip, window, cx);
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()

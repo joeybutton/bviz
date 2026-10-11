@@ -380,7 +380,7 @@ impl StatsPanel {
         let row_hover = palette.hover;
         let row_pick = palette.selection;
         let row_pick_hover = palette.picked_hover();
-        let tooltip = palette.tooltip;
+        let tooltip = palette.colors.tooltip();
         let picked = self.picked_row(&order);
         let version = order.aggregate_version;
         let entity = cx.entity();

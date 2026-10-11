@@ -9,7 +9,7 @@ use bviz_graph_layout::Id;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip, TooltipColors};
+use bviz_ui_components::{Button, ListScroll, TextTooltip};
 use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
     uniform_list,
@@ -109,7 +109,7 @@ fn row(
         .rounded_sm()
         .tooltip(TextTooltip::builder(
             slow.hover(mnemonic).into(),
-            TooltipColors::from_colors(colors),
+            colors.tooltip(),
         ))
         .child(legend::ran(Ran::On(slow.timing.runner), palette))
         .child(

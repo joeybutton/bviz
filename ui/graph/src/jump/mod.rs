@@ -20,8 +20,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::text_input::{self, TextEdited};
 use bviz_ui_components::{
-    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, TooltipColors, key_text_within,
-    list_scrollbar, menu_chrome, overlay_canvas,
+    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, key_text_within, list_scrollbar,
+    menu_chrome, overlay_canvas,
 };
 use gpui::{
     Action, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, KeyContext,
@@ -718,7 +718,7 @@ fn listed(
         .as_ref()
         .is_some_and(|jump| jump.aimed == index);
     let hidden = hidden_by(view, candidate.id);
-    let tip = TooltipColors::from_colors(colors);
+    let tip = colors.tooltip();
     let id = candidate.id;
     let entity = entity.clone();
     menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(

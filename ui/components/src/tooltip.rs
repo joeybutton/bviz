@@ -1,8 +1,8 @@
-use bviz_ui_theme::ThemeColors;
+use bviz_ui_theme::TooltipColors;
 use gpui::{
     AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
-    Pixels, Point, Render, Rgba, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div,
-    font, point, px, quad, size,
+    Pixels, Point, Render, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div, font,
+    point, px, quad, size,
 };
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
@@ -22,28 +22,6 @@ const TOOLTIP_KEYS_GAP: f32 = 12.0;
 const TOOLTIP_RADIUS: f32 = 4.0;
 /// Width of the panel's border.
 const TOOLTIP_BORDER: f32 = 1.0;
-
-/// A tooltip's colors. The panel fill is opaque, so text under the tooltip does
-/// not read through it.
-#[derive(Clone, Copy)]
-pub struct TooltipColors {
-    pub panel: Rgba,
-    pub border: Rgba,
-    pub label: Rgba,
-    /// The ink of the keys a [`TextTooltip`] names beside its text.
-    pub keys: Rgba,
-}
-
-impl TooltipColors {
-    pub fn from_colors(colors: &ThemeColors) -> TooltipColors {
-        TooltipColors {
-            panel: colors.panel.into(),
-            border: colors.border.into(),
-            label: colors.text.into(),
-            keys: colors.text_muted.into(),
-        }
-    }
-}
 
 /// Where a box `extent` long starts along one axis spanning `start..end` for an
 /// anchor at `at`, as [`beside_anchor`] places it.

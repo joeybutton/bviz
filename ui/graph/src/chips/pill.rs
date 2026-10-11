@@ -6,7 +6,7 @@ use bviz_graph_layout::query_lang::{Chip, Counts, Outcome};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Clicks, Entry, Gestures, Input, Motion, Place, Pointer,
 };
-use bviz_ui_components::{Button, TextTooltip, TooltipColors};
+use bviz_ui_components::{Button, TextTooltip};
 use gpui::{
     ClickEvent, Context, Div, HighlightStyle, Hsla, MouseButton, MouseDownEvent, Pixels,
     SharedString, Stateful, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*, px,
@@ -166,10 +166,7 @@ pub(super) fn pill(
             .icon("dots-three-vertical")
             .tooltip("Chip menu"),
         )
-        .tooltip(TextTooltip::builder(
-            explained,
-            TooltipColors::from_colors(colors),
-        ))
+        .tooltip(TextTooltip::builder(explained, colors.tooltip()))
 }
 
 /// What the chip being typed named, beside the field, explaining itself by
@@ -177,7 +174,7 @@ pub(super) fn pill(
 pub(super) fn draft(outcome: &Outcome, palette: &Palette) -> Option<Stateful<Div>> {
     let counted = count(outcome, palette)?;
     let explained = explain_outcome(outcome);
-    let colors = TooltipColors::from_colors(&palette.colors);
+    let colors = palette.colors.tooltip();
     Some(
         div()
             .id("graph-chip-draft")

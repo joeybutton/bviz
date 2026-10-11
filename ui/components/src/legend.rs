@@ -3,9 +3,7 @@
 //! whole key.
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
-use crate::{
-    CONTROL_HEIGHT, KeyScope, TextTooltip, TooltipColors, action_label, key_text_in, menu_chrome,
-};
+use crate::{CONTROL_HEIGHT, KeyScope, TextTooltip, action_label, key_text_in, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, Context, Div, Element, ElementId, Entity,
@@ -215,7 +213,7 @@ impl RenderOnce for LegendEntry {
         let body = self.body();
         match self.tooltip {
             Some(tooltip) => {
-                let colors = TooltipColors::from_colors(&bviz_ui_theme::theme(window, cx).colors);
+                let colors = bviz_ui_theme::theme(window, cx).colors.tooltip();
                 body.id(ElementId::Name(self.label))
                     .tooltip(TextTooltip::builder(tooltip, colors))
                     .into_any_element()
@@ -418,7 +416,7 @@ impl Legend {
     fn chip(&self, label: SharedString, seen: &Seen, colors: &ThemeColors) -> Div {
         let state = self.state.clone();
         let view_focus = seen.view_focus.clone();
-        let tooltip_colors = TooltipColors::from_colors(colors);
+        let tooltip_colors = colors.tooltip();
         // A tooltip would cover the popover the chip holds open.
         let chip = menu_chrome::trigger("chip".into(), colors)
             .when(!seen.open, |chip| {

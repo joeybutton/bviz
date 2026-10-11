@@ -32,7 +32,7 @@ use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Hel
 use bviz_ui_components::{
     Button, DragEnd, Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState,
     ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip, Toolbar,
-    TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
     list_scrollbar, load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box,
     tooltip_extent, track_drag,
 };
@@ -1301,7 +1301,7 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         };
         let center = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
         if let Some(lines) = lines {
-            let tooltip = TooltipColors::from_colors(&palette.colors);
+            let tooltip = palette.colors.tooltip();
             paint_tooltip_box(&lines, center, bounds, tooltip, window, cx);
         }
     };
@@ -1353,7 +1353,7 @@ fn pick_layer(
         let level = pick::row_top(scroll.bounds(), scroll.offset().y, row, aimed);
         let at = at.within(bounds);
         let place = |extent| pick::flank(at, list, extent, level, bounds);
-        let tooltip = TooltipColors::from_colors(&palette.colors);
+        let tooltip = palette.colors.tooltip();
         paint_tooltip(&lines, place, tooltip, window, cx);
     })
 }
@@ -1636,7 +1636,7 @@ fn strip(
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
     let unit = group("points", palette).child(choice.picker.dropdown());
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
         let note = times_note(times, choice.timed, scope.unit(), read);
         div()
@@ -1732,7 +1732,7 @@ fn input_toggle(
     .selected(matches!(toggle, Toggle::On | Toggle::Lone))
     .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
     .compact();
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     div()
         .id(("scatter-input-why", input as usize))
         .child(control)

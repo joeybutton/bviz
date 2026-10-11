@@ -10,7 +10,7 @@ use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGra
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
-use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip, TooltipColors};
+use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 use std::sync::Arc;
 
@@ -248,7 +248,7 @@ pub(super) fn field(
     palette: &Palette,
     cx: &Context<ExclusivePanel>,
 ) -> Stateful<Div> {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     div()
         .id("exclusive-roots")
         .key_context(KEY_CONTEXT)

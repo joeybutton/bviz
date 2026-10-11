@@ -1,5 +1,5 @@
-use crate::{CONTROL_HEIGHT, TextTooltip, TooltipColors, action_label, key_text, key_text_in};
-use bviz_ui_theme::{ThemeColors, label_on, level_step, luminance, mix, over};
+use crate::{CONTROL_HEIGHT, TextTooltip, action_label, key_text, key_text_in};
+use bviz_ui_theme::{ThemeColors, TooltipColors, label_on, level_step, luminance, mix, over};
 use gpui::{
     Action, AnyView, App, ClickEvent, Div, ElementId, Entity, FocusHandle, Hsla, IntoElement,
     KeyDownEvent, KeyUpEvent, RenderOnce, Rgba, SharedString, Stateful, Window, div, prelude::*,
@@ -408,11 +408,7 @@ impl RenderOnce for Button {
             .flex_none()
             .when(!self.disabled, |el| el.cursor_pointer());
 
-        let el = match tooltip(
-            self.tooltip.take(),
-            self.keys.take(),
-            TooltipColors::from_colors(&colors),
-        ) {
+        let el = match tooltip(self.tooltip.take(), self.keys.take(), colors.tooltip()) {
             Some(tooltip) => el.tooltip(tooltip),
             None => el,
         };

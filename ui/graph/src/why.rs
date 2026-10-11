@@ -15,9 +15,7 @@ use bviz_graph_layout::paths::{self, Paths};
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
-use bviz_ui_components::{
-    Button, ListScroll, TextTooltip, TooltipColors, load_in_background, overlay_canvas,
-};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, load_in_background, overlay_canvas};
 use gpui::{ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -511,7 +509,7 @@ fn endpoint(
     spelling: &Spelling,
     palette: &Palette,
 ) -> Stateful<Div> {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     div()
         .id(key)
         .flex()
@@ -569,7 +567,7 @@ fn chain<'a>(
     spelling: &'a Spelling,
     palette: &'a Palette,
 ) -> impl Iterator<Item = Stateful<Div>> + 'a {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     links.iter().enumerate().map(move |(position, link)| {
         div()
             .id(("why-link", position))

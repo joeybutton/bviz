@@ -1,4 +1,4 @@
-use gpui::{Hsla, SharedString};
+use gpui::{Hsla, Rgba, SharedString};
 
 /// Whether a theme is meant for a light or a dark system appearance.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,6 +67,28 @@ pub struct ThemeColors {
     /// Carries the base opacity a drop shadow paints at, which a caller fading a
     /// shadow in scales down.
     pub shadow: Hsla,
+}
+
+impl ThemeColors {
+    /// The colours every tooltip is drawn in. The panel fill is opaque, so text
+    /// under the tooltip does not read through it.
+    pub fn tooltip(&self) -> TooltipColors {
+        TooltipColors {
+            panel: self.panel.into(),
+            border: self.border.into(),
+            label: self.text.into(),
+            keys: self.text_muted.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct TooltipColors {
+    pub panel: Rgba,
+    pub border: Rgba,
+    pub label: Rgba,
+    /// The ink of the keys a tooltip names beside its text.
+    pub keys: Rgba,
 }
 
 /// Hues for coloring data by category — a node's kind, an edge's provenance, a

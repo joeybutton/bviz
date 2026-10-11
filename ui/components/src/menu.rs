@@ -4,7 +4,7 @@
 use crate::menu_chrome::{
     self, LABEL_GAP, MENU_ICON, ROW_INSET, SHEET_BORDER, SHEET_PADDING, opened,
 };
-use crate::{TextTooltip, TooltipColors, action_label, key_text_in};
+use crate::{TextTooltip, action_label, key_text_in};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, AnyWindowHandle, App, Bounds, Context, Div, EventEmitter, FocusHandle, IntoElement,
@@ -384,7 +384,7 @@ impl Menu {
                 row.text_color(colors.text_muted).cursor_default()
             })
             .when_some(laid.tooltip, |row, tooltip| {
-                let tip = TooltipColors::from_colors(colors);
+                let tip = colors.tooltip();
                 row.tooltip(TextTooltip::builder(tooltip.clone(), tip))
             })
             .justify_between()
