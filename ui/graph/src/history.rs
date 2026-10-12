@@ -45,6 +45,24 @@ impl<T: PartialEq> History<T> {
         self.at > 0
     }
 
+    /// Rewrites each step by `rewrite`, merging a step rewritten alike to the
+    /// one before it into that one.
+    pub(crate) fn rewrite(&mut self, mut rewrite: impl FnMut(&T) -> T) {
+        let mut steps: VecDeque<T> = VecDeque::with_capacity(LENGTH);
+        let mut at = 0;
+        for (index, step) in self.steps.iter().enumerate() {
+            let step = rewrite(step);
+            if steps.back() != Some(&step) {
+                steps.push_back(step);
+            }
+            if index == self.at {
+                at = steps.len() - 1;
+            }
+        }
+        self.steps = steps;
+        self.at = at;
+    }
+
     /// Steps back to the step before the current one, where there is one.
     pub(crate) fn back(&mut self) -> Option<&T> {
         self.at = self.at.checked_sub(1)?;
@@ -65,6 +83,20 @@ impl<T: PartialEq> History<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steps_rewritten_alike_merge_and_the_current_stays_current() {
+        let mut history = History::new(0);
+        for step in 1..5 {
+            history.push(step);
+        }
+        history.back();
+        history.rewrite(|&step| step.min(2));
+        assert_eq!(history.current(), &2);
+        assert_eq!(history.back(), Some(&1));
+        history.forward();
+        assert_eq!(history.forward(), None);
+    }
 
     #[test]
     fn back_and_forward_walk_the_steps_pushed() {

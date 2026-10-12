@@ -4,7 +4,7 @@
 use super::ancestry::{self, Spot};
 use super::icicle::{self, Cell, Holds, Parent, Run};
 use super::transition::{Placed, Transition};
-use super::{RootedBy, SEVERAL, WHOLE_BUILD, what_is_shared};
+use super::{RootedBy, SEVERAL, Shown, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
 use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
@@ -14,7 +14,7 @@ use crate::point::{
     KindNames, configuration_readings, mnemonic, point_label, primary_output, unit_names,
 };
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Dominators, Standing};
+use bviz_graph_layout::dominators::{Dominators, ShownTree, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
 use bviz_graph_layout::shown::{ELLIPSIS, fit_label, name_start};
@@ -110,6 +110,8 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 /// borrow of the panel.
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
+    /// What of `tree` the cells draw.
+    pub(crate) shown: Arc<Shown>,
     /// How the roots of `tree` were chosen.
     pub(crate) by: RootedBy,
     pub(crate) colouring: Arc<Colouring>,
@@ -141,7 +143,7 @@ pub(crate) fn paint_icicle(
     cx: &mut App,
 ) {
     let row = row_height(window);
-    let tree = &*scene.tree;
+    let tree = &scene.shown.tree;
     let lowered = scene
         .transition
         .as_ref()
@@ -298,8 +300,9 @@ fn paint_cell(
         }
         (_, Holds::Shared) => {
             let (room, font_size) = style.label_room(rect);
-            let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
-            let count = scene.tree.shared_tops().len();
+            let shown = &scene.shown.tree;
+            let whole = cell_name(&scene.tree, shown, &scene.shared, scene.by, Holds::Shared);
+            let count = shown.shared_tops().len();
             let width = text_width(window, font_size, label);
             CellName::plain(shared_cell_name(whole, count, room, width))
         }
@@ -310,7 +313,10 @@ fn paint_cell(
             let hint = hints.get(&node).map(String::as_str);
             name.fitted(hint, room, text_width(window, font_size, label))
         }
-        (_, holds) => CellName::plain(cell_name(&scene.tree, &scene.shared, scene.by, holds)),
+        (_, holds) => {
+            let (tree, shown) = (&scene.tree, &scene.shown.tree);
+            CellName::plain(cell_name(tree, shown, &scene.shared, scene.by, holds))
+        }
     };
     let strength = match cell.holds {
         Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
@@ -466,14 +472,20 @@ fn rest_fill(palette: &Palette) -> Rgba {
     mix(palette.data.neutral, palette.background, REST_RECEDE)
 }
 
-/// What the cell holding `holds` of `tree`, whose roots were chosen `by`,
-/// reads.
-fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
+/// What the cell holding `holds` of `shown`, drawn from `tree`, whose roots
+/// were chosen `by`, reads.
+fn cell_name(
+    tree: &Dominators,
+    shown: &ShownTree,
+    shared: &Shared,
+    by: RootedBy,
+    holds: Holds,
+) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
         Holds::Shared => {
-            let (name, count) = (shared_name(tree, by), tree.shared_tops().len());
+            let (name, count) = (shared_name(tree, by), shown.shared_tops().len());
             format!("{name} · {count}")
         }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
