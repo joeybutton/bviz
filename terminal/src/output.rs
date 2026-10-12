@@ -11,6 +11,7 @@ use prost::Message;
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
 use crate::bep::command_line::{CommandLine, command_line_section::SectionType};
 use crate::bep::timestamp_proto::google::protobuf::Timestamp;
+use crate::columns::Columns;
 use crate::outcomes::{self, checksum};
 
 /// What a build event stream tells of the build that wrote it.
@@ -18,8 +19,9 @@ pub struct BuildOutput {
     /// The configurations the stream describes (its `Configuration` events).
     pub configurations: Configurations,
     pub outcomes: Outcomes,
-    /// Terminal width in columns Bazel rendered for (`--terminal_columns`).
-    pub columns: u16,
+    /// Terminal width Bazel rendered for (`--terminal_columns`), or Bazel's
+    /// fallback where the stream names none the emulator can run at.
+    pub(crate) columns: Columns,
     /// stdout and stderr concatenated in stream order. `bazel build` writes
     /// everything — progress, messages, forwarded action output — to stderr and
     /// leaves stdout empty; the query-family commands (`query`/`cquery`/`aquery`/
@@ -60,7 +62,7 @@ impl BuildOutput {
         BuildOutput {
             configurations: Configurations::default(),
             outcomes: Outcomes::default(),
-            columns,
+            columns: Columns::new(columns).expect("a width the emulator runs at"),
             frames: vec![bytes.len()],
             bytes,
             anchors: Vec::new(),
@@ -68,9 +70,6 @@ impl BuildOutput {
         }
     }
 }
-
-/// Width Bazel falls back to when no terminal is detected; see `--terminal_columns`.
-const DEFAULT_COLUMNS: u16 = 80;
 
 /// Read a whole build event binary stream. An event that does not decode fails
 /// the read.
@@ -130,7 +129,7 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     Ok(BuildOutput {
         configurations,
         outcomes,
-        columns: columns.unwrap_or(DEFAULT_COLUMNS),
+        columns: columns.unwrap_or(Columns::DEFAULT),
         bytes,
         frames,
         anchors,
@@ -225,8 +224,10 @@ fn option_value<'a>(command_line: &'a CommandLine, name: &str) -> Option<&'a str
         .map(|option| option.option_value.as_str())
 }
 
-fn terminal_columns(command_line: &CommandLine) -> Option<u16> {
-    option_value(command_line, "terminal_columns").and_then(|value| value.parse().ok())
+fn terminal_columns(command_line: &CommandLine) -> Option<Columns> {
+    option_value(command_line, "terminal_columns")
+        .and_then(|value| value.parse().ok())
+        .and_then(Columns::new)
 }
 
 /// Whether `--show_timestamps` is enabled, as a boolean option Bazel canonicalizes
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn reads_columns_and_output() {
         let output = parse(SAMPLE).expect("parse sample stream");
-        assert_eq!(output.columns, 100);
+        assert_eq!(output.columns.get(), 100);
         // Bazel's curses progress display emits cursor-control escape sequences.
         assert!(
             output.bytes.contains(&0x1b),
@@ -296,6 +297,62 @@ mod tests {
         assert_eq!(known.name(NULL_CONFIGURATION), None);
         assert_eq!(known.name(""), None);
         assert_eq!(known.name("0c3d9a77").as_deref(), Some("k8-opt-exec"));
+    }
+
+    /// A length-delimited `StructuredCommandLine` event naming
+    /// `--terminal_columns=value`.
+    fn terminal_columns_event(value: &str) -> Vec<u8> {
+        use crate::bep::command_line::{self as cl, CommandLineSection};
+        BuildEvent {
+            payload: Some(Payload::StructuredCommandLine(CommandLine {
+                sections: vec![CommandLineSection {
+                    section_type: Some(SectionType::OptionList(cl::OptionList {
+                        option: vec![cl::Option {
+                            option_name: "terminal_columns".into(),
+                            option_value: value.into(),
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    /// A length-delimited `Progress` event writing `stderr`.
+    fn progress_event(stderr: &str) -> Vec<u8> {
+        BuildEvent {
+            payload: Some(Payload::Progress(bes::Progress {
+                stderr: stderr.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    #[test]
+    fn falls_back_from_a_width_the_emulator_cannot_hold() {
+        for width in ["0", "1", "65535", "-3", "wide"] {
+            let stream = [terminal_columns_event(width), progress_event("built\n")].concat();
+            let output = parse(&stream).expect("parse stream");
+            assert_eq!(
+                output.columns,
+                Columns::DEFAULT,
+                "--terminal_columns={width}"
+            );
+            let screen = crate::screen::Screen::from_output(&output);
+            assert_eq!(screen.text(), "built", "--terminal_columns={width}");
+        }
+    }
+
+    #[test]
+    fn takes_the_first_width_the_emulator_can_hold() {
+        let stream = [terminal_columns_event("0"), terminal_columns_event("120")].concat();
+        assert_eq!(parse(&stream).expect("parse stream").columns.get(), 120);
     }
 
     #[test]
