@@ -35,7 +35,7 @@ use bviz_ui_components::{
     centered_notice, centered_spinner, legend_gestures, load_in_background, paint_hover_card,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
-use cell_menu::{Offer, PointFacts};
+use cell_menu::{Caveat, Offer, PointFacts};
 use gpui::{
     Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -907,7 +907,7 @@ impl ExclusivePanel {
             }
             Offer::Root { node, caveat } => {
                 let label = label(node);
-                let explained = caveat.map(|caveat| caveat.explain(&label));
+                let explained = caveat.map(Caveat::explain);
                 let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
                 match explained {
                     Some(explained) => item.tooltip(explained),

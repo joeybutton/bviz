@@ -29,16 +29,11 @@ pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//too
 
 /// What the field's tooltip says it takes.
 const HELP: &str = "\
-Roots the tree at what a bazel build of this target set requests.
-Patterns are separated by spaces; one starting with - takes its
-targets out, and # starts a comment.
-Patterns are read as typed at the workspace root.
-A wildcard leaves out the rules tagged manual.
-A test_suite stands for itself, not for its tests.
-Not applied: .bazelignore, --deleted_packages,
---build_tag_filters, --build_tests_only, and the skipping
-of targets incompatible with the platform.
-Empty, the tree is rooted at every top-level point.";
+Root target patterns · empty: top-level
+-pattern removes · # comment · from workspace root
+wildcards skip manual · test_suite: itself only
+not applied: .bazelignore, --deleted_packages,
+--build_tag_filters, --build_tests_only, incompatible targets";
 
 /// What the points a target set roots a tree at are picked from, by the
 /// unit of the tree. Each graph is that of a scope of the unit its place
