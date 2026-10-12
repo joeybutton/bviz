@@ -30,10 +30,9 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    CardAnchor, HoverCard, KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent,
-    MenuItem, QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel,
-    cached_layer, centered_notice, centered_spinner, key_text_in, legend_gestures,
-    load_in_background, paint_hover_card,
+    CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
+    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
+    centered_notice, centered_spinner, legend_gestures, load_in_background, paint_hover_card,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Offer, PointFacts};
@@ -1629,30 +1628,6 @@ fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> St
 /// The most roots a tooltip names as reaching a top.
 const NAMED_ROOTS: usize = 3;
 
-/// What a click on the cell holding `holds` under `top` does, along with the
-/// keys `up` that go up a level as a click on the top cell does, and where its
-/// menu offers `more` than the click that it does; absent where a click does
-/// nothing.
-fn gesture(holds: Holds, top: Holds, up: Option<&str>, more: bool) -> Option<String> {
-    let click = FOCUS_CELL.gesture().input.text(KeyStyle::NATIVE);
-    let does = match holds {
-        Holds::Build => return None,
-        _ if holds == top => match up {
-            Some(keys) => format!("{click} or {keys} to go up a level"),
-            None => format!("{click} to go up a level"),
-        },
-        Holds::Node(_) => format!("{click} to focus"),
-        Holds::Shared | Holds::Rest(_) => format!("{click} to open"),
-    };
-    Some(match more {
-        true => {
-            let menu = OPEN_MENU.gesture().input.text(KeyStyle::NATIVE);
-            format!("{does} · {menu} for more")
-        }
-        false => does,
-    })
-}
-
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
 
@@ -2083,11 +2058,11 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
         let panel = view.read(cx);
-        let Some((drawn, Selection { cell, by, lines })) = panel
+        let Some(Selection { cell, by, lines }) = panel
             .drawn
             .as_ref()
             .filter(|drawn| drawn.transition.is_none())
-            .and_then(|drawn| Some((drawn, drawn.selection.as_ref()?)))
+            .and_then(|drawn| drawn.selection.as_ref())
         else {
             return;
         };
@@ -2099,10 +2074,7 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
             (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
             (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
         };
-        let more = panel.offers(cell.holds, cx).len() > 1;
-        let up = key_text_in(&FocusUp, &panel.focus_handle, window);
-        let gesture = gesture(cell.holds, drawn.top(), up.as_deref(), more);
-        let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
+        let lines = lines.clone();
         let tooltip = palette.colors.tooltip();
         paint_hover_card(&lines, anchor, bounds, tooltip, window, cx);
     };
