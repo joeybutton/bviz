@@ -548,7 +548,7 @@ with `&mut View`, so it needs neither the `Rc` nor the cell.
 
 **What the cell costs.** Dynamic borrow checking on a field nothing shares, a `RefCell`
 that can panic at runtime, and read-modify-write (`let mut v = f.get(); …; f.set(v)`) where
-in-place mutation would do. `Timeline` in `ui/trace/src/timeline.rs` holds its time
+in-place mutation would do. `Timeline` in `ui/trace/src/timeline/` holds its time
 view, viewport, fit latch, scroll anchor, and memoized cull list as plain fields, and
 `fit_prepaint` / `slice_paint` are the worked examples of the read-then-commit shape.
 
@@ -596,11 +596,11 @@ Reach for a cell only for a writer with no path to `&mut App` or `&mut self` at 
   parent-only notify.
 - **`deferred(child)` is paint *ordering* only** — it draws its subtree on top, for overlays and
   popups. It has nothing to do with caching.
-- **Worked examples in this repo.** `ui/trace/src/timeline.rs` `SliceCanvas` (timeline slices
+- **Worked examples in this repo.** `ui/trace/src/timeline/paint.rs` `SliceCanvas` (timeline slices
   cached; crosshair/tooltip live in the parent's `overlay_paint`) and
   `ui/trace/src/flame_panel.rs` `FlameCanvas` (flame boxes cached; tooltip overlay). Each panel
   routes every content change through its own `invalidate_canvas`, which notifies the cached
-  child as well as the parent. A complementary `SliceDrawCache` (in `timeline.rs`) memoizes the
+  child as well as the parent. A complementary `SliceDrawCache` (in `timeline/slices.rs`) memoizes the
   *cull* list — which slices are visible — keyed by viewport; it avoids re-culling but not
   re-painting, so it is a separate, view-held cache from the cached child view that avoids
   re-painting.
