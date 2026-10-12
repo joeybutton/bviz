@@ -87,8 +87,9 @@ pull request discussion: that is where the history gets read from later.
 
 Pin new dependencies in `MODULE.bazel` or `Cargo.lock`, and commit the updated
 lockfiles. The build checks the licence of every third-party work linked into
-the binaries; a dependency with no declared licence, or with copyleft terms,
-fails that check and needs a maintainer's decision before it can go in.
+the binaries; a dependency with no declared licence, or under a GPL, LGPL or
+AGPL licence, fails that check and needs a maintainer's decision before it can
+go in.
 
 ## Licensing
 
