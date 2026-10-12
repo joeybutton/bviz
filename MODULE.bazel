@@ -446,51 +446,49 @@ http_archive(
     url = "https://github.com/bazelbuild/bazel/releases/download/9.2.0/bazel_nojdk-9.2.0-linux-x86_64",
 )
 
-new_git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+http_files = use_repo_rule("//3rd-party:http_files.bzl", "http_files")
+
+BAZEL_SRC = "https://raw.githubusercontent.com/bazelbuild/bazel/8220c6198837d5c13d53fea211cf3282aa12408a/"  # 9.2.0
+
+BAZEL_LICENSE = {"LICENSE": "9fe6dae7684812d0117f5a0611aa773656776545797608f201fef88fa7363e0b"}
 
 # query (build.proto), cquery + aquery (analysis_v2.proto) and their transitive
 # stardoc_output.proto, for parsing `--output=streamed_proto`.
-new_git_repository(
+http_files(
     name = "bazel_query_proto",
     build_file = "//3rd-party:bazel_query_proto.BUILD",
-    commit = "8220c6198837d5c13d53fea211cf3282aa12408a",  # 9.2.0
-    remote = "https://github.com/bazelbuild/bazel.git",
-    sparse_checkout_patterns = [
-        "/LICENSE",
-        "src/main/protobuf/analysis_v2.proto",
-        "src/main/protobuf/build.proto",
-        "src/main/protobuf/stardoc_output.proto",
-    ],
+    files = BAZEL_LICENSE | {
+        "src/main/protobuf/analysis_v2.proto": "2dc3deb978de08a4cd6b95b824b4c2d1801dbf945ab332877c419495b59e908c",
+        "src/main/protobuf/build.proto": "5041f18adb0507f0d85ddb2c8ecf62d0cf148c8506dd4cdaff051a40cc4ecd96",
+        "src/main/protobuf/stardoc_output.proto": "4bd566b8efae83ae84cc96467d682a7760d2a1b03e635642eaab9d5db76dd80c",
+    },
+    url_prefix = BAZEL_SRC,
 )
 
-new_git_repository(
+http_files(
     name = "bazel_build_event_proto",
     build_file = "//3rd-party:bazel_build_event_proto.BUILD",
-    commit = "8220c6198837d5c13d53fea211cf3282aa12408a",  # 9.2.0
-    remote = "https://github.com/bazelbuild/bazel.git",
-    sparse_checkout_patterns = [
-        "/LICENSE",
-        "src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto",
-        "src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto",
-        "src/main/protobuf/action_cache.proto",
-        "src/main/protobuf/command_line.proto",
-        "src/main/protobuf/failure_details.proto",
-        "src/main/protobuf/invocation_policy.proto",
-        "src/main/protobuf/option_filters.proto",
-        "src/main/protobuf/strategy_policy.proto",
-    ],
+    files = BAZEL_LICENSE | {
+        "src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto": "f15a652c9804e09fabf3a77919ecaf314750e547daabc7572fd0fad058174316",
+        "src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto": "679135cd318b1e13b920ded15094dc80a3483bb0c34514daeaa098b5fe334375",
+        "src/main/protobuf/action_cache.proto": "9eeff48f357ec2dc07617a0a326fdd89ef6108d6b93bc9eea5592ecb7ff849b3",
+        "src/main/protobuf/command_line.proto": "bad4d1fc43be92cd7a70ff3414d4e4c7c3f1843ed57eca75db84b4ae30c7fa33",
+        "src/main/protobuf/failure_details.proto": "143557d95de1f8603540bd3ddf34dfa8d541baee95ef56214a52dd354ad90e0e",
+        "src/main/protobuf/invocation_policy.proto": "bed0008e69fbc537bc912753bbf23895d9cffd4a1c97adbf41f29082274f523b",
+        "src/main/protobuf/option_filters.proto": "c8e92a8a5be45484f705e4abe4f2a3d4b5c77c99477b5ce2286add87ed64f2cc",
+        "src/main/protobuf/strategy_policy.proto": "0068e23223be68f55ddc36d63916efae9b8f64f1cbae5b02bac6059b5b032d4d",
+    },
+    url_prefix = BAZEL_SRC,
 )
 
 # spawn.proto, for reading `--execution_log_compact_file`.
-new_git_repository(
+http_files(
     name = "bazel_spawn_proto",
     build_file = "//3rd-party:bazel_spawn_proto.BUILD",
-    commit = "8220c6198837d5c13d53fea211cf3282aa12408a",  # 9.2.0
-    remote = "https://github.com/bazelbuild/bazel.git",
-    sparse_checkout_patterns = [
-        "/LICENSE",
-        "src/main/protobuf/spawn.proto",
-    ],
+    files = BAZEL_LICENSE | {
+        "src/main/protobuf/spawn.proto": "110f4b5e020b72fe3d51f6aa69d6ecc31d6f20ee57c194827da48a8184675e7a",
+    },
+    url_prefix = BAZEL_SRC,
 )
 
 bazel_dep(name = "bazel_env.bzl", version = "0.7.2", dev_dependency = True)
