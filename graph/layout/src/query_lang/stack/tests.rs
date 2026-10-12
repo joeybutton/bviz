@@ -698,3 +698,25 @@ fn a_stack_equals_one_holding_the_same_chips_alike() {
     edited.set_text(first, "//b:app");
     assert_ne!(edited, original);
 }
+
+#[test]
+fn the_chip_leaving_a_node_out_of_the_scope_is_named() {
+    let fixture = Fixture::new();
+    let node = |name: &str| fixture.names.get(&format!("target:{name}")).unwrap();
+    let mut stack = stack(&["//a:*", "//b:app", "- //a:lib", "kind(rule)"]);
+    let excluded = |stack: &Stack, name: &str| {
+        stack.excluded_by(&fixture.universe, &Prefixes::default(), node(name))
+    };
+    let negating = id(&stack, 2);
+    assert_eq!(excluded(&stack, "//a:lib"), Some(Exclusion::Chip(negating)));
+    assert_eq!(excluded(&stack, "//b:test"), Some(Exclusion::Sources));
+    assert_eq!(excluded(&stack, "//a:gen"), None);
+    assert_eq!(
+        excluded(&stack, "//a:lib.cc"),
+        Some(Exclusion::Chip(id(&stack, 3)))
+    );
+
+    stack.toggle_enabled(negating);
+    assert_eq!(excluded(&stack, "//a:lib"), None);
+    assert_eq!(excluded(&Stack::default(), "//a:lib"), None);
+}
