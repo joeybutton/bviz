@@ -5,26 +5,43 @@ use flate2::read::MultiGzDecoder;
 
 use super::{GZIP_MAGIC, LoadError, timed};
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<String, LoadError> {
+/// What a profile's bytes decode to, by whether the stream ran to its end.
+pub(crate) enum Decoded<T> {
+    Complete(T),
+    /// What a gzip stream cut off before its end, as an interrupted Bazel
+    /// leaves it, decoded ahead of the cut: no complete profile, only whole
+    /// events for [`super::recover`] to take.
+    CutOff(T),
+}
+
+impl<T> Decoded<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Decoded<U> {
+        match self {
+            Decoded::Complete(t) => Decoded::Complete(f(t)),
+            Decoded::CutOff(t) => Decoded::CutOff(f(t)),
+        }
+    }
+}
+
+pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded<String>, LoadError> {
     let raw = if bytes.starts_with(&GZIP_MAGIC) {
         timed("  decompress", || gunzip(bytes))?
     } else {
-        bytes.to_vec()
+        Decoded::Complete(bytes.to_vec())
     };
-    Ok(timed("  latin1->utf8", || latin1_to_utf8(raw)))
+    Ok(timed("  latin1->utf8", || raw.map(latin1_to_utf8)))
 }
 
 /// Inflates a gzip stream into one buffer, reserved from [`gzip_size_hint`] so
 /// the common single-member case decodes without growth reallocations (a
-/// stream the hint understates merely grows past the reservation). A stream
-/// cut off before its end, as an interrupted Bazel leaves it, yields what it
-/// decoded ahead of the cut, for [`super::recover`] to take the whole events
-/// from.
-fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
+/// stream the hint understates merely grows past the reservation).
+fn gunzip(bytes: &[u8]) -> Result<Decoded<Vec<u8>>, LoadError> {
     let mut out = Vec::with_capacity(gzip_size_hint(bytes).unwrap_or(0));
     match MultiGzDecoder::new(bytes).read_to_end(&mut out) {
-        Ok(_) => Ok(out),
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof && !out.is_empty() => Ok(out),
+        Ok(_) => Ok(Decoded::Complete(out)),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof && !out.is_empty() => {
+            Ok(Decoded::CutOff(out))
+        }
         Err(e) => Err(LoadError::Decompress(e)),
     }
 }

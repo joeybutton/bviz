@@ -17,7 +17,7 @@ mod scanner;
 mod serde_events;
 
 use build::{Builder, Merge, seal};
-use decode::{decode, gzip_size_hint_from_file, latin1_cow};
+use decode::{Decoded, decode, gzip_size_hint_from_file, latin1_cow};
 use pipeline::{
     TraceEventsArray, find_trace_events_array, find_trace_events_key, parse_gz_pipelined,
     parse_gz_pipelined_reader, parse_parallel,
@@ -154,7 +154,7 @@ impl Profile {
     /// read from the file's trailer without pulling the whole file in. Anything
     /// the pipeline declines — plain JSON, a small or oddly shaped stream, a
     /// decode or parse failure — reads the whole file and goes through
-    /// [`from_bytes`], which owns the whole-buffer fallback chain.
+    /// [`from_whole_buffer`].
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
         if let Ok(mut file) = std::fs::File::open(path)
             && let Ok(Some(decoded_size)) = gzip_size_hint_from_file(&mut file)
@@ -169,32 +169,42 @@ impl Profile {
             return Ok(profile);
         }
         let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
-        Profile::from_bytes(&bytes)
+        from_whole_buffer(&bytes)
     }
 
     /// Parses a profile, preferring the pipelined gzip path (see
     /// [`parse_gz_pipelined`]) that overlaps decompression with the parallel
     /// parse. Anything the pipeline declines — plain JSON, a small or oddly
-    /// shaped stream, a decode or parse failure — decodes whole into memory and
-    /// parses that text: the parser works over a slice (`SliceRead`), far faster
-    /// than the byte-at-a-time `from_reader` (`IoRead`) on a trace of millions of
-    /// events, and a profile compresses small enough that the decoded text fits
-    /// comfortably. A parse failure — most often a profile truncated by an
-    /// interrupted Bazel — falls back to the best-effort [`recover`].
+    /// shaped stream, a decode or parse failure — goes through
+    /// [`from_whole_buffer`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
         if bytes.starts_with(&GZIP_MAGIC)
             && let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes))
         {
             return Ok(profile);
         }
-        let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
-        if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
-            return Ok(profile);
-        }
-        match timed("parse+build (serial)", || parse_streaming(&decoded)) {
-            Ok(profile) => Ok(profile),
-            Err(_) => recover(&decoded),
-        }
+        from_whole_buffer(bytes)
+    }
+}
+
+/// Decodes a profile whole into memory and parses that text: the parser works
+/// over a slice (`SliceRead`), far faster than the byte-at-a-time
+/// `from_reader` (`IoRead`) on a trace of millions of events, and a profile
+/// compresses small enough that the decoded text fits comfortably. A parse
+/// failure — most often a profile truncated by an interrupted Bazel — falls
+/// back to the best-effort [`recover`], as does a gzip stream cut off before
+/// its end, without the parses its text cannot pass.
+fn from_whole_buffer(bytes: &[u8]) -> Result<Profile, LoadError> {
+    let decoded = match timed("decode (decompress+transcode)", || decode(bytes))? {
+        Decoded::Complete(text) => text,
+        Decoded::CutOff(text) => return timed("recover", || recover(&text)),
+    };
+    if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
+        return Ok(profile);
+    }
+    match timed("parse+build (serial)", || parse_streaming(&decoded)) {
+        Ok(profile) => Ok(profile),
+        Err(_) => recover(&decoded),
     }
 }
 
@@ -1379,6 +1389,18 @@ mod tests {
         let gz = gzip(&json);
         let truncated = &gz[..gz.len() * 3 / 4];
         let p = Profile::from_bytes(truncated).expect("recover");
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+        assert!(!p.threads().is_empty());
+    }
+
+    #[test]
+    fn a_truncated_gzip_file_loads_by_recovery() {
+        let json = chunkable_profile_json();
+        let gz = gzip(&json);
+        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let path = std::path::Path::new(&dir).join("truncated.profile.gz");
+        std::fs::write(&path, &gz[..gz.len() * 3 / 4]).unwrap();
+        let p = Profile::from_path(&path).expect("recover");
         assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
         assert!(!p.threads().is_empty());
     }
