@@ -1,4 +1,5 @@
 use crate::spinner;
+use bviz_invocation::Recorded;
 use bviz_ui_theme::ThemeColors;
 use gpui::{Div, Pixels, SharedString, div, prelude::*, px};
 
@@ -36,6 +37,13 @@ impl<T> Source<T> {
             Self::Loaded(document) => loaded(document),
             Self::Failed(_) => absent.into(),
         }
+    }
+}
+
+impl<T> Source<Recorded<T>> {
+    /// Whether the document loaded is of a file that ends early.
+    pub fn is_cut_off(&self) -> bool {
+        matches!(self, Self::Loaded(document) if document.is_cut_off())
     }
 }
 

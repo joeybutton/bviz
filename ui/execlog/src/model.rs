@@ -57,8 +57,7 @@ impl ExecLogModel {
         &self.source
     }
 
-    /// Whether the summary is of a log that ends early.
     pub(crate) fn cut_off(&self) -> bool {
-        matches!(&self.source, Source::Loaded(summary) if summary.is_cut_off())
+        self.source.is_cut_off()
     }
 }

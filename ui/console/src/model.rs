@@ -144,9 +144,8 @@ impl ConsoleModel {
         }
     }
 
-    /// Whether the replay is of a stream that ends early.
     pub(crate) fn cut_off(&self) -> bool {
-        matches!(&self.source, Source::Loaded(replay) if replay.is_cut_off())
+        self.source.is_cut_off()
     }
 }
 

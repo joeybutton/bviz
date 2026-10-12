@@ -651,9 +651,8 @@ impl TraceModel {
         }
     }
 
-    /// Whether the loaded profile is of a file that ends early.
     pub(crate) fn cut_off(&self) -> bool {
-        matches!(&self.source, Source::Loaded(loaded) if loaded.is_cut_off())
+        self.source.is_cut_off()
     }
 
     pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
