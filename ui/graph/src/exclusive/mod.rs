@@ -44,9 +44,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    Nesting, OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup,
-    cached_layer, centered_notice, centered_spinner, defer_hover_card, legend_gestures,
-    load_in_background, over_window,
+    Nesting, OneRow, Priority, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
+    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
+    over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
@@ -165,10 +165,10 @@ gpui::actions!(
         ShowWholeBuild,
         /// Go up one level
         FocusUp,
-        /// Leave roots field
-        LeaveRoots,
-        /// Focus roots field
-        FocusRoots,
+        /// Close roots
+        CloseRoots,
+        /// Edit roots
+        EditRoots,
         /// Select previous cell
         SelectPrevious,
         /// Select next cell
@@ -217,8 +217,8 @@ pub struct ExclusivePanel {
     /// Chooses the roots afresh, absent while none are being chosen; replaced
     /// by a later choice, which it would only hold up.
     choosing: Option<Choosing>,
-    /// The field naming the roots as a target set.
-    roots_field: Entity<QueryField>,
+    /// The setting naming the roots as a target set.
+    roots: roots::Setting,
     /// The document's query bar, as this panel stands it.
     chips: Entity<ChipBar>,
     /// The target set that last failed, which is not resolved again while
@@ -302,16 +302,8 @@ impl ExclusivePanel {
             cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refilter(cx));
         let verdicts_landed =
             cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.refilter(cx));
-        let roots_field = cx.new(|cx| {
-            QueryField::new(
-                "exclusive-roots",
-                roots::PLACEHOLDER,
-                roots::FIELD_WIDTH,
-                cx,
-            )
-            .narrowing_to(roots::FIELD_LEAST)
-        });
-        let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
+        let roots = roots::Setting::new(cx);
+        let roots_typed = cx.subscribe(roots.field(), |view, _, event, cx| match event {
             QueryFieldEvent::Edited | QueryFieldEvent::CursorMoved => {}
             QueryFieldEvent::Settled => view.reroot(cx),
         });
@@ -349,7 +341,7 @@ impl ExclusivePanel {
             frame: None,
             rooting: None,
             choosing: None,
-            roots_field,
+            roots,
             chips,
             failed: None,
             coloured: HashMap::new(),
@@ -622,13 +614,12 @@ impl ExclusivePanel {
         self.redraw(cx);
     }
 
-    /// The target set the roots field holds; none where it is empty.
+    /// The target set the roots setting holds; none where it is empty.
     fn target_set(&self, cx: &App) -> Option<SharedString> {
-        let text = self.roots_field.read(cx).text(cx);
-        (!text.trim().is_empty()).then_some(text)
+        self.roots.target_set(cx)
     }
 
-    /// How the target set the roots field holds failed in the scope chosen,
+    /// How the target set the roots setting holds failed in the scope chosen,
     /// where it is the set that last failed.
     fn failure(&self, cx: &App) -> Option<&Failed> {
         let (scope, text) = (self.scope(cx)?, self.target_set(cx)?);
@@ -636,7 +627,7 @@ impl ExclusivePanel {
     }
 
     /// Chooses the roots of the chosen scope by the target set the roots
-    /// field holds, or as the top-level points with the field empty, where
+    /// setting holds, or as the top-level points with it empty, where
     /// neither the roots in place nor those being chosen are chosen so. A
     /// target set that failed gives up the choice under way and leaves in
     /// place the roots an earlier set named in the scope, and otherwise
@@ -1417,8 +1408,7 @@ impl ExclusivePanel {
             }
             Deed::Root(label) => {
                 let label = label.clone();
-                self.roots_field
-                    .update(cx, |field, cx| field.set_text(label, cx));
+                (self.roots.field()).update(cx, |field, cx| field.set_text(label, cx));
                 self.reroot(cx);
             }
         }
@@ -2475,9 +2465,9 @@ impl Render for ExclusivePanel {
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
         let root = root.when(self.picker.is_some(), |root| {
-            root.on_action(cx.listener(|view, _: &FocusRoots, window, cx| {
-                view.roots_field.read(cx).focus_handle(cx).focus(window, cx);
-            }))
+            root.on_action(
+                cx.listener(|view, _: &EditRoots, window, cx| view.edit_roots(window, cx)),
+            )
         });
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
@@ -2489,20 +2479,16 @@ impl Render for ExclusivePanel {
                 up: drawn.focused().is_some(),
             });
             let scoping = Scoping {
-                roots: &self.roots_field,
+                roots: roots::setting(self, &palette, window, cx),
                 computing,
                 travels,
             };
             let legend = legend(&self.legend, drawn, &palette);
-            strip(
-                picker,
-                scoping,
-                legend,
-                &self.focus_handle,
-                &palette,
-                window,
-                cx,
-            )
+            let strip = strip(picker, scoping, legend, &self.focus_handle, window, cx);
+            div()
+                .relative()
+                .child(strip)
+                .children(roots::sheet(self, &palette, cx))
         }));
         let chips = &self.chips;
         let root = root.child(OneRow::new("exclusive-query-bar").filling(|| chips.clone()));
@@ -2597,9 +2583,9 @@ impl Render for ExclusivePanel {
 const POINTS: Priority = 2;
 
 /// What the strip holds past its picker.
-struct Scoping<'a> {
-    /// The field choosing the roots of the tree.
-    roots: &'a Entity<QueryField>,
+struct Scoping {
+    /// The setting choosing the roots of the tree.
+    roots: ToolbarGroup,
     /// Whether the roots of a new choice are chosen and its tree computed over
     /// the one drawn for the last.
     computing: bool,
@@ -2670,7 +2656,6 @@ fn strip(
     scoping: Scoping,
     legend: Legend,
     focus: &FocusHandle,
-    palette: &Palette,
     window: &Window,
     cx: &Context<ExclusivePanel>,
 ) -> OneRow {
@@ -2678,7 +2663,7 @@ fn strip(
     OneRow::new("exclusive-controls")
         .group(travel(scoping.travels, focus, window, cx))
         .group(points)
-        .filling(|| roots::field(scoping.roots, palette, cx))
+        .group(scoping.roots)
         .when(scoping.computing, |row| {
             row.busy("exclusive-computing", "computing…")
         })

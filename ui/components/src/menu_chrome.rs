@@ -75,7 +75,7 @@ fn chosen_hover(colors: &ThemeColors) -> Hsla {
 /// before a caret, and showing `hint` except while `open` holds of `picker`,
 /// whose open menu the hint would cover. The caller adds the click that opens
 /// the menu.
-pub(crate) fn trigger<V: 'static>(
+pub fn trigger<V: 'static>(
     id: ElementId,
     colors: &ThemeColors,
     hint: Hint,

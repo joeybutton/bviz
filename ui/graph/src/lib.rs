@@ -237,10 +237,15 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
-        KeyBinding::new("r", exclusive::FocusRoots, exclusive_canvas),
+        KeyBinding::new("r", exclusive::EditRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
-            exclusive::LeaveRoots,
+            exclusive::CloseRoots,
+            Some(exclusive::ROOTS_KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new(
+            "enter",
+            exclusive::CloseRoots,
             Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
         KeyBinding::new("escape", scatter::DismissCard, scatter_unpicked),
@@ -1725,20 +1730,27 @@ mod tests {
         ));
     }
 
-    /// The exclusive-deps panel's roots field is reached by `r`, `q` reaching
-    /// the query bar as in every view, and both are text inside it.
+    /// The exclusive-deps panel's roots are edited by `r`, `q` reaching the
+    /// query bar as in every view, and both are text inside the roots' field,
+    /// which Escape and Enter close.
     #[test]
-    fn the_roots_field_is_reached_by_r() {
+    fn the_roots_are_edited_by_r() {
         const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
         const IN_ROOTS: &[&str] = &[
             exclusive::KEY_CONTEXT.id(),
             exclusive::ROOTS_KEY_CONTEXT.id(),
             text_input::KEY_CONTEXT.id(),
         ];
-        assert!(is(dispatched("r", IN_EXCLUSIVE), exclusive::FocusRoots));
+        assert!(is(dispatched("r", IN_EXCLUSIVE), exclusive::EditRoots));
         assert!(is(dispatched("q", IN_EXCLUSIVE), chips::Focus));
         assert!(dispatched("r", IN_ROOTS).is_none());
         assert!(dispatched("q", IN_ROOTS).is_none());
+        for keys in ["escape", "enter"] {
+            assert!(
+                is(dispatched(keys, IN_ROOTS), exclusive::CloseRoots),
+                "{keys}"
+            );
+        }
         for keys in ["secondary-f", "/"] {
             assert!(is(dispatched(keys, IN_EXCLUSIVE), jump::Open), "{keys}");
         }

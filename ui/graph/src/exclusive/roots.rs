@@ -1,7 +1,7 @@
-//! The field naming the roots of a dominator tree as a Bazel target set, and
+//! The setting naming the roots of a dominator tree as a Bazel target set, and
 //! the points of a unit such a set roots the tree at.
 
-use super::{ExclusivePanel, LeaveRoots, RootedBy};
+use super::{CloseRoots, EditRoots, ExclusivePanel, RootedBy};
 use crate::Palette;
 use crate::model::{GraphModel, Prepared};
 use crate::point::{unit_names, written_name};
@@ -11,28 +11,30 @@ use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::shown::written_by_place;
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
-use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
-use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
+use bviz_ui_components::{
+    Hint, KeyScope, MenuItem, Nesting, Priority, QueryField, ToolbarGroup, menu_chrome,
+};
+use gpui::{
+    App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, Pixels, SharedString,
+    Subscription, Window, div, prelude::*, px,
+};
 use std::sync::Arc;
 
-/// The key context the roots field carries, which [`LeaveRoots`] is scoped to.
+/// The key context the sheet editing the roots carries, which [`CloseRoots`]
+/// is scoped to.
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
     &super::KEY_CONTEXT,
     Nesting::Inside,
     "GraphExclusiveRoots",
-    "Roots field",
+    "Roots",
 );
 
 /// Width the field is drawn at, wide enough for its placeholder.
-pub(super) const FIELD_WIDTH: Pixels = px(380.);
+const FIELD_WIDTH: Pixels = px(380.);
 
-/// The narrowest the field stands in its toolbar, the other controls giving
-/// way before it narrows further.
-pub(super) const FIELD_LEAST: Pixels = px(120.);
+const PLACEHOLDER: &str = "top-level, or target patterns: //... -//tools/...";
 
-pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//tools/...";
-
-/// What the field's tooltip says it takes.
+/// What the sheet says the field takes.
 const HELP: &str = "\
 Root target patterns · empty: top-level
 -pattern removes · # comment · from workspace root
@@ -238,23 +240,157 @@ fn copies_noted(guessed: u32, generated: u32, uncopied: u32) -> impl Iterator<It
     guessed.into_iter().chain(generated).chain(uncopied)
 }
 
-/// The roots field `input`, from which Escape returns to the panel.
-pub(super) fn field(
-    input: &Entity<QueryField>,
+/// The header setting naming the roots as a target set, and the sheet that
+/// edits it under the setting.
+pub(super) struct Setting {
+    field: Entity<QueryField>,
+    /// Held by the sheet while it is open, whose losing focus closes it and
+    /// roots the tree at what the field holds.
+    sheet: FocusHandle,
+    open: bool,
+    /// Closes the sheet as focus leaves it; installed on the first render,
+    /// where the window is in hand.
+    closing: Option<Subscription>,
+}
+
+impl Setting {
+    pub(super) fn new(cx: &mut Context<ExclusivePanel>) -> Self {
+        Setting {
+            field: cx.new(|cx| QueryField::new("exclusive-roots", PLACEHOLDER, FIELD_WIDTH, cx)),
+            sheet: cx.focus_handle(),
+            open: false,
+            closing: None,
+        }
+    }
+
+    pub(super) fn field(&self) -> &Entity<QueryField> {
+        &self.field
+    }
+
+    /// The target set the field holds; none where it is empty.
+    pub(super) fn target_set(&self, cx: &App) -> Option<SharedString> {
+        let text = self.field.read(cx).text(cx);
+        (!text.trim().is_empty()).then_some(text)
+    }
+}
+
+impl ExclusivePanel {
+    /// Opens the sheet editing the roots, its field taking focus.
+    pub(super) fn edit_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.roots.closing.is_none() {
+            let closing = cx.on_focus_out(&self.roots.sheet, window, |view, _, _, cx| {
+                view.roots.open = false;
+                view.reroot(cx);
+                cx.notify();
+            });
+            self.roots.closing = Some(closing);
+        }
+        self.roots.open = true;
+        self.roots.field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the sheet editing the roots, handing focus back to the panel,
+    /// and roots the tree at what the field holds without waiting for it to
+    /// settle.
+    pub(super) fn close_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.roots.open = false;
+        self.focus_handle.focus(window, cx);
+        self.reroot(cx);
+        cx.notify();
+    }
+}
+
+/// Room the setting gives what it reads, past which it is cut short.
+const READING_WIDTH: Pixels = px(260.);
+
+/// What the setting reads of the target set `text`.
+fn reading(text: &str) -> SharedString {
+    match text.trim() {
+        "" => TOP_LEVEL.into(),
+        set => set.to_owned().into(),
+    }
+}
+
+/// What the setting reads with the field empty.
+const TOP_LEVEL: &str = "top-level";
+
+/// The words the setting is labelled with, as a build of its roots reads.
+const BUILD: &str = "bazel build";
+
+/// How long the setting holds out against the panel narrowing.
+const ROOTS: Priority = 3;
+
+/// The setting naming the roots in the panel's header, which opens the
+/// [`sheet`] editing them, and in the strip's overflow menu the row doing so.
+pub(super) fn setting(
+    view: &ExclusivePanel,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &Context<ExclusivePanel>,
+) -> ToolbarGroup {
+    let colors = &palette.colors;
+    let text = view.roots.field.read(cx).text(cx);
+    let set = !text.trim().is_empty();
+    let reading = reading(&text);
+    let width = menu_chrome::widest(window, std::iter::once(reading.clone())).min(READING_WIDTH);
+    let focus = &view.focus_handle;
+    let trigger = || {
+        let hint = Hint::default().keys_for(&EditRoots, focus);
+        let open: fn(&ExclusivePanel) -> bool = |view| view.roots.open;
+        menu_chrome::trigger(
+            "exclusive-roots-setting".into(),
+            colors,
+            hint,
+            (cx.weak_entity(), open),
+            width,
+            reading.clone(),
+        )
+        .on_click(
+            cx.listener(|view, _: &ClickEvent, window, cx| match view.roots.open {
+                true => view.close_roots(window, cx),
+                false => view.edit_roots(window, cx),
+            }),
+        )
+    };
+    let panel = cx.weak_entity();
+    let row = MenuItem::action(&EditRoots, Some(focus), window, cx, move |window, cx| {
+        panel
+            .update(cx, |view, cx| view.edit_roots(window, cx))
+            .ok();
+    });
+    ToolbarGroup::named(ROOTS, BUILD, trigger).overflow(row, set)
+}
+
+/// The sheet editing the roots, open under the strip `view` stands its
+/// setting in; outside the strip, so that it stands whether the setting stands
+/// in the strip or has left it for the strip's overflow menu.
+pub(super) fn sheet(
+    view: &ExclusivePanel,
     palette: &Palette,
     cx: &Context<ExclusivePanel>,
-) -> Stateful<Div> {
-    let tip = palette.colors.tooltip();
-    div()
-        .id("exclusive-roots")
-        .key_context(KEY_CONTEXT)
-        .on_action(cx.listener(|view, _: &LeaveRoots, window, cx| {
-            view.focus_handle.focus(window, cx);
-        }))
-        .tooltip(TextTooltip::builder(HELP.into(), tip))
-        .flex_1()
-        .min_w_0()
-        .child(input.clone())
+) -> Option<impl IntoElement + use<>> {
+    let colors = &palette.colors;
+    let roots = &view.roots;
+    roots.open.then(|| {
+        let sheet = div()
+            .track_focus(&roots.sheet)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|view, _: &CloseRoots, window, cx| view.close_roots(window, cx)))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_2()
+            .child(roots.field.clone())
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.text_muted)
+                    .whitespace_nowrap()
+                    .children(HELP.lines().map(|line| div().child(line))),
+            );
+        menu_chrome::under_trigger(menu_chrome::sheet(colors).child(sheet))
+    })
 }
 
 /// The line under the strip saying that the target set the field holds
