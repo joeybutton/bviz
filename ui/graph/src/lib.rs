@@ -90,7 +90,7 @@ use legend::Legend;
 use mode::LayoutMode;
 use model::{
     ExclusionNamed, FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested,
-    SourceReplaced, VerdictsLanded,
+    SelectionChanged, SourceReplaced, VerdictsLanded,
 };
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
@@ -403,6 +403,8 @@ pub struct GraphPanel {
     _verdicts_landed: Subscription,
     /// Names on the hidden card the chip leaving its node out.
     _exclusion_named: Subscription,
+    /// Marks a node another view selects, leaving the camera where it is.
+    _selection_changed: Subscription,
     /// Whether the workspace shows the panel.
     shown: bool,
     _reveal_requested: Subscription,
@@ -624,6 +626,11 @@ impl GraphPanel {
             view.restate_shown(cx)
         });
         let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let selection_changed = cx.subscribe(&model, |view, _, event: &SelectionChanged, cx| {
+            if event.by != cx.entity_id() {
+                selection::remark(view, cx);
+            }
+        });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
                 derive::catch_up(view, cx);
@@ -671,6 +678,7 @@ impl GraphPanel {
             _filter_changed: filter_changed,
             _verdicts_landed: verdicts_landed,
             _exclusion_named: exclusion_named,
+            _selection_changed: selection_changed,
             shown: false,
             _reveal_requested: reveal_requested,
             hovered: None,
@@ -944,6 +952,7 @@ impl GraphPanel {
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
+        selection::remark(self, cx);
         true
     }
 
@@ -992,8 +1001,7 @@ impl GraphPanel {
                 true
             }
             (CanvasIntent::Deselect, None) => {
-                self.selection.clear();
-                self.invalidate_canvas(cx);
+                selection::select(self, None, cx);
                 true
             }
             _ => false,
@@ -1161,14 +1169,16 @@ impl GraphPanel {
         self.steer(|framing| framing.move_to(scaled), cx);
     }
 
-    /// Puts away the innermost thing the reader set up: a reveal pending, then
-    /// the selection, and with neither the dependency paths asked for.
+    /// Puts away the innermost thing the reader set up: a reveal pending,
+    /// then the selection where the panel marks it, then the dependency paths
+    /// asked for, and last a selection the panel marks nothing for.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        let selected = self.model.read(cx).selected().is_some();
+        let marked = self.selection.node().is_some();
         if reveal::dismiss(self) {
             cx.notify();
-        } else if self.selection.node().is_some() {
-            self.selection.clear();
-            self.invalidate_canvas(cx);
+        } else if marked || (selected && !self.why.asked()) {
+            selection::select(self, None, cx);
         } else {
             why::clear(self, cx);
         }

@@ -7,7 +7,7 @@ use crate::hidden::{self, HiddenBy};
 use crate::history;
 use crate::mode::LayoutMode;
 use crate::point::{point_label, written_name};
-use crate::{GraphPanel, Palette, pins, why};
+use crate::{GraphPanel, Palette, pins, selection, why};
 use bviz_graph_layout::Id;
 use bviz_ui_components::Button;
 use bviz_ui_workspace::PanelEvent;
@@ -70,7 +70,7 @@ type Stop = history::Stop<Held>;
 /// offered to be revealed anyway instead. The node is the jump [`back`] returns
 /// from.
 pub(crate) fn reveal(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    let origin = match view.selection.node() {
+    let origin = match view.model.read(cx).selected() {
         Some(selected) => Some(Stop::Node(selected)),
         None => view.framing.hold().map(Stop::View),
     };
@@ -100,7 +100,7 @@ fn revisit(view: &mut GraphPanel, stop: Stop, cx: &mut Context<GraphPanel>) {
         Stop::Node(id) => ask(view, id, Ask::Show, cx),
         Stop::View(held) => {
             dismiss(view);
-            view.selection.clear();
+            selection::select(view, None, cx);
             view.framing.return_to(held);
         }
     }
@@ -135,7 +135,7 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
         (None, Ask::InPlace) => match standing_for(view, id) {
             Some(shown) => {
                 view.reveal = Reveal::Idle;
-                view.selection.select(shown);
+                selection::select(view, Some(id), cx);
                 view.framing.request_frame(Frame::Node(shown));
             }
             None if view.derived.deriving() => view.reveal = Reveal::Waiting(id, Ask::InPlace),
@@ -179,7 +179,7 @@ fn offer(view: &mut GraphPanel, id: Id, by: HiddenBy, cx: &mut Context<GraphPane
 /// The box standing for `id` in the drawing as it is: in a layered drawing the
 /// innermost drawn box holding it, which opens none and so lays nothing out
 /// afresh.
-fn standing_for(view: &GraphPanel, id: Id) -> Option<Id> {
+pub(crate) fn standing_for(view: &GraphPanel, id: Id) -> Option<Id> {
     match view.mode {
         LayoutMode::Layered => derive::drawn_holder(view, id),
         LayoutMode::Map => Some(id),
@@ -187,7 +187,7 @@ fn standing_for(view: &GraphPanel, id: Id) -> Option<Id> {
 }
 
 fn show(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
-    view.selection.select(id);
+    selection::select(view, Some(id), cx);
     if view.mode == LayoutMode::Layered {
         derive::expand_to(view, id, cx);
     }

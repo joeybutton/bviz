@@ -503,8 +503,8 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
 
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
-/// The read has landed, loaded or failed. Carried as an event because what it
-/// calls for turns on what a view has selected, which the graph does not hold.
+/// The read has landed, loaded or failed, leaving nothing selected. Carried
+/// as an event because what it calls for turns on each view's own state.
 pub(crate) struct SourceReplaced;
 
 /// The loaded graph's map has landed in its [`Placement`].
@@ -556,6 +556,14 @@ pub(crate) struct FilterChanged {
 
 /// The verdicts [`GraphModel::verdicts`] was asked for have landed.
 pub(crate) struct VerdictsLanded;
+
+/// Another node, or none, is [`GraphModel::selected`]. A view marks what it
+/// selects itself as it publishes it, so it takes up only a change some other
+/// view made.
+pub(crate) struct SelectionChanged {
+    /// The view that made the selection.
+    pub(crate) by: EntityId,
+}
 
 /// What leaves a node out of the applied query has been named, as
 /// [`GraphModel::exclusion`] reads.
@@ -698,6 +706,7 @@ pub(crate) struct GraphModel {
     /// query, named or being named; at most [`NAMED_EXCLUSIONS`] of them,
     /// the oldest first.
     exclusions: Vec<ExclusionNaming>,
+    selected: Selected,
     /// The matcher pool the lists over the graph — each panel's palette and
     /// each query bar's completion — take up in turn.
     matchers: fuzzy::Pool,
@@ -741,6 +750,19 @@ impl EventEmitter<ExclusionNamed> for GraphModel {}
 impl EventEmitter<QueryRefused> for GraphModel {}
 impl EventEmitter<QueryApplied> for GraphModel {}
 impl EventEmitter<QueryCounted> for GraphModel {}
+impl EventEmitter<SelectionChanged> for GraphModel {}
+
+/// The node of the loaded graph every view of it marks as the one selected.
+#[derive(Default)]
+struct Selected(Option<Id>);
+
+impl Selected {
+    /// Selects `node`, or nothing for `None`, reporting whether that changed
+    /// what is selected.
+    fn set(&mut self, node: Option<Id>) -> bool {
+        std::mem::replace(&mut self.0, node) != node
+    }
+}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -795,7 +817,7 @@ impl GraphModel {
                 model.counted = None;
                 model.counting = None;
                 model.exclusions.clear();
-                cx.emit(SourceReplaced);
+                model.replaced(cx);
             },
         );
         Self {
@@ -839,6 +861,13 @@ impl GraphModel {
         (changed, reveal)
     }
 
+    /// Announces that the graph has been replaced, whose nodes no selection
+    /// names any longer.
+    fn replaced(&mut self, cx: &mut Context<Self>) {
+        self.selected = Selected::default();
+        cx.emit(SourceReplaced);
+    }
+
     /// Waits on `placing` and lands the map it places through `landing`.
     fn placing(
         placing: Pending<Arc<MapLayout>>,
@@ -853,7 +882,7 @@ impl GraphModel {
                     derive_levels(map, cx);
                     cx.emit(MapPlaced);
                 }
-                None => cx.emit(SourceReplaced),
+                None => model.replaced(cx),
             },
         )
     }
@@ -893,6 +922,7 @@ impl GraphModel {
             counted: None,
             counting: None,
             exclusions: Vec::with_capacity(NAMED_EXCLUSIONS),
+            selected: Selected::default(),
             matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
@@ -1281,6 +1311,20 @@ impl GraphModel {
         }
     }
 
+    /// The node every view of the graph marks as the one selected.
+    pub(crate) fn selected(&self) -> Option<Id> {
+        self.selected.0
+    }
+
+    /// Selects `node`, or nothing for `None`, for every view of the graph;
+    /// `by` is the view selecting it. Selecting what is selected already
+    /// announces nothing.
+    pub(crate) fn select(&mut self, node: Option<Id>, by: EntityId, cx: &mut Context<Self>) {
+        if self.selected.set(node) {
+            cx.emit(SelectionChanged { by });
+        }
+    }
+
     /// Asks the graph panel the graph's other views defer to to show the node
     /// `id`, where one is open.
     pub(crate) fn reveal(&mut self, id: Id, cx: &mut Context<Self>) {
@@ -1365,6 +1409,17 @@ mod tests {
         Spawns, Timings,
     };
     use std::time::Duration;
+
+    #[test]
+    fn selecting_what_is_selected_changes_nothing() {
+        let mut selected = Selected::default();
+        assert!(!selected.set(None));
+        assert!(selected.set(Some(Id(3))));
+        assert!(!selected.set(Some(Id(3))));
+        assert!(selected.set(Some(Id(4))));
+        assert!(selected.set(None));
+        assert_eq!(selected.0, None);
+    }
 
     #[test]
     fn a_graph_describes_its_configurations_by_checksum() {

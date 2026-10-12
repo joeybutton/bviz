@@ -274,7 +274,7 @@ pub(crate) fn card(
                 ),
         )
         .children(runners(timecard, palette))
-        .children(view.selection.node().map(|node| selected(node, loaded, cx)))
+        .children(crate::selection::acted_on(view, cx).map(|node| selected(node, loaded, cx)))
         .child(
             div()
                 .min_w_0()

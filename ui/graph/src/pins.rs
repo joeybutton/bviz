@@ -168,6 +168,17 @@ pub(crate) fn set(view: &mut GraphPanel, node: Id, pin: Visibility, cx: &mut Con
     set_pins(view, pins, cx);
 }
 
+/// Hides every one of `nodes` whatever the rules say.
+pub(crate) fn hide(view: &mut GraphPanel, nodes: &[Id], cx: &mut Context<GraphPanel>) {
+    let mut pins = view.model.read(cx).filter().pins().clone();
+    pins.extend(
+        nodes
+            .iter()
+            .map(|&node| (node, Pin::Set(Visibility::Hidden))),
+    );
+    set_pins(view, pins, cx);
+}
+
 /// Shows `node` whatever the rules say, as [`revealing`] pins it.
 pub(crate) fn reveal(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
     let pins = revealing(view.model.read(cx).filter().pins(), node);

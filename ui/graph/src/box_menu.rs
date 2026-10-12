@@ -3,7 +3,7 @@
 
 use crate::camera::{Rect, to_screen};
 use crate::relation::Relation;
-use crate::{GraphPanel, pins, why};
+use crate::{GraphPanel, derive, pins, selection, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
 use bviz_ui_components::{Menu, MenuEvent, MenuItem, SubmenuItem, over_window};
@@ -11,7 +11,6 @@ use gpui::{
     App, AppContext as _, Context, Entity, IntoElement, Pixels, Point, SharedString, Subscription,
     WeakEntity, Window, point,
 };
-use std::collections::HashSet;
 
 /// One row of a box's menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,25 +47,41 @@ fn offered(asking_another: bool) -> Vec<Offer> {
 
 /// A menu put up over a box, let go of once it closes.
 pub(crate) struct BoxMenu {
-    /// The box the rows act on.
+    /// The node of the graph the rows act on, which the document holds
+    /// selected while the menu stands.
     node: Id,
     menu: Entity<Menu>,
     _dismissed: Subscription,
 }
 
-/// Selects `node` and puts up the menu of what can be done with it at `at`.
+/// Selects the node the box `hit` stands for, as [`derive::member`] names
+/// it, and puts up the menu of what can be done with it at `at`.
 pub(crate) fn open(
     view: &mut GraphPanel,
-    node: Id,
+    hit: Id,
     at: Point<Pixels>,
     window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
-    view.selection.select(node);
-    view.invalidate_canvas(cx);
+    let node = derive::member(view, hit);
+    selection::select(view, Some(node), cx);
+    let gathered = derive::gathered(view, hit);
+    put_up(view, node, gathered, at, window, cx);
+}
+
+/// Puts up at `at` the menu of what can be done with `node`, or with the
+/// nodes `gathered` where the box is a merge group's.
+fn put_up(
+    view: &mut GraphPanel,
+    node: Id,
+    gathered: Vec<Id>,
+    at: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut Context<GraphPanel>,
+) {
     // The card stands beside the pointer, where the menu opens.
     view.box_card.forget(cx);
-    let items = items(view, node, cx);
+    let items = items(view, node, gathered, cx);
     let menu = cx.new(|cx| Menu::new(items, at, window, cx));
     let dismissed = cx.subscribe_in(&menu, window, |view, _, event: &MenuEvent, window, cx| {
         let MenuEvent::Dismissed { holding_focus } = event;
@@ -83,10 +98,11 @@ pub(crate) fn open(
     });
 }
 
-/// Takes the menu down where `gone` holds the box it stands over.
-pub(crate) fn forget(view: &GraphPanel, gone: &HashSet<Id>, cx: &mut App) {
+/// Takes the menu down where the panel no longer acts on its node, as
+/// [`selection::acted_on`] names what it acts on.
+pub(crate) fn remarked(view: &GraphPanel, cx: &mut App) {
     if let Some(open) = &view.box_menu
-        && gone.contains(&open.node)
+        && selection::acted_on(view, cx) != Some(open.node)
     {
         open.menu.update(cx, |menu, cx| menu.dismiss(cx));
     }
@@ -99,17 +115,19 @@ pub(crate) fn close(view: &GraphPanel, cx: &mut App) {
     }
 }
 
-/// Puts up the menu of the selected box, where one is selected, at the foot
-/// of the box.
+/// Puts up the menu of the node the panel acts on, where it acts on one, at
+/// the foot of the box marked for it.
 pub(crate) fn open_selected(
     view: &mut GraphPanel,
     window: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
-    if let Some(node) = view.selection.node() {
-        let at = foot(view, node);
-        open(view, node, at, window, cx);
-    }
+    let (Some(node), Some(marked)) = (selection::acted_on(view, cx), view.selection.node()) else {
+        return;
+    };
+    let at = foot(view, marked);
+    let gathered = derive::gathered(view, marked);
+    put_up(view, node, gathered, at, window, cx);
 }
 
 /// The window point at the foot of `node` as the canvas draws it, held inside
@@ -130,29 +148,49 @@ fn foot(view: &GraphPanel, node: Id) -> Point<Pixels> {
     )
 }
 
-/// The rows of the menu of `node`.
-fn items(view: &GraphPanel, node: Id, cx: &Context<GraphPanel>) -> Vec<MenuItem> {
+/// The rows of the menu of `node`, or of a merge group's box gathering the
+/// nodes `gathered`, which stands for all of them: hiding it pins every one,
+/// and the questions, each about a single node, wait for the group to be
+/// opened.
+fn items(
+    view: &GraphPanel,
+    node: Id,
+    gathered: Vec<Id>,
+    cx: &Context<GraphPanel>,
+) -> Vec<MenuItem> {
     let panel = cx.weak_entity();
+    let group = gathered.len();
+    let hidden = match gathered.is_empty() {
+        true => vec![node],
+        false => gathered,
+    };
+    let single = |row: MenuItem| match group {
+        0 => row,
+        _ => row.disabled().tooltip(format!(
+            "Open the group to ask about one of its {group} nodes"
+        )),
+    };
     offered(why::asking_about_another(view, node))
         .into_iter()
         .map(|offer| match offer {
             Offer::Highlight => {
                 MenuItem::submenu(offer.label(), highlights(&panel, view.selection.relation()))
             }
-            Offer::AlwaysHide => MenuItem::new(
-                offer.label(),
-                deed(&panel, move |view, cx| {
-                    pins::set(view, node, Visibility::Hidden, cx)
-                }),
-            ),
-            Offer::AskWhy => MenuItem::new(
+            Offer::AlwaysHide => {
+                let hidden = hidden.clone();
+                MenuItem::new(
+                    offer.label(),
+                    deed(&panel, move |view, cx| pins::hide(view, &hidden, cx)),
+                )
+            }
+            Offer::AskWhy => single(MenuItem::new(
                 offer.label(),
                 deed(&panel, move |view, cx| why::ask_why(view, node, cx)),
-            ),
-            Offer::AskFrom => MenuItem::new(
+            )),
+            Offer::AskFrom => single(MenuItem::new(
                 offer.label(),
                 deed(&panel, move |view, cx| why::ask_from(view, node, cx)),
-            ),
+            )),
         })
         .collect()
 }

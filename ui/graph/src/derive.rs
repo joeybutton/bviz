@@ -365,7 +365,6 @@ impl Slice {
 
 /// What re-evaluating a filter left of the graph a panel was drawing.
 struct Restricted {
-    dropped: HashSet<Id>,
     expanded: HashSet<Id>,
     over_budget: Option<Overflow>,
 }
@@ -408,6 +407,26 @@ struct Laid {
     /// The remap of [`bviz_graph_layout::quotient::quotient`] `view` was laid out
     /// through.
     groups: Arc<BTreeMap<Id, Id>>,
+    /// The boxes `view` draws.
+    drawn: Arc<HashSet<Id>>,
+    /// The container holding each node of the graph `view` was laid out
+    /// from.
+    parents: Arc<HashMap<Id, Id>>,
+}
+
+impl Laid {
+    /// `view`, laid out from `base` through `groups`.
+    fn new(view: Arc<LaidOut>, groups: Arc<BTreeMap<Id, Id>>, base: &Graph) -> Self {
+        let drawn = view.boxes.iter().map(|b| b.id).collect();
+        let mut parents: HashMap<Id, Id> = HashMap::with_capacity(base.nodes.len());
+        parents.extend((base.nodes.iter()).filter_map(|node| Some((node.id, node.parent?))));
+        Laid {
+            view,
+            groups,
+            drawn: Arc::new(drawn),
+            parents: Arc::new(parents),
+        }
+    }
 }
 
 impl Layered {
@@ -430,11 +449,30 @@ impl Layered {
     /// container holding it.
     fn holder(&self, id: Id) -> Option<Id> {
         let laid = self.laid.as_ref().ok()?;
-        let boxes: HashSet<Id> = laid.view.boxes.iter().map(|b| b.id).collect();
+        let parent = |id: &Id| laid.parents.get(id).copied();
         std::iter::once(id)
             .chain(laid.groups.get(&id).copied())
-            .chain(holders(&self.base, id))
-            .find(|candidate| boxes.contains(candidate))
+            .chain(std::iter::successors(parent(&id), parent))
+            .find(|candidate| laid.drawn.contains(candidate))
+    }
+
+    /// A node of the graph the box `id` stands for: the first of those a
+    /// merge group's box gathers, which names the group's nodes in every
+    /// drawing, and any other box's own node.
+    fn member(&self, id: Id) -> Id {
+        let gathered = (self.laid.as_ref().ok())
+            .and_then(|laid| laid.groups.iter().find(|&(_, &group)| group == id));
+        gathered.map_or(id, |(&member, _)| member)
+    }
+
+    /// The nodes of the graph the merge group's box `id` gathers, in id
+    /// order; none for any other box.
+    fn gathered(&self, id: Id) -> Vec<Id> {
+        let Ok(laid) = &self.laid else {
+            return Vec::new();
+        };
+        let members = laid.groups.iter().filter(|&(_, &group)| group == id);
+        members.map(|(&member, _)| member).collect()
     }
 }
 
@@ -469,9 +507,6 @@ struct Adopted {
 /// What a derivation that evaluated the filter afresh leaves for the panel to
 /// answer for.
 struct Restriction {
-    /// The nodes the filter took out of the graph, which nothing keyed on a
-    /// node — an expansion, a selection — can go on naming.
-    dropped: HashSet<Id>,
     /// The map of the graph that leaves, where that restricts the document's;
     /// no camera has called for a level of it.
     map: Option<RestrictedMap>,
@@ -780,7 +815,6 @@ impl Derived {
         let restriction = landed.restricted.map(|restricted| {
             self.over_budget = restricted.over_budget;
             Restriction {
-                dropped: restricted.dropped,
                 map: landed.slice.restricted_map().cloned(),
             }
         });
@@ -860,6 +894,7 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     view.derived.opened_on(loaded);
     crate::why::reset(view);
     crate::reveal::reset(view);
+    crate::selection::remark(view, cx);
     crate::jump::graph::reset(view, cx);
     let scoped = view.model.read(cx).filter().applied().is_some();
     follow(view, scoped, cx);
@@ -951,24 +986,29 @@ pub(crate) fn expand_to(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPan
     request(view, cx);
 }
 
-/// The containers holding `id` in `base`, innermost first.
-fn holders(base: &Graph, id: Id) -> Vec<Id> {
-    let nodes = &base.nodes;
-    let mut parents: HashMap<Id, Id> = HashMap::with_capacity(nodes.len());
-    parents.extend(
-        nodes
-            .iter()
-            .filter_map(|node| Some((node.id, node.parent?))),
-    );
-    let parent = |id: Id| parents.get(&id).copied();
-    std::iter::successors(parent(id), |&container| parent(container)).collect()
-}
-
 /// The innermost box of the layered drawing on screen standing for `id`, as
 /// [`Layered::holder`] finds it, opening none. `None` where the drawing holds
 /// none, or is yet to be derived.
 pub(crate) fn drawn_holder(view: &GraphPanel, id: Id) -> Option<Id> {
     view.derived.layered.as_ref()?.holder(id)
+}
+
+/// A node of the graph the box `id` of the drawing on screen stands for, as
+/// [`Layered::member`] names it.
+pub(crate) fn member(view: &GraphPanel, id: Id) -> Id {
+    match (view.mode, &view.derived.layered) {
+        (LayoutMode::Layered, Some(layered)) => layered.member(id),
+        _ => id,
+    }
+}
+
+/// The nodes of the graph the box `id` of the drawing on screen gathers, as
+/// [`Layered::gathered`] names them.
+pub(crate) fn gathered(view: &GraphPanel, id: Id) -> Vec<Id> {
+    match (view.mode, &view.derived.layered) {
+        (LayoutMode::Layered, Some(layered)) => layered.gathered(id),
+        _ => Vec::new(),
+    }
 }
 
 /// Opens `expanded` onto `id` in `base`: every container holding it, then the
@@ -1198,9 +1238,8 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                             .map(|laid| &laid.view.anchors),
                     );
                     Relaid::Fresh(Layered {
-                        laid: laid.map(|(view, groups)| Laid {
-                            view: Arc::new(view),
-                            groups: Arc::new(groups),
+                        laid: laid.map(|(view, groups)| {
+                            Laid::new(Arc::new(view), Arc::new(groups), &slice.base)
                         }),
                         base: Arc::clone(&slice.base),
                         expanded: expanded.clone(),
@@ -1222,12 +1261,8 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                 landing,
             } = view.derived.adopt(landed);
             let restricted = restriction.is_some();
-            if let Some(restriction) = restriction {
-                view.selection.forget(&restriction.dropped);
-                crate::box_menu::forget(view, &restriction.dropped, cx);
-                if let Some(map) = restriction.map {
-                    map.derive_levels(cx);
-                }
+            if let Some(map) = restriction.and_then(|restriction| restriction.map) {
+                map.derive_levels(cx);
             }
             if frame {
                 view.framing.request_frame(Frame::Drawing);
@@ -1237,6 +1272,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             if let Some(landing) = landing {
                 view.settle_onto(&landing, cx);
             }
+            crate::selection::remark(view, cx);
             crate::reveal::landed(view, cx);
             view.drawing_moved(cx);
             view.invalidate_canvas(cx);
@@ -1303,16 +1339,6 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
     for node in &base.nodes {
         held[node.id.0 as usize] = true;
     }
-    let mut dropped: HashSet<Id> =
-        HashSet::with_capacity(shared.base.nodes.len() - base.nodes.len());
-    dropped.extend(
-        shared
-            .base
-            .nodes
-            .iter()
-            .map(|node| node.id)
-            .filter(|id| !held[id.0 as usize]),
-    );
     let opened = bviz_graph_layout::lod::default_expansion(
         &base,
         None,
@@ -1330,7 +1356,6 @@ fn restrict_to_paths(shared: &Shared, paths: &Arc<Paths>) -> (Slice, Restricted)
     let transitions = Arc::new(Transitions::of(&base, &shared.facets));
     let slice = restricted_slice(shared, lens, base, Arc::new(HashSet::new()), transitions);
     let restricted = Restricted {
-        dropped,
         expanded,
         over_budget,
     };
@@ -1392,14 +1417,12 @@ fn keeping(
         DEFAULT_MAX_EDGES,
     ) {
         Ok(expanded) => Restricted {
-            dropped,
             expanded,
             over_budget: None,
         },
         // No expansion of this graph fits, and the unexpanded view is the
         // smallest drawing of it there is.
         Err(overflow) => Restricted {
-            dropped,
             expanded: HashSet::new(),
             over_budget: Some(overflow),
         },
@@ -1410,7 +1433,6 @@ fn keeping(
 mod tests {
     use super::*;
     use crate::model::Opening;
-    use crate::selection::Selection;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::labels::LabelIndex;
     use bviz_graph_layout::select::{Pin, Predicate, Rule, Values, Visibility};
@@ -1488,6 +1510,13 @@ mod tests {
             .kind
     }
 
+    /// The nodes of `shared`'s graph `slice` leaves out.
+    fn dropped(shared: &Shared, slice: &Slice) -> HashSet<Id> {
+        let kept: HashSet<Id> = slice.base.nodes.iter().map(|node| node.id).collect();
+        let nodes = shared.base.nodes.iter().map(|node| node.id);
+        nodes.filter(|id| !kept.contains(id)).collect()
+    }
+
     /// The graph `filter` leaves of `shared`'s, as [`restrict`] leaves it.
     fn restrict_through(
         shared: &Shared,
@@ -1542,7 +1571,7 @@ mod tests {
             slice.map().expect("a placed map"),
             loaded.shared.map.placed().expect("a placed map"),
         ));
-        assert!(restricted.dropped.is_empty());
+        assert!(dropped(&loaded.shared, &slice).is_empty());
         assert_eq!(restricted.expanded, expanded);
         assert_eq!(restricted.over_budget, None);
     }
@@ -1551,16 +1580,16 @@ mod tests {
     fn a_filter_hiding_a_kind_leaves_no_box_for_those_nodes() {
         let loaded = document();
 
-        let (slice, restricted) =
+        let (slice, _) =
             restrict_through(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
 
+        let dropped = dropped(&loaded.shared, &slice);
         assert!(
-            restricted
-                .dropped
+            dropped
                 .iter()
                 .all(|&id| kind_of(&loaded, id) == Kind::Action)
         );
-        assert!(!restricted.dropped.is_empty());
+        assert!(!dropped.is_empty());
         assert!(
             slice
                 .base
@@ -1685,10 +1714,10 @@ mod tests {
         }
     }
 
-    /// Ids outlive a restriction, so what the reader had opened and picked out
-    /// goes on naming the same boxes; only what the filter took out gives way.
+    /// Ids outlive a restriction, so what the reader had opened goes on naming
+    /// the same boxes; only what the filter took out gives way.
     #[test]
-    fn an_expansion_and_a_selection_outlive_a_filter_change() {
+    fn an_expansion_outlives_a_filter_change() {
         let loaded = document();
         let (kept, hidden) = (id(&loaded, "//a:t"), id(&loaded, "//b:t"));
         let expanded: HashSet<Id> = [kept, hidden].into_iter().collect();
@@ -1702,14 +1731,6 @@ mod tests {
         let (_, restricted) = restrict_through(&loaded.shared, &filter, &expanded, true);
 
         assert_eq!(restricted.expanded, [kept].into_iter().collect());
-
-        let mut selection = Selection::none();
-        selection.select(kept);
-        selection.forget(&restricted.dropped);
-        assert_eq!(selection.node(), Some(kept));
-        selection.select(hidden);
-        selection.forget(&restricted.dropped);
-        assert_eq!(selection.node(), None);
     }
 
     /// A derivation laying no layered drawing out settles nothing for a panel
@@ -1863,7 +1884,7 @@ mod tests {
     #[test]
     fn paths_draw_their_nodes_their_frames_and_their_edges_alone() {
         let loaded = document();
-        let (slice, restricted) = restrict_to_paths(&loaded.shared, &across(&loaded));
+        let (slice, _) = restrict_to_paths(&loaded.shared, &across(&loaded));
 
         let mut drawn: Vec<&str> = slice
             .base
@@ -1888,9 +1909,8 @@ mod tests {
             edges,
             [(id(&loaded, "//a:t#link"), id(&loaded, "//b:t#compile"))]
         );
-        let mut dropped: Vec<&str> = restricted
-            .dropped
-            .iter()
+        let dropped = dropped(&loaded.shared, &slice);
+        let mut dropped: Vec<&str> = (dropped.iter())
             .map(|&id| loaded.shared.names.resolve(id))
             .collect();
         dropped.sort_unstable();
@@ -1997,10 +2017,7 @@ mod tests {
             )
             .expect("the fixture is sparse enough to lay out");
             Layered {
-                laid: Ok(Laid {
-                    view: Arc::new(view),
-                    groups: Arc::new(groups),
-                }),
+                laid: Ok(Laid::new(Arc::new(view), Arc::new(groups), &self.base)),
                 base: Arc::new(self.base.clone()),
                 expanded,
                 reduced: false,
@@ -2046,6 +2063,25 @@ mod tests {
 
         let opened = fixture.layered([fixture.package, fixture.target, group].into());
         assert_eq!(opened.holder(first), Some(first));
+    }
+
+    /// A group's box is minted afresh by each layout, so what it stands for
+    /// outside the drawing is one of the sources it gathers, the same one
+    /// every time.
+    #[test]
+    fn a_group_box_stands_for_the_first_source_it_gathers() {
+        let mut fixture = MergedSources::new();
+        let [first, second] = fixture.sources;
+        let folded = fixture.layered([fixture.package, fixture.target].into());
+
+        let group = folded.holder(first).expect("a box standing for the source");
+        assert_eq!(folded.member(group), first.min(second));
+        assert_eq!(folded.member(fixture.target), fixture.target);
+        assert_eq!(
+            folded.gathered(group),
+            [first.min(second), first.max(second)]
+        );
+        assert!(folded.gathered(fixture.target).is_empty());
     }
 
     #[test]
@@ -2109,10 +2145,11 @@ mod tests {
     /// reduced edge set.
     fn layered(loaded: &Loaded, width: f64) -> Layered {
         Layered {
-            laid: Ok(Laid {
-                view: drawing(width),
-                groups: Arc::default(),
-            }),
+            laid: Ok(Laid::new(
+                drawing(width),
+                Arc::default(),
+                &loaded.shared.base,
+            )),
             base: Arc::clone(&loaded.shared.base),
             expanded: HashSet::new(),
             reduced: true,

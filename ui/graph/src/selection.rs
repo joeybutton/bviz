@@ -1,12 +1,15 @@
+use crate::GraphPanel;
 use crate::derive::Shown;
 use crate::neighborhood::{MarkingMemo, Neighborhood};
 use crate::relation::Relation;
+use crate::reveal::{hidden_by, standing_for};
 use bviz_graph_layout::Id;
-use std::collections::HashSet;
+use gpui::{App, Context};
 use std::rc::Rc;
 
-/// The node whose related nodes stay marked until another is picked, and which
-/// of its relations the marking covers.
+/// The box standing for the document's selected node, whose related nodes
+/// stay marked until another is selected, and which of its relations the
+/// marking covers.
 pub(crate) struct Selection {
     node: Option<Id>,
     relation: Relation,
@@ -22,6 +25,7 @@ impl Selection {
         }
     }
 
+    /// The box marked, which may hold the node selected rather than be it.
     pub(crate) fn node(&self) -> Option<Id> {
         self.node
     }
@@ -30,33 +34,51 @@ impl Selection {
         self.relation
     }
 
-    /// Selects `node`, whichever node was selected before.
-    pub(crate) fn select(&mut self, node: Id) {
-        self.node = Some(node);
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.node = None;
-    }
-
-    /// Drops the selection where `gone` holds the node it stands on, which a
-    /// drawing no longer holding that node leaves nothing to mark from.
-    pub(crate) fn forget(&mut self, gone: &HashSet<Id>) {
-        if self.node.is_some_and(|node| gone.contains(&node)) {
-            self.clear();
-        }
+    /// Marks from the box `node`, or from none.
+    pub(crate) fn mark(&mut self, node: Option<Id>) {
+        self.node = node;
     }
 
     pub(crate) fn set_relation(&mut self, relation: Relation) {
         self.relation = relation;
     }
 
-    /// What the selection marks in `shown`. Empty while nothing is selected,
-    /// and while the selected node is folded away into a container this view
-    /// draws in its place.
+    /// What the selection marks in `shown`. Empty while no box is marked,
+    /// and while `shown` draws none for the box marked, as a map's coarser
+    /// levels may not.
     pub(crate) fn marking(&mut self, shown: Shown<'_>) -> Rc<Neighborhood> {
         self.marked.marking(shown, self.node, self.relation)
     }
+}
+
+/// Selects `node`, or nothing for `None`, in the panel's document, and
+/// marks the box standing for it.
+pub(crate) fn select(view: &mut GraphPanel, node: Option<Id>, cx: &mut Context<GraphPanel>) {
+    let by = cx.entity_id();
+    view.model
+        .update(cx, |model, cx| model.select(node, by, cx));
+    remark(view, cx);
+}
+
+/// The node the panel's controls act on: the document's selected node, while
+/// the panel marks a box for it, which may hold it rather than be it.
+pub(crate) fn acted_on(view: &GraphPanel, cx: &App) -> Option<Id> {
+    view.selection.node()?;
+    view.model.read(cx).selected()
+}
+
+/// Marks the box standing for the document's selected node in the drawing as
+/// it is, opening none, and no box where the panel hides that node.
+pub(crate) fn remark(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    let selected = view.model.read(cx).selected();
+    let marked = selected
+        .filter(|&id| hidden_by(view, id).is_none())
+        .and_then(|id| standing_for(view, id));
+    if marked != view.selection.node() {
+        view.selection.mark(marked);
+        view.invalidate_canvas(cx);
+    }
+    crate::box_menu::remarked(view, cx);
 }
 
 #[cfg(test)]
@@ -114,40 +136,17 @@ mod tests {
         assert!(selection.marking(shown(&pair())).boxes.is_empty());
     }
 
-    #[test]
-    fn selecting_the_selected_node_keeps_it_selected() {
-        let mut selection = Selection::none();
-        selection.select(Id(0));
-        selection.select(Id(0));
-        assert_eq!(selection.node(), Some(Id(0)));
-        selection.select(Id(1));
-        assert_eq!(selection.node(), Some(Id(1)));
-    }
-
-    /// A node the drawing no longer holds has nothing to mark, so a filter that
-    /// takes it out takes the selection with it and leaves one on any other node
-    /// standing.
-    #[test]
-    fn a_selection_on_a_node_a_filter_drops_goes_with_it() {
-        let mut selection = Selection::none();
-        selection.select(Id(0));
-        selection.forget(&[Id(1)].into_iter().collect());
-        assert_eq!(selection.node(), Some(Id(0)));
-        selection.forget(&[Id(0)].into_iter().collect());
-        assert_eq!(selection.node(), None);
-    }
-
     /// The relation is the reader's standing answer to what a selection should
     /// mark, so it outlives the box it was set on and the next one is marked to
     /// the same reach without setting it again.
     #[test]
     fn the_relation_outlives_the_selection_it_was_set_on() {
         let mut selection = Selection::none();
-        selection.select(Id(0));
+        selection.mark(Some(Id(0)));
         selection.set_relation(Relation::Transitive(Direction::In));
-        selection.clear();
+        selection.mark(None);
         assert_eq!(selection.relation(), Relation::Transitive(Direction::In));
-        selection.select(Id(1));
+        selection.mark(Some(Id(1)));
         assert_eq!(selection.relation(), Relation::Transitive(Direction::In));
     }
 
@@ -155,7 +154,7 @@ mod tests {
     fn a_marking_covers_the_relation_it_was_asked_for() {
         let g = pair();
         let mut selection = Selection::none();
-        selection.select(Id(0));
+        selection.mark(Some(Id(0)));
         selection.set_relation(Relation::None);
         assert_eq!(selection.marking(shown(&g)).boxes.len(), 1);
         selection.set_relation(Relation::Direct(Direction::Out));
