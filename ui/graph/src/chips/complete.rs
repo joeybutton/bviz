@@ -4,7 +4,7 @@
 //! that is one of a vocabulary, matched against the word under the cursor and
 //! listed under the field.
 
-use super::{AcceptCompletion, ChipBar, command, completion_stack};
+use super::{AcceptCompletion, ChipBar, Holder, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
 use crate::jump::{Candidates, bring_into_view, labelled, package_of};
@@ -690,7 +690,7 @@ pub(super) fn list(
                     kind,
                     note,
                     accepts,
-                    accepts_keys: accepts.and_then(|accepts| accepts.keys(cx)),
+                    accepts_keys: accepts.and_then(|accepts| accepts.keys(view.holder, cx)),
                 };
                 Some(listed(row, &listing, &entity))
             })
@@ -882,13 +882,14 @@ enum Accepts {
 
 impl Accepts {
     /// The keys the keymap accepts the row by.
-    fn keys(self, cx: &App) -> Option<SharedString> {
-        key_text_within(&AcceptCompletion, &self.stack(), cx)
+    fn keys(self, holder: Holder, cx: &App) -> Option<SharedString> {
+        key_text_within(&AcceptCompletion, &self.stack(holder), cx)
     }
 
-    /// The key contexts the field stands in while the keys accept this row.
-    fn stack(self) -> [KeyContext; 5] {
-        completion_stack(self == Accepts::Aimed)
+    /// The key contexts the field in `holder` stands in while the keys accept
+    /// this row.
+    fn stack(self, holder: Holder) -> [KeyContext; 5] {
+        completion_stack(holder, self == Accepts::Aimed)
     }
 }
 
@@ -905,12 +906,14 @@ mod tests {
         let mut bindings = crate::bindings();
         bindings.extend(text_input::bindings());
         let keymap = Keymap::new(bindings);
-        let keys = |accepts: Accepts| {
-            binding_within(&keymap, &AcceptCompletion, &accepts.stack())
-                .map(|binding| binding_text(binding, KeyStyle::Words))
-        };
-        assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
-        assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+        for holder in Holder::ALL {
+            let keys = |accepts: Accepts| {
+                binding_within(&keymap, &AcceptCompletion, &accepts.stack(holder))
+                    .map(|binding| binding_text(binding, KeyStyle::Words))
+            };
+            assert_eq!(keys(Accepts::First).as_deref(), Some("Tab"));
+            assert_eq!(keys(Accepts::Aimed).as_deref(), Some("Enter"));
+        }
     }
 
     /// What a graph `holding` nodes of those kinds states, every axis

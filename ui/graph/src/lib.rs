@@ -157,7 +157,13 @@ fn bindings() -> Vec<KeyBinding> {
     let jumping = Some(jump::KEY_CONTEXT.id());
     let scatter_canvas = text_input::unless_typing(scatter::KEY_CONTEXT);
     let scatter_canvas = Some(scatter_canvas.as_str());
-    let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
+    // The list's keys stand down in the query bar, whose keys share them.
+    let picking = format!(
+        "{} && {} && !{}",
+        scatter::KEY_CONTEXT,
+        scatter::PICKING,
+        chips::KEY_CONTEXT
+    );
     let picking = Some(picking.as_str());
     let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
     let exclusive_canvas = Some(exclusive_canvas.as_str());
@@ -488,8 +494,15 @@ impl GraphPanel {
                     .map_or_else(Default::default, |panel| jump::drawn_ids(panel.read(cx)))
             })
         };
-        let chips =
-            cx.new(|cx| chips::ChipBar::new(model.clone(), focus_handle.clone(), Some(drawn), cx));
+        let chips = cx.new(|cx| {
+            chips::ChipBar::new(
+                model.clone(),
+                chips::Holder::Graph,
+                focus_handle.clone(),
+                Some(drawn),
+                cx,
+            )
+        });
         let query_applied = cx.subscribe(&model, |view, _, applied: &QueryApplied, cx| {
             if applied.by == view.chips.entity_id() {
                 derive::show_filter(view, cx);
@@ -1689,7 +1702,11 @@ mod tests {
     fn completing(keys: &str, aimed: bool) -> Option<std::boxed::Box<dyn gpui::Action>> {
         let mut bindings = bindings();
         bindings.extend(text_input::bindings());
-        keymap_probe::dispatched_within(bindings, keys, &chips::completion_stack(aimed))
+        keymap_probe::dispatched_within(
+            bindings,
+            keys,
+            &chips::completion_stack(chips::Holder::Graph, aimed),
+        )
     }
 
     /// While the list completing the field's word stands open, its keys
@@ -1827,6 +1844,58 @@ mod tests {
         };
         assert_eq!(bound(&chips::Apply), 1);
         assert_eq!(bound(&chips::CopyStack), 1);
+    }
+
+    /// Each view standing a query bar is the holder whose scope its keys
+    /// reach the bar from.
+    #[test]
+    fn every_holder_is_the_view_it_names() {
+        use chips::Holder;
+        assert_eq!(Holder::Graph.scope(), GraphPanel::kind().key_context);
+        assert_eq!(Holder::Scatter.scope(), ScatterPanel::kind().key_context);
+    }
+
+    /// The scatter plot's pick list leaves its keys to the query bar while
+    /// the bar holds the focus.
+    #[test]
+    fn the_pick_list_leaves_its_keys_to_the_query_bar() {
+        let picking = [scatter::KEY_CONTEXT.id(), scatter::PICKING.id()];
+        let picking_context = picking.join(" ");
+        let listing = &[picking_context.as_str()];
+        assert!(is(dispatched("down", listing), scatter::AimDown));
+        let in_bar = &[picking_context.as_str(), chips::KEY_CONTEXT.id()];
+        assert!(!is(dispatched("down", in_bar), scatter::AimDown));
+        assert!(!is(dispatched("enter", in_bar), scatter::RevealAimed));
+    }
+
+    /// Every view holding the query bar reaches it by the same keys, from
+    /// outside its text fields and from within the bar.
+    #[test]
+    fn the_bars_keys_reach_it_in_every_view_holding_it() {
+        for holder in chips::Holder::ALL.map(chips::Holder::scope) {
+            let outside = &[holder.id()];
+            let on_chips = &[holder.id(), chips::KEY_CONTEXT.id()];
+            let in_field = &[
+                holder.id(),
+                chips::KEY_CONTEXT.id(),
+                chips::FIELD_KEY_CONTEXT.id(),
+                text_input::KEY_CONTEXT.id(),
+            ];
+            assert!(
+                is(dispatched("secondary-enter", outside), chips::Apply),
+                "{holder}"
+            );
+            assert!(
+                is(dispatched("secondary-shift-c", outside), chips::CopyStack),
+                "{holder}"
+            );
+            assert!(
+                is(dispatched("left", on_chips), chips::SelectPrevious),
+                "{holder}"
+            );
+            assert!(is(dispatched("enter", in_field), chips::Commit), "{holder}");
+            assert!(is(dispatched("escape", in_field), chips::Leave), "{holder}");
+        }
     }
 
     /// A staged stack is applied from anywhere in the panel but the text

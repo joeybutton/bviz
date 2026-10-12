@@ -75,13 +75,40 @@ actions!(
     ]
 );
 
+/// A view of the graph document standing a query bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Holder {
+    Graph,
+    Scatter,
+}
+
+impl Holder {
+    pub(crate) const ALL: [Holder; 2] = [Holder::Graph, Holder::Scatter];
+
+    /// The key scope of the view, from which the keys acting on its bar as a
+    /// whole reach the bar.
+    pub(crate) const fn scope(self) -> KeyScope {
+        match self {
+            Holder::Graph => crate::KEY_CONTEXT,
+            Holder::Scatter => crate::scatter::KEY_CONTEXT,
+        }
+    }
+}
+
+/// The key scope of every [`Holder`].
+const HOLDERS: [KeyScope; Holder::ALL.len()] = {
+    let mut scopes = [crate::KEY_CONTEXT; Holder::ALL.len()];
+    let mut at = 0;
+    while at < scopes.len() {
+        scopes[at] = Holder::ALL[at].scope();
+        at += 1;
+    }
+    scopes
+};
+
 /// The key context the bar carries, scoping the keys that act on its chips.
-pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
-    &crate::KEY_CONTEXT,
-    Nesting::Inside,
-    "GraphChips",
-    "Query bar",
-);
+pub(crate) const KEY_CONTEXT: KeyScope =
+    KeyScope::within_each(&HOLDERS, Nesting::Inside, "GraphChips", "Query bar");
 
 /// The key context the bar's field carries.
 pub(crate) const FIELD_KEY_CONTEXT: KeyScope = KeyScope::within(
@@ -117,17 +144,20 @@ const NOTICE_WIDTH: Pixels = px(480.);
 
 const PLACEHOLDER: &str = "query: //foo/... or deps()";
 
-/// The bar's keys; `unless_typing` scopes those reaching it from the panel.
+/// The bar's keys; `unless_typing` scopes the key focusing it from the graph
+/// panel.
 pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
     let field = Some(FIELD_KEY_CONTEXT.id());
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
     let completing = Some(COMPLETION_KEY_CONTEXT.id());
     let aimed = Some(AIMED_KEY_CONTEXT.id());
-    // Outside the panel's text fields, or anywhere in the bar, its own field
-    // included: one predicate, which the keys help lists once.
-    let panel_or_bar = unless_typing.map(|panel| format!("{panel} || {KEY_CONTEXT}"));
-    let panel_or_bar = panel_or_bar.as_deref();
+    // Outside the text fields of any view holding a bar, or anywhere in the
+    // bar, its own field included: one predicate, which the keys help lists
+    // once.
+    let outside_fields = HOLDERS.map(text_input::unless_typing).join(" || ");
+    let holder_or_bar = format!("{outside_fields} || {KEY_CONTEXT}");
+    let holder_or_bar = Some(holder_or_bar.as_str());
     vec![
         KeyBinding::new("up", CompletePrevious, completing),
         KeyBinding::new("down", CompleteNext, completing),
@@ -135,7 +165,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("enter", AcceptCompletion, aimed),
         KeyBinding::new("escape", CloseCompletion, completing),
         KeyBinding::new("q", Focus, unless_typing),
-        KeyBinding::new("secondary-enter", Apply, panel_or_bar),
+        KeyBinding::new("secondary-enter", Apply, holder_or_bar),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),
         KeyBinding::new("left", SelectPrevious, on_chips),
@@ -151,7 +181,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-c", CopyChip, on_chips),
         KeyBinding::new("shift-f10", OpenChipMenu, on_chips),
         KeyBinding::new("menu", OpenChipMenu, on_chips),
-        KeyBinding::new("secondary-shift-c", CopyStack, panel_or_bar),
+        KeyBinding::new("secondary-shift-c", CopyStack, holder_or_bar),
         KeyBinding::new(
             "secondary-shift-backspace",
             ClearQuery,
@@ -167,6 +197,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
 /// scrolled is this bar's own.
 pub(crate) struct ChipBar {
     model: Entity<GraphModel>,
+    holder: Holder,
     /// The view holding the bar, which leaving the bar gives the focus back
     /// to.
     host: FocusHandle,
@@ -243,10 +274,11 @@ struct OpenMenu {
 }
 
 impl ChipBar {
-    /// A bar over `model` in the view `host` focuses, whose completion ranks
-    /// first the nodes `drawn` reads.
+    /// A bar over `model` in the view `holder` that `host` focuses, whose
+    /// completion ranks first the nodes `drawn` reads.
     pub(crate) fn new(
         model: Entity<GraphModel>,
+        holder: Holder,
         host: FocusHandle,
         drawn: Option<Drawn>,
         cx: &mut Context<Self>,
@@ -279,6 +311,7 @@ impl ChipBar {
             cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| reset(view, cx));
         let mut bar = ChipBar {
             model,
+            holder,
             host,
             drawn,
             field,
@@ -1040,11 +1073,11 @@ fn bar(
         )
 }
 
-/// The key contexts from the panel's in to the field's text while its
+/// The key contexts from `holder`'s in to the field's text while its
 /// completion's list stands open.
-pub(crate) fn completion_stack(aimed: bool) -> [KeyContext; 5] {
+pub(crate) fn completion_stack(holder: Holder, aimed: bool) -> [KeyContext; 5] {
     [
-        crate::KEY_CONTEXT.into(),
+        holder.scope().into(),
         KEY_CONTEXT.into(),
         FIELD_KEY_CONTEXT.into(),
         completion_context(aimed),

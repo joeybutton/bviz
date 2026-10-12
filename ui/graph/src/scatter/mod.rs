@@ -11,6 +11,7 @@ mod plot;
 
 use crate::CycleColouring;
 use crate::Palette;
+use crate::chips::{self, ChipBar, Holder};
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
@@ -109,6 +110,8 @@ pub struct ScatterPanel {
     /// The layer drawing the marks; notified through
     /// [`Self::invalidate_canvas`].
     canvas: Entity<ScatterCanvas>,
+    /// The document's query bar, as this panel stands it.
+    chips: Entity<ChipBar>,
     legend: Entity<LegendState>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
@@ -185,9 +188,12 @@ impl ScatterPanel {
         let focus = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
         let choice = Choice::of(&model, &focus, cx);
+        let chips =
+            cx.new(|cx| ChipBar::new(model.clone(), Holder::Scatter, focus.clone(), None, cx));
         Self {
             focus,
             legend,
+            chips,
             choice,
             model,
             shown: false,
@@ -1184,7 +1190,10 @@ impl Panel for ScatterPanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().chain(legend_gestures()).collect()
+        (GESTURES.rows())
+            .chain(chips::gestures())
+            .chain(legend_gestures())
+            .collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1260,6 +1269,12 @@ impl Render for ScatterPanel {
             .on_action(cx.listener(|view, _: &CycleColouring, _, cx| {
                 view.cycle(|choice| choice.colour_picker.clone(), cx);
             }))
+            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
+                view.chips.update(cx, chips::apply_staged);
+            }))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| {
+                view.chips.update(cx, chips::copy_stack);
+            }))
             .track_focus(&self.focus)
             .flex_1()
             .flex()
@@ -1287,6 +1302,8 @@ impl Render for ScatterPanel {
             };
             strip(choice, shown, legend, &self.focus, window, cx)
         }));
+        let chips = &self.chips;
+        let root = root.child(OneRow::new("scatter-query-bar").filling(|| chips.clone()));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = scope.zip(capabilities);
         let dropped = dropped.and_then(|(scope, capabilities)| dropped_edges(scope, capabilities));
