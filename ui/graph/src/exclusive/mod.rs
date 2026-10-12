@@ -15,7 +15,9 @@ pub(crate) use roots::NOTICE_SEPARATOR;
 use crate::Palette;
 use crate::history::History;
 use crate::hue::{Colouring, Hue};
-use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
+use crate::model::{
+    DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey, VerdictsLanded,
+};
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
 };
@@ -24,8 +26,8 @@ use ancestry::{Spot, Stands};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
+use bviz_graph_layout::select::Verdicts;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
@@ -188,12 +190,9 @@ pub struct ExclusivePanel {
     /// Where the cells were last laid out, which a pointer is resolved
     /// against.
     frame: Option<Frame>,
-    /// How the document's filter takes the nodes of the graph read, from the
-    /// time it is evaluated.
-    fade: Option<Fade>,
-    /// Evaluates the filter, absent while none is being evaluated, so that one
-    /// evaluation runs at a time.
-    fading: Option<Task<()>>,
+    /// The verdicts of the document's filter the cells are faded by, from the
+    /// time they first land.
+    fade: Option<Arc<Verdicts>>,
     /// The roots chosen last, from the time the first are chosen.
     rooting: Option<Rooting>,
     /// Chooses the roots afresh, absent while none are being chosen; replaced
@@ -218,6 +217,7 @@ pub struct ExclusivePanel {
     _source_replaced: Subscription,
     _dominators_landed: Subscription,
     _filter_changed: Subscription,
+    _verdicts_landed: Subscription,
     _roots_typed: Subscription,
 }
 
@@ -248,7 +248,6 @@ impl ExclusivePanel {
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
             view.fade = None;
-            view.fading = None;
             view.rooting = None;
             view.choosing = None;
             view.failed = None;
@@ -265,6 +264,8 @@ impl ExclusivePanel {
             }
         });
         let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
+        let verdicts_landed =
+            cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.refade(cx));
         let roots_field = cx.new(|cx| {
             QueryField::new(
                 "exclusive-roots",
@@ -292,7 +293,6 @@ impl ExclusivePanel {
             canvas: cx.new(|_| IcicleCanvas { parent }),
             frame: None,
             fade: None,
-            fading: None,
             rooting: None,
             choosing: None,
             roots_field,
@@ -305,6 +305,7 @@ impl ExclusivePanel {
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
             _filter_changed: filter_changed,
+            _verdicts_landed: verdicts_landed,
             _roots_typed: roots_typed,
         }
     }
@@ -475,39 +476,24 @@ impl ExclusivePanel {
             .update(cx, |model, cx| model.want_dominators(&wanted, cx));
     }
 
-    /// Evaluates the document's filter, where the panel is shown and that is
-    /// not the filter the cells are faded by. The filter is evaluated over
-    /// every node of the graph, so this runs off the UI thread, and an
-    /// evaluation running evaluates again once it lands.
+    /// Fades the cells by the verdicts of the document's filter as it stands,
+    /// where the panel is shown, asking for them where they have yet to land.
     fn refade(&mut self, cx: &mut Context<Self>) {
-        if !self.shown || self.fading.is_some() {
+        if !self.shown {
             return;
         }
-        let model = self.model.read(cx);
-        let Some(loaded) = model.loaded() else {
+        let Some(verdicts) = self.model.update(cx, |model, cx| model.verdicts(cx)) else {
             return;
         };
-        let filter = model.filter().filter();
-        if self.fade.as_ref().is_some_and(|fade| fade.filter == filter) {
+        if self
+            .fade
+            .as_ref()
+            .is_some_and(|fade| Arc::ptr_eq(fade, &verdicts))
+        {
             return;
         }
-        let shared = loaded.shared.clone();
-        self.fading = Some(load_in_background(
-            cx,
-            move || {
-                let verdicts = filter.evaluate(&shared.base);
-                Fade {
-                    filter,
-                    verdicts: Arc::new(verdicts),
-                }
-            },
-            |view, fade, cx| {
-                view.fading = None;
-                view.fade = Some(fade);
-                view.invalidate_canvas(cx);
-                view.refade(cx);
-            },
-        ));
+        self.fade = Some(verdicts);
+        self.invalidate_canvas(cx);
     }
 
     /// Draws the unit chosen.
@@ -1205,13 +1191,6 @@ impl RootedBy {
             Roots::Chosen(_) => RootedBy::Targets,
         }
     }
-}
-
-/// How the cells are faded, kept with the filter it was evaluated from so a
-/// filter that changes is told apart from the one the cells are faded by.
-struct Fade {
-    filter: Filter,
-    verdicts: Arc<Verdicts>,
 }
 
 /// A tree landed, coloured: the hue of each of its points, and the legend
@@ -2107,7 +2086,7 @@ impl Render for IcicleCanvas {
             let drawn = panel.drawn.as_ref()?;
             Some(Scene {
                 colouring: Arc::clone(&drawn.coloured.colouring),
-                verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
+                verdicts: panel.fade.clone(),
                 tree: Arc::clone(&drawn.coloured.tree),
                 by: drawn.coloured.by(),
                 top: drawn.top(),

@@ -15,7 +15,9 @@ use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
 use crate::hue::Hue;
-use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
+use crate::model::{
+    FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced, VerdictsLanded,
+};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
     configuration_readings, identify, mnemonic, point_label, primary_output, unit_names,
@@ -27,7 +29,7 @@ use crate::unit_picker::UnitPicker;
 use axis::{Axes, Axis, Clocks};
 use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
-use bviz_graph_layout::select::Filter;
+use bviz_graph_layout::select::Verdicts;
 use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::LabelLine;
@@ -130,6 +132,7 @@ pub struct ScatterPanel {
     _source_replaced: Subscription,
     _metrics_landed: Subscription,
     _filter_changed: Subscription,
+    _verdicts_landed: Subscription,
 }
 
 impl ScatterPanel {
@@ -176,6 +179,8 @@ impl ScatterPanel {
             view.close_pick(cx);
             view.replot(cx);
         });
+        let verdicts_landed =
+            cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.replot(cx));
         let parent = cx.entity().downgrade();
         let focus = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
@@ -200,6 +205,7 @@ impl ScatterPanel {
             _source_replaced: source_replaced,
             _metrics_landed: metrics_landed,
             _filter_changed: filter_changed,
+            _verdicts_landed: verdicts_landed,
         }
     }
 
@@ -300,14 +306,14 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Plots the measured points through the document's filter, where the plot
-    /// drawn is not of the chosen scope, axes and colouring, not drawn through
-    /// that filter, or not of the action times the graph holds, once the
-    /// choices reading action time are offered as the unit's measure has any.
-    /// A hidden panel waits until it is shown, and a plotting running replots
-    /// once it lands. The filter is evaluated over every node of the graph, so
-    /// this runs off the UI thread, and the plot drawn stays until the new one
-    /// lands.
+    /// Plots the measured points through the verdicts of the document's
+    /// filter, where the plot drawn is not of the chosen scope, axes and
+    /// colouring, not drawn through those verdicts, or not of the action times
+    /// the graph holds, once the choices reading action time are offered as the
+    /// unit's measure has any. A hidden panel waits until it is shown, and a
+    /// plotting running replots once it lands. Plotting passes over every
+    /// point, so this runs off the UI thread, and the plot drawn stays until
+    /// the new one lands.
     fn replot(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.plotting.is_some() {
             return;
@@ -327,6 +333,9 @@ impl ScatterPanel {
             return;
         };
         let (axes, colour) = (choice.axes, choice.colour);
+        let Some(verdicts) = self.model.update(cx, |model, cx| model.verdicts(cx)) else {
+            return;
+        };
         let model = self.model.read(cx);
         let Some(loaded) = model.loaded() else {
             return;
@@ -336,9 +345,8 @@ impl ScatterPanel {
         else {
             return;
         };
-        let filter = model.filter().filter();
         if self.plot.as_ref().is_some_and(|plot| {
-            plot.filter == filter
+            Arc::ptr_eq(&plot.verdicts, &verdicts)
                 && plot.scope == scope
                 && plot.plotted.axes == axes
                 && plot.colour == colour
@@ -352,7 +360,6 @@ impl ScatterPanel {
         self.plotting = Some(load_in_background(
             cx,
             move || {
-                let verdicts = filter.evaluate(&shared.base);
                 let plots = |point: &Metrics| plotted_as(scope.unit(), point.kind);
                 let colouring = Colouring::of(colour, scope.unit(), &reference, &shared.facets);
                 let hue = |point: &Metrics| colouring.hue(point, &shared.facets, &clocks);
@@ -364,9 +371,9 @@ impl ScatterPanel {
                     .iter()
                     .filter(|point| plots(point) && axes.place(point, time(point.id)).is_some());
                 let legend = colouring.legend(points, &shared.facets, &clocks);
-                (plotted, legend, filter)
+                (plotted, legend, verdicts)
             },
-            move |view, (plotted, legend, filter), cx| {
+            move |view, (plotted, legend, verdicts), cx| {
                 view.plotting = None;
                 if view.plot.as_ref().is_none_or(|plot| {
                     plot.scope.unit() != scope.unit()
@@ -379,7 +386,7 @@ impl ScatterPanel {
                     plotted: Arc::new(plotted),
                     legend,
                     pointer: Pointer::Away,
-                    filter,
+                    verdicts,
                     scope,
                     colour,
                     timed,
@@ -956,7 +963,7 @@ struct Plot {
     legend: Vec<(SharedString, Hue)>,
     pointer: Pointer,
     /// What `plotted` was drawn through.
-    filter: Filter,
+    verdicts: Arc<Verdicts>,
     /// What `plotted` measures.
     scope: Scope,
     /// What the marks of `plotted` are coloured by.

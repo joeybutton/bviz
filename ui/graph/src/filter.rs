@@ -2,9 +2,11 @@
 //! out what that leaves.
 
 use bviz_graph_layout::Id;
+use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::query_lang::Stack;
-use bviz_graph_layout::select::{Filter, Pin, Rule, Scope};
+use bviz_graph_layout::select::{Filter, Pin, Rule, Scope, Verdicts};
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 /// The query applied and the nodes a reader pinned: what decides which nodes
 /// are any part of what is shown, whichever view of the graph shows them.
@@ -78,12 +80,52 @@ impl DocumentFilter {
     }
 }
 
+/// A filter with its verdicts on one graph, evaluated once for every view
+/// drawing through it.
+pub(crate) struct Judgement {
+    filter: Filter,
+    graph: Arc<Graph>,
+    verdicts: OnceLock<Arc<Verdicts>>,
+}
+
+impl Judgement {
+    pub(crate) fn new(filter: Filter, graph: Arc<Graph>) -> Self {
+        Judgement {
+            filter,
+            graph,
+            verdicts: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// Whether this judges `graph` through `filter`.
+    pub(crate) fn judges(&self, filter: &Filter, graph: &Arc<Graph>) -> bool {
+        Arc::ptr_eq(&self.graph, graph) && self.filter == *filter
+    }
+
+    /// The verdicts, evaluated by the first caller, every other one waiting on
+    /// that evaluation. Evaluation passes over every node of the graph, so
+    /// this belongs off the UI thread.
+    pub(crate) fn verdicts(&self) -> Arc<Verdicts> {
+        let evaluate = || Arc::new(self.filter.evaluate(&self.graph));
+        Arc::clone(self.verdicts.get_or_init(evaluate))
+    }
+
+    /// The verdicts, where they have been evaluated.
+    pub(crate) fn evaluated(&self) -> Option<&Arc<Verdicts>> {
+        self.verdicts.get()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rules::{self, BoxClass};
     use bviz_graph_layout::Kind;
-    use bviz_graph_layout::graph::{Graph, Node};
+    use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::{Verdict, Visibility};
 
     /// A package holding a target holding an action.
@@ -122,5 +164,23 @@ mod tests {
 
         let panel = document.with_rules(&unwrapping).evaluate(&graph);
         assert_eq!(panel.get(Id(1)), Verdict::Faded);
+    }
+
+    /// Every caller shares the one evaluation.
+    #[test]
+    fn a_judgement_evaluates_its_filter_once_for_every_caller() {
+        let graph = Arc::new(graph());
+        let mut document = DocumentFilter::default();
+        document.set_pins([(Id(2), Pin::Set(Visibility::Hidden))].into());
+        let judgement = Judgement::new(document.filter(), Arc::clone(&graph));
+        assert!(judgement.evaluated().is_none());
+        assert!(judgement.judges(&document.filter(), &graph));
+        assert!(!judgement.judges(&DocumentFilter::default().filter(), &graph));
+
+        let first = judgement.verdicts();
+        assert!(Arc::ptr_eq(&first, &judgement.verdicts()));
+        assert!(judgement.evaluated().is_some());
+        assert_eq!(first.get(Id(2)), Verdict::Hidden);
+        assert_eq!(first.get(Id(1)), Verdict::Shown);
     }
 }

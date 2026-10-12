@@ -4,7 +4,7 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
-use crate::filter::{Applied, DocumentFilter};
+use crate::filter::{Applied, DocumentFilter, Judgement};
 use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -544,6 +544,9 @@ pub(crate) struct FilterChanged {
     pub(crate) frame: bool,
 }
 
+/// The verdicts [`GraphModel::verdicts`] was asked for have landed.
+pub(crate) struct VerdictsLanded;
+
 /// The chips staged in [`GraphModel::query`] changed.
 pub(crate) struct QueryChanged;
 
@@ -642,6 +645,13 @@ pub(crate) struct GraphModel {
     deferred: Option<Deferred>,
     /// What every view of the graph shows its share of it through.
     filter: DocumentFilter,
+    /// `filter` as it stands over the loaded graph, evaluated once a view asks
+    /// for its verdicts; absent while the graph is still being read.
+    judgement: Option<Arc<Judgement>>,
+    /// Announces the verdicts of `judgement` as they land, absent until a view
+    /// asks for them. Replacing it announces nothing of the judgement it
+    /// served, whose evaluation, once running, still runs to its end.
+    judging: Option<Task<()>>,
     /// The chips the query bars stage, which applying makes the filter's
     /// scope.
     query: Stack,
@@ -671,6 +681,7 @@ impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
 impl<K: 'static, T: 'static> EventEmitter<Landed<K, T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
+impl EventEmitter<VerdictsLanded> for GraphModel {}
 impl EventEmitter<QueryChanged> for GraphModel {}
 impl EventEmitter<QueryRefused> for GraphModel {}
 
@@ -723,6 +734,7 @@ impl GraphModel {
                     Err(err) => Source::Failed(err),
                 };
                 model.take_up(cx);
+                model.judge();
                 cx.emit(SourceReplaced);
             },
         );
@@ -813,6 +825,8 @@ impl GraphModel {
             _placing: Task::ready(()),
             deferred: None,
             filter: DocumentFilter::default(),
+            judgement: None,
+            judging: None,
             query: Stack::default(),
             prefixes: Arc::default(),
             _applying: Task::ready(()),
@@ -852,11 +866,60 @@ impl GraphModel {
         &self.filter
     }
 
+    /// `filter` as it stands over the loaded graph, whose verdicts are
+    /// evaluated once for every view drawing through it.
+    pub(crate) fn judgement(&self) -> Option<&Arc<Judgement>> {
+        self.judgement.as_ref()
+    }
+
+    /// The verdicts of the filter as it stands, where they have landed; asks
+    /// for them otherwise, emitting [`VerdictsLanded`] once they land. What
+    /// they change is each view's own to redraw, so their landing notifies
+    /// none.
+    pub(crate) fn verdicts(&mut self, cx: &mut Context<Self>) -> Option<Arc<select::Verdicts>> {
+        let judgement = self.judgement.as_ref()?;
+        if let Some(verdicts) = judgement.evaluated() {
+            return Some(Arc::clone(verdicts));
+        }
+        if self.judging.is_none() {
+            let judgement = Arc::clone(judgement);
+            self.judging = Some(cx.spawn(async move |model, cx| {
+                let evaluating = async move {
+                    judgement.verdicts();
+                };
+                cx.background_executor().spawn(evaluating).await;
+                model.update(cx, |_, cx| cx.emit(VerdictsLanded)).ok();
+            }));
+        }
+        None
+    }
+
     /// Pins the nodes `pins` names, and no other.
     pub(crate) fn set_pins(&mut self, pins: HashMap<Id, select::Pin>, cx: &mut Context<Self>) {
         if self.filter.set_pins(pins) {
-            cx.emit(FilterChanged { frame: false });
+            self.filter_changed(false, cx);
         }
+    }
+
+    /// Takes up a change to the filter, `frame` saying whether it named the
+    /// part of the graph to look at.
+    fn filter_changed(&mut self, frame: bool, cx: &mut Context<Self>) {
+        self.judge();
+        cx.emit(FilterChanged { frame });
+    }
+
+    /// Makes the judgement of the filter as it stands over the loaded graph,
+    /// where the one held judges another.
+    fn judge(&mut self) {
+        let Some(loaded) = self.loaded() else {
+            return;
+        };
+        let (filter, base) = (self.filter.filter(), &loaded.shared.base);
+        if (self.judgement.as_ref()).is_some_and(|judgement| judgement.judges(&filter, base)) {
+            return;
+        }
+        self.judgement = Some(Arc::new(Judgement::new(filter, Arc::clone(base))));
+        self.judging = None;
     }
 
     /// The chips staged, which the filter takes up once they are applied.
@@ -924,7 +987,7 @@ impl GraphModel {
             Ok(scope) => {
                 let applied = scope.map(|scope| Applied::new(stack, scope));
                 if self.filter.set_applied(applied) {
-                    cx.emit(FilterChanged { frame: true });
+                    self.filter_changed(true, cx);
                 }
             }
             Err(why) => cx.emit(QueryRefused(why)),

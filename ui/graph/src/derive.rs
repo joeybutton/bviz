@@ -11,7 +11,7 @@
 //! carry across a filter change.
 
 use crate::build::{self, TooDense};
-use crate::filter::DocumentFilter;
+use crate::filter::{DocumentFilter, Judgement};
 use crate::framing::Frame;
 use crate::mode::LayoutMode;
 use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
@@ -1109,8 +1109,17 @@ pub(crate) fn set_paths(
 
 /// Derives what the panel draws off the UI thread and adopts the result.
 fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let Some(shared) = view.model.read(cx).loaded().map(|l| l.shared.clone()) else {
+    let model = view.model.read(cx);
+    let Some(shared) = model.loaded().map(|l| l.shared.clone()) else {
         return;
+    };
+    // The document's own verdicts serve a panel whose rules add nothing to
+    // its filter.
+    let judged = match view.derived.lens() {
+        Lens::Filter(filter) => (model.judgement())
+            .filter(|judgement| judgement.judges(&filter, &shared.base))
+            .cloned(),
+        Lens::Paths(_) => None,
     };
     let Some(slice) = view.derived.slice.clone() else {
         return;
@@ -1144,7 +1153,12 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
             let (mut slice, restricted) = match restricting {
                 true => {
                     let (mut next, restricted) = match &lens {
-                        Lens::Filter(filter) => restrict(&shared, filter, &expanded, reduced),
+                        Lens::Filter(filter) => {
+                            let judgement = judged.unwrap_or_else(|| {
+                                Arc::new(Judgement::new(filter.clone(), Arc::clone(&shared.base)))
+                            });
+                            restrict(&shared, &judgement, &expanded, reduced)
+                        }
                         Lens::Paths(paths) => restrict_to_paths(&shared, paths),
                     };
                     if let (Some(zoom), Some(map)) = (map_zoom, next.map()) {
@@ -1227,18 +1241,18 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     );
 }
 
-/// The graph `filter` leaves of `shared`'s, with `expanded` held to what
-/// survives it and to the caps that bound a legible drawing.
+/// The graph `judgement`'s filter leaves of `shared`'s, with `expanded` held to
+/// what survives it and to the caps that bound a legible drawing.
 ///
 /// A filter that hides nothing leaves the shared graph itself, with the
 /// reduction, containers and placement the document holds for it.
 fn restrict(
     shared: &Shared,
-    filter: &Filter,
+    judgement: &Judgement,
     expanded: &HashSet<Id>,
     reduced: bool,
 ) -> (Slice, Restricted) {
-    let verdicts = Arc::new(filter.evaluate(&shared.base));
+    let verdicts = judgement.verdicts();
     // Every node lands in `keep` or in `dropped`, and `faded` is a part of what
     // `keep` holds, so the node count bounds all three.
     let nodes = shared.base.nodes.len();
@@ -1260,7 +1274,7 @@ fn restrict(
     }
     let faded = Arc::new(faded);
     let lens = Through::Filter {
-        filter: filter.clone(),
+        filter: judgement.filter().clone(),
         verdicts,
     };
     let slice = match dropped.is_empty() {
@@ -1471,6 +1485,17 @@ mod tests {
             .kind
     }
 
+    /// The graph `filter` leaves of `shared`'s, as [`restrict`] leaves it.
+    fn restrict_through(
+        shared: &Shared,
+        filter: &Filter,
+        expanded: &HashSet<Id>,
+        reduced: bool,
+    ) -> (Slice, Restricted) {
+        let judgement = Judgement::new(filter.clone(), Arc::clone(&shared.base));
+        restrict(shared, &judgement, expanded, reduced)
+    }
+
     /// A filter that draws everything but the nodes of `kind`.
     fn hiding(kind: Kind) -> Filter {
         Filter {
@@ -1505,7 +1530,8 @@ mod tests {
         let loaded = document();
         let expanded: HashSet<Id> = [id(&loaded, "//a:t")].into_iter().collect();
 
-        let (slice, restricted) = restrict(&loaded.shared, &Filter::default(), &expanded, true);
+        let (slice, restricted) =
+            restrict_through(&loaded.shared, &Filter::default(), &expanded, true);
 
         assert!(Arc::ptr_eq(&slice.base, &loaded.shared.base));
         assert!(Arc::ptr_eq(&slice.reduced, &loaded.shared.reduced_base));
@@ -1523,7 +1549,7 @@ mod tests {
         let loaded = document();
 
         let (slice, restricted) =
-            restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+            restrict_through(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
 
         assert!(
             restricted
@@ -1560,7 +1586,8 @@ mod tests {
     #[test]
     fn a_container_whose_descendants_are_folded_is_still_drawn() {
         let loaded = document();
-        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Target), &HashSet::new(), true);
+        let (slice, _) =
+            restrict_through(&loaded.shared, &hiding(Kind::Target), &HashSet::new(), true);
 
         let coarsest = slice.map().expect("a placed map").level(0);
         assert!(
@@ -1579,7 +1606,8 @@ mod tests {
     /// The document, and the slice hiding its actions leaves of it.
     fn actions_hidden() -> (Loaded, Slice) {
         let loaded = document();
-        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        let (slice, _) =
+            restrict_through(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
         (loaded, slice)
     }
 
@@ -1626,7 +1654,8 @@ mod tests {
     #[test]
     fn a_restriction_made_before_the_map_lands_is_placed_where_the_document_places_it() {
         let (loaded, land) = document_placing();
-        let (slice, _) = restrict(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
+        let (slice, _) =
+            restrict_through(&loaded.shared, &hiding(Kind::Action), &HashSet::new(), true);
         assert!(slice.map().is_none());
 
         land();
@@ -1667,7 +1696,7 @@ mod tests {
             ..Filter::default()
         };
 
-        let (_, restricted) = restrict(&loaded.shared, &filter, &expanded, true);
+        let (_, restricted) = restrict_through(&loaded.shared, &filter, &expanded, true);
 
         assert_eq!(restricted.expanded, [kept].into_iter().collect());
 
@@ -1716,7 +1745,8 @@ mod tests {
         let mut derived = opened(&loaded);
         derived.filter = hiding(Kind::Action);
         derived.frame_on_landing = true;
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        let (slice, restricted) =
+            restrict_through(&loaded.shared, &derived.filter, &HashSet::new(), true);
 
         let adopted = derived.adopt(Landed {
             slice,
@@ -1749,7 +1779,8 @@ mod tests {
         assert!(derived.restricted_map_drawn().is_none(), "the whole graph");
 
         derived.filter = hiding(Kind::Action);
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        let (slice, restricted) =
+            restrict_through(&loaded.shared, &derived.filter, &HashSet::new(), true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),
@@ -1775,7 +1806,7 @@ mod tests {
         derived.filter = hiding(Kind::Action);
         assert!(derived.restricting());
 
-        let (slice, restricted) = restrict(
+        let (slice, restricted) = restrict_through(
             &loaded.shared,
             &derived.filter,
             &derived.expanded,
@@ -1874,7 +1905,7 @@ mod tests {
         let expanded: HashSet<Id> = [id(&loaded, "//a:t")].into_iter().collect();
         derived.expanded = expanded.clone();
         let (slice, restricted) =
-            restrict(&loaded.shared, &derived.filter, &derived.expanded, true);
+            restrict_through(&loaded.shared, &derived.filter, &derived.expanded, true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),
@@ -2037,7 +2068,8 @@ mod tests {
         assert!(derived.hidden(action).is_none());
 
         derived.filter = hiding(Kind::Action);
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        let (slice, restricted) =
+            restrict_through(&loaded.shared, &derived.filter, &HashSet::new(), true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),
