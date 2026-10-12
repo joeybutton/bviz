@@ -159,9 +159,10 @@ fn window_frame(window: &Window) -> Bounds<Pixels> {
 }
 
 /// The widest a tooltip panel's text runs inside `frame`: no wider than
-/// [`TOOLTIP_MAX_WIDTH`], nor than the frame holds with the panel's padding.
-fn text_room(frame: Bounds<Pixels>) -> Pixels {
-    let held = frame.size.width - px(2.0 * (TOOLTIP_PAD + TOOLTIP_BORDER));
+/// [`TOOLTIP_MAX_WIDTH`], nor than the frame holds with the panel's padding
+/// and the `beside` the text stands next to.
+fn text_room(frame: Bounds<Pixels>, beside: Pixels) -> Pixels {
+    let held = frame.size.width - px(2.0 * (TOOLTIP_PAD + TOOLTIP_BORDER)) - beside;
     held.min(px(TOOLTIP_MAX_WIDTH)).max(px(TOOLTIP_TEXT_SIZE))
 }
 
@@ -296,7 +297,7 @@ impl Element for Floating {
             return;
         };
         let frame = window_frame(window);
-        let width = text_room(frame);
+        let width = text_room(frame, px(0.));
         let shaped = shape_lines(&self.lines, self.colors.label.into(), width, window);
         let extent = panel_extent(&shaped);
         let origin = held_in(place(extent, frame), extent, frame);
@@ -382,12 +383,15 @@ impl TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let rows = shape_rows(
-            &self.text,
-            self.colors.label.into(),
-            px(TOOLTIP_MAX_WIDTH),
-            window,
-        );
+        let keys = self.keys.as_ref().map_or(px(0.), |keys| {
+            let size = px(TOOLTIP_TEXT_SIZE);
+            let ui = font(bviz_ui_assets::UI);
+            let shaped =
+                bviz_ui_assets::shape_line(window, keys.clone(), ui, size, self.colors.keys.into());
+            shaped.width() + px(TOOLTIP_KEYS_GAP)
+        });
+        let width = text_room(window_frame(window), keys);
+        let rows = shape_rows(&self.text, self.colors.label.into(), width, window);
         // A tooltip view is drawn outside the element tree that sets the UI
         // face, so it inherits none.
         div()
