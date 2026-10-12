@@ -1391,9 +1391,9 @@ fn describe(
     let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let stand_on = |weight: u32, on: &str| exist_only_because(weight, &names, on);
+    let exclusive = |weight: u32| exclusive(weight, &names);
     let shares = |weight: u32, within: Option<Focused>| {
-        let of_build = format!("{} of the build", share(weight, tree.total()));
+        let of_build = format!("{} of build", share(weight, tree.total()));
         match within {
             Some(within) => {
                 let name = match within {
@@ -1416,22 +1416,13 @@ fn describe(
             let (count, weight) = (tree.shared_tops().len() as u32, tree.shared_weight());
             lines.push(shared_name(tree, by));
             lines.push(gathered_as_shared(count, by.word(), &names));
-            lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
+            lines.push(exclusive(weight));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
-            let copies = coloured
-                .targets
-                .as_ref()
-                .map(|targets| targets.copies(node));
-            let this = if copies.is_some_and(|copies| copies > 1) {
-                "this copy"
-            } else {
-                "this"
-            };
-            lines.push(stand_on(weight, this));
+            lines.push(exclusive(weight));
             if let Some(targets) = &coloured.targets {
                 let held = targets.held(node);
                 lines.extend(targets_held(held.targets(), held.only_here()));
@@ -1448,9 +1439,9 @@ fn describe(
             let (count, weight) = (run.count(), run.weight());
             lines.push(match on_top {
                 true => run_name(tree, shared, by, run),
-                false => format!("{} too narrow to draw apart", names.counted(count)),
+                false => format!("{} · too narrow", names.counted(count)),
             });
-            lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
+            lines.push(exclusive(weight));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
     }
@@ -1463,14 +1454,14 @@ fn describe(
 fn targets_held(targets: u32, only_here: u32) -> Option<String> {
     let elsewhere = match (targets, only_here) {
         (0, _) => return None,
-        (1, 0) => "also configured elsewhere".to_owned(),
+        (1, 0) => "configured elsewhere too".to_owned(),
         (1, _) => "configured only here".to_owned(),
-        (_, 0) => "each also configured elsewhere".to_owned(),
+        (_, 0) => "each configured elsewhere too".to_owned(),
         _ if only_here == targets => "all configured only here".to_owned(),
-        _ => format!("{only_here} of them configured only here"),
+        _ => format!("{only_here} configured only here"),
     };
     let covered = unit_names(Unit::Target).counted(targets);
-    Some(format!("covering {covered}, {elsewhere}"))
+    Some(format!("{covered} · {elsewhere}"))
 }
 
 /// Where the target of the configured target `id` stands in `targets`, the
@@ -1485,22 +1476,21 @@ fn as_target(targets: &Dominators, id: Id, by: RootedBy, shared: &Shared) -> Opt
         (None, Standing::Root { .. } | Standing::ReachedRoot(_)) => word.to_owned(),
         (None, Standing::Below(count)) => shared_by(count, word, names.of(count.value())),
     };
-    let held = exist_only_because(targets.weight(node), &names, "it");
-    Some(format!("as a target: {place}; {held}"))
+    let held = exclusive(targets.weight(node), &names);
+    Some(format!("as target: {place} · {held}"))
 }
 
-/// How a tooltip says that `weight` points, which `names` names, exist only
-/// because of `on`.
-fn exist_only_because(weight: u32, names: &KindNames, on: &str) -> String {
-    let exist = if weight == 1 { "exists" } else { "exist" };
-    format!("{} {exist} only because of {on}", names.counted(weight))
+/// How a tooltip counts the `weight` points, which `names` names, that exist
+/// only because of what it describes.
+fn exclusive(weight: u32, names: &KindNames) -> String {
+    format!("{} exclusive", names.counted(weight))
 }
 
 /// How a tooltip names `parent` of `tree` as the immediate dominator of the
 /// point it describes.
 fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
     let dominator = point_name(tree.id(parent), tree.scope().unit(), shared);
-    format!("immediately dominated by {dominator}")
+    format!("dominator {dominator}")
 }
 
 /// Pushes onto `lines` what a tooltip says of `node`, a top of `tree` whose
@@ -1515,9 +1505,9 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     let (count, said): (_, fn(Count, &str, &str) -> String) = match tree.standing(node) {
         Standing::Root { in_cycle } => {
             return match elsewhere {
-                None => lines.push(format!("{word}: {}", by.why(in_cycle))),
+                None => lines.push(format!("{word} · {}", by.why(in_cycle))),
                 Some(elsewhere) => {
-                    lines.push(format!("{word} here, and a dependency elsewhere:"));
+                    lines.push(format!("{word} here · dependency elsewhere:"));
                     lines.extend(elsewhere);
                 }
             };
@@ -1535,10 +1525,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     lines.extend(listed.map(|name| format!("{LISTED}{name}")));
     let more = count.less(named.len() as u32);
     if !named.is_empty() && more.value() > 0 {
-        lines.push(format!("{LISTED}and {more} more"));
+        lines.push(format!("{LISTED}+{more} more"));
     }
     if let Some(elsewhere) = elsewhere {
-        lines.push("and a dependency elsewhere:".to_owned());
+        lines.push("dependency elsewhere:".to_owned());
         lines.extend(elsewhere);
     }
 }
@@ -1550,10 +1540,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
 fn reached_elsewhere(elsewhere: Elsewhere, unit: Unit, shared: &Shared) -> Vec<String> {
     let dependent = point_name(elsewhere.dependent, unit, shared);
     let copy = match configuration(elsewhere.copy, shared) {
-        Some(configuration) => format!("its copy in {configuration}"),
-        None => "another copy of it".to_owned(),
+        Some(configuration) => format!("{configuration} copy"),
+        None => "another copy".to_owned(),
     };
-    let reached = format!("{LISTED}{dependent} reaches {copy}");
+    let reached = format!("{LISTED}{dependent} → {copy}");
     let more = other_copies(elsewhere.copies.saturating_sub(1));
     std::iter::once(reached).chain(more).collect()
 }
@@ -1563,8 +1553,8 @@ fn reached_elsewhere(elsewhere: Elsewhere, unit: Unit, shared: &Shared) -> Vec<S
 fn other_copies(more: u32) -> Option<String> {
     match more {
         0 => None,
-        1 => Some(format!("{LISTED}1 other copy is a dependency too")),
-        _ => Some(format!("{LISTED}{more} other copies are dependencies too")),
+        1 => Some(format!("{LISTED}+1 copy depended on")),
+        _ => Some(format!("{LISTED}+{more} copies depended on")),
     }
 }
 
@@ -1601,9 +1591,9 @@ impl RootedBy {
     /// cycle, which it is `in_cycle` with.
     fn why(self, in_cycle: bool) -> &'static str {
         match (self, in_cycle) {
-            (RootedBy::Tops, false) => "nothing depends on it",
-            (RootedBy::Tops, true) => "nothing outside its cycle depends on it",
-            (RootedBy::Targets, _) => "named by the target set",
+            (RootedBy::Tops, false) => "no dependents",
+            (RootedBy::Tops, true) => "no dependents outside its cycle",
+            (RootedBy::Targets, _) => "in the target set",
         }
     }
 }
@@ -1627,13 +1617,13 @@ fn what_is_shared(word: &str, named: &str) -> String {
 /// roots being called `word`.
 fn gathered_as_shared(count: u32, word: &str, names: &KindNames) -> String {
     let (shared, sharing) = (names.counted(count), names.many);
-    format!("{shared} that two or more {word} {sharing} depend on")
+    format!("{shared} · shared by 2+ {word} {sharing}")
 }
 
 /// How a reader says that `how_many` roots besides a root, called `word`
 /// `named`, reach it.
 fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> String {
-    format!("{word}, and reached from {how_many} other {word} {named}")
+    format!("{word} · reached from {how_many} other {word} {named}")
 }
 
 /// The most roots a tooltip names as reaching a top.
@@ -2198,9 +2188,9 @@ mod tests {
     #[test]
     fn the_other_copies_reached_are_counted_only_where_there_are_any() {
         assert_eq!(other_copies(0), None);
-        let one = "  · 1 other copy is a dependency too";
+        let one = "  · +1 copy depended on";
         assert_eq!(other_copies(1).unwrap(), one);
-        let several = "  · 2 other copies are dependencies too";
+        let several = "  · +2 copies depended on";
         assert_eq!(other_copies(2).unwrap(), several);
     }
 
@@ -2218,10 +2208,10 @@ mod tests {
         );
         assert_eq!(
             reached_from(3, targets.word(), many),
-            "requested, and reached from 3 other requested configured targets"
+            "requested · reached from 3 other requested configured targets"
         );
-        assert_eq!(targets.why(true), "named by the target set");
-        assert_eq!(tops.why(false), "nothing depends on it");
+        assert_eq!(targets.why(true), "in the target set");
+        assert_eq!(tops.why(false), "no dependents");
     }
 
     #[test]
@@ -2229,12 +2219,12 @@ mod tests {
         let read = |targets, only_here| targets_held(targets, only_here);
         assert_eq!(read(0, 0), None);
         let read = |targets, only_here| read(targets, only_here).unwrap();
-        assert_eq!(read(1, 0), "covering 1 target, also configured elsewhere");
-        assert_eq!(read(1, 1), "covering 1 target, configured only here");
-        let each_elsewhere = "covering 3 targets, each also configured elsewhere";
+        assert_eq!(read(1, 0), "1 target · configured elsewhere too");
+        assert_eq!(read(1, 1), "1 target · configured only here");
+        let each_elsewhere = "3 targets · each configured elsewhere too";
         assert_eq!(read(3, 0), each_elsewhere);
-        assert_eq!(read(3, 3), "covering 3 targets, all configured only here");
-        let some_here = "covering 3 targets, 1 of them configured only here";
+        assert_eq!(read(3, 3), "3 targets · all configured only here");
+        let some_here = "3 targets · 1 configured only here";
         assert_eq!(read(3, 1), some_here);
     }
 
@@ -2243,11 +2233,11 @@ mod tests {
         let names = unit_names(Unit::ConfiguredTarget);
         assert_eq!(
             gathered_as_shared(1, TOP_LEVEL, &names),
-            "1 configured target that two or more top-level configured targets depend on"
+            "1 configured target · shared by 2+ top-level configured targets"
         );
         assert_eq!(
             gathered_as_shared(7, REQUESTED, &names),
-            "7 configured targets that two or more requested configured targets depend on"
+            "7 configured targets · shared by 2+ requested configured targets"
         );
     }
 }
