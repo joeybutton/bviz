@@ -126,7 +126,7 @@ are used; the entry is here to record where they came from.
 
 gpui's Wayland backend binds KDE's org_kde_kwin_blur protocol, so the Linux
 binaries link Rust bindings that wayland-protocols-plasma generates from KDE
-Plasma's protocol definitions. Sixteen of those definitions are
+Plasma's protocol definitions. Seventeen of those definitions are
 LGPL-2.1-or-later, and the crate ships their text at
 plasma-wayland-protocols/COPYING.LIB. bviz takes them under LGPL-3.0, which "or
 later" permits and which Apache-2.0 is compatible with.
