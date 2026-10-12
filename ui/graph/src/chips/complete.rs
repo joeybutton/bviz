@@ -27,7 +27,7 @@ use gpui::{
     MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
     px, uniform_list,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -476,7 +476,7 @@ pub(super) fn hold_closed(view: &mut ChipBar, cx: &App) {
 
 /// Takes up what the matcher has found since the last poll.
 fn take_up(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
-    let drawn = (view.drawn.as_ref()).map_or_else(FxHashSet::default, |drawn| drawn(cx));
+    let drawn = (view.drawn.as_ref()).map_or_else(Default::default, |drawn| drawn(cx));
     let Some(offered) = view.completer.offered.as_mut() else {
         return;
     };

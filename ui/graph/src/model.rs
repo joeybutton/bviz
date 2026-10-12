@@ -10,6 +10,7 @@ use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
+use crate::stand_in::Writers;
 use crate::status::{Landings, Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
@@ -145,6 +146,9 @@ pub(crate) struct Loaded {
     completions: Prepared<Completions>,
     /// The graph as a query reads it.
     universe: Prepared<Universe>,
+    /// The actions writing each file, which a view of actions lands a file
+    /// on.
+    writers: Prepared<Arc<Writers>>,
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
@@ -166,11 +170,13 @@ impl Loaded {
             let targets = Arc::clone(indexed.get());
             Universe::with_targets(&shared.base, targets, &shared.facets, &shared.capabilities)
         });
+        let writers = Prepared::new(&shared, |shared| Arc::new(Writers::of(&shared.base)));
         Self {
             targets,
             candidates,
             completions,
             universe,
+            writers,
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -520,6 +526,9 @@ pub(crate) enum Reveal {
     /// The node is shown as [`crate::reveal::Ask::InPlace`] asks, and the panel
     /// keeps its place among its pane's.
     InPlace,
+    /// The paths that put the node in the build are drawn, and the panel is
+    /// brought forward as for [`Self::Activate`].
+    AskWhy,
 }
 
 /// The graph panel the graph's other views defer to.
@@ -1214,6 +1223,10 @@ impl GraphModel {
         Some(self.loaded()?.targets.clone())
     }
 
+    pub(crate) fn writers(&self) -> Option<Prepared<Arc<Writers>>> {
+        Some(self.loaded()?.writers.clone())
+    }
+
     pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
         Some(self.loaded()?.candidates.clone())
     }
@@ -1271,11 +1284,21 @@ impl GraphModel {
     /// Asks the graph panel the graph's other views defer to to show the node
     /// `id`, where one is open.
     pub(crate) fn reveal(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.request(id, Reveal::Activate, cx);
+    }
+
+    /// Asks the graph panel the graph's other views defer to why the node
+    /// `id` is in the build, where one is open.
+    pub(crate) fn ask_why(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.request(id, Reveal::AskWhy, cx);
+    }
+
+    fn request(&mut self, node: Id, reveal: Reveal, cx: &mut Context<Self>) {
         if let Some(deferred) = &self.deferred {
             cx.emit(RevealRequested {
                 panel: deferred.panel,
-                node: id,
-                reveal: Reveal::Activate,
+                node,
+                reveal,
             });
         }
     }

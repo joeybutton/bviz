@@ -104,6 +104,8 @@ const CONTAINER_SHRINK: f32 = 1000.;
 pub(crate) enum Stands {
     Here,
     Hidden(HiddenBy),
+    /// Nothing the view draws stands for the node, whatever the filter.
+    Absent,
 }
 
 /// Reads where a node stands in the view holding a palette.
@@ -340,6 +342,12 @@ impl JumpPalette {
             .update(cx, |bar, cx| chips::push(bar, &literal, cx));
     }
 
+    /// Whether asking why a row's node is in the build has a graph panel to
+    /// draw the answer: the holder, or one the document defers to.
+    fn answers_why(&self, cx: &App) -> bool {
+        self.holder == Holder::Graph || self.model.read(cx).reveals()
+    }
+
     /// The lines under the rows: how many nodes the query matches, and the
     /// keys.
     fn footer(&self, jump: &Jump, muted: Hsla, cx: &App) -> Div {
@@ -358,8 +366,11 @@ impl JumpPalette {
         // Read within the stack the field is drawn in, which a palette just
         // opened has drawn in no frame yet.
         let field = field_stack(self.holder);
+        let answers_why = self.answers_why(cx);
         let line = |hints: &[Hint]| {
-            let hints = hints.iter().filter_map(|(actions, does)| {
+            let asks_why = |action: &&dyn Action| action.name() == AskWhy.name();
+            let offered = |(actions, _): &&Hint| answers_why || !actions.iter().any(asks_why);
+            let hints = hints.iter().filter(offered).filter_map(|(actions, does)| {
                 let keys: Option<Vec<_>> = actions
                     .iter()
                     .map(|action| key_text_within(*action, &field, cx))
@@ -426,7 +437,7 @@ fn take_up(view: &mut JumpPalette, cx: &mut Context<JumpPalette>) {
     let drawn = view
         .drawn
         .as_ref()
-        .map_or_else(FxHashSet::default, |drawn| drawn(cx));
+        .map_or_else(Default::default, |drawn| drawn(cx));
     let Some(jump) = view.open.as_mut() else {
         return;
     };
@@ -528,7 +539,9 @@ impl Render for JumpPalette {
                         cx.listener(|view, _: &Go, window, cx| view.act(JumpEvent::Go, window, cx)),
                     )
                     .on_action(cx.listener(|view, _: &AskWhy, window, cx| {
-                        view.act(JumpEvent::AskWhy, window, cx)
+                        if view.answers_why(cx) {
+                            view.act(JumpEvent::AskWhy, window, cx)
+                        }
                     }))
                     .on_action(cx.listener(|view, _: &AlwaysShow, window, cx| {
                         view.act(JumpEvent::AlwaysShow, window, cx)
@@ -613,13 +626,16 @@ fn rows(
         let (Some(jump), Some(loaded)) = (view.open.as_ref(), view.model.read(cx).loaded()) else {
             return Vec::new();
         };
+        let candidates = jump.candidates.get();
+        let reveals = view.model.read(cx).reveals();
         range
             .filter_map(|index| {
                 let row = jump.matching.rows().get(index)?;
-                let candidate = jump.candidates.get().get(row.candidate);
+                let candidate = candidates.get(row.candidate);
                 let shown = Shown {
                     aimed: jump.aimed == index,
                     stands: (view.standing)(candidate.id, cx),
+                    shows_in_graph: reveals,
                 };
                 Some(listed(
                     &loaded.shared,
@@ -686,6 +702,9 @@ const KEY_HINTS: [&[Hint]; 2] = [
 struct Shown {
     aimed: bool,
     stands: Stands,
+    /// Whether a graph panel is open to show a node the view draws nothing
+    /// for.
+    shows_in_graph: bool,
 }
 
 /// One row of the open palette `jump`, at `index`: the node's text with the
@@ -750,7 +769,27 @@ fn listed(
                 .id(("jump-hidden", index))
                 .tooltip(TextTooltip::builder(by.describe().into(), tip)),
         ),
+        Stands::Absent => Some(
+            badge(NOT_IN_VIEW, colors.text_muted)
+                .id(("jump-absent", index))
+                .tooltip(TextTooltip::builder(
+                    absent_tip(shown.shows_in_graph).into(),
+                    tip,
+                )),
+        ),
     })
+}
+
+/// The badge of a row whose node the view draws nothing for.
+const NOT_IN_VIEW: &str = "not in this view";
+
+/// What the badge of a row whose node the view draws nothing for says,
+/// offering the graph panel where one is open to show the node.
+fn absent_tip(shows_in_graph: bool) -> &'static str {
+    match shows_in_graph {
+        true => "Nothing in this view stands for it; Enter offers to show it in the graph",
+        false => "Nothing in this view stands for it",
+    }
 }
 
 fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {

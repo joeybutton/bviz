@@ -102,7 +102,7 @@ fn unrevealed(pins: &HashMap<Id, Pin>) -> HashMap<Id, Pin> {
 }
 
 /// `pins` without the pin they hold for `node`.
-fn unpinned(pins: &HashMap<Id, Pin>, node: Id) -> HashMap<Id, Pin> {
+pub(crate) fn unpinned(pins: &HashMap<Id, Pin>, node: Id) -> HashMap<Id, Pin> {
     let mut pins = pins.clone();
     pins.remove(&node);
     pins

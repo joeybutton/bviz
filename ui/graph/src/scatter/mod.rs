@@ -4,6 +4,7 @@
 
 mod axis;
 mod hue;
+mod landing;
 mod paint;
 mod pick;
 mod placed;
@@ -15,15 +16,19 @@ use crate::chips::{self, ChipBar};
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
+use crate::hidden::{self, Offering, Unshown};
 use crate::holder::Holder;
 use crate::hue::Hue;
+use crate::jump::{self, JumpEvent, JumpPalette, Stands};
 use crate::model::{
-    FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced, VerdictsLanded,
+    ExclusionNamed, FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced,
+    VerdictsLanded,
 };
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
     configuration_readings, identify, mnemonic, point_label, primary_output, unit_names,
 };
+use crate::reveal;
 use crate::timing::{NodeTimes, Untimed};
 use crate::toolbar::PickerGroup;
 use crate::unit_picker::CyclePoints;
@@ -53,12 +58,14 @@ use gpui::{
     WeakEntity, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use hue::{ColourBy, Colouring};
+use landing::{Landing, PointIndex};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
 use pick::{Extents, PickList, PickRow};
 use placed::Placed;
 use plot::{MIN_RADIUS, Mark, Picked, Plotted, Spot, Zoom};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.
@@ -68,6 +75,15 @@ pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphScatter", "Scatter"
 /// points under a click is up, which the list's own bindings require.
 pub(crate) const PICKING: KeyScope =
     KeyScope::within(&KEY_CONTEXT, Nesting::State, "picking", "Pick list");
+
+/// The identifier the scatter plot's key context carries while a card offers
+/// to show a node a jump could not land on.
+pub(crate) const OFFERING: KeyScope = KeyScope::within(
+    &KEY_CONTEXT,
+    Nesting::State,
+    "scatterOffering",
+    "Hidden card",
+);
 
 gpui::actions!(
     bviz_graph,
@@ -86,8 +102,17 @@ gpui::actions!(
         CycleAcross,
         /// Cycle up axis
         CycleUp,
+        /// Dismiss card or selection
+        DismissCard,
     ]
 );
+
+/// How long the ring marking the points a jump lands on takes to spread
+/// out and fade.
+const PULSE: Duration = Duration::from_millis(600);
+
+/// How wide the card offering to show a node stands.
+const CARD_WIDTH: Pixels = px(300.);
 
 /// What the panel reads while the graph is being measured.
 const MEASURING: &str = "Computing metrics…";
@@ -113,6 +138,15 @@ pub struct ScatterPanel {
     canvas: Entity<ScatterCanvas>,
     /// The document's query bar, as this panel stands it.
     chips: Entity<ChipBar>,
+    jump: Entity<JumpPalette>,
+    /// The part of each axis shown as the palette opened, which closing it
+    /// unpicked returns to.
+    opened_zoom: Option<OpenedZoom>,
+    /// The node the plot marks the points of, which a jump lands on.
+    selected: Option<Id>,
+    /// When the last jump landed, which the marked points pulse from.
+    pulsed: Option<Instant>,
+    offering: Offering,
     legend: Entity<LegendState>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
@@ -137,6 +171,9 @@ pub struct ScatterPanel {
     _metrics_landed: Subscription,
     _filter_changed: Subscription,
     _verdicts_landed: Subscription,
+    _exclusion_named: Subscription,
+    /// Lands what the palette picks.
+    _jumped: Subscription,
 }
 
 impl ScatterPanel {
@@ -167,6 +204,10 @@ impl ScatterPanel {
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
+            view.selected = None;
+            view.pulsed = None;
+            view.opened_zoom = None;
+            view.offering.clear();
             view.restate_shown(cx);
             view.plotting = None;
             view.choice = Choice::of(&view.model, &view.focus, cx);
@@ -186,16 +227,26 @@ impl ScatterPanel {
         });
         let verdicts_landed =
             cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.replot(cx));
+        let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
         let parent = cx.entity().downgrade();
         let focus = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
         let choice = Choice::of(&model, &focus, cx);
         let chips =
             cx.new(|cx| ChipBar::new(model.clone(), Holder::Scatter, focus.clone(), None, cx));
+        let jump = Self::palette(&model, &focus, &chips, cx);
+        let jumped = cx.subscribe(&jump, |view, _, event: &JumpEvent, cx| {
+            view.jumped(*event, cx)
+        });
         Self {
             focus,
             legend,
             chips,
+            jump,
+            opened_zoom: None,
+            selected: None,
+            pulsed: None,
+            offering: Offering::new(model.clone()),
             choice,
             model,
             shown: false,
@@ -214,6 +265,225 @@ impl ScatterPanel {
             _metrics_landed: metrics_landed,
             _filter_changed: filter_changed,
             _verdicts_landed: verdicts_landed,
+            _exclusion_named: exclusion_named,
+            _jumped: jumped,
+        }
+    }
+
+    /// The jump palette the plot stands, ranking its points first.
+    fn palette(
+        model: &Entity<GraphModel>,
+        focus: &FocusHandle,
+        chips: &Entity<ChipBar>,
+        cx: &mut Context<Self>,
+    ) -> Entity<JumpPalette> {
+        let panel = cx.weak_entity();
+        let drawn: chips::Drawn = Box::new(move |cx: &App| {
+            let panel = panel.upgrade();
+            let plot = panel
+                .as_ref()
+                .and_then(|panel| panel.read(cx).plot.as_ref());
+            plot.map_or_else(Default::default, |plot| Arc::clone(plot.index.drawn()))
+        });
+        let panel = cx.weak_entity();
+        let standing = Box::new(move |id, cx: &App| {
+            let Some(panel) = panel.upgrade() else {
+                return Stands::Here;
+            };
+            let panel = panel.read(cx);
+            let (Some(plot), Some(loaded)) = (&panel.plot, panel.model.read(cx).loaded()) else {
+                return Stands::Here;
+            };
+            let shared = &loaded.shared;
+            (plot.index).stands(&shared.base, &shared.facets, &plot.verdicts, id)
+        });
+        let (model, focus, chips) = (model.clone(), focus.clone(), chips.clone());
+        cx.new(|cx| {
+            JumpPalette::new(
+                model,
+                Holder::Scatter,
+                focus,
+                chips,
+                Some(drawn),
+                standing,
+                cx,
+            )
+        })
+    }
+
+    /// Opens the palette over the plot, noting the zoom it opened at.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pick(cx);
+        if self.jump.update(cx, |palette, cx| palette.open(window, cx)) {
+            self.opened_zoom = self.plot.as_ref().map(|plot| OpenedZoom {
+                zoom: self.zoom,
+                unit: plot.scope.unit(),
+                axes: plot.plotted.axes,
+            });
+        }
+    }
+
+    /// Lands what the palette asks of the plot.
+    fn jumped(&mut self, event: JumpEvent, cx: &mut Context<Self>) {
+        if let JumpEvent::Preview(id) = event {
+            self.preview(id, cx);
+            return;
+        }
+        let opened_zoom = self.opened_zoom.take();
+        if let Some(plot) = &mut self.plot {
+            plot.previewed.clear();
+        }
+        match event {
+            JumpEvent::Preview(_) => {}
+            JumpEvent::Go(id) => self.land(id, cx),
+            JumpEvent::AskWhy(id) => self.model.update(cx, |model, cx| model.ask_why(id, cx)),
+            JumpEvent::AlwaysShow(id) => {
+                // The pin goes on the point the filter hides, which may stand
+                // for `id` rather than be it.
+                let pinned = match self.landing(id, cx) {
+                    Some(Landing::Hidden(point, _)) => point,
+                    _ => id,
+                };
+                self.offering.always_show(id, pinned, cx);
+            }
+            JumpEvent::Closed => {
+                let drawn_alike = |opened: &OpenedZoom| {
+                    (self.plot.as_ref()).is_some_and(|plot| {
+                        plot.scope.unit() == opened.unit && plot.plotted.axes == opened.axes
+                    })
+                };
+                if let Some(opened) = opened_zoom.filter(drawn_alike) {
+                    self.show_zoom(opened.zoom, cx);
+                }
+            }
+            JumpEvent::Dismissed => {}
+        }
+        cx.notify();
+    }
+
+    /// What a jump to `id` lands on in the plot drawn; none while no plot is.
+    fn landing(&self, id: Id, cx: &App) -> Option<Landing> {
+        let plot = self.plot.as_ref()?;
+        let shared = &self.model.read(cx).loaded()?.shared;
+        Some((plot.index).landing(&shared.base, &shared.facets, &plot.verdicts, id))
+    }
+
+    /// Rings the points a jump to `id` would land on, and brings them into
+    /// view below the palette, leaving what is selected as it is.
+    fn preview(&mut self, id: Id, cx: &mut Context<Self>) {
+        let marks = match self.landing(id, cx) {
+            Some(Landing::Marks(marks)) => marks,
+            _ => Vec::new(),
+        };
+        let clear_below = self.jump.read(cx).painted().map(|painted| painted.bottom());
+        self.zoom_onto(&marks, clear_below, cx);
+        if let Some(plot) = &mut self.plot {
+            plot.previewed = marks;
+        }
+        cx.notify();
+    }
+
+    /// Selects the points `id` stands for, brings them into view and pulses
+    /// them, listing them where there are several. Where none is drawn, the
+    /// card says why and offers to show the node another way; with no plot
+    /// drawn yet, the jump waits for one.
+    fn land(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.offering.clear();
+        let Some(landing) = self.landing(id, cx) else {
+            self.offering.wait_for(id);
+            return;
+        };
+        let unshown = match landing {
+            Landing::Marks(marks) => {
+                self.selected = Some(id);
+                self.zoom_onto(&marks, None, cx);
+                self.pulsed = Some(Instant::now());
+                let spot = (self.area().zip(self.plot.as_ref()))
+                    .map(|(area, plot)| area.spot(area.place(&plot.plotted.marks[marks[0]])));
+                let several = (marks.len() > 1)
+                    .then(|| Picked::of(marks.clone()))
+                    .flatten();
+                if let Some(plot) = &mut self.plot {
+                    plot.selected = marks;
+                }
+                if let Some((spot, picked)) = spot.zip(several) {
+                    self.open_pick(spot, picked, cx);
+                }
+                self.invalidate_canvas(cx);
+                return;
+            }
+            Landing::Hidden(..) | Landing::Absent(_) => unshown(landing),
+        };
+        if let Some(unshown) = unshown {
+            self.offering.stand(id, unshown, cx);
+        }
+        cx.notify();
+    }
+
+    /// Takes up a plot drawn afresh: marks the points of the node selected,
+    /// moves the card to where its node now lands, and lands the jump waiting
+    /// for the plot.
+    fn replotted(&mut self, cx: &mut Context<Self>) {
+        let marks = match self.selected.and_then(|id| self.landing(id, cx)) {
+            Some(Landing::Marks(marks)) => marks,
+            _ => Vec::new(),
+        };
+        if let Some(plot) = &mut self.plot {
+            plot.selected = marks;
+        }
+        let offer = self.offering.offer();
+        let now = offer
+            .and_then(|offer| self.landing(offer.node, cx))
+            .and_then(unshown);
+        self.offering.redrawn(now, cx);
+        if let Some(id) = self.offering.take_waiting() {
+            self.land(id, cx);
+        }
+    }
+
+    /// Answers the card as its key does, leaving the key to the plot where
+    /// the card offers only to close.
+    fn accept(&mut self, cx: &mut Context<Self>) {
+        match self.offering.accept(cx) {
+            true => cx.notify(),
+            false => cx.propagate(),
+        }
+    }
+
+    /// Puts away the card, or with none the selection.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if !self.offering.dismiss() {
+            self.selected = None;
+            if let Some(plot) = &mut self.plot {
+                plot.selected.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Shows the part of each axis that brings `marks` into view below the
+    /// height `clear_below`, or below the top of the plot.
+    fn zoom_onto(&mut self, marks: &[usize], clear_below: Option<Pixels>, cx: &mut Context<Self>) {
+        let (Some(area), Some(plot)) = (self.area(), &self.plot) else {
+            return;
+        };
+        if marks.is_empty() {
+            return;
+        }
+        let clear_below = clear_below.unwrap_or(area.frame().top());
+        let zoom = area.onto(
+            marks.iter().map(|&mark| &plot.plotted.marks[mark]),
+            clear_below,
+        );
+        self.show_zoom(zoom, cx);
+    }
+
+    /// Shows the plot at `zoom`, naming nothing under the pointer.
+    fn show_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+        if zoom != self.zoom {
+            self.zoom = zoom;
+            self.close_pick(cx);
+            self.invalidate_canvas(cx);
         }
     }
 
@@ -365,6 +635,9 @@ impl ScatterPanel {
         let clocks = Clocks::of(loaded.times(), &reference.points);
         let (metrics, reference) = (Arc::clone(metrics), Arc::clone(reference));
         let shared = loaded.shared.clone();
+        let Some(writers) = model.writers() else {
+            return;
+        };
         self.plotting = Some(load_in_background(
             cx,
             move || {
@@ -374,14 +647,16 @@ impl ScatterPanel {
                 let verdict = |id| verdicts.get(id);
                 let time = |id| clocks.time(id);
                 let plotted = Plotted::of(&metrics, &reference, axes, time, plots, verdict, hue);
+                let writers = Arc::clone(writers.get());
+                let index = PointIndex::of(&metrics, &plotted, plots, &shared.base, writers);
                 let points = metrics
                     .points
                     .iter()
                     .filter(|point| plots(point) && axes.place(point, time(point.id)).is_some());
                 let legend = colouring.legend(points, &shared.facets, &clocks);
-                (plotted, legend, verdicts)
+                (plotted, index, legend, verdicts)
             },
-            move |view, (plotted, legend, verdicts), cx| {
+            move |view, (plotted, index, legend, verdicts), cx| {
                 view.plotting = None;
                 if view.plot.as_ref().is_none_or(|plot| {
                     plot.scope.unit() != scope.unit()
@@ -392,13 +667,17 @@ impl ScatterPanel {
                 }
                 view.plot = Some(Plot {
                     plotted: Arc::new(plotted),
+                    index,
                     legend,
                     pointer: Pointer::Away,
                     verdicts,
                     scope,
                     colour,
                     timed,
+                    selected: Vec::new(),
+                    previewed: Vec::new(),
                 });
+                view.replotted(cx);
                 view.restate_shown(cx);
                 view.invalidate_canvas(cx);
                 view.replot(cx);
@@ -772,6 +1051,25 @@ impl ScatterPanel {
     }
 }
 
+/// The part of each axis a plot showed as the palette opened, with what
+/// the plot measured and on which axes, which a zoom only means alike.
+#[derive(Clone, Copy)]
+struct OpenedZoom {
+    zoom: Zoom,
+    unit: Unit,
+    axes: Axes,
+}
+
+/// Why the plot shows no part of a node a jump to which lands as `landing`;
+/// none where it lands on marks.
+fn unshown(landing: Landing) -> Option<Unshown> {
+    match landing {
+        Landing::Marks(_) => None,
+        Landing::Hidden(point, by) => Some(Unshown::Hidden { point, by }),
+        Landing::Absent(absent) => Some(Unshown::Absent(absent.describe())),
+    }
+}
+
 /// The choice of what the plot measures, which the strip offers.
 struct Choice {
     /// The inputs the graph was read from.
@@ -980,6 +1278,8 @@ fn input_name(input: Input) -> &'static str {
 /// The measured points as drawn, and what among them the pointer is on.
 struct Plot {
     plotted: Arc<Plotted>,
+    /// Where each node stands among the points `plotted` draws.
+    index: PointIndex,
     /// Each hue the plotted points are drawn in, and what it stands for.
     legend: Vec<(SharedString, Hue)>,
     pointer: Pointer,
@@ -991,6 +1291,10 @@ struct Plot {
     colour: ColourBy,
     /// Which of its session's timings `plotted` was drawn with.
     timed: Revision,
+    /// The marks standing for the node selected.
+    selected: Vec<usize>,
+    /// The marks standing for the node the palette's keys are on.
+    previewed: Vec<usize>,
 }
 
 /// What the panel does for a gesture in [`GESTURES`].
@@ -1203,6 +1507,7 @@ impl Panel for ScatterPanel {
 
     fn gestures() -> Vec<GestureRow> {
         (GESTURES.rows())
+            .chain(jump::gestures())
             .chain(chips::gestures())
             .chain(legend_gestures())
             .collect()
@@ -1237,6 +1542,10 @@ impl Panel for ScatterPanel {
             false => {
                 self.clear_hover(cx);
                 self.close_pick(cx);
+                self.jump.update(cx, |palette, cx| palette.dismiss(cx));
+                if let Some(plot) = &mut self.plot {
+                    plot.previewed.clear();
+                }
             }
         }
     }
@@ -1245,10 +1554,13 @@ impl Panel for ScatterPanel {
 impl Render for ScatterPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let key_context = match self.picking() {
-            true => format!("{} {PICKING}", Self::kind().key_context),
-            false => Self::kind().key_context.to_string(),
-        };
+        let mut key_context = Self::kind().key_context.to_string();
+        if self.picking() {
+            key_context = format!("{key_context} {PICKING}");
+        }
+        if self.offering.offer().is_some() {
+            key_context = format!("{key_context} {OFFERING}");
+        }
         let root = div()
             .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholePlot, window, cx| {
@@ -1264,6 +1576,11 @@ impl Render for ScatterPanel {
             .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))
             .on_action(cx.listener(|view, _: &RevealAimed, _, cx| view.reveal_aimed(cx)))
             .on_action(cx.listener(|view, _: &ClosePickList, _, cx| view.close_pick(cx)))
+            .on_action(
+                cx.listener(|view, _: &jump::Open, window, cx| view.open_palette(window, cx)),
+            )
+            .on_action(cx.listener(|view, _: &DismissCard, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| view.accept(cx)))
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend.update(cx, |legend, cx| legend.show(window, cx));
             }))
@@ -1338,8 +1655,20 @@ impl Render for ScatterPanel {
             ),
             _ => None,
         };
+        let card = hidden::offer_card(
+            &self.offering,
+            |view: &mut Self| &mut view.offering,
+            &palette,
+            &self.focus,
+            &DismissCard,
+            cx,
+        );
+        let card = card.map(|card| div().absolute().top_2().right_2().w(CARD_WIDTH).child(card));
+        let jump = self.jump.read(cx).is_open().then(|| self.jump.clone());
         let Some(plot) = &self.plot else {
-            return root.child(centered_spinner(MEASURING, &palette.colors));
+            let measuring = centered_spinner(MEASURING, &palette.colors);
+            let over = div().relative().flex_1().min_h(px(0.)).child(measuring);
+            return root.child(over.children(jump).children(card));
         };
         let list = match (&plot.pointer, extents) {
             (Pointer::Picking(pick), Some(extents)) => {
@@ -1377,6 +1706,8 @@ impl Render for ScatterPanel {
                 .when(hovering && reveals, |plot| plot.cursor_pointer())
                 .child(hover_layer(cx.entity(), palette))
                 .children(list)
+                .children(card)
+                .children(jump)
                 .on_mouse_move(cx.listener(|view, e: &MouseMoveEvent, _, cx| {
                     if view.press.is_none() {
                         GESTURES.dispatch(gesture::Pointer::HOVER, |intent| match intent {
@@ -1439,6 +1770,17 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         let panel = view.read(cx);
         let (zoom, pressed) = (panel.zoom, panel.press.is_some());
         let ringed = panel.ringed();
+        let pulse = panel
+            .pulsed
+            .map(|at| at.elapsed().as_secs_f32() / PULSE.as_secs_f32());
+        let pulse = pulse.filter(|&progress| progress < 1.0);
+        let marked = panel.plot.as_ref().map(|plot| {
+            (
+                Arc::clone(&plot.plotted),
+                plot.selected.clone(),
+                plot.previewed.clone(),
+            )
+        });
         if pressed {
             track_drag(
                 window,
@@ -1446,6 +1788,19 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
                 |view, at, _, cx| view.drag_to(at, cx),
                 |view, at, end, _, cx| view.end_press(at, end, cx),
             );
+        }
+        if let Some((plotted, selected, previewed)) = marked
+            && let Some(area) = paint::data_area(&plotted, zoom, bounds)
+        {
+            for &mark in &previewed {
+                paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
+            }
+            for &mark in &selected {
+                paint::paint_selection(&plotted.marks[mark], &area, &palette, pulse, window);
+            }
+            if pulse.is_some() && !selected.is_empty() {
+                window.request_animation_frame();
+            }
         }
         let Some((plotted, mark, _)) = ringed else {
             return;

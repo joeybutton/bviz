@@ -12,6 +12,7 @@ use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
 use gpui::{App, Context, Entity, FocusHandle, Window, prelude::*, px};
 use rustc_hash::FxHashSet;
+use std::sync::Arc;
 
 /// Where the graph panel stood as its palette opened, and in which mode, so
 /// that closing it unpicked returns there.
@@ -39,7 +40,8 @@ pub(crate) fn palette(
 pub(crate) fn drawn_reader(cx: &Context<GraphPanel>) -> chips::Drawn {
     let panel = cx.weak_entity();
     Box::new(move |cx: &App| {
-        (panel.upgrade()).map_or_else(Default::default, |panel| drawn_ids(panel.read(cx)))
+        let drawn = (panel.upgrade()).map(|panel| drawn_ids(panel.read(cx)));
+        Arc::new(drawn.unwrap_or_default())
     })
 }
 

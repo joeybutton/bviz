@@ -33,6 +33,7 @@ use gpui::{
     prelude::*, px,
 };
 use rustc_hash::FxHashSet;
+use std::sync::Arc;
 
 actions!(
     bviz_graph_chips,
@@ -223,7 +224,7 @@ pub(crate) struct ChipBar {
 }
 
 /// The nodes a bar's holder draws, read as the completion ranks its rows.
-pub(crate) type Drawn = Box<dyn Fn(&App) -> FxHashSet<Id>>;
+pub(crate) type Drawn = Box<dyn Fn(&App) -> Arc<FxHashSet<Id>>>;
 
 /// How many of the points a view draws in its own unit the document's
 /// filter shows, each counted as [`crate::filter::Shown`] counts a node.

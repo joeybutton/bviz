@@ -71,6 +71,7 @@ mod scatter;
 mod scroll;
 mod selection;
 mod spatial;
+mod stand_in;
 mod status;
 mod timecard;
 mod timing;
@@ -144,6 +145,7 @@ pub fn register_keys(cx: &mut App) {
             exclusive::ROOTS_KEY_CONTEXT,
             scatter::KEY_CONTEXT,
             scatter::PICKING,
+            scatter::OFFERING,
             jump::KEY_CONTEXT,
             chips::KEY_CONTEXT,
             chips::FIELD_KEY_CONTEXT,
@@ -168,6 +170,19 @@ fn bindings() -> Vec<KeyBinding> {
         chips::KEY_CONTEXT
     );
     let picking = Some(picking.as_str());
+    let scatter_unpicked = format!(
+        "{} && !{}",
+        text_input::unless_typing(scatter::KEY_CONTEXT),
+        scatter::PICKING
+    );
+    let scatter_unpicked = Some(scatter_unpicked.as_str());
+    let scatter_offering = format!(
+        "{} && {} && !{}",
+        scatter::KEY_CONTEXT,
+        scatter::OFFERING,
+        text_input::KEY_CONTEXT
+    );
+    let scatter_offering = Some(scatter_offering.as_str());
     let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
     let exclusive_canvas = Some(exclusive_canvas.as_str());
     let mut bindings = vec![
@@ -217,6 +232,8 @@ fn bindings() -> Vec<KeyBinding> {
             exclusive::LeaveRoots,
             Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
+        KeyBinding::new("escape", scatter::DismissCard, scatter_unpicked),
+        KeyBinding::new("enter", reveal::Accept, scatter_offering),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
         KeyBinding::new("enter", scatter::RevealAimed, picking),
@@ -229,6 +246,7 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
+    bindings.extend(find_key_bindings(scatter::KEY_CONTEXT, jump::Open));
     bindings
 }
 
@@ -593,6 +611,10 @@ impl GraphPanel {
                 match event.reveal {
                     Reveal::Activate => reveal::reveal(view, event.node, cx),
                     Reveal::InPlace => reveal::show_in_place(view, event.node, cx),
+                    Reveal::AskWhy => {
+                        why::ask_why(view, event.node, cx);
+                        cx.emit(PanelEvent::Activate);
+                    }
                 }
             }
         });
@@ -1711,6 +1733,35 @@ mod tests {
                 "{keys}"
             );
         }
+    }
+
+    /// The scatter plot opens the palette by the find keys, and while a card
+    /// stands Enter answers it, the list of points under a click still
+    /// taking Enter and Escape while it is up.
+    #[test]
+    fn the_scatter_plot_finds_and_answers_its_card() {
+        const IN_SCATTER: &[&str] = &[scatter::KEY_CONTEXT.id()];
+        const OFFERING: &[&str] = &["GraphScatter scatterOffering"];
+        const PICKING_TOO: &[&str] = &["GraphScatter scatterOffering picking"];
+        for keys in ["secondary-f", "/"] {
+            assert!(is(dispatched(keys, IN_SCATTER), jump::Open), "{keys}");
+        }
+        assert!(is(dispatched("escape", IN_SCATTER), scatter::DismissCard));
+        assert!(dispatched("enter", IN_SCATTER).is_none());
+        assert!(is(dispatched("enter", OFFERING), reveal::Accept));
+        assert!(is(dispatched("enter", PICKING_TOO), scatter::RevealAimed));
+        assert!(is(
+            dispatched("escape", PICKING_TOO),
+            scatter::ClosePickList
+        ));
+        let in_palette = &[
+            scatter::KEY_CONTEXT.id(),
+            jump::KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        assert!(is(dispatched("enter", in_palette), jump::Go));
+        assert!(is(dispatched("escape", in_palette), jump::Close));
+        assert!(dispatched("/", in_palette).is_none());
     }
 
     /// The field's word keys reach it inside the bar, beside the bar's own
