@@ -6,6 +6,7 @@ use bviz_graph_layout::facets::{ConfigRef, Tri};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::{Facets, Id, Kind, Names};
+use bviz_label::shown::written_line;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -63,9 +64,7 @@ pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &
     let (facets, repos) = (&shared.facets, shared.labels.repos());
     let written = written_name(&shared.names, facets, repos, id);
     let label = repos.names().show(&written).into_text();
-    // A label shown shorter than a command line takes it is given as written
-    // too, for the reader who takes it elsewhere.
-    let written = (written != label).then(|| format!("written {written}"));
+    let written = written_line(&written, &label);
     match unit {
         Unit::Action => {
             lines.push(format!("{} {label}", mnemonic(id, shared)));

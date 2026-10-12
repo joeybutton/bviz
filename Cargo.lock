@@ -1104,6 +1104,7 @@ dependencies = [
  "bviz_bazel_flags",
  "bviz_graph_layout",
  "bviz_invocation",
+ "bviz_label",
  "bviz_parallel",
  "bviz_ui_assets",
  "bviz_ui_components",

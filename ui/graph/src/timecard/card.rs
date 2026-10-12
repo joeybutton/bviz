@@ -6,6 +6,9 @@ use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
 use crate::{GraphPanel, Palette, ToggleTiming};
 use bviz_graph_layout::Id;
+use bviz_label::names::RepoNames;
+use bviz_label::shown::Parts;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
@@ -92,6 +95,7 @@ fn row(
     index: usize,
     slow: &Slow,
     mnemonic: Option<&str>,
+    names: &RepoNames,
     view: &Entity<GraphPanel>,
     palette: &Palette,
 ) -> Stateful<Div> {
@@ -106,8 +110,13 @@ fn row(
                 .whitespace_nowrap()
                 .child(mnemonic.to_owned())
         }))
-        // Paths sharing a directory differ at their tails.
-        .child(line(slow.subject().to_owned()).text_ellipsis_start());
+        .child({
+            let path = slow.subject();
+            let parts = Parts::of_path(path);
+            div()
+                .min_w_0()
+                .child(LabelLine::parted(path.to_owned(), parts, colors.text_muted))
+        });
     let listed = div()
         .id(("timecard-row", index))
         .w_full()
@@ -117,7 +126,7 @@ fn row(
         .px_1()
         .rounded_sm()
         .tooltip(TextTooltip::builder(
-            slow.hover(mnemonic).into(),
+            slow.hover(mnemonic, names).into(),
             colors.tooltip(),
         ))
         .child(legend::ran(Ran::On(slow.timing.runner), palette))
@@ -128,7 +137,7 @@ fn row(
                 .flex()
                 .flex_col()
                 .child(name)
-                .child(line(slow.detail()).text_color(colors.text_muted)),
+                .child(line(slow.detail(names)).text_color(colors.text_muted)),
         );
     match slow.shown.node() {
         Some(node) => {
@@ -164,7 +173,8 @@ fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphP
                     Shown::Action(node) => mnemonic(loaded, node),
                     Shown::Owner { .. } | Shown::Off => None,
                 };
-                row(index, slow, mnemonic, &entity, &palette)
+                let names = loaded.shared.labels.repos().names();
+                row(index, slow, mnemonic, names, &entity, &palette)
             })
             .collect::<Vec<_>>()
     })

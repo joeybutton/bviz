@@ -435,6 +435,12 @@ fn most_fitting(
     None
 }
 
+/// The line a card adds for a label it shows shorter than it is `written`,
+/// for the reader who takes it elsewhere; none where it shows it as written.
+pub fn written_line(written: &str, shown: &str) -> Option<String> {
+    (written != shown).then(|| format!("written {written}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

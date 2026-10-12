@@ -14,6 +14,7 @@ rust_library(
         "//bazel_flags",
         "//graph/layout",
         "//invocation",
+        "//label",
         "//ui/assets",
         "//ui/components",
         "//ui/graph/args",

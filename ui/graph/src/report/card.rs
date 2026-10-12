@@ -7,6 +7,8 @@ use crate::status::{Status, Statuses};
 use crate::{GraphPanel, Palette, ToggleOutcomes, why};
 use bviz_graph_layout::Id;
 use bviz_invocation::Configurations;
+use bviz_label::names::RepoNames;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
@@ -85,6 +87,11 @@ impl<'a> Reported<'a> {
     fn report(self) -> &'a Report {
         self.loaded.reported()
     }
+
+    /// The names the graph shows the build's labels by.
+    fn names(self) -> &'a RepoNames {
+        self.loaded.shared.labels.repos().names()
+    }
 }
 
 /// Puts the card up or away, where the build reported anything for it to read.
@@ -123,6 +130,7 @@ fn row(
     index: usize,
     row: &Row,
     configurations: &Configurations,
+    names: &RepoNames,
     view: &Entity<GraphPanel>,
     palette: &Palette,
 ) -> Stateful<Div> {
@@ -135,8 +143,16 @@ fn row(
             row.lead()
                 .map(|lead| div().flex_none().whitespace_nowrap().child(lead)),
         )
-        // Labels sharing a package differ at their tails.
-        .child(line(row.subject(configurations)).text_ellipsis_start());
+        .child({
+            let subject = row.name().subject(names);
+            let parts = row.name().parts(&subject);
+            let label = LabelLine::parted(subject.into_owned(), parts, colors.text_muted);
+            div().min_w_0().child(label)
+        })
+        .children(
+            row.configuration(configurations)
+                .map(|configuration| div().flex_none().whitespace_nowrap().child(configuration)),
+        );
     let listed = div()
         .id(("report-row", index))
         .w_full()
@@ -146,7 +162,7 @@ fn row(
         .px_1()
         .rounded_sm()
         .tooltip(TextTooltip::builder(
-            row.hover(configurations).into(),
+            row.hover(configurations, names).into(),
             colors.tooltip(),
         ))
         .child(legend::status(row.listed.status(), palette))
@@ -212,6 +228,7 @@ impl<'a> Selected<'a> {
 /// those are what is asked.
 fn selected(
     selected: Selected,
+    names: &RepoNames,
     view: &GraphPanel,
     palette: &Palette,
     cx: &Context<GraphPanel>,
@@ -220,7 +237,7 @@ fn selected(
     let cause = selected
         .cause()
         .filter(|&cause| !why::asking_between(view, cause, node));
-    let words = selected.badged.words(selected.status);
+    let words = selected.badged.words(selected.status, names);
     let said = div()
         .flex()
         .items_center()
@@ -253,13 +270,14 @@ fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphP
         let reported = Reported::of(entity.read(cx), cx);
         let rows = reported.into_iter().flat_map(|reported| {
             let listed = reported.report().listed(range.clone());
-            listed.map(move |listed| (listed, reported.configurations))
+            listed.map(move |listed| (listed, reported))
         });
         range
             .clone()
             .zip(rows)
-            .map(|(index, (listed, configurations))| {
-                row(index, listed, configurations, &entity, &palette)
+            .map(|(index, (listed, reported))| {
+                let (configurations, names) = (reported.configurations, reported.names());
+                row(index, listed, configurations, names, &entity, &palette)
             })
             .collect::<Vec<_>>()
     })
@@ -322,7 +340,7 @@ pub(crate) fn card(
                 .lines()
                 .map(|mismatch| div().min_w_0().text_color(colors.warning).child(mismatch)),
         )
-        .children(chosen.map(|chosen| selected(chosen, view, palette, cx)));
+        .children(chosen.map(|chosen| selected(chosen, reported.names(), view, palette, cx)));
     let rows = report.rows();
     let rows = (rows > 0).then(|| listed(view, rows, palette, cx));
     Some(Folding::new(head, rows, palette))
@@ -372,7 +390,9 @@ mod tests {
     fn selected(outcomes: &Outcomes, name: &str) -> Option<(Status, String, Option<Id>)> {
         let (report, statuses) = resolved(outcomes);
         let selected = Selected::of(node(name), &report, &statuses)?;
-        let words = selected.badged.words(selected.status);
+        let words = selected
+            .badged
+            .words(selected.status, &RepoNames::default());
         Some((selected.status, words, selected.cause()))
     }
 
@@ -384,7 +404,7 @@ mod tests {
             selected(&outcomes, &format!("ct://app:bin#{CONFIG}")),
             Some((
                 Status::Failed,
-                "//app:bin failed: //gen:gen (Genrule) failed".into(),
+                "//app:bin failed: //gen (Genrule) failed".into(),
                 Some(action)
             ))
         );
@@ -392,7 +412,7 @@ mod tests {
             selected(&outcomes, &format!("action:{GEN_OUTPUT}")),
             Some((
                 Status::RootCause,
-                "Genrule //gen:gen failed · 1 target failed".into(),
+                "Genrule //gen failed · 1 target failed".into(),
                 None
             ))
         );
@@ -429,7 +449,7 @@ mod tests {
             selected(&outcomes, &format!("ct://gen:gen#{CONFIG}")),
             Some((
                 Status::RootCause,
-                "//gen:gen built; this box holds the root cause of a failure".into(),
+                "//gen built; this box holds the root cause of a failure".into(),
                 None
             ))
         );
@@ -437,7 +457,7 @@ mod tests {
             selected(&outcomes, "target://gen:gen"),
             Some((
                 Status::RootCause,
-                "//gen:gen built; this box holds the root cause of a failure".into(),
+                "//gen built; this box holds the root cause of a failure".into(),
                 None
             ))
         );

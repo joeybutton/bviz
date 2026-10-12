@@ -1,7 +1,7 @@
 //! The names a set of repositories are written and shown by.
 
 use crate::repo::{self, RepoName};
-use crate::shown::Shown;
+use crate::shown::{Shown, written_line};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -146,6 +146,16 @@ impl RepoNames {
         self.show(&self.written_label(label)).into_text()
     }
 
+    /// The canonical label `label` as it is shown, with the line a card adds
+    /// for it where that reads shorter than it is written, as
+    /// [`written_line`] words it.
+    pub fn shown_with_written(&self, label: &str) -> (String, Option<String>) {
+        let written = self.written_label(label);
+        let shown = self.show(&written).into_text();
+        let line = written_line(&written, &shown);
+        (shown, line)
+    }
+
     /// `written`, a label or a package path as a reader writes it, as it is
     /// shown: by the name its repository is shown by, and where it names a
     /// target named after its package or repository, by that alone.
@@ -223,6 +233,25 @@ mod tests {
         assert_eq!(
             names.written_label("@@rules_rust+//rust:toolchain"),
             "@rules_rust//rust:toolchain"
+        );
+    }
+
+    /// A label shown shorter than it is written gets a line naming it as
+    /// written; one shown as written gets none.
+    #[test]
+    fn a_label_shown_shorter_is_named_as_written_too() {
+        let labels = ["@@llvm++llvm+llvm-project//llvm:Support", "//ui/graph:lib"];
+        let names = RepoNames::of_labels(labels.into_iter());
+        assert_eq!(
+            names.shown_with_written(labels[0]),
+            (
+                "@llvm-project//llvm:Support".to_owned(),
+                Some("written @@llvm++llvm+llvm-project//llvm:Support".to_owned())
+            )
+        );
+        assert_eq!(
+            names.shown_with_written(labels[1]),
+            ("//ui/graph:lib".to_owned(), None)
         );
     }
 }

@@ -850,6 +850,7 @@ mod tests {
     use bviz_graph_layout::Names;
     use bviz_graph_layout::graph::Node;
     use bviz_invocation::{Configurations, Outcomes};
+    use bviz_label::names::RepoNames;
     use std::num::{NonZeroI32, NonZeroU32};
     use std::time::Duration;
 
@@ -994,7 +995,8 @@ mod tests {
     fn rows(outcomes: &Outcomes) -> Vec<(String, String, bool)> {
         let (report, configurations) = (report(outcomes), configurations());
         let read = |row: &Row| {
-            let subject = row.subject(&configurations);
+            let subject = row.name().subject(&RepoNames::default());
+            let subject = row.configured(&subject, &configurations);
             let name = match row.lead() {
                 Some(lead) => format!("{lead} {subject}"),
                 None => subject,
@@ -1125,15 +1127,16 @@ mod tests {
         assert_eq!(
             rows(&outcomes),
             [read(
-                "Genrule //gen:gen",
+                "Genrule //gen",
                 "exited 1 · 2 targets failed — bash failed: exit 1",
                 true
             )]
         );
         let report = report(&outcomes);
         assert_eq!(
-            report.root_causes[0].hover(&configurations()),
-            "Genrule //gen:gen\nexited 1 · 2 targets failed\n\nbash failed: exit 1\n\nUse --sandbox_debug"
+            report.root_causes[0].hover(&configurations(), &RepoNames::default()),
+            "Genrule //gen\nwritten //gen:gen\nexited 1 · 2 targets failed\n\nbash failed: exit 1\n\n\
+             Use --sandbox_debug"
         );
         assert_eq!(
             report.root_causes[0].shown.node(),
@@ -1158,7 +1161,7 @@ mod tests {
         assert_eq!(
             rows(&outcomes),
             [
-                read("Genrule //gen:gen", "exited 1 · 3 targets failed", true),
+                read("Genrule //gen", "exited 1 · 3 targets failed", true),
                 read(
                     "Genrule //docs:site",
                     "exited 2 · 1 target failed · not in this graph",
@@ -1203,10 +1206,7 @@ mod tests {
     fn an_action_is_listed_whichever_of_its_failure_and_its_blame_is_reported() {
         let mut unblamed = Outcomes::default();
         unblamed.report_failed_action(GEN_OUTPUT.into(), failed_action(target("//gen:gen"), 1, ""));
-        assert_eq!(
-            rows(&unblamed),
-            [read("Genrule //gen:gen", "exited 1", true)]
-        );
+        assert_eq!(rows(&unblamed), [read("Genrule //gen", "exited 1", true)]);
 
         let mut unowned = Outcomes::default();
         unowned.report_failed_action(
@@ -1283,9 +1283,9 @@ mod tests {
         assert_eq!(
             named,
             [
-                "Genrule //gen:gen (k8-opt-exec)",
+                "Genrule //gen (k8-opt-exec)",
                 "Genrule //docs:site",
-                "Genrule //gen:gen (k8-fastbuild)",
+                "Genrule //gen (k8-fastbuild)",
                 "//lib:broken (0c3d9a)",
                 "//lib:broken (k8-fastbuild)",
             ]
@@ -1398,7 +1398,7 @@ mod tests {
         assert_eq!(
             rows(&outcomes),
             [
-                read("Genrule //gen:gen", "exited 1", true),
+                read("Genrule //gen", "exited 1", true),
                 read("//app:broken", "failed in 0.3s · not in this graph", false),
                 read("//app:check", "failed in 0.3s", true),
                 read(
@@ -1465,7 +1465,7 @@ mod tests {
     /// as the root cause.
     fn said_of(report: &Report, name: &str) -> Option<(String, Option<Id>)> {
         let said = report.said(node(name))?;
-        Some((said.words(), said.cause))
+        Some((said.words(&RepoNames::default()), said.cause))
     }
 
     #[test]
@@ -1485,7 +1485,7 @@ mod tests {
             assert_eq!(
                 said_of(&report, &name),
                 Some((
-                    "//app:bin failed: //gen:gen (Genrule) exited 1".into(),
+                    "//app:bin failed: //gen (Genrule) exited 1".into(),
                     Some(cause)
                 )),
                 "{name}"
@@ -1496,7 +1496,7 @@ mod tests {
         for name in [format!("ct://gen:gen#{CONFIG}"), "target://gen:gen".into()] {
             assert_eq!(
                 said_of(&report, &name),
-                Some(("//gen:gen failed: its Genrule action exited 1".into(), None)),
+                Some(("//gen failed: its Genrule action exited 1".into(), None)),
                 "{name}"
             );
         }
@@ -1523,7 +1523,7 @@ mod tests {
         assert_eq!(
             said(&[action(DOCS_OUTPUT), action(GEN_OUTPUT)]),
             (
-                "//app:bin failed: //gen:gen (Genrule) exited 1, and 1 more cause".into(),
+                "//app:bin failed: //gen (Genrule) exited 1, and 1 more cause".into(),
                 Some(generator)
             )
         );
@@ -1531,7 +1531,7 @@ mod tests {
         assert_eq!(
             said(&[action(BIN_OUTPUT), action(GEN_OUTPUT)]),
             (
-                "//app:bin failed: //gen:gen (Genrule) exited 1, and 1 more cause".into(),
+                "//app:bin failed: //gen (Genrule) exited 1, and 1 more cause".into(),
                 Some(generator)
             )
         );
@@ -1697,7 +1697,7 @@ mod tests {
             said_of(&report(&outcomes), "target://lib:broken").expect("a saying")
         };
         let stands = (
-            "//lib:broken failed: //gen:gen (Genrule) exited 1".to_owned(),
+            "//lib:broken failed: //gen (Genrule) exited 1".to_owned(),
             Some(node(&format!("action:{BIN_OUTPUT}"))),
         );
         assert_eq!(said(&reports), stands);
