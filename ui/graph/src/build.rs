@@ -17,24 +17,18 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
     for input in inputs {
         let path = input.path.display();
         let bytes = std::fs::read(&input.path).map_err(|e| format!("{path}: {e}"))?;
+        let undecodable = |e| undecodable(input, e);
         match input.kind {
             InputKind::Aquery => {
                 aq = Some(
-                    streamed_proto::read_action_graph_containers(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
+                    streamed_proto::read_action_graph_containers(&bytes).map_err(undecodable)?,
                 );
             }
             InputKind::Cquery => {
-                cq = Some(
-                    streamed_proto::read_cquery_results(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
-                );
+                cq = Some(streamed_proto::read_cquery_results(&bytes).map_err(undecodable)?);
             }
             InputKind::Query => {
-                q = Some(
-                    streamed_proto::read_query_targets(&bytes)
-                        .map_err(|e| format!("{path}: {e}"))?,
-                );
+                q = Some(streamed_proto::read_query_targets(&bytes).map_err(undecodable)?);
             }
         }
     }
@@ -44,6 +38,18 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
     // expansion rather than re-derived (differently) from each view.
     let reduced = bviz_graph_layout::reduce::transitive_reduction(&joint.graph);
     Ok((joint, reduced))
+}
+
+/// Why `input` does not decode, worded for a reader who most often handed its
+/// flag some other file: another command's output, a format other than
+/// streamed_proto, or another tool's file altogether.
+fn undecodable(input: &Input, e: impl std::fmt::Display) -> String {
+    format!(
+        "{} does not decode as the output of bazel {} --output=streamed_proto, the file --{} reads ({e})",
+        input.path.display(),
+        input.kind.command(),
+        input.kind.flag(),
+    )
 }
 
 /// The inputs `source` reads.
@@ -163,6 +169,28 @@ mod tests {
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::{EdgeKind, Facets, Kind};
     use std::cmp::Ordering;
+
+    /// A file other than the streamed_proto output its flag reads is reported
+    /// with the Bazel command that writes what the flag expects.
+    #[test]
+    fn a_file_of_another_format_names_the_output_its_flag_reads() {
+        let dir = std::env::var("TEST_TMPDIR")
+            .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+        let path = std::path::Path::new(&dir).join("profile.json");
+        std::fs::write(&path, r#"{"otherData":{},"traceEvents":[]}"#).expect("write the file");
+        for kind in [InputKind::Aquery, InputKind::Cquery, InputKind::Query] {
+            let input = Input {
+                kind,
+                path: path.clone(),
+            };
+            let Err(why) = build_graph(&[input]) else {
+                panic!("a profile reads as no {kind:?} output");
+            };
+            let command = format!("bazel {} --output=streamed_proto", kind.command());
+            assert!(why.contains(&command), "{why}");
+            assert!(why.contains(&format!("--{}", kind.flag())), "{why}");
+        }
+    }
 
     /// A target whose two configured targets are built as tools, one of which
     /// the configured target `app` depends on: the connector into `app` carries

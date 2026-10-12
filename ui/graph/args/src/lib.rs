@@ -52,6 +52,27 @@ pub enum InputKind {
     Query,
 }
 
+impl InputKind {
+    /// The long name of the flag a file of this kind is given by.
+    pub fn flag(self) -> &'static str {
+        match self {
+            InputKind::Aquery => AQUERY_LONG,
+            InputKind::Cquery => CQUERY_LONG,
+            InputKind::Query => QUERY_LONG,
+        }
+    }
+
+    /// The Bazel command whose `--output=streamed_proto` a file of this kind
+    /// holds.
+    pub fn command(self) -> &'static str {
+        match self {
+            InputKind::Aquery => "aquery",
+            InputKind::Cquery => "cquery",
+            InputKind::Query => "query",
+        }
+    }
+}
+
 /// One file a joint graph is read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Input {
