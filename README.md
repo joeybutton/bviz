@@ -102,3 +102,6 @@ Layout Kernel.
 bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
 third-party works it bundles or derives from, and their terms, are listed in
 [NOTICE](NOTICE).
+
+Bazel is a trademark of Google LLC. bviz is not affiliated with or endorsed by
+Google.
