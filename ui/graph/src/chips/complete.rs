@@ -161,7 +161,7 @@ impl Few {
 
 /// The tooltip of every row offering one of [`Function::EXTENSIONS`] that
 /// evaluates over the graph.
-const EXTENSION_NOTE: &str = "bviz extension, not part of Bazel's query language";
+const EXTENSION_NOTE: &str = "Not in Bazel's query language";
 
 /// The kind a row offering `function` names, and its tooltip, if any, over a
 /// graph `commands` were read from whose data `readable` states.
@@ -182,11 +182,7 @@ fn function_note(
                 return None;
             }
             let commands: Vec<&str> = commands.iter().map(|command| command.name()).collect();
-            Some(format!(
-                "{}() is no {} function; bviz evaluates it",
-                function.name(),
-                commands.join(" or ")
-            ))
+            Some(format!("Not in {} · bviz-evaluated", commands.join(" or ")))
         });
     (kind, note)
 }
@@ -936,7 +932,7 @@ mod tests {
             note(Function::Config, &[Command::Query, Command::Aquery]),
             (
                 "function",
-                Some("config() is no query or aquery function; bviz evaluates it".to_owned())
+                Some("Not in query or aquery · bviz-evaluated".to_owned())
             )
         );
         assert_eq!(

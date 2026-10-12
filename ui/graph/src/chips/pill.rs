@@ -283,8 +283,8 @@ fn explain(chip: &Chip, outcome: Option<&Outcome>) -> SharedString {
     };
     let expanded = (chip.expanded() != chip.text()).then(|| chip.expanded());
     let role = match chip.is_source() {
-        true => "a source, joining the union the stack starts from",
-        false => "a refinement of the set before it",
+        true => "source",
+        false => "refinement",
     };
     let lines = [
         Some(chip.text()),
@@ -300,11 +300,11 @@ fn explain_outcome(outcome: &Outcome) -> Option<SharedString> {
     match outcome {
         Outcome::Invalid(error) => Some(error.message.clone().into()),
         Outcome::Failed(error) => Some(error.message.clone().into()),
-        Outcome::Blocked => Some("a chip before it does not evaluate".into()),
+        Outcome::Blocked => Some("blocked by an earlier chip".into()),
         Outcome::Disabled => None,
         Outcome::Named { counts, .. } => Some(
             format!(
-                "{} nodes: {} targets, {} configured targets, {} actions",
+                "{} nodes · {} targets · {} configured targets · {} actions",
                 counts.nodes, counts.targets, counts.configured_targets, counts.actions
             )
             .into(),
@@ -369,22 +369,12 @@ mod tests {
         let second = stack.push("except //a:b");
         let explained = explain(stack.chip(first).unwrap(), None);
         let lines: Vec<&str> = explained.lines().collect();
-        assert_eq!(
-            lines,
-            [long, "a source, joining the union the stack starts from"]
-        );
+        assert_eq!(lines, [long, "source"]);
         let chip = stack.chip(second).unwrap();
         assert_ne!(chip.expanded(), chip.text());
         let explained = explain(chip, None);
         let lines: Vec<&str> = explained.lines().collect();
-        assert_eq!(
-            lines,
-            [
-                chip.text(),
-                chip.expanded(),
-                "a refinement of the set before it"
-            ]
-        );
+        assert_eq!(lines, [chip.text(), chip.expanded(), "refinement"]);
     }
 
     #[test]
