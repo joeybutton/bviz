@@ -14,6 +14,7 @@ mod key_scope;
 pub mod keymap_probe;
 mod keys;
 mod keys_help;
+mod label_line;
 mod layer;
 mod legend;
 mod list_scroll;
@@ -52,6 +53,7 @@ pub use keys_help::{
     GESTURE_MAX_CHARS, GestureGroup, KEYS_HELP_NAME, KeyGroup, KeyRow, KeysHelp, KeysHelpEvent,
     LABEL_MAX_CHARS, keys_in_effect,
 };
+pub use label_line::{HintedLabelLine, LabelLine};
 pub use layer::{cached_layer, overlay_canvas};
 pub use legend::{
     CloseLegend, Legend, LegendEntry, LegendState, LegendToggle, PaintSwatch, ShowLegend, Swatch,

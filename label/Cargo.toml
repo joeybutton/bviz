@@ -1,0 +1,11 @@
+[package]
+name = "bviz_label"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lib]
+name = "bviz_label"
+path = "src/lib.rs"

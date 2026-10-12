@@ -232,7 +232,7 @@ pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
 /// How the row offering `candidate` reads its text: as the graph shows it,
 /// parted where that leads up to the node's own name.
 pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Parts) {
-    let shown = shared.labels.repos().show(&candidate.text);
+    let shown = shared.labels.repos().names().show(&candidate.text);
     let parts = Parts::of_label(shown.text()).or_else(|| {
         let text = shown.text();
         let path = path(text, candidate.kind);
@@ -249,7 +249,7 @@ pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Parts) 
 /// `written`, a label or package path as a reader writes it, as the graph
 /// shows it.
 pub(crate) fn shown(shared: &Shared, written: &str) -> String {
-    shared.labels.repos().show(written).into_text()
+    shared.labels.repos().names().show(written).into_text()
 }
 
 /// The short name of the configuration the node a row offers is built in.

@@ -268,7 +268,7 @@ impl TargetIndex {
                 named.into_iter().map(String::as_str).collect()
             }
             Repo::Apparent(name) => {
-                let named = self.labels.repos().canonical(name).unwrap_or(name);
+                let named = self.labels.repos().names().canonical(name).unwrap_or(name);
                 let repos = self.repos.iter().map(String::as_str);
                 repos
                     .filter(|held| repo_matches(named, strip_sigil(held)))

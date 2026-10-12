@@ -15,7 +15,6 @@ use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
 use crate::hue::Hue;
-use crate::label_line::LabelLine;
 use crate::model::{FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced};
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
@@ -31,6 +30,7 @@ use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
     CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,

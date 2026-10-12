@@ -6,7 +6,6 @@
 //! returns to it along with the filter.
 
 use crate::column::{Folding, line, scrolling};
-use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
 use crate::point::{shown_name, written_name};
@@ -18,6 +17,7 @@ use bviz_graph_layout::select::labels::package_label;
 use bviz_graph_layout::shown::name_start;
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::{
     Button, ListScroll, TextTooltip, TruncatingLabel, load_in_background, overlay_canvas,
 };

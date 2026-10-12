@@ -1,8 +1,8 @@
 //! A label set on one line of whatever width it is given.
 
-use bviz_graph_layout::shown::{Fitted, Parts, fit};
+use crate::Hint;
+use bviz_label::shown::{Fitted, Parts, fit};
 use bviz_ui_assets::{shape_line, text_metrics};
-use bviz_ui_components::Hint;
 use gpui::{
     App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, HighlightStyle, Hsla,
     InspectorElementId, IntoElement, LayoutId, Pixels, RenderOnce, ShapedLine, SharedString,
@@ -15,7 +15,7 @@ use std::rc::Rc;
 /// in the ink it inherits, where it lives set in `muted`. It stands as wide
 /// as it reads whole and narrows to whatever its line gives it, cut short as
 /// [`fit`] cuts it.
-pub(crate) struct LabelLine {
+pub struct LabelLine {
     text: SharedString,
     parts: Parts,
     muted: Hsla,
@@ -28,7 +28,7 @@ pub(crate) struct LabelLine {
 impl LabelLine {
     /// `label`, a label as it is shown; text that is no label is cut short at
     /// its end.
-    pub(crate) fn new(label: impl Into<SharedString>, muted: Hsla) -> Self {
+    pub fn new(label: impl Into<SharedString>, muted: Hsla) -> Self {
         let text = label.into();
         Self {
             parts: Parts::of_label(&text).unwrap_or_default(),
@@ -40,7 +40,7 @@ impl LabelLine {
     }
 
     /// `text` parted as `parts` parts it.
-    pub(crate) fn parted(text: impl Into<SharedString>, parts: Parts, muted: Hsla) -> Self {
+    pub fn parted(text: impl Into<SharedString>, parts: Parts, muted: Hsla) -> Self {
         Self {
             text: text.into(),
             parts,
@@ -52,7 +52,7 @@ impl LabelLine {
 
     /// Picks out the chars `chars` of the text, ascending, in `style`,
     /// wherever they are kept.
-    pub(crate) fn picked(mut self, chars: Vec<u32>, style: HighlightStyle) -> Self {
+    pub fn picked(mut self, chars: Vec<u32>, style: HighlightStyle) -> Self {
         self.picked = Some((chars, style));
         self
     }
@@ -60,7 +60,7 @@ impl LabelLine {
     /// The line in a box keyed by `id`, whose hint reads `written`, the text
     /// as a reader writes it, wherever the line reads otherwise: cut short to
     /// fit, or shown shorter than it is written.
-    pub(crate) fn hinted(
+    pub fn hinted(
         self,
         id: impl Into<ElementId>,
         written: impl Into<SharedString>,
@@ -212,7 +212,7 @@ impl Element for LabelLine {
 
 /// A [`LabelLine`] reading in full in a hint, made by [`LabelLine::hinted`].
 #[derive(IntoElement)]
-pub(crate) struct HintedLabelLine {
+pub struct HintedLabelLine {
     id: ElementId,
     line: LabelLine,
     written: SharedString,

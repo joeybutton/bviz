@@ -9,6 +9,7 @@ members = [
     "execlog",
     "graph/layout",
     "invocation",
+    "label",
     "terminal",
     "tools/notices",
     "tools/proto_field_numbers",
@@ -43,6 +44,7 @@ repository = "https://github.com/yume-ag/bviz"
 [workspace.dependencies]
 alacritty_terminal = "0.26"
 bviz_bazel_flags = { path = "bazel_flags" }
+bviz_label = { path = "label" }
 bviz_invocation = { path = "invocation" }
 bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }

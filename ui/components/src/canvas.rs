@@ -1,6 +1,7 @@
 //! Window-agnostic canvas primitives: shaping text to fit a width, and painting a
 //! filled, bordered, labeled quad.
 
+use bviz_label::shown::{ELLIPSIS, cut_end};
 use gpui::{App, Bounds, Hsla, Pixels, Rgba, TextAlign, Window, fill, point, px, size};
 use std::ops::Range;
 
@@ -43,14 +44,9 @@ impl Inked<'_> {
     }
 }
 
-const ELLIPSIS: char = '…';
-
-/// `text` shaped by `shape`, or, if wider than `avail`, its longest prefix that
-/// fits `avail` with an [`ELLIPSIS`] appended, down to none at all.
-///
-/// The whole line's glyph positions place the cut, which a shape or two
-/// confirms; finding it that way relies on an ellipsized prefix never narrowing
-/// as it lengthens.
+/// `text` shaped by `shape`, cut short at its end as [`cut_end`] cuts it to
+/// fit `avail`. The whole line's glyph positions say roughly where the cut
+/// falls, which the cut starts its search from.
 fn truncated(
     text: &str,
     avail: f32,
@@ -60,39 +56,15 @@ fn truncated(
     if f32::from(line.width()) <= avail {
         return line;
     }
-    let chars = text.chars().count();
-    let ellipsis = shape(ELLIPSIS.to_string()).width();
-    let placed = line
+    let ellipsis = shape(ELLIPSIS.to_owned()).width();
+    let near = line
         .index_for_x(px(avail) - ellipsis)
-        .map_or(chars, |byte| {
+        .map_or(text.chars().count(), |byte| {
             text.char_indices().take_while(|&(i, _)| i < byte).count()
         });
-    let mut ellipsized = |keep: usize| {
-        let cut = text.char_indices().nth(keep).map_or(text.len(), |(i, _)| i);
-        let mut s = String::with_capacity(cut + ELLIPSIS.len_utf8());
-        s.push_str(&text[..cut]);
-        s.push(ELLIPSIS);
-        shape(s)
-    };
-    let fits = |line: &gpui::ShapedLine| f32::from(line.width()) <= avail;
-    let mut keep = placed;
-    let mut best = ellipsized(keep);
-    if fits(&best) {
-        while keep < chars {
-            let longer = ellipsized(keep + 1);
-            if !fits(&longer) {
-                break;
-            }
-            best = longer;
-            keep += 1;
-        }
-    } else {
-        while keep > 0 && !fits(&best) {
-            keep -= 1;
-            best = ellipsized(keep);
-        }
-    }
-    best
+    let width = |cut: &str| f32::from(shape(cut.to_owned()).width());
+    let cut = cut_end(text, avail, width, Some(near));
+    shape(cut)
 }
 
 /// Width of the muted leading column that divides a box from its neighbor.
@@ -193,8 +165,9 @@ mod tests {
     use gpui::{Font, FontWeight, SharedString, TextRun, WindowTextSystem, font};
     use std::sync::Arc;
 
-    /// The longest prefix whose ellipsized width fits, found by shaping every
-    /// prefix: the definition [`truncated`] must agree with.
+    /// The longest prefix, of at least one char, whose ellipsized width fits,
+    /// found by shaping every prefix: the definition [`truncated`] must agree
+    /// with.
     fn truncated_by_scan(
         text: &str,
         avail: f32,
@@ -205,16 +178,17 @@ mod tests {
             return line;
         }
         let chars: Vec<char> = text.chars().collect();
-        let mut ellipsized = |keep: usize| {
-            let mut s: String = chars[..keep].iter().collect();
-            s.push(ELLIPSIS);
-            shape(s)
+        let ellipsized = |keep: usize| -> String {
+            chars[..keep]
+                .iter()
+                .copied()
+                .chain(ELLIPSIS.chars())
+                .collect()
         };
-        let longest = (0..=chars.len())
+        let longest = (1..chars.len())
             .rev()
-            .find(|&keep| f32::from(ellipsized(keep).width()) <= avail)
-            .unwrap_or(0);
-        ellipsized(longest)
+            .find(|&keep| f32::from(shape(ellipsized(keep)).width()) <= avail);
+        shape(longest.map_or_else(String::new, ellipsized))
     }
 
     const TEXTS: &[&str] = &[

@@ -4,14 +4,13 @@
 use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::history::History;
-use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
 use crate::point::{point_label, written_name};
 use crate::rules;
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
-use bviz_ui_components::{Button, TruncatingLabel};
+use bviz_ui_components::{Button, LabelLine, TruncatingLabel};
 use bviz_ui_workspace::PanelEvent;
 use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
 

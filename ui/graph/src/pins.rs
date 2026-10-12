@@ -7,12 +7,12 @@
 //! leave.
 
 use crate::column::scrolling;
-use crate::label_line::LabelLine;
 use crate::point::written_name;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
@@ -155,7 +155,7 @@ fn held(filter: &Filter, names: &Names, facets: &Facets, repos: &WrittenRepos) -
         let written = written_name(names, facets, repos, node);
         Held {
             node,
-            label: repos.show(&written).into_text().into(),
+            label: repos.names().show(&written).into_text().into(),
             written: written.into(),
             pin,
         }

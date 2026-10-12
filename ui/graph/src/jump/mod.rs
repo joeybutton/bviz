@@ -7,7 +7,6 @@ mod index;
 use crate::derive::Drawn;
 use crate::framing::{Frame, Held};
 use crate::fuzzy::{self, Matching, Row, Standing, TEXT_SIZE};
-use crate::label_line::LabelLine;
 use crate::mode::LayoutMode;
 use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
@@ -16,6 +15,7 @@ use crate::{GraphPanel, Palette, chips, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };

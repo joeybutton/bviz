@@ -180,6 +180,17 @@ impl Parts {
         })
     }
 
+    /// The parts of `path`, a file's path: its directories the place, its
+    /// file the name.
+    pub fn of_path(path: &str) -> Self {
+        let file = path.rfind('/').map_or(0, |slash| slash + 1);
+        Self {
+            place_start: 0,
+            name_start: file,
+            lead_muted: false,
+        }
+    }
+
     /// The parts of `text` with its lead in the ink of its name, ending at
     /// the byte `place_start`, and its name starting at the byte
     /// `name_start`; `None` where those are out of order or not char
@@ -251,13 +262,10 @@ pub fn fit(text: &str, parts: Parts, room: f32, mut width: impl FnMut(&str) -> f
     let joint = usize::from(name_start > place_start && chars[name_start - 1] == '/');
     let place_end = name_start - joint;
     let lay = |pieces: &[Piece]| lay_out(&chars, pieces, parts, place_start, name_start);
-    let mut fitted = |pieces: &[Piece]| {
-        let laid = lay(pieces);
-        (width(&laid.text) <= room).then_some(laid)
-    };
+    let mut fits = |pieces: &[Piece]| width(&lay(pieces).text) <= room;
     let whole = [Piece::Kept(0, chars.len())];
-    if let Some(fit) = fitted(&whole) {
-        return fit;
+    if fits(&whole) {
+        return lay(&whole);
     }
     let place = place_end - place_start;
     if place > 0 {
@@ -269,8 +277,8 @@ pub fn fit(text: &str, parts: Parts, room: f32, mut width: impl FnMut(&str) -> f
                 Piece::Kept(place_end - back, chars.len()),
             ]
         };
-        if let Some(fit) = longest(place - 1, |count| fitted(&kept(count))) {
-            return fit;
+        if let Some(count) = most_fitting(0..place, None, |count| fits(&kept(count))) {
+            return lay(&kept(count));
         }
     }
     // A lead of no more than a char stands as it is, which an ellipsis in its
@@ -284,24 +292,44 @@ pub fn fit(text: &str, parts: Parts, room: f32, mut width: impl FnMut(&str) -> f
         let joined = [Piece::Kept(place_end, name_start)];
         lead.iter().chain(&joined).chain(rest).copied().collect()
     };
-    if !lead.is_empty()
-        && let Some(fit) = fitted(&with_lead(&[Piece::Kept(name_start, chars.len())]))
-    {
-        return fit;
+    let named = with_lead(&[Piece::Kept(name_start, chars.len())]);
+    if !lead.is_empty() && fits(&named) {
+        return lay(&named);
     }
+    let cut =
+        |count: usize| with_lead(&[Piece::Kept(name_start, name_start + count), Piece::Ellipsis]);
     let name = chars.len() - name_start;
-    // Keeps `count` chars of the name past its first, so a cut keeps one.
-    let cut = |count: usize| {
-        with_lead(&[
-            Piece::Kept(name_start, name_start + count + 1),
-            Piece::Ellipsis,
-        ])
+    match most_fitting(1..name, None, |count| fits(&cut(count))) {
+        Some(count) => lay(&cut(count)),
+        None => lay(&[]),
+    }
+}
+
+/// `text` within `room` as `width` measures text: whole where it fits, else
+/// the most of its first chars that fit beside an [`ELLIPSIS`], at least one,
+/// and otherwise nothing. The search starts from `near` chars where a caller
+/// can tell roughly how many fit.
+pub fn cut_end(
+    text: &str,
+    room: f32,
+    mut width: impl FnMut(&str) -> f32,
+    near: Option<usize>,
+) -> String {
+    if width(text) <= room {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let cut = |count: usize| -> String {
+        chars[..count]
+            .iter()
+            .copied()
+            .chain(ELLIPSIS.chars())
+            .collect()
     };
-    let fit = match name {
-        0 => None,
-        _ => longest(name - 1, |count| fitted(&cut(count))),
-    };
-    fit.unwrap_or_else(|| lay(&[]))
+    match most_fitting(1..chars.len(), near, |count| width(&cut(count)) <= room) {
+        Some(count) => cut(count),
+        None => String::new(),
+    }
 }
 
 /// `shown`, a label as it is shown, or text that is no label, within `room`
@@ -366,19 +394,45 @@ fn lay_out(
     fitted
 }
 
-/// What `fit` makes of the most, up to `most`, it fits, where it fits any,
-/// fitting fewer wherever it fits more.
-fn longest<T>(most: usize, mut fit: impl FnMut(usize) -> Option<T>) -> Option<T> {
-    let mut best = fit(0)?;
-    let (mut fits, mut over) = (0, most + 1);
-    while over - fits > 1 {
-        let mid = (fits + over) / 2;
-        match fit(mid) {
-            Some(fitted) => (best, fits) = (fitted, mid),
-            None => over = mid,
+/// The most of `counts` that `fits`, which fits every count below one it
+/// fits; `None` where it fits none. Counts are tried from `near` up or down
+/// where it is given, and halved towards the most otherwise.
+fn most_fitting(
+    counts: std::ops::Range<usize>,
+    near: Option<usize>,
+    mut fits: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    if counts.is_empty() {
+        return None;
+    }
+    let Some(near) = near else {
+        if !fits(counts.start) {
+            return None;
+        }
+        let (mut fitting, mut over) = (counts.start, counts.end);
+        while over - fitting > 1 {
+            let mid = (fitting + over) / 2;
+            match fits(mid) {
+                true => fitting = mid,
+                false => over = mid,
+            }
+        }
+        return Some(fitting);
+    };
+    let mut count = near.clamp(counts.start, counts.end - 1);
+    if fits(count) {
+        while count + 1 < counts.end && fits(count + 1) {
+            count += 1;
+        }
+        return Some(count);
+    }
+    while count > counts.start {
+        count -= 1;
+        if fits(count) {
+            return Some(count);
         }
     }
-    Some(best)
+    None
 }
 
 #[cfg(test)]
@@ -504,6 +558,23 @@ mod tests {
         assert_eq!(fitted.at(20), Some(13));
         assert_eq!(fitted.at(22), Some(15));
         assert_eq!(Parts::led(text, 22, 11), None);
+    }
+
+    #[test]
+    fn a_cut_from_near_its_length_ends_where_a_halving_cut_ends() {
+        let text = "Compiling //a/very/long:label";
+        for room in [0.0, 1.0, 2.0, 7.0, 19.0, 40.0] {
+            let halved = cut_end(text, room, chars, None);
+            for near in [0, 3, 12, 40] {
+                assert_eq!(
+                    cut_end(text, room, chars, Some(near)),
+                    halved,
+                    "{room} {near}"
+                );
+            }
+        }
+        assert_eq!(cut_end(text, 7.0, chars, None), "Compil…");
+        assert_eq!(cut_end(text, 1.0, chars, None), "");
     }
 
     /// The chars of the name left out stand for the last component of the

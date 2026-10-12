@@ -62,7 +62,7 @@ pub(crate) fn kind_names(kind: Kind) -> KindNames {
 pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &mut Vec<String>) {
     let (facets, repos) = (&shared.facets, shared.labels.repos());
     let written = written_name(&shared.names, facets, repos, id);
-    let label = repos.show(&written).into_text();
+    let label = repos.names().show(&written).into_text();
     // A label shown shorter than a command line takes it is given as written
     // too, for the reader who takes it elsewhere.
     let written = (written != label).then(|| format!("written {written}"));
@@ -115,7 +115,7 @@ pub(crate) fn point_label(id: Id, shared: &Shared) -> String {
 pub(crate) fn written_name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> String {
     let label = carried_label(names, facets, id).map(Cow::Borrowed);
     match label.or_else(|| package_label(names, id).map(Cow::Owned)) {
-        Some(label) => repos.written_label(&label).into_owned(),
+        Some(label) => repos.names().written_label(&label).into_owned(),
         None => names.resolve(id).to_owned(),
     }
 }
@@ -123,6 +123,7 @@ pub(crate) fn written_name(names: &Names, facets: &Facets, repos: &WrittenRepos,
 /// How the node `id` is shown: [`written_name`] as `repos` shows it.
 pub(crate) fn shown_name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> String {
     repos
+        .names()
         .show(&written_name(names, facets, repos, id))
         .into_text()
 }
