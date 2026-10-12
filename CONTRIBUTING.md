@@ -43,6 +43,7 @@ Each viewer also builds as a binary of its own, taking the same flags as
 | `//ui/graph:graph` | the build and dependency graph |
 | `//ui/trace:trace` | the action timeline: thread lanes, counters, flame graph, stats |
 | `//ui/console:console` | the console output, replayed against its clock |
+| `//ui/execlog:execlog` | the spawn time by phase, from the execution log |
 
 ## Before you open a pull request
 
