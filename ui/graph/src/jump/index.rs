@@ -98,7 +98,7 @@ impl Candidates {
                 .iter()
                 .filter(|node| Scope::All.holds(node.kind))
                 .map(|node| {
-                    let text = text(shared, node.id, node.kind);
+                    let text = node_text(shared, node.id, node.kind);
                     Candidate {
                         id: node.id,
                         kind: node.kind,
@@ -162,7 +162,7 @@ fn path(text: &str, kind: Kind) -> Range<u32> {
 }
 
 /// What the node `id` of `kind` is matched by and read as.
-fn text(shared: &Shared, id: Id, kind: Kind) -> String {
+pub(crate) fn node_text(shared: &Shared, id: Id, kind: Kind) -> String {
     match kind {
         Kind::Package => package_path(shared, id),
         Kind::Action => match primary_output(id, shared) {
@@ -222,12 +222,11 @@ fn package_path(shared: &Shared, id: Id) -> String {
     path
 }
 
-/// What holds the node a row offers, where its own text does not already
-/// read it: the package holding a package, and the target owning an action
-/// or a file that is no target itself.
-pub(crate) fn container(shared: &Shared, candidate: &Candidate) -> Option<String> {
-    let id = candidate.id;
-    match candidate.kind {
+/// What holds the node `id` of `kind`, where its [text](node_text) does not
+/// already read it: the package holding a package, and the target owning an
+/// action or a file that is no target itself.
+pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
+    match kind {
         Kind::Package => {
             let parent = shared.base.nodes.get(id.0 as usize)?.parent?;
             Some(package_path(shared, parent))
@@ -417,7 +416,7 @@ pub(crate) mod tests {
                 .find(|candidate| candidate.id == id)
                 .expect("an offered node");
             (
-                container(&shared, candidate),
+                container(&shared, candidate.id, candidate.kind),
                 configuration(&shared, candidate),
             )
         };

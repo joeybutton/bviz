@@ -68,6 +68,7 @@ pub fn setup(cx: &mut App) {
     declare_scopes(cx, [KEY_CONTEXT]);
     cx.bind_keys(bindings());
     bviz_ui_components::register_keys(cx);
+    bviz_ui_components::place_tooltips(cx);
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
             cx.quit();

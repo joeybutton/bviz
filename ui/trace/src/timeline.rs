@@ -24,8 +24,8 @@ use bviz_ui_components::gesture::{
     scroll_pixels, wheel_zoom_factor,
 };
 use bviz_ui_components::{
-    DragEnd, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, overlay_canvas, paint_tooltip_box,
-    track_drag,
+    CardAnchor, DragEnd, HoverCard, ShownCard, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    hover_card_canvas, overlay_canvas, track_drag,
 };
 use bviz_ui_playback::Clock;
 use gpui::{
@@ -587,9 +587,8 @@ pub(crate) struct Timeline {
     framed_on_fit: Option<TimeSpan>,
     /// The timeline's memoized culled draw list; see [`SliceDrawCache`].
     slice_draw: Option<SliceDrawCache>,
-    /// The cursor position while it hovers the flame lanes, anchoring the slice
-    /// tooltip; `None` otherwise.
-    hover: Option<Point<Pixels>>,
+    /// The card describing the slice under the pointer.
+    card: HoverCard<Slice>,
     /// The cursor position while it hovers the time-content column and no drag is
     /// in progress, drawn as a crosshair; `None` otherwise.
     crosshair: Option<Point<Pixels>>,
@@ -655,7 +654,7 @@ impl Timeline {
             follow: Follow::Playhead,
             framed_on_fit: None,
             slice_draw: None,
-            hover: None,
+            card: HoverCard::new(cx, |timeline| &mut timeline.card, Self::carded),
             crosshair: None,
             drag: TimelineDrag::None,
             last_mouse: Point::default(),
@@ -876,11 +875,17 @@ impl Timeline {
         self.scroll_counters_to(self.counter_scroll(cx) - dy, cx);
     }
 
-    /// Clears the slice tooltip and crosshair, so a tab switch drops them
+    /// Clears the slice card and crosshair, so a tab switch drops them
     /// instead of leaving them until the next mouse move.
     pub(crate) fn clear_hover(&mut self) {
-        self.hover = None;
+        self.card.leave();
         self.crosshair = None;
+    }
+
+    /// The slice under the pointer, which the card describes.
+    fn carded(&self, cx: &App) -> Option<Slice> {
+        let at = self.card.pointer()?;
+        Some(*self.slice_at(at, cx)?.slice())
     }
 
     /// Whether `pos` lies over a time-axis region the crosshair shows on: the
@@ -1229,12 +1234,10 @@ impl Timeline {
         self.invalidate_canvas(cx);
     }
 
-    /// Tracks the cursor for the slice tooltip. A move outside the lanes that
-    /// leaves nothing to clear costs no repaint.
+    /// Tracks the cursor for the slice card.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let was_hovering = self.hover.is_some();
-        self.hover = self.regions(cx).in_flame(pos).then_some(pos);
-        if was_hovering || self.hover.is_some() {
+        let slice = self.slice_at(pos, cx).map(|hovered| *hovered.slice());
+        if self.card.hover(pos, slice.as_ref()) {
             cx.notify();
         }
     }
@@ -1342,7 +1345,7 @@ impl Timeline {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
-                    let cleared = this.crosshair.take().is_some() | this.hover.take().is_some();
+                    let cleared = this.crosshair.take().is_some() | this.card.leave();
                     if cleared {
                         cx.notify();
                     }
@@ -1374,14 +1377,29 @@ impl Render for Timeline {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let entity = cx.entity();
         let slices = cached_layer(self.canvas.clone());
-        let overlay = overlay_canvas(overlay_paint(profile, lanes, entity, palette));
+        let overlay = overlay_canvas(overlay_paint(profile, lanes, entity.clone(), palette));
+        let card = hover_card_canvas(palette.colors.tooltip(), move |_, _, cx| {
+            let timeline = entity.read(cx);
+            let at = timeline.card.pointer()?;
+            let hovered = timeline.slice_at(at, cx)?;
+            if !timeline.card.shows(hovered.slice()) {
+                return None;
+            }
+            let model = timeline.model.read(cx);
+            let session = model.session().map(|session| session.read(cx));
+            Some(ShownCard {
+                lines: slice_tooltip(&hovered, session).into(),
+                anchor: CardAnchor::Pointer(at),
+            })
+        });
         let root = div()
             .id("trace-content")
             .relative()
             .size_full()
             .overflow_hidden()
             .child(slices)
-            .child(overlay);
+            .child(overlay)
+            .child(card);
         self.content_handlers(root, cx).into_any_element()
     }
 }
@@ -1428,7 +1446,7 @@ fn timeline_on_drag(
         TimelineDrag::None => {}
     }
     timeline.release_if_moved(before);
-    timeline.update_hover(position, cx);
+    timeline.card.drag(position);
     if moves_slices {
         timeline.invalidate_canvas(cx);
     } else {
@@ -1438,11 +1456,12 @@ fn timeline_on_drag(
 
 fn timeline_end_drag(
     timeline: &mut Timeline,
-    _: Point<Pixels>,
+    position: Point<Pixels>,
     end: DragEnd,
     _: &mut Window,
     cx: &mut Context<Timeline>,
 ) {
+    timeline.update_hover(position, cx);
     match std::mem::replace(&mut timeline.drag, TimelineDrag::None) {
         TimelineDrag::TimeRegion(drag) => {
             timeline.commit_time_region(drag, end, cx);
@@ -2216,7 +2235,6 @@ fn overlay_paint(
             selection,
             playhead,
             crosshair,
-            hovered,
             dragging,
         ) = {
             let timeline = parent.read(cx);
@@ -2225,10 +2243,6 @@ fn overlay_paint(
             let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let model = timeline.model.read(cx);
-            let hovered = timeline.hover.and_then(|at| {
-                let session = model.session().map(|session| session.read(cx));
-                Some((at, slice_tooltip(&timeline.slice_at(at, cx)?, session)))
-            });
             let selection = timeline.drag.preview(model.time_selection());
             (
                 tv,
@@ -2239,7 +2253,6 @@ fn overlay_paint(
                 selection,
                 model.playhead_us(cx),
                 timeline.crosshair,
-                hovered,
                 !matches!(timeline.drag, TimelineDrag::None),
             )
         };
@@ -2273,9 +2286,6 @@ fn overlay_paint(
                 window,
                 cx,
             );
-        }
-        if let Some((at, lines)) = hovered {
-            paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);
@@ -2628,15 +2638,14 @@ mod tests {
             [
                 "Compiling a.cc",
                 "action processing · 1.00ms",
-                "mnemonic: CppCompile",
-                "configuration: k8-fastbuild",
+                "CppCompile · k8-fastbuild",
             ]
         );
     }
 
     #[test]
     fn a_tooltip_shows_the_checksum_of_a_configuration_no_session_names() {
-        let by_checksum = format!("configuration: {CONFIGURATION}");
+        let by_checksum = format!("CppCompile · {CONFIGURATION}");
         let unread = Session::default();
         let elsewhere = crate::tests::session_knowing(&[("0c3d9a7714be", "k8-opt-exec")]);
         for session in [None, Some(&unread), Some(&elsewhere)] {

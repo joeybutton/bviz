@@ -1,7 +1,7 @@
 //! A table sorted by a click on a column's header.
 
 use crate::gesture::{Button, Entry, Input, Place};
-use gpui::{Div, Hsla, IntoElement, ParentElement, Pixels, Styled, div};
+use gpui::{Div, Hsla, IntoElement, ParentElement, Pixels, SharedString, Styled, div};
 
 /// The gesture asking a table to sort as [`Sort::clicked`] does, for which its
 /// view acts on `intent`.
@@ -39,6 +39,11 @@ impl<C: Copy + PartialEq> Sort<C> {
     pub fn of(self, column: C) -> Option<bool> {
         (self.by == column).then_some(self.descending)
     }
+}
+
+/// The hint of a sortable column header ordering the table by `what`.
+pub fn sort_hint(what: &str) -> SharedString {
+    format!("Sort by {what}").into()
 }
 
 /// A sortable column header's `title`, with a caret pointing the way the

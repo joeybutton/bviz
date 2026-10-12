@@ -1,15 +1,15 @@
 use bviz_terminal::{Cell, Flags, Scroll, Terminal};
 use bviz_ui_components::{
-    Axis, DEFAULT_MIN_THUMB, DragEnd, Scrollbar, ScrollbarColors, track_drag,
+    Axis, DEFAULT_MIN_THUMB, DragEnd, Hint, Scrollbar, ScrollbarColors, track_drag,
 };
-use bviz_ui_theme::ThemeColors;
+use bviz_ui_theme::{ThemeColors, TooltipColors};
 use gpui::{
-    App, Bounds, Element, Entity, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style, TextRun, Window, fill, point, px,
-    relative, size,
+    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, Font, GlobalElementId,
+    Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point, ShapedLine, Style,
+    TextRun, Window, div, fill, point, prelude::*, px, relative, size,
 };
 
-use super::{ConsoleIntent, ConsolePanel, ContentLayout, GESTURES};
+use super::{ConsoleIntent, ConsolePanel, ContentLayout, GESTURES, OPEN_LINK};
 use crate::color::{CellStyle, Defaults, style_key};
 
 /// Width of the scroll bar gutter reserved on the right edge. The bar is an
@@ -54,6 +54,8 @@ pub(super) struct Prepaint {
     /// Quads painted over the text, such as the hovered URL's underline.
     overlays: Vec<PaintQuad>,
     scrollbar: Option<PaintQuad>,
+    /// The hint over each row of every URL drawn.
+    url_hints: Vec<AnyElement>,
 }
 
 impl IntoElement for TerminalElement {
@@ -314,6 +316,55 @@ impl TerminalElement {
         overlays
     }
 
+    /// An element over each row of every URL drawn, whose hint names the URL
+    /// in full and how to open it: an element of its own, so that it shows
+    /// after the delay every control's hint keeps, and laid out before the
+    /// pointer reaches the URL, whose move onto it is what starts that delay.
+    fn url_hints(
+        &self,
+        bounds: Bounds<Pixels>,
+        metrics: &Metrics,
+        columns: usize,
+        colors: TooltipColors,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        let urls = self.view.update(cx, |view, _| {
+            // A drag selecting text crosses links on its way, not to read them.
+            if view.selecting {
+                return None;
+            }
+            let frame = view.terminal_frame?;
+            let terminal = view.terminal.as_mut()?;
+            Some(view.drawn_urls.of(terminal, frame))
+        });
+        let Some(urls) = urls else {
+            return Vec::new();
+        };
+        let mut hints = Vec::with_capacity(urls.len());
+        for url in urls.iter() {
+            let hint = Hint::default()
+                .text(url.text.clone())
+                .gesture(OPEN_LINK.row());
+            for (r, span) in url.spans.iter().enumerate() {
+                let Some((first, last)) = *span else { continue };
+                let origin = point(
+                    bounds.left() + metrics.cell_width * first as f32,
+                    bounds.top() + metrics.line_height * r as f32,
+                );
+                let width = metrics.cell_width * (last - first + 1) as f32;
+                let space = size(width, metrics.line_height).map(AvailableSpace::Definite);
+                let cell = r * columns + first;
+                let id = ElementId::named_usize(url.text.clone(), cell);
+                let over = hint.clone().on(div().id(id).size_full(), colors);
+                let mut over = over.into_any_element();
+                over.prepaint_as_root(origin, space, window, cx);
+                hints.push(over);
+            }
+        }
+        hints
+    }
+
     fn install_thumb_drag(&self, window: &mut Window, cx: &App) {
         if self.view.read(cx).drag_grab.is_some() {
             track_drag(
@@ -467,12 +518,14 @@ impl Element for TerminalElement {
             colors.highlight,
         ));
         let overlays = self.url_overlay(bounds, metrics, colors.text_accent, cx);
+        let url_hints = self.url_hints(bounds, metrics, cols, colors.tooltip(), window, cx);
 
         Prepaint {
             lines,
             backgrounds,
             overlays,
             scrollbar,
+            url_hints,
         }
     }
 
@@ -507,6 +560,9 @@ impl Element for TerminalElement {
         }
         if let Some(scrollbar) = prepaint.scrollbar.take() {
             window.paint_quad(scrollbar);
+        }
+        for hint in &mut prepaint.url_hints {
+            hint.paint(window, cx);
         }
 
         self.install_thumb_drag(window, cx);

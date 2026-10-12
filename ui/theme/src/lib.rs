@@ -8,7 +8,7 @@ mod theme;
 pub use fill::{DataFill, Shade};
 pub use registry::{ThemeRegistry, built_in_themes, init, theme};
 pub use schema::ThemeFamilyContent;
-pub use theme::{Appearance, DataColors, TerminalColors, Theme, ThemeColors};
+pub use theme::{Appearance, DataColors, TerminalColors, Theme, ThemeColors, TooltipColors};
 
 use gpui::{Hsla, Rgba, hsla};
 use std::f32::consts::TAU;

@@ -14,9 +14,10 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, DragEnd, KeyScope, Legend, LegendState, SCROLLBAR_THICKNESS,
-    Scrollbar, ShowLegend, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner,
-    legend_gestures, overlay_canvas, paint_labeled_box, paint_tooltip_box, spinner, track_drag,
+    Axis, Button, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
+    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, ShownCard, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
+    cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
+    paint_labeled_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -83,11 +84,21 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
     ),
 ]);
 
-/// The weights the toolbar offers, each with its button's id and label, in the
-/// order the buttons stand.
-pub(crate) const WEIGHT_CHOICES: [(&str, &str, FlameWeight); 2] = [
-    ("flame-summed-time", "Summed time", FlameWeight::Duration),
-    ("flame-wall-time", "Wall time", FlameWeight::WallShare),
+/// The weights the toolbar offers, each with its button's id, label and hint,
+/// in the order the buttons stand.
+pub(crate) const WEIGHT_CHOICES: [(&str, &str, &str, FlameWeight); 2] = [
+    (
+        "flame-summed-time",
+        "Summed time",
+        "Size by summed time",
+        FlameWeight::Duration,
+    ),
+    (
+        "flame-wall-time",
+        "Wall time",
+        "Size by wall time",
+        FlameWeight::WallShare,
+    ),
 ];
 
 /// Whether the toolbar's button for `weight` reads as chosen while `mode`
@@ -352,11 +363,10 @@ fn remainder_label(remainder: &FlameRemainder) -> String {
     }
 }
 
-/// The tooltip's lines for `hovered`, its figures labelled with the weight of
-/// the aggregate the box belongs to. A frame gives its name and what the name
+/// The tooltip's lines for `hovered`. A frame gives its name and what the name
 /// leaves open about its spans (see [`FlameGraph::kind_or_category`]) where
-/// that is not the name itself; a remainder, and the depth drawn beneath one,
-/// says what the remainder's label counts.
+/// that is not the name itself, then its figures; a remainder, and the depth
+/// drawn beneath one, gives what the remainder's label counts and their total.
 fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let HoveredBox { aggregates, boxed } = hovered;
     let flame = &aggregates.flame;
@@ -368,14 +378,10 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
             0.0
         }
     };
-    let measure = match aggregates.mode.weight {
-        FlameWeight::Duration => "summed time",
-        FlameWeight::WallShare => "share of wall time",
-    };
     match boxed.content {
         FlameBoxContent::Frame(frame) => {
             let detail = format!(
-                "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
+                "total {} · self {} · {} span{} · {:.1}% of view",
                 format_duration(frame.total_us),
                 format_duration(flame.span_self_us(frame.node)),
                 frame.count,
@@ -398,28 +404,14 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
             let total_us = flame.remainder_total_us(&remainder);
             vec![
                 remainder_label(&remainder),
-                "frames too narrow to draw apart at this zoom".to_string(),
                 format!(
-                    "{measure}: total {}, {:.1}% of view",
+                    "too narrow · total {} · {:.1}% of view",
                     format_duration(total_us),
                     pct(total_us),
                 ),
             ]
         }
     }
-}
-
-/// Paints `hovered`'s tooltip near `at`.
-fn paint_flame_tooltip(
-    hovered: &HoveredBox,
-    at: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let lines = flame_tooltip_lines(hovered);
-    paint_tooltip_box(&lines, at, bounds, palette.tooltip, window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
@@ -447,9 +439,8 @@ pub struct FlamePanel {
     flame_bounds: Option<Bounds<Pixels>>,
     /// The panel's memoized box layout; see [`FlameBoxCache`].
     flame_boxes: Option<FlameBoxCache>,
-    /// The cursor position while it hovers the graph, anchoring the box tooltip;
-    /// `None` otherwise.
-    flame_hover: Option<Point<Pixels>>,
+    /// The card describing the box under the pointer.
+    card: HoverCard<FlameBoxContent>,
     drag: FlameDrag,
     last_mouse: Point<Pixels>,
     legend: Entity<LegendState>,
@@ -490,7 +481,7 @@ impl FlamePanel {
             flame_scroll_y: 0.0,
             flame_bounds: None,
             flame_boxes: None,
-            flame_hover: None,
+            card: HoverCard::new(cx, |panel| &mut panel.card, Self::carded),
             drag: FlameDrag::None,
             last_mouse: Point::default(),
             canvas,
@@ -525,7 +516,7 @@ impl FlamePanel {
     /// Clears the box tooltip, so a pane bringing another panel forward drops it
     /// instead of leaving it until the next mouse move.
     fn clear_hover(&mut self) {
-        self.flame_hover = None;
+        self.card.leave();
     }
 
     /// The panel's toolbar: the window the graph covers, then the controls that
@@ -546,16 +537,18 @@ impl FlamePanel {
     fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
         let mode = self.model.read(cx).flame_mode();
         let kinds = mode.labels == FlameLabels::Kind;
-        let button = |id: &'static str, label: &'static str, on: bool, to: FlameMode| {
-            let view = cx.entity();
-            Button::new(id, move |_, _, cx| {
-                view.update(cx, |this, cx| this.set_mode(to, cx));
-            })
-            .ghost()
-            .compact()
-            .selected(on)
-            .label(label)
-        };
+        let button =
+            |id: &'static str, label: &'static str, hint: &'static str, on: bool, to: FlameMode| {
+                let view = cx.entity();
+                Button::new(id, move |_, _, cx| {
+                    view.update(cx, |this, cx| this.set_mode(to, cx));
+                })
+                .ghost()
+                .compact()
+                .selected(on)
+                .label(label)
+                .tooltip(hint)
+            };
         let group = || {
             div()
                 .flex()
@@ -577,6 +570,7 @@ impl FlamePanel {
                 .child(button(
                     "flame-top-down",
                     "Top-down",
+                    "Top-down: callees",
                     mode.direction == FlameDirection::TopDown,
                     FlameMode {
                         direction: FlameDirection::TopDown,
@@ -586,19 +580,21 @@ impl FlamePanel {
                 .child(button(
                     "flame-bottom-up",
                     "Bottom-up",
+                    "Bottom-up: callers",
                     mode.direction == FlameDirection::BottomUp,
                     FlameMode {
                         direction: FlameDirection::BottomUp,
                         ..mode
                     },
                 )),
-            pair().children(WEIGHT_CHOICES.map(|(id, label, weight)| {
+            pair().children(WEIGHT_CHOICES.map(|(id, label, hint, weight)| {
                 let (chosen, to) = weight_choice(mode, weight);
-                button(id, label, chosen, to)
+                button(id, label, hint, chosen, to)
             })),
             group().child(button(
                 "flame-kinds",
                 "Kinds",
+                "Merge spans by kind",
                 kinds,
                 FlameMode {
                     labels: if kinds {
@@ -717,25 +713,28 @@ impl FlamePanel {
             .hit(&aggregates, fl, self.flame_scroll(cx), pos)
     }
 
-    /// Tracks the cursor for the box tooltip: the position is recorded across the
-    /// whole graph rect so the tooltip follows the cursor, while only a move that
-    /// draws or erases one repaints.
+    /// Tracks the cursor for the box card.
     fn update_hover(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
-        let drawn_before = self.hovered_box(cx).is_some();
-        self.flame_hover = self
-            .layout(cx)
-            .filter(|fl| fl.rect().contains(&pos))
-            .map(|_| pos);
-        if drawn_before || self.hovered_box(cx).is_some() {
+        let boxed = self.box_at(pos, cx).map(|hovered| hovered.boxed.content);
+        if self.card.hover(pos, boxed.as_ref()) {
             cx.notify();
         }
     }
 
-    /// The hovered box, with the graph the tooltip names it through, and the
-    /// position the tooltip anchors at, when the hover lands on one.
+    /// What the box under the pointer stands for, which the card describes.
+    fn carded(&self, cx: &App) -> Option<FlameBoxContent> {
+        let at = self.card.pointer()?;
+        Some(self.box_at(at, cx)?.boxed.content)
+    }
+
+    /// The box the card describes, with the graph it names the box through,
+    /// and the pointer it stands beside, while the card is shown.
     fn hovered_box(&self, cx: &App) -> Option<(Point<Pixels>, HoveredBox)> {
-        let at = self.flame_hover?;
-        Some((at, self.box_at(at, cx)?))
+        let at = self.card.pointer()?;
+        let hovered = self.box_at(at, cx)?;
+        self.card
+            .shows(&hovered.boxed.content)
+            .then_some((at, hovered))
     }
 
     /// Whether `pos` lies over the graph clear of every box and scroll bar.
@@ -897,7 +896,7 @@ impl FlamePanel {
             }
         }))
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !*hovered && this.flame_hover.take().is_some() {
+            if !*hovered && this.card.leave() {
                 cx.notify();
             }
         }))
@@ -977,15 +976,18 @@ impl FlamePanel {
         }
         let entity = cx.entity();
         let boxes = cached_layer(self.canvas.clone());
-        let overlay = overlay_canvas(move |bounds, window, cx| {
-            let (hovered, dragging) = {
-                let this = entity.read(cx);
-                (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
-            };
-            if let Some((at, drawn)) = hovered {
-                paint_flame_tooltip(&drawn, at, bounds, &palette, window, cx);
+        let card = hover_card_canvas(palette.colors.tooltip(), {
+            let entity = entity.clone();
+            move |_, _, cx| {
+                let (at, hovered) = entity.read(cx).hovered_box(cx)?;
+                Some(ShownCard {
+                    lines: flame_tooltip_lines(&hovered).into(),
+                    anchor: CardAnchor::Pointer(at),
+                })
             }
-            if dragging {
+        });
+        let overlay = overlay_canvas(move |_, window, cx| {
+            if !matches!(entity.read(cx).drag, FlameDrag::None) {
                 track_drag(window, &entity, flame_on_drag, flame_end_drag);
             }
         });
@@ -1028,6 +1030,7 @@ impl FlamePanel {
                 .overflow_hidden()
                 .child(boxes)
                 .child(overlay)
+                .child(card)
                 .children(spinner),
             cx,
         )
@@ -1059,18 +1062,19 @@ fn flame_on_drag(
         FlameDrag::HThumb(grab) => panel.hthumb_to(position, grab, cx),
         FlameDrag::None => {}
     }
-    panel.update_hover(position, cx);
+    panel.card.drag(position);
     panel.invalidate_canvas(cx);
 }
 
 fn flame_end_drag(
     panel: &mut FlamePanel,
-    _: Point<Pixels>,
+    position: Point<Pixels>,
     _: DragEnd,
     _: &mut Window,
     cx: &mut Context<FlamePanel>,
 ) {
     panel.drag = FlameDrag::None;
+    panel.update_hover(position, cx);
     panel.invalidate_canvas(cx);
 }
 
@@ -1349,7 +1353,7 @@ mod tests {
             [
                 "compile",
                 "general information",
-                "summed time: total 1.00ms, self 1.00ms, 1 span, 66.7% of view"
+                "total 1.00ms · self 1.00ms · 1 span · 66.7% of view"
             ]
         );
         assert_eq!(
@@ -1357,7 +1361,7 @@ mod tests {
             [
                 "compile",
                 "general information",
-                "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
+                "total 750µs · self 750µs · 1 span · 75.0% of view"
             ]
         );
     }
@@ -1406,19 +1410,11 @@ mod tests {
         };
         assert_eq!(
             lines(FlameWeight::Duration),
-            [
-                "(40 others)",
-                "frames too narrow to draw apart at this zoom",
-                "summed time: total 200µs, 1.3% of view"
-            ]
+            ["(40 others)", "too narrow · total 200µs · 1.3% of view"]
         );
         assert_eq!(
             lines(FlameWeight::WallShare),
-            [
-                "(40 others)",
-                "frames too narrow to draw apart at this zoom",
-                "share of wall time: total 100µs, 1.0% of view"
-            ]
+            ["(40 others)", "too narrow · total 100µs · 1.0% of view"]
         );
     }
 
@@ -1463,11 +1459,7 @@ mod tests {
             boxed
         };
         let remainder = of_kind(|c| matches!(c, FlameBoxContent::Remainder(_)));
-        let lines = [
-            "(40 frames)",
-            "frames too narrow to draw apart at this zoom",
-            "summed time: total 200µs, 2.0% of view",
-        ];
+        let lines = ["(40 frames)", "too narrow · total 200µs · 2.0% of view"];
         assert_eq!(lines_at(remainder), lines);
         // The row the thin spans' own children reach is the remainder's too,
         // and names none of them.
@@ -1495,10 +1487,7 @@ mod tests {
             .expect("the box at its own center");
         assert_eq!(
             flame_tooltip_lines(&hovered),
-            [
-                "All",
-                "summed time: total 1.00ms, self 0µs, 0 spans, 100.0% of view"
-            ]
+            ["All", "total 1.00ms · self 0µs · 0 spans · 100.0% of view"]
         );
     }
 
@@ -1601,7 +1590,7 @@ mod tests {
         assert_eq!(
             figures(FlameWeight::Duration),
             (
-                Some("summed time: total 1.00ms, self 600µs, 1 span, 50.0% of view".to_string()),
+                Some("total 1.00ms · self 600µs · 1 span · 50.0% of view".to_string()),
                 600
             )
         );
@@ -1610,10 +1599,7 @@ mod tests {
         assert_eq!(
             figures(FlameWeight::WallShare),
             (
-                Some(
-                    "share of wall time: total 750µs, self 550µs, 1 span, 50.0% of view"
-                        .to_string()
-                ),
+                Some("total 750µs · self 550µs · 1 span · 50.0% of view".to_string()),
                 600
             )
         );

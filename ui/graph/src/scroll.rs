@@ -197,6 +197,7 @@ pub(crate) fn scroll_drag_move(
     let Drag::Scrollbar(drag) = view.drag else {
         return;
     };
+    view.box_card.drag(position, cx);
     let Some(bar) = current_scrollbar(view, drag.axis) else {
         return;
     };

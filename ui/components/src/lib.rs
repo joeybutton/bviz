@@ -8,6 +8,8 @@ mod drag;
 mod dropdown;
 mod find_keys;
 pub mod gesture;
+mod hint;
+mod hover_card;
 mod key_scope;
 pub mod keymap_probe;
 mod keys;
@@ -27,6 +29,7 @@ mod spinner;
 pub mod text_input;
 mod toolbar;
 mod tooltip;
+mod truncating_label;
 mod zoom_keys;
 
 pub use background::{Pending, load_in_background};
@@ -36,6 +39,8 @@ pub use divider::{Divider, DividerSide};
 pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use find_keys::find_key_bindings;
+pub use hint::Hint;
+pub use hover_card::{HoverCard, ShownCard, defer_hover_card, hover_card_canvas};
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{
     KeyStyle, action_label, binding_text, binding_within, key_text, key_text_in, key_text_within,
@@ -57,14 +62,15 @@ pub use notice::{Source, centered_notice, centered_spinner};
 pub use query_field::{QueryField, QueryFieldEvent};
 pub use scrollbar::{Axis, DEFAULT_MIN_THUMB, SCROLLBAR_THICKNESS, Scrollbar, ScrollbarColors};
 pub use scrubber::{ScrubberColors, ScrubberState, scrubber};
-pub use sort::{Sort, sort_gesture, sort_header};
+pub use sort::{Sort, sort_gesture, sort_header, sort_hint};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
-    TextTooltip, TooltipColors, beside_anchor, paint_tooltip, paint_tooltip_box, room_beside,
+    CardAnchor, TextTooltip, beside_anchor, defer_tooltip, place_tooltips, room_beside,
     tooltip_extent,
 };
+pub use truncating_label::TruncatingLabel;
 pub use zoom_keys::{ZOOM_KEY_STEP, ZoomIn, ZoomOut, zoom_key_bindings};
 
 use gpui::{App, Pixels, px};

@@ -12,8 +12,8 @@ use bviz_trace_layout::{FlameLabels, ScopeAggregate, StatRow};
 use bviz_ui_components::gesture::{Button, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Axis, DEFAULT_MIN_THUMB, DragEnd, KeyScope, SCROLLBAR_THICKNESS, Scrollbar, Sort, TextTooltip,
-    Toolbar, centered_spinner, load_in_background, overlay_canvas, sort_gesture, sort_header,
-    track_drag,
+    Toolbar, TruncatingLabel, centered_spinner, load_in_background, overlay_canvas, sort_gesture,
+    sort_header, sort_hint, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -105,6 +105,21 @@ fn column_header(column: StatsColumn, labels: FlameLabels) -> &'static str {
         StatsColumn::Avg => "Avg",
         StatsColumn::Max => "Max",
         StatsColumn::Percent => "%",
+    }
+}
+
+/// What a click on `column`'s header sorts the rows by, under `labels`.
+fn sorts_by(column: StatsColumn, labels: FlameLabels) -> &'static str {
+    match column {
+        StatsColumn::Key => match labels {
+            FlameLabels::Kind => "kind",
+            FlameLabels::Name => "name",
+        },
+        StatsColumn::Count => "span count",
+        StatsColumn::SelfTime => "self time",
+        StatsColumn::Avg => "mean self time",
+        StatsColumn::Max => "max self time",
+        StatsColumn::Percent => "self-time share",
     }
 }
 
@@ -349,6 +364,10 @@ impl StatsPanel {
                     .id(SharedString::from(format!("stats-h-{i}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(palette.hover))
+                    .tooltip(TextTooltip::builder(
+                        sort_hint(sorts_by(column, labels)),
+                        palette.colors.tooltip(),
+                    ))
                     .on_click(cx.listener(move |this, e, _, cx| {
                         GESTURES.dispatch(Pointer::click(e), |intent| match intent {
                             StatsIntent::Sort => {
@@ -380,7 +399,6 @@ impl StatsPanel {
         let row_hover = palette.hover;
         let row_pick = palette.selection;
         let row_pick_hover = palette.picked_hover();
-        let tooltip = palette.tooltip;
         let picked = self.picked_row(&order);
         let version = order.aggregate_version;
         let entity = cx.entity();
@@ -402,13 +420,11 @@ impl StatsPanel {
                     let cells = STATS_COLUMNS.iter().map(|spec| {
                         let text: SharedString = match spec.column {
                             StatsColumn::Key => {
-                                let key = SharedString::from(key.to_string());
-                                let named = div()
-                                    .id(("stats-key", index as usize))
-                                    .w_full()
-                                    .min_w_0()
-                                    .tooltip(TextTooltip::builder(key.clone(), tooltip))
-                                    .child(line(key));
+                                let named = TruncatingLabel::new(
+                                    ("stats-key", index as usize),
+                                    key.to_string(),
+                                )
+                                .w_full();
                                 return table_cell(spec.width, [named.into_any_element()]);
                             }
                             StatsColumn::Count => row.count.to_string().into(),

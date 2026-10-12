@@ -16,7 +16,7 @@ use bviz_graph_layout::select::labels::{carried_label, package_label};
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
 use bviz_ui_components::{
-    Button, ListScroll, TextTooltip, TooltipColors, load_in_background, overlay_canvas,
+    Button, ListScroll, TextTooltip, TruncatingLabel, load_in_background, overlay_canvas,
 };
 use gpui::{ClickEvent, Context, Div, Pixels, SharedString, Stateful, Task, div, prelude::*, px};
 use std::collections::HashMap;
@@ -273,7 +273,7 @@ fn crossing(
     }
     let beyond = difference.changes.len().saturating_sub(CHANGES_SHOWN);
     if beyond > 0 {
-        let _ = write!(text, "\nand {beyond} more");
+        let _ = write!(text, "\n+{beyond} more");
     }
     text
 }
@@ -511,7 +511,7 @@ fn endpoint(
     spelling: &Spelling,
     palette: &Palette,
 ) -> Stateful<Div> {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     div()
         .id(key)
         .flex()
@@ -569,7 +569,7 @@ fn chain<'a>(
     spelling: &'a Spelling,
     palette: &'a Palette,
 ) -> impl Iterator<Item = Stateful<Div>> + 'a {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     links.iter().enumerate().map(move |(position, link)| {
         div()
             .id(("why-link", position))
@@ -669,7 +669,9 @@ pub(crate) fn card(
         .then_some("the map leaves some transitions unmarked; the layered layout marks each");
     let from = match &question.dependent {
         Some(dependent) => endpoint("why-from", "from ", dependent, &spelling, palette),
-        None => div().id("why-from").child(line("from every dependent")),
+        None => div()
+            .id("why-from")
+            .child(TruncatingLabel::new("label", "from every dependent")),
     };
     let head = div()
         .flex()
@@ -683,7 +685,10 @@ pub(crate) fn card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(line("why is this built").text_color(palette.colors.text_muted))
+                .child(
+                    TruncatingLabel::new("why-heading", "why is this built")
+                        .text_color(palette.colors.text_muted),
+                )
                 .child(
                     Button::new(
                         "why-clear",
@@ -702,12 +707,12 @@ pub(crate) fn card(
             palette,
         ))
         .child(from)
-        .child(line(status))
+        .child(TruncatingLabel::new("why-status", status))
         .children(unmarked.map(|unmarked| div().min_w_0().child(unmarked)))
         .children(map_note.map(|note| div().min_w_0().child(note)))
-        .children(
-            (!links.is_empty()).then(|| line("shortest:").text_color(palette.colors.text_muted)),
-        );
+        .children((!links.is_empty()).then(|| {
+            TruncatingLabel::new("why-shortest", "shortest:").text_color(palette.colors.text_muted)
+        }));
     let chain =
         (!links.is_empty()).then(|| listed(view, chain(&links, &spelling, palette), palette, cx));
     Some(Folding::new(head, chain, palette))

@@ -1,11 +1,11 @@
 //! A multi-select: a trigger reading how many of its values are checked, and a
 //! menu of rows that stays open as they are toggled.
 
-use crate::KeyScope;
 use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
 use crate::scrollbar::ScrollbarColors;
+use crate::{Hint, KeyScope, TruncatingLabel};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -179,6 +179,8 @@ pub struct MultiSelect {
     /// Names what the values belong to; read on the trigger before the tally.
     label: SharedString,
     rows: Rows,
+    /// What the trigger's tooltip reads.
+    hint: Hint,
     focus_handle: FocusHandle,
     /// Closes the menu when focus leaves it (an outside click); installed lazily
     /// on the first render, where the window is in hand.
@@ -201,10 +203,17 @@ impl MultiSelect {
                 open: false,
                 measured: None,
             },
+            hint: Hint::default(),
             focus_handle: cx.focus_handle(),
             dismiss: None,
             scroll: ListScroll::new(),
         }
+    }
+
+    /// The tooltip reading `text`.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.hint = self.hint.text(text);
+        self
     }
 
     /// Restates the values the control offers and which of them are checked.
@@ -254,7 +263,10 @@ impl MultiSelect {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let (checked, total) = self.rows.tally();
-        menu_chrome::trigger(self.id.clone(), colors)
+        let trigger = menu_chrome::trigger(self.id.clone(), colors);
+        let open = |select: &Self| select.rows.open;
+        (self.hint.clone())
+            .on_picker(trigger, colors.tooltip(), cx.weak_entity(), open)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 let open = !this.rows.open;
                 this.set_open(open, window, cx);
@@ -298,8 +310,10 @@ impl MultiSelect {
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(set_all("multi-select-all", "all", true, cx))
-                .child(set_all("multi-select-none", "none", false, cx)),
+                .child(set_all("multi-select-all", "all", true, cx).tooltip("Check every value"))
+                .child(
+                    set_all("multi-select-none", "none", false, cx).tooltip("Uncheck every value"),
+                ),
         )
     }
 
@@ -363,7 +377,11 @@ impl MultiSelect {
             cx.notify();
         }))
         .child(menu_chrome::check(colors, option.checked))
-        .child(menu_chrome::reading(label_width, option.label.clone()))
+        .child(
+            TruncatingLabel::new(("multi-select-label", index), option.label.clone())
+                .w(label_width)
+                .flex_none(),
+        )
     }
 }
 

@@ -10,7 +10,7 @@ use bviz_invocation::Configurations;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip, TooltipColors};
+use bviz_ui_components::{Button, ListScroll, TextTooltip, TruncatingLabel};
 use gpui::{
     App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
     uniform_list,
@@ -140,7 +140,7 @@ fn row(
         .rounded_sm()
         .tooltip(TextTooltip::builder(
             row.hover(configurations).into(),
-            TooltipColors::from_colors(colors),
+            colors.tooltip(),
         ))
         .child(legend::status(row.listed.status(), palette))
         .child(
@@ -297,7 +297,7 @@ pub(crate) fn card(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(line(report.builds.line()))
+                .child(TruncatingLabel::new("report-builds", report.builds.line()))
                 .child(
                     Button::new(
                         "report-close",
@@ -308,7 +308,7 @@ pub(crate) fn card(
                     .compact(),
                 ),
         )
-        .children(report.tests.line().map(line))
+        .children((report.tests.line()).map(|tests| TruncatingLabel::new("report-tests", tests)))
         .children(
             report
                 .mismatches
@@ -385,7 +385,7 @@ mod tests {
             selected(&outcomes, &format!("action:{GEN_OUTPUT}")),
             Some((
                 Status::RootCause,
-                "Genrule //gen:gen failed, failing 1 target".into(),
+                "Genrule //gen:gen failed · 1 target failed".into(),
                 None
             ))
         );

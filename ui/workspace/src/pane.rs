@@ -1,12 +1,10 @@
 use crate::drop::Band;
-use crate::gestures::{CHROME_GESTURES, ChromeIntent};
+use crate::gestures::{CHROME_GESTURES, ChromeIntent, OPEN_PANEL_MENU};
 use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, Documents, PanelEvent};
 use bviz_ui_components::gesture::{Pointer, scroll_pixels};
-use bviz_ui_components::{
-    Button, KeysHelp, KeysHelpEvent, TextTooltip, TooltipColors, overlay_canvas,
-};
+use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, overlay_canvas};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Anchor, AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, Entity, EntityId,
@@ -610,8 +608,8 @@ impl Pane {
     }
 
     /// The control that puts up the menu of rearrangements the panel on show
-    /// offers, so the menu is there to be found without knowing that a press of
-    /// the secondary button over a tab or a handle opens it too.
+    /// offers, so the menu is there to be found without knowing the gesture
+    /// that opens it too, which its hint names.
     fn menu_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let pane = cx.entity();
         let panel = self.active_panel().entity_id();
@@ -626,7 +624,7 @@ impl Pane {
             .ghost()
             .icon(MENU_ICON)
             .compact()
-            .tooltip("Panel menu"),
+            .gesture(OPEN_PANEL_MENU.row()),
         )
     }
 
@@ -1013,7 +1011,7 @@ fn naming_tooltip(
     colors: &ThemeColors,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let panel = panel.clone();
-    let colors = TooltipColors::from_colors(colors);
+    let colors = colors.tooltip();
     move |_, cx| {
         let joined = Documents::global(cx).read(cx).joined_name(panel.document());
         let tip = naming_tip(
@@ -1029,10 +1027,7 @@ fn naming_tooltip(
 /// panel's whole title, the document `joined` names, and what the panel's
 /// kind shows.
 fn naming_tip(title: &str, joined: Option<&str>, description: Option<&str>) -> String {
-    let joined = joined.map(|name| format!("Part of {name}"));
-    let lines = iter::once(title)
-        .chain(joined.as_deref())
-        .chain(description);
+    let lines = iter::once(title).chain(joined).chain(description);
     lines.collect::<Vec<_>>().join("\n")
 }
 
@@ -1147,11 +1142,11 @@ mod tests {
                 Some("Invocation a5f7f3e6"),
                 Some("Time by call stack")
             ),
-            format!("{title}\nPart of Invocation a5f7f3e6\nTime by call stack")
+            format!("{title}\nInvocation a5f7f3e6\nTime by call stack")
         );
         assert_eq!(
             naming_tip(title, Some("Invocation a5f7f3e6"), None),
-            format!("{title}\nPart of Invocation a5f7f3e6")
+            format!("{title}\nInvocation a5f7f3e6")
         );
         assert_eq!(
             naming_tip(title, None, Some("Time by call stack")),

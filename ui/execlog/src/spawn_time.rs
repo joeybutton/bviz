@@ -7,8 +7,8 @@ use bviz_execlog::{Phase, PhaseTiming};
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
-    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, legend_gestures,
-    list_scrollbar, sort_gesture, sort_header,
+    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, TruncatingLabel,
+    legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -157,13 +157,16 @@ impl SpawnTimePanel {
             .iter()
             .map(|runner| runner.sum.name.clone())
             .collect();
-        let runner_picker = cx.new(|cx| Dropdown::new("mnemonic-runner", names, 0, cx));
+        let runner_picker =
+            cx.new(|cx| Dropdown::new("mnemonic-runner", names, 0, cx).tooltip("Runner shown"));
         let runner_picked = cx.subscribe(&runner_picker, |_, _, _: &DropdownEvent, cx| {
             cx.notify();
         });
         let phase = summary.longest_phase();
-        let phase_picker =
-            cx.new(|cx| Dropdown::new("top-phase", Phase::ALL.map(phase_name), phase.index(), cx));
+        let phase_picker = cx.new(|cx| {
+            Dropdown::new("top-phase", Phase::ALL.map(phase_name), phase.index(), cx)
+                .tooltip("Rank by phase")
+        });
         let phase_picked = cx.subscribe(&phase_picker, |_, _, _: &DropdownEvent, cx| {
             cx.notify();
         });
@@ -262,8 +265,7 @@ impl SpawnTimePanel {
 /// What the log holds in sum, explaining on hover how to read a sum of spawn
 /// time, and the legend naming which colour is which phase.
 fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) -> OneRow {
-    let caveats = "Spawns overlap, so summed spawn time is not wall time.\n\
-                   Spawns answered from the action cache are not logged.";
+    let caveats = "spawns overlap · not wall time\naction-cache hits not logged";
     let totals = div()
         .id("spawn-time-summary")
         .min_w_0()
@@ -275,7 +277,10 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
             summary.spawns,
             duration(summary.timing.total())
         ))
-        .tooltip(TextTooltip::builder(caveats.into(), palette.tooltip));
+        .tooltip(TextTooltip::builder(
+            caveats.into(),
+            palette.colors.tooltip(),
+        ));
     let phases = spent_in(&summary.timing)
         .map(|phase| LegendEntry::new(Swatch::Fill(palette.phase(phase)), phase_name(phase)));
     Toolbar::new()
@@ -419,7 +424,7 @@ fn plain_header(name_title: &'static str, palette: &Palette) -> Div {
 fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnTimePanel>) -> Div {
     let [name, spawns, time, bar, note] = GROUP_COLUMNS;
     let [spawns_title, time_title, bar_title, note_title] = GROUP_TITLES;
-    let sorting = |column: Column, title: &'static str, by: SortBy| {
+    let sorting = |column: Column, title: &'static str, by: SortBy, what: &str| {
         let content = sort_header(
             title,
             sort.of(by),
@@ -431,6 +436,10 @@ fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnT
             .id(title)
             .cursor_pointer()
             .hover(|style| style.bg(palette.colors.element_hover))
+            .tooltip(TextTooltip::builder(
+                sort_hint(what),
+                palette.colors.tooltip(),
+            ))
             .on_click(cx.listener(move |panel, e, _, cx| {
                 GESTURES.dispatch(Pointer::click(e), |intent| match intent {
                     SpawnTimeIntent::Sort => {
@@ -443,9 +452,9 @@ fn sorting_header(sort: Sort<SortBy>, palette: &Palette, cx: &mut Context<SpawnT
     };
     header_row(
         [
-            sorting(name, "Mnemonic", SortBy::Name),
-            sorting(spawns, spawns_title, SortBy::Spawns),
-            sorting(time, time_title, SortBy::Time),
+            sorting(name, "Mnemonic", SortBy::Name, "mnemonic"),
+            sorting(spawns, spawns_title, SortBy::Spawns, "spawn count"),
+            sorting(time, time_title, SortBy::Time, "spawn time"),
             cell(bar, bar_title).into_any_element(),
             cell(note, note_title).into_any_element(),
         ],
@@ -467,7 +476,7 @@ fn group_table(id: &'static str, header: Div, rows: &[GroupRow], palette: &Palet
         row(
             (id, index),
             [
-                cell(name, div().text_ellipsis().child(group.name.clone())),
+                cell(name, TruncatingLabel::new("name", group.name.clone())),
                 cell(spawns, group.spawns.to_string()),
                 cell(total, duration(group.timing.total())),
                 cell(bar, phase_bar(&group.timing, longest, palette)),
@@ -491,11 +500,6 @@ const TOP_COLUMNS: [Column; 4] = [
     text(Width::Fixed(NAME_WIDTH)),
     text(Width::Rest),
 ];
-
-/// A line of a cell, cut short where the cell runs out of room for it.
-fn line(text: SharedString) -> Div {
-    div().min_w_0().text_ellipsis().child(text)
-}
 
 /// `spawns`, longest in `phase` first, each named by its target and output.
 fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
@@ -523,8 +527,11 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
             ("top", index),
             [
                 cell(time, duration(spawn.time)),
-                cell(mnemonic, line(spawn.mnemonic.clone())),
-                cell(runner, line(spawn.runner.clone())),
+                cell(
+                    mnemonic,
+                    TruncatingLabel::new("mnemonic", spawn.mnemonic.clone()),
+                ),
+                cell(runner, TruncatingLabel::new("runner", spawn.runner.clone())),
                 cell(
                     made,
                     div()
@@ -532,9 +539,11 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(line(first))
+                        .child(TruncatingLabel::new("first", first))
                         .children(second.map(|output| {
-                            line(output).text_xs().text_color(palette.colors.text_muted)
+                            TruncatingLabel::new("second", output)
+                                .text_xs()
+                                .text_color(palette.colors.text_muted)
                         })),
                 ),
             ],
@@ -569,7 +578,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
     let segments = spent_in(timing).map(|phase| {
         let time = timing.phase(phase);
         let mut tip = format!(
-            "{}: {} ({} of {})",
+            "{} · {} · {} of {}",
             phase_name(phase),
             exact_duration(time),
             share(time, total),
@@ -577,7 +586,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
         );
         if summed > total {
             tip.push_str(&format!(
-                "\nThe reported phases overlap, summing to {}.",
+                "\nphases overlap · sum {}",
                 exact_duration(summed)
             ));
         }
@@ -587,7 +596,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
             .min_w(MIN_SEGMENT_WIDTH)
             .w(relative(fraction(time, span)));
         let segment = if execution_only && phase == Phase::Execute {
-            tip.push_str("\nThis runner reports no other phase.");
+            tip.push_str("\nonly phase reported");
             segment
                 .bg(palette.unbroken)
                 .border_2()
@@ -596,7 +605,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
         } else {
             segment.bg(palette.phase(phase))
         };
-        segment.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+        segment.tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
     });
     div()
         .flex()

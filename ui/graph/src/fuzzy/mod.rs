@@ -326,7 +326,19 @@ pub(crate) fn highlighted(
     muted: Hsla,
     picked: Hsla,
 ) -> StyledText {
-    let highlights = styled_runs(&text, path, matched)
+    let highlights = highlights(&text, path, matched, muted, picked);
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// The byte ranges of `text` that [`highlighted`] draws apart, each with how.
+pub(crate) fn highlights(
+    text: &str,
+    path: &Range<u32>,
+    matched: &[u32],
+    muted: Hsla,
+    picked: Hsla,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    styled_runs(text, path, matched)
         .into_iter()
         .map(|(range, style)| {
             let highlight = match style {
@@ -348,9 +360,8 @@ pub(crate) fn highlighted(
                 },
             };
             (range, highlight)
-        });
-    let highlights: Vec<_> = highlights.collect();
-    StyledText::new(text).with_highlights(highlights)
+        })
+        .collect()
 }
 
 /// How a run of a row's text is drawn apart from the candidate's name.

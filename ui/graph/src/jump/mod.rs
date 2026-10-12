@@ -12,15 +12,15 @@ use crate::model::{Prepared, Shared};
 use crate::point::kind_names;
 use crate::reveal::{self, hidden_by};
 use crate::{GraphPanel, Palette, chips, pins, why};
+use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Visibility;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
-use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
 use bviz_ui_components::text_input::{self, TextEdited};
 use bviz_ui_components::{
-    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, TooltipColors, key_text_within,
+    KeyScope, ListScroll, Nesting, TextInput, TextTooltip, TruncatingLabel, key_text_within,
     list_scrollbar, menu_chrome, overlay_canvas,
 };
 use gpui::{
@@ -29,8 +29,10 @@ use gpui::{
     Subscription, TextStyleRefinement, Window, actions, div, prelude::*, px, relative, rems,
     uniform_list,
 };
+#[cfg(test)]
+pub(crate) use index::tests::shared as fixture;
 use index::{Candidate, Scope};
-pub(crate) use index::{Candidates, labelled, package_of};
+pub(crate) use index::{Candidates, container, labelled, node_text, package_of};
 use rustc_hash::FxHashSet;
 
 actions!(
@@ -659,10 +661,7 @@ fn footer(jump: &Jump, muted: Hsla, cx: &App) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .children(tally),
+                        .children(tally.map(|tally| TruncatingLabel::new("jump-tally", tally))),
                 )
                 .child(first),
         )
@@ -718,7 +717,7 @@ fn listed(
         .as_ref()
         .is_some_and(|jump| jump.aimed == index);
     let hidden = hidden_by(view, candidate.id);
-    let tip = TooltipColors::from_colors(colors);
+    let tip = colors.tooltip();
     let id = candidate.id;
     let entity = entity.clone();
     menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
@@ -736,32 +735,27 @@ fn listed(
         });
     })
     .child(
-        div()
-            .flex_grow_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis_start()
-            .child(fuzzy::highlighted(
-                SharedString::from(candidate.text.to_string()),
+        TruncatingLabel::new("text", candidate.text.to_string())
+            .highlights(fuzzy::highlights(
+                &candidate.text,
                 &candidate.path,
                 &row.matched,
                 colors.text_muted,
                 palette.highlight.into(),
-            )),
+            ))
+            .flex_grow_1()
+            .text_ellipsis_start(),
     )
-    .children(index::container(shared, candidate).map(|container| {
-        div()
-            .flex_shrink(CONTAINER_SHRINK)
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis_start()
-            .text_xs()
-            .text_color(colors.text_muted)
-            .child(container)
-    }))
-    .child(badge(kind_name(candidate.kind), colors.text_muted))
+    .children(
+        index::container(shared, candidate.id, candidate.kind).map(|container| {
+            TruncatingLabel::new("container", container)
+                .flex_shrink(CONTAINER_SHRINK)
+                .text_ellipsis_start()
+                .text_xs()
+                .text_color(colors.text_muted)
+        }),
+    )
+    .child(badge(kind_names(candidate.kind).one, colors.text_muted))
     .children(
         index::configuration(shared, candidate)
             .map(|configuration| badge(configuration, colors.text_muted)),
@@ -771,14 +765,6 @@ fn listed(
             .id(("jump-hidden", index))
             .tooltip(TextTooltip::builder(by.describe().into(), tip))
     }))
-}
-
-/// How a row names the kind of its node.
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Package => "package",
-        _ => kind_names(kind).one,
-    }
 }
 
 fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {

@@ -6,10 +6,10 @@ use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
 use crate::rules;
-use crate::{GraphPanel, Palette, column, pins, why};
+use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
-use bviz_ui_components::Button;
+use bviz_ui_components::{Button, TruncatingLabel};
 use bviz_ui_workspace::PanelEvent;
 use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
 
@@ -317,8 +317,8 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
             .bg(palette.container)
             .text_xs()
             .text_color(palette.label)
-            .child(column::line(name))
-            .child(column::line(by.describe()))
+            .child(TruncatingLabel::new("reveal-name", name))
+            .child(TruncatingLabel::new("reveal-reason", by.describe()))
             .child(
                 div()
                     .flex()

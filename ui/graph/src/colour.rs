@@ -4,9 +4,8 @@ use crate::GraphPanel;
 use crate::model::GraphModel;
 use crate::timing::{NodeTimes, Untimed};
 use bviz_bazel_flags::{PROFILE_PRIMARY_OUTPUT, PROFILE_TARGET_LABEL};
-use bviz_ui_components::{Dropdown, TextTooltip, TooltipColors};
-use bviz_ui_theme::ThemeColors;
-use gpui::{Context, IntoElement, SharedString, div, prelude::*};
+use bviz_ui_components::Dropdown;
+use gpui::{Context, SharedString};
 
 /// What a box's fill says.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -77,23 +76,17 @@ impl Offered {
     }
 }
 
-/// What a control reading the graph's action times says of them: how much of
-/// the profile the graph places, or why it places none, and where no profile
-/// is open, that one opened with the graph lets it `read` them.
-pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedString {
+/// The hint of a control reading the graph's action times, which `name`s it
+/// where the graph places any, and says why it places none otherwise.
+pub(crate) fn note(times: Result<&NodeTimes, Untimed>, name: &str) -> SharedString {
     match times {
-        Ok(times) => times.coverage().line(),
-        Err(Untimed::NoProfile) => {
-            format!("Open the build's profile with the graph to {read}")
+        Ok(_) => name.to_owned(),
+        Err(Untimed::NoProfile) => "No profile loaded".to_owned(),
+        Err(Untimed::NoActions) => "Profile records no actions".to_owned(),
+        Err(Untimed::Unnamed) => {
+            format!("Needs {PROFILE_PRIMARY_OUTPUT} or {PROFILE_TARGET_LABEL}")
         }
-        Err(Untimed::NoActions) => "The build's profile records no actions".to_owned(),
-        Err(Untimed::Unnamed) => format!(
-            "The build's profile names no action; record one with \
-             {PROFILE_PRIMARY_OUTPUT} or {PROFILE_TARGET_LABEL}"
-        ),
-        Err(Untimed::Unplaced) => {
-            "None of the actions the build's profile names is in this graph".to_owned()
-        }
+        Err(Untimed::Unplaced) => "No profiled action in graph".to_owned(),
     }
     .into()
 }
@@ -103,8 +96,11 @@ pub(crate) fn note(times: Result<&NodeTimes, Untimed>, read: &str) -> SharedStri
 /// them.
 pub(crate) fn sync(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let offered = Offered::by(view.model.read(cx));
-    view.colour_picker
-        .update(cx, |picker, cx| offer(picker, offered, cx));
+    let hint = hint(view.model.read(cx));
+    view.colour_picker.update(cx, |picker, cx| {
+        offer(picker, offered, cx);
+        picker.set_tooltip(hint, cx);
+    });
     if !view.colouring.available(offered) {
         set(view, Colouring::Kind, cx);
     }
@@ -129,25 +125,12 @@ pub(crate) fn set(view: &mut GraphPanel, colouring: Colouring, cx: &mut Context<
     view.invalidate_canvas(cx);
 }
 
-/// The picker, carrying what [`note`] says of the loaded graph's times.
-pub(crate) fn control(
-    view: &GraphPanel,
-    colors: &ThemeColors,
-    cx: &Context<GraphPanel>,
-) -> impl IntoElement + use<> {
-    let times = view
-        .model
-        .read(cx)
+/// What the picker's hint says of the action times `model` holds.
+pub(crate) fn hint(model: &GraphModel) -> SharedString {
+    let times = model
         .loaded()
         .map_or(Err(Untimed::NoProfile), |loaded| loaded.times());
-    div()
-        .id("colour-picker")
-        .flex_none()
-        .tooltip(TextTooltip::builder(
-            note(times, "colour its boxes by their actions"),
-            TooltipColors::from_colors(colors),
-        ))
-        .child(view.colour_picker.clone())
+    note(times, "Box colouring")
 }
 
 #[cfg(test)]
@@ -164,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_profile_naming_no_action_says_which_flags_name_them() {
-        let said = note(Err(Untimed::Unnamed), "read them");
+        let said = note(Err(Untimed::Unnamed), "Box colouring");
         assert!(said.contains(PROFILE_PRIMARY_OUTPUT.as_str()), "{said}");
         assert!(said.contains(PROFILE_TARGET_LABEL.as_str()), "{said}");
     }

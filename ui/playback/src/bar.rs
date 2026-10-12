@@ -1,7 +1,10 @@
-use crate::{Clock, PlayPause, Speed, StepBack, StepForward, TEXT_SIZE, Timeline};
+use crate::{
+    Clock, PlayPause, Speed, SpeedDown, SpeedUp, StepBack, StepForward, TEXT_SIZE, Timeline,
+};
 use bviz_invocation::EpochMicros;
 use bviz_ui_components::{
-    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, scrubber,
+    Button, Dropdown, DropdownEvent, ScrubberColors, ScrubberState, TextTooltip, TruncatingLabel,
+    scrubber,
 };
 use bviz_ui_theme::ThemeColors;
 use gpui::{
@@ -23,6 +26,12 @@ const READOUT_WIDTH: Pixels = px(128.);
 
 const SECONDS_PER_MINUTE: u64 = 60;
 
+/// What the readout leads an approximate time with.
+const APPROXIMATE_MARK: &str = "~";
+
+/// What the readout's hint says of an approximate time.
+const APPROXIMATE_HINT: &str = "Approximate time";
+
 /// The transport driving a document's [`Clock`], labelled with the document's
 /// name. Draws nothing while the clock has no time.
 pub struct PlaybackBar {
@@ -39,7 +48,12 @@ impl PlaybackBar {
     pub fn new(name: SharedString, clock: Entity<Clock>, cx: &mut Context<Self>) -> Self {
         let current = speed_of(&clock, cx);
         let labels = Speed::all().map(|speed| format!("{}\u{d7}", speed.factor()));
-        let speed = cx.new(|cx| Dropdown::new("playback-speed", labels, current.index(), cx));
+        let speed = cx.new(|cx| {
+            Dropdown::new("playback-speed", labels, current.index(), cx)
+                .tooltip("Playback speed")
+                .keys_for_focused(&SpeedDown)
+                .keys_for_focused(&SpeedUp)
+        });
         let clock_changed = cx.observe(&clock, |bar, clock, cx| {
             let index = speed_of(&clock, cx).index();
             bar.speed
@@ -140,6 +154,7 @@ impl Render for PlaybackBar {
         let now = timeline.now();
         let fraction = timeline.range().fraction_at(now);
         let readout = readout(timeline, now);
+        let approximate = timeline.approximate();
         let playing = timeline.is_playing();
         let colors = bviz_ui_theme::theme(window, cx).colors;
         div()
@@ -157,23 +172,24 @@ impl Render for PlaybackBar {
             .font_family(bviz_ui_assets::UI)
             .text_color(colors.text)
             .child(
-                div()
+                TruncatingLabel::new("playback-name", self.name.clone())
                     .max_w(NAME_MAX_WIDTH)
                     .flex_none()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
                     .text_size(TEXT_SIZE)
-                    .text_color(colors.text_muted)
-                    .child(self.name.clone()),
+                    .text_color(colors.text_muted),
             )
             .children(self.transport(playing))
             .child(self.scrubber(fraction, &colors, cx))
             .child(
                 div()
+                    .id("playback-readout")
                     .w(READOUT_WIDTH)
                     .flex_none()
                     .text_size(TEXT_SIZE)
+                    .when(approximate, |readout| {
+                        let hint = TextTooltip::builder(APPROXIMATE_HINT.into(), colors.tooltip());
+                        readout.tooltip(hint)
+                    })
                     .child(readout),
             )
             .child(self.speed.clone())
@@ -194,7 +210,11 @@ fn readout(timeline: &Timeline, now: EpochMicros) -> SharedString {
     let range = timeline.range();
     let elapsed = minutes_seconds(range.elapsed_micros(now));
     let total = minutes_seconds(range.length_micros());
-    let approximate = if timeline.approximate() { "~" } else { "" };
+    let approximate = if timeline.approximate() {
+        APPROXIMATE_MARK
+    } else {
+        ""
+    };
     format!("{approximate}{elapsed} / {total}").into()
 }
 

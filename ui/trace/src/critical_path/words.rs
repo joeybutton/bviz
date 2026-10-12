@@ -9,9 +9,9 @@ pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
 
 /// What a share of the wall time is a share of, in a part's tooltip.
-const OF_THE_WALL_TIME: &str = "the wall time";
+const OF_THE_WALL_TIME: &str = "wall time";
 /// What a share of the spawn phases' time is a share of, in a phase's tooltip.
-pub(crate) const OF_THE_ACTIONS: &str = "these actions' time";
+pub(crate) const OF_THE_ACTIONS: &str = "action time";
 /// The name of an action's time outside its spawns.
 pub(crate) const AROUND_SPAWNS: &str = "around spawns";
 /// What a step's Waited cell shows where it waited no time.
@@ -61,13 +61,13 @@ fn runner_name(runner: SpawnRunner) -> &'static str {
 /// How an action `runner` answered came by its result.
 fn runner_phrase(runner: SpawnRunner) -> &'static str {
     match runner {
-        SpawnRunner::RemoteExecution => "Ran remotely",
-        SpawnRunner::Worker => "Ran on a persistent worker",
-        SpawnRunner::Sandboxed => "Ran in a local sandbox",
-        SpawnRunner::Local => "Ran locally",
-        SpawnRunner::RemoteCacheHit => "Remote cache hit",
-        SpawnRunner::DiskCacheHit => "Disk cache hit",
-        SpawnRunner::Deduplicated => "Reused an identical spawn's outputs",
+        SpawnRunner::RemoteExecution => "remote execution",
+        SpawnRunner::Worker => "persistent worker",
+        SpawnRunner::Sandboxed => "local sandbox",
+        SpawnRunner::Local => "local",
+        SpawnRunner::RemoteCacheHit => "remote cache hit",
+        SpawnRunner::DiskCacheHit => "disk cache hit",
+        SpawnRunner::Deduplicated => "deduplicated",
     }
 }
 
@@ -83,14 +83,10 @@ fn work_note(work: Work, logged: bool) -> Option<String> {
             _,
         ) => return Some(spawned_note(&spawned)),
         (Work::Spanned(_), false) => return None,
-        (Work::Spanned(_), true) => {
-            "No logged spawn: it ran none (as a file write) or went unlogged."
-        }
-        (Work::Unspanned(_), false) => "No action span: an action-cache hit, or not recorded.",
-        (Work::Unspanned(_), true) => {
-            "No action span or logged spawn: an action-cache hit, or not recorded."
-        }
-        (Work::ChangePruned, _) => "Change pruned: inputs unchanged, so it did not run.",
+        (Work::Spanned(_), true) => "no logged spawn",
+        (Work::Unspanned(_), false) => "no action span · likely cache hit",
+        (Work::Unspanned(_), true) => "no action span or logged spawn · likely cache hit",
+        (Work::ChangePruned, _) => "change pruned · inputs unchanged",
     };
     Some(note.to_owned())
 }
@@ -99,13 +95,13 @@ fn work_note(work: Work, logged: bool) -> Option<String> {
 fn spawned_note(spawned: &Spawned) -> String {
     let spawns = spawned.spawns();
     let mut note = format!(
-        "{}: {spawns} {}, {}.",
+        "{} · {spawns} {} · {}",
         runner_phrase(spawned.runner()),
         if spawns == 1 { "spawn" } else { "spawns" },
         duration(spawned.logged()),
     );
     if spawned.fit() == Fit::Scaled {
-        note.push_str("\nPhases scaled down to the action's time.");
+        note.push_str("\nphases scaled to action time");
     }
     note
 }
@@ -165,7 +161,7 @@ pub(crate) fn part_tip(part: Part, time: Duration, whole: Duration, of: &str) ->
 /// What is `named`, with its time and share `of` what `whole` is.
 pub(crate) fn named_tip(named: &str, time: Duration, whole: Duration, of: &str) -> String {
     format!(
-        "{named}: {} ({} of {of})",
+        "{named} · {} · {} of {of}",
         duration(time),
         share(time, whole)
     )
@@ -225,95 +221,39 @@ pub(crate) fn lever(lever: Lever, time: Duration, bound: Option<Duration>) -> St
     format!("{name} {}{bound} → {pull}", duration(time))
 }
 
-/// A lever's tooltip: what its time is and how pulling it shortens the path,
-/// and the [bound](lever_bound) on what that saves where there is one.
-pub(crate) fn lever_account(lever: Lever, bound: Option<Duration>) -> String {
-    let tip = lever_tip(lever);
-    match bound {
-        Some(bound) => format!(
-            "{tip}\nSaves at most {}: other chains then bound the build.",
-            duration(bound)
-        ),
-        None => tip.to_owned(),
-    }
-}
-
-/// What the time a lever acts on is, and how pulling it shortens the path.
+/// A lever's tooltip: what its time counts.
 pub(crate) fn lever_tip(lever: Lever) -> &'static str {
     match lever {
-        Lever::LeadIn => {
-            "Startup, loading, analysis and repository fetches before the first step.\n\
-             A warm server and prefetched or vendored repositories shorten it."
-        }
-        Lever::Waiting => {
-            "Steps waiting for inputs built off the path, or for a free job slot.\n\
-             Cut those dependencies, or raise --jobs."
-        }
-        Lever::RemoteQueue => {
-            "Spawns queued for a remote executor.\n\
-             More executor capacity shortens it."
-        }
-        Lever::LocalQueue => {
-            "Spawns waiting for local CPU and memory.\n\
-             Raise --local_resources, or have actions declare less."
-        }
-        Lever::Parse => {
-            "Building remote execution requests, e.g. input Merkle trees.\n\
-             Fewer inputs per action build faster."
-        }
-        Lever::Upload => {
-            "Uploading inputs the remote cache lacked, excluding network time.\n\
-             Build those inputs remotely too, or cache them."
-        }
-        Lever::Network => {
-            "Waiting on remote-cache calls: lookups, missing-input checks, transfers.\n\
-             A closer cache and fewer, smaller inputs shorten it."
-        }
-        Lever::RemoteSetup => {
-            "Remote executors staging inputs.\n\
-             Fewer, smaller inputs, or inputs cached on the executor, shorten it."
-        }
-        Lever::LocalSetup => {
-            "Fetching inputs and setting up sandboxes or workers.\n\
-             Persistent workers, a cheaper sandbox or fewer inputs shorten it."
-        }
-        Lever::Execution => {
-            "Running the spawns' commands.\n\
-             Use a faster tool, or split the target so its parts run in parallel."
-        }
-        Lever::ProcessOutputs => {
-            "Moving outputs out of the sandbox, worker or remote executor.\n\
-             Fewer, smaller outputs move faster."
-        }
-        Lever::Fetch => {
-            "Downloading outputs, excluding network time.\n\
-             --remote_download_minimal downloads only the outputs needed locally."
-        }
-        Lever::LocalOnRemote => {
-            "Steps run locally in a build that ran other spawns remotely.\n\
-             A strategy or a no-remote tag may keep them local."
-        }
-        Lever::CacheHitOverhead => {
-            "Steps with no action span or logged spawn, likely action-cache hits, that \
-             still took time.\n\
-             Bazel spent it checking their inputs and outputs."
-        }
+        Lever::LeadIn => "startup, loading, analysis, repository fetches",
+        Lever::Waiting => "waits for inputs off the path or a --jobs slot",
+        Lever::RemoteQueue => "spawns queued for remote executors",
+        Lever::LocalQueue => "spawns waiting for local CPU and memory",
+        Lever::Parse => "remote execution request building",
+        Lever::Upload => "uploads of inputs the remote cache lacked",
+        Lever::Network => "remote-cache lookups, checks and transfers",
+        Lever::RemoteSetup => "input staging on remote executors",
+        Lever::LocalSetup => "input fetches, sandbox and worker setup",
+        Lever::Execution => "the spawns' commands",
+        Lever::ProcessOutputs => "output moves out of where spawns ran",
+        Lever::Fetch => "output downloads, network time aside",
+        Lever::LocalOnRemote => "local steps in a remote build",
+        Lever::CacheHitOverhead => "input and output checks on likely cache hits",
     }
 }
 
 /// What an action's time in `phase` went to.
 fn phase_explanation(phase: Phase) -> &'static str {
     match phase {
-        Phase::Parse => "Building remote execution requests, e.g. input Merkle trees.",
-        Phase::Upload => "Uploading inputs the remote cache lacked, excluding network time.",
-        Phase::Network => "Remote-cache calls: lookups, missing-input checks, transfers.",
-        Phase::Queue => "Waiting for a remote executor, or for local resources.",
-        Phase::Setup => "Staging inputs, and setting up a local sandbox or worker.",
-        Phase::Execute => "Running the spawns' commands.",
-        Phase::ProcessOutputs => "Moving outputs out of where they ran.",
-        Phase::Fetch => "Downloading outputs, excluding network time.",
-        Phase::Retry => "Earlier attempts of retried spawns.",
-        Phase::Other => "Spawn time in no phase, e.g. remote waits the executor leaves out.",
+        Phase::Parse => "remote execution request building",
+        Phase::Upload => "uploads of inputs the remote cache lacked",
+        Phase::Network => "remote-cache lookups, checks and transfers",
+        Phase::Queue => "queued for an executor or local resources",
+        Phase::Setup => "input staging, sandbox or worker setup",
+        Phase::Execute => "the spawns' commands",
+        Phase::ProcessOutputs => "output moves out of where spawns ran",
+        Phase::Fetch => "output downloads, network time aside",
+        Phase::Retry => "earlier attempts of retried spawns",
+        Phase::Other => "spawn time in no phase",
     }
 }
 
@@ -334,8 +274,7 @@ pub(crate) fn phase_account(phase: Phase, coverage: &Coverage) -> String {
 /// The tooltip of the time around spawns in the spawn phases' bar and legend.
 pub(crate) fn around_account(coverage: &Coverage) -> String {
     format!(
-        "{}\nAction time outside spawns: cache lookups and stores, output cleanup and \
-         checks, the execution log.",
+        "{}\ncache lookups and stores, output checks, the execution log",
         named_tip(
             AROUND_SPAWNS,
             coverage.around(),
@@ -345,60 +284,45 @@ pub(crate) fn around_account(coverage: &Coverage) -> String {
     )
 }
 
-/// What the wall time in `part` went to.
-fn explanation(part: Part, path: &CriticalPath) -> String {
-    match part {
-        Part::LeadIn => {
-            "Startup, loading, analysis and repository fetches before the first step.".to_owned()
-        }
+/// What the wall time in `part` went to; `None` for the actions themselves,
+/// which their name says.
+fn explanation(part: Part, path: &CriticalPath) -> Option<String> {
+    Some(match part {
+        Part::LeadIn => "startup, loading, analysis, repository fetches".to_owned(),
         Part::Waiting => {
-            let longest = path.longest_wait().map_or(String::new(), |step| {
-                format!(
-                    "\nLongest: {} before {}.",
+            let waits = "waits for inputs off the path, input checks or a --jobs slot";
+            match path.longest_wait() {
+                Some(step) => format!(
+                    "{waits}\nlongest {} before {}",
                     duration(step.gap()),
                     step.name()
-                )
-            });
-            format!(
-                "Steps waiting for inputs off the path, input checks, or a free --jobs \
-                 slot.{longest}"
-            )
+                ),
+                None => waits.to_owned(),
+            }
         }
-        Part::BeforeAction => {
-            "Before action spans started: input discovery and action-cache checks.".to_owned()
-        }
-        Part::Action => "The actions themselves.".to_owned(),
-        Part::Unspanned => {
-            "Steps with no action span: action-cache hits, or spans left out.".to_owned()
-        }
-        Part::Tail => "After the last step, until the command ended.".to_owned(),
-    }
+        Part::BeforeAction => "input discovery, action-cache checks".to_owned(),
+        Part::Action => return None,
+        Part::Unspanned => "steps with no action span · likely cache hits".to_owned(),
+        Part::Tail => "after the last step".to_owned(),
+    })
 }
 
 /// The tooltip of `part` in the path's bar and legend: its time, and what
 /// it went to.
 pub(crate) fn part_account(part: Part, path: &CriticalPath) -> String {
-    format!(
-        "{}\n{}",
-        part_tip(part, path.time_in(part), path.wall(), OF_THE_WALL_TIME),
-        explanation(part, path)
-    )
+    let tip = part_tip(part, path.time_in(part), path.wall(), OF_THE_WALL_TIME);
+    match explanation(part, path) {
+        Some(explanation) => format!("{tip}\n{explanation}"),
+        None => tip,
+    }
 }
 
 /// A step's tooltip: everything known of what it ran. `logged` says whether
 /// an execution log of the invocation was given.
 pub(crate) fn step_tip(step: &Step, logged: bool) -> String {
     let mut lines = vec![step.name().to_owned()];
-    let known = [
-        ("Mnemonic", step.mnemonic()),
-        ("Target", step.target()),
-        ("Output", step.primary_output()),
-    ];
-    lines.extend(
-        known
-            .into_iter()
-            .filter_map(|(key, value)| Some(format!("{key}: {}", value?))),
-    );
+    let known = [step.mnemonic(), step.target(), step.primary_output()];
+    lines.extend(known.into_iter().flatten().map(str::to_owned));
     lines.extend(work_note(step.work(), logged));
     lines.join("\n")
 }
@@ -417,22 +341,14 @@ pub(crate) fn could_save_tip(step: &Step) -> Option<String> {
         ceiling,
     } = step.model()?;
     if modeled.is_zero() {
-        return Some(
-            "No action span, as for a cache hit, so the model counts it as zero.".to_owned(),
-        );
+        return Some("no action span · modeled as zero".to_owned());
     }
-    let mut tip = format!(
-        "Taking no time, it would end the modeled build {} sooner.",
-        duration(ceiling)
-    );
     let (modeled, ceiling) = (duration(modeled), duration(ceiling));
     // A ceiling that reads the same as the duration shows the reader no bound.
-    if ceiling != modeled {
-        tip.push_str(&format!(
-            "\nModeled at {modeled}; another chain caps the saving at {ceiling}."
-        ));
-    }
-    Some(tip)
+    Some(match ceiling == modeled {
+        true => format!("modeled {modeled}"),
+        false => format!("modeled {modeled} · capped by another chain"),
+    })
 }
 
 /// The modeled build against the time the observed path spent in action
@@ -449,12 +365,10 @@ pub(crate) fn modeled_line(path: &CriticalPath, modeled: &Modeled) -> String {
 /// and where it holds too little of the build or the path to go by, what.
 pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
     let mut tip = format!(
-        "If every action started once its inputs were ready, the build would take {}.\n\
-         The critical path's actions took {}.\n\
-         Match: the model found Bazel's chain, and \"Could save\" holds.\n\
-         Well below: parallelism or scheduling held the build back.\n\
-         Graph from aquery, times from profile; untimed actions (mostly cache hits) \
-         count as zero.",
+        "modeled build {} · path's actions {}\n\
+         match: \"Could save\" holds\n\
+         well below: scheduling held the build back\n\
+         graph from aquery · times from profile · untimed as zero",
         duration(modeled.length()),
         duration(path.time_in(Part::Action)),
     );
@@ -466,15 +380,12 @@ pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
         .count();
     if fraction_of(modeled.timed(), modeled.spanned()) < FEW_MATCHED {
         tip.push_str(&format!(
-            "\nOnly {} of {} actions matched aquery by output path; aquery likely ran with \
-             other targets or flags.",
+            "\nonly {} of {} actions matched aquery",
             modeled.timed(),
             modeled.spanned(),
         ));
     } else if unmodeled > 0 {
-        tip.push_str(&format!(
-            "\n{unmodeled} of {steps} steps not in the model; their \"Could save\" is empty."
-        ));
+        tip.push_str(&format!("\n{unmodeled} of {steps} steps unmodeled"));
     }
     tip
 }
@@ -492,11 +403,10 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
 pub(crate) const STEPS_TITLE: &str = "Steps";
 
 /// The tooltip of the choice of the list of a path's steps.
-pub(crate) const STEPS_TIP: &str = "The critical path's steps.";
+pub(crate) const STEPS_TIP: &str = "Critical path steps";
 
 /// The tooltip of the choice of the list of actions nearly critical.
-pub(crate) const NEARLY_CRITICAL_TIP: &str =
-    "Actions off the path that turn critical as the path's actions shorten.";
+pub(crate) const NEARLY_CRITICAL_TIP: &str = "Nearly critical actions";
 
 /// The title of the list of actions nearly critical.
 pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {
@@ -511,17 +421,13 @@ pub(crate) const NO_NEARLY_CRITICAL: &str = "No action off the path can turn cri
 pub(crate) fn nearly_critical_tip(action: &NearlyCritical) -> String {
     let mut lines = vec![action.description.clone()];
     let known = [
-        ("Mnemonic", action.mnemonic.as_deref()),
-        ("Target", action.target.as_deref()),
-        ("Output", Some(action.primary_output.as_str())),
+        action.mnemonic.as_deref(),
+        action.target.as_deref(),
+        Some(action.primary_output.as_str()),
     ];
-    lines.extend(
-        known
-            .into_iter()
-            .filter_map(|(key, value)| Some(format!("{key}: {}", value?))),
-    );
+    lines.extend(known.into_iter().flatten().map(str::to_owned));
     lines.push(format!(
-        "Took {}; {} of slack before it delays the modeled build.",
+        "{} · slack {}",
         duration(action.duration),
         duration(action.slack)
     ));
@@ -634,7 +540,7 @@ pub(super) mod tests {
         let note = work_note(path.steps()[0].work(), true).expect("a note");
         assert_eq!(
             note,
-            "Ran remotely: 1 spawn, 3.00ms.\nPhases scaled down to the action's time."
+            "remote execution · 1 spawn · 3.00ms\nphases scaled to action time"
         );
     }
 
@@ -698,17 +604,11 @@ pub(super) mod tests {
         assert_eq!(could_save(compile), "800µs");
         assert_eq!(
             could_save_tip(compile).as_deref(),
-            Some(
-                "Taking no time, it would end the modeled build 800µs sooner.\n\
-                 Modeled at 2.00ms; another chain caps the saving at 800µs."
-            )
+            Some("modeled 2.00ms · capped by another chain")
         );
-        assert_eq!(
-            could_save_tip(link).as_deref(),
-            Some("Taking no time, it would end the modeled build 400µs sooner.")
-        );
+        assert_eq!(could_save_tip(link).as_deref(), Some("modeled 400µs"));
         assert_eq!(could_save(written), "0µs");
-        assert!(could_save_tip(written).is_some_and(|tip| tip.starts_with("No action span")));
+        assert!(could_save_tip(written).is_some_and(|tip| tip.starts_with("no action span")));
         assert_eq!(could_save(checked), "");
         assert_eq!(could_save_tip(checked), None);
     }
@@ -723,20 +623,10 @@ pub(super) mod tests {
         );
         let tip = modeled_tip(&path, modeled);
         assert!(
-            tip.starts_with(
-                "If every action started once its inputs were ready, the build would take \
-                 2.70ms.\n"
-            ),
+            tip.starts_with("modeled build 2.70ms · path's actions 2.40ms\n"),
             "{tip}"
         );
-        assert!(
-            tip.contains("\nThe critical path's actions took 2.40ms.\n"),
-            "{tip}"
-        );
-        assert!(
-            tip.ends_with("\n1 of 4 steps not in the model; their \"Could save\" is empty."),
-            "{tip}"
-        );
+        assert!(tip.ends_with("\n1 of 4 steps unmodeled"), "{tip}");
     }
 
     #[test]
@@ -744,10 +634,7 @@ pub(super) mod tests {
         let path = modeled_path(&["bazel-out/a.o"]);
         let tip = modeled_tip(&path, path.modeled().expect("modeled"));
         assert!(
-            tip.ends_with(
-                "\nOnly 1 of 4 actions matched aquery by output path; aquery likely ran with \
-                 other targets or flags."
-            ),
+            tip.ends_with("\nonly 1 of 4 actions matched aquery"),
             "{tip}"
         );
     }
@@ -759,8 +646,7 @@ pub(super) mod tests {
         assert_eq!(nearly_critical_title(modeled), "Nearly critical (2)");
         assert_eq!(
             nearly_critical_tip(&modeled.nearly_critical()[1]),
-            "Compiling b.c\nMnemonic: CppCompile\nTarget: //b\nOutput: bazel-out/b.o\n\
-             Took 1.50ms; 800µs of slack before it delays the modeled build."
+            "Compiling b.c\nCppCompile\n//b\nbazel-out/b.o\n1.50ms · slack 800µs"
         );
     }
 
@@ -791,23 +677,15 @@ pub(super) mod tests {
             lever(Lever::Execution, ms(1500), bound),
             "execution 1.50s, saves at most 400.00ms → a faster tool, or split the target"
         );
-        assert!(
-            lever_account(Lever::Execution, bound)
-                .ends_with("\nSaves at most 400.00ms: other chains then bound the build.")
-        );
-        assert_eq!(
-            lever_account(Lever::Execution, None),
-            lever_tip(Lever::Execution)
-        );
     }
 
     #[test]
     fn the_wait_s_account_names_the_longest_wait() {
         assert_eq!(
             part_account(Part::Waiting, &path()),
-            "waiting: 6.00ms (60.0% of the wall time)\n\
-             Steps waiting for inputs off the path, input checks, or a free --jobs slot.\n\
-             Longest: 6.00ms before Linking a."
+            "waiting · 6.00ms · 60.0% of wall time\n\
+             waits for inputs off the path, input checks or a --jobs slot\n\
+             longest 6.00ms before Linking a"
         );
     }
 
@@ -815,8 +693,7 @@ pub(super) mod tests {
     fn a_part_s_account_opens_with_its_time_then_says_what_it_went_to() {
         assert_eq!(
             part_account(Part::Tail, &path()),
-            "tail: 600µs (6.0% of the wall time)\n\
-             After the last step, until the command ended."
+            "tail · 600µs · 6.0% of wall time\nafter the last step"
         );
     }
 

@@ -6,6 +6,32 @@ impl Terminal {
     pub fn url_at(&mut self, column: usize, row: usize) -> Option<Url> {
         let point = self.grid_point(column, row);
         let (start, end) = self.url_match_at(point)?;
+        self.url_between(start, end)
+    }
+
+    /// Every URL the viewport draws any part of, in reading order, each found
+    /// as [`url_at`](Self::url_at) finds it.
+    pub fn urls(&mut self) -> Vec<Url> {
+        let (last_column, last_row) = (self.columns.saturating_sub(1), self.rows.saturating_sub(1));
+        let top = self.term.line_search_left(self.grid_point(0, 0));
+        let bottom = (self.term).line_search_right(self.grid_point(last_column, last_row));
+        let matches: Vec<(Point, Point)> = RegexIter::new(
+            top,
+            bottom,
+            Direction::Right,
+            &self.term,
+            &mut self.url_regex,
+        )
+        .map(|m| (*m.start(), *m.end()))
+        .collect();
+        (matches.into_iter())
+            .filter_map(|(start, end)| self.url_between(start, end))
+            .collect()
+    }
+
+    /// The URL a regex match spanning `start..=end` reads, short of the
+    /// punctuation closing it; `None` where nothing is left.
+    fn url_between(&self, start: Point, end: Point) -> Option<Url> {
         let full = self.term.bounds_to_string(start, end);
         let (text, end) = Self::trim_trailing_punctuation(&full, end);
         if text.is_empty() {

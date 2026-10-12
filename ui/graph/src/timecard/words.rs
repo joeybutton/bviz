@@ -18,7 +18,7 @@ fn actions(count: u32) -> String {
 /// What part of `whole` the share `part` is, by time, or by count where
 /// `whole` took no time. A part that is neither none nor all of the whole
 /// never rounds to either, and a part holding an action is never none.
-fn part_of(part: Share, whole: Share) -> String {
+pub(crate) fn part_of(part: Share, whole: Share) -> String {
     let none = part.actions == 0;
     let (part, whole) = match whole.wall.is_zero() {
         true => (f64::from(part.actions), f64::from(whole.actions)),
@@ -126,7 +126,7 @@ const OFF_GRAPH: &str = "not in this graph";
 
 /// What a row adds, before the owner's label, to its account of an action the
 /// graph holds no node for but holds the owner of.
-const NOT_DRAWN: &str = "not drawn, in";
+const NOT_DRAWN: &str = "not drawn · owner";
 
 impl Slow {
     pub(super) fn subject(&self) -> &str {
@@ -308,7 +308,7 @@ mod tests {
         };
         assert_eq!(
             in_owner.detail(),
-            "12.3s · remote cache hit · not drawn, in //app:app"
+            "12.3s · remote cache hit · not drawn · owner //app:app"
         );
         let elsewhere = Slow {
             shown: Shown::Off,

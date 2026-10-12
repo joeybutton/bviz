@@ -48,7 +48,9 @@ pub(crate) fn kind_names(kind: Kind) -> KindNames {
             "package or environment group",
             "package and environment groups",
         ),
-        _ => ("rule target", "rule targets"),
+        Kind::Package => ("package", "packages"),
+        Kind::MergeGroup => ("file group", "file groups"),
+        Kind::Target => ("rule target", "rule targets"),
     };
     KindNames { one, many }
 }
@@ -60,19 +62,24 @@ pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &
     let label = point_label(id, shared);
     match unit {
         Unit::Action => {
-            lines.extend([mnemonic(id, shared).to_owned(), format!("of {label}")]);
-            lines.extend(configuration(id, shared).map(|name| format!("in {name}")));
+            lines.push(format!("{} {label}", mnemonic(id, shared)));
             let aspects = facets.aspects().values(id);
-            if !aspects.is_empty() {
+            let aspects = (!aspects.is_empty()).then(|| {
                 let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
-                lines.push(format!("via {}", aspects.collect::<Vec<_>>().join(", ")));
+                format!("via {}", aspects.collect::<Vec<_>>().join(", "))
+            });
+            let ran: Vec<String> = [configuration(id, shared), aspects]
+                .into_iter()
+                .flatten()
+                .collect();
+            if !ran.is_empty() {
+                lines.push(ran.join(" · "));
             }
-            let output = primary_output(id, shared);
-            lines.extend(output.map(|output| format!("writes {output}")));
+            lines.extend(primary_output(id, shared).map(str::to_owned));
         }
         Unit::ConfiguredTarget => {
             lines.push(label);
-            lines.extend(configuration(id, shared).map(|name| format!("in {name}")));
+            lines.extend(configuration(id, shared));
         }
         Unit::Target => {
             let repo = match facets.repo(id) {
@@ -82,7 +89,7 @@ pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &
                 },
                 None => UNKNOWN_REPO,
             };
-            lines.extend([label, format!("{} in {repo}", kind_names(kind).one)]);
+            lines.extend([label, format!("{} · {repo}", kind_names(kind).one)]);
         }
     }
 }
@@ -211,8 +218,8 @@ fn distinguishing_prefix(checksums: &[&str]) -> usize {
     parting.max().unwrap_or(0).max(MIN_CHECKSUM_PREFIX)
 }
 
-const MAIN_REPO: &str = "the main repository";
-const UNKNOWN_REPO: &str = "an unnamed repository";
+const MAIN_REPO: &str = "main repo";
+const UNKNOWN_REPO: &str = "unnamed repo";
 
 #[cfg(test)]
 mod tests {

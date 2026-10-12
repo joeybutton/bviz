@@ -10,7 +10,7 @@ use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGra
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
-use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip, TooltipColors};
+use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
 use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
 use std::sync::Arc;
 
@@ -29,16 +29,11 @@ pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//too
 
 /// What the field's tooltip says it takes.
 const HELP: &str = "\
-Roots the tree at what a bazel build of this target set requests.
-Patterns are separated by spaces; one starting with - takes its
-targets out, and # starts a comment.
-Patterns are read as typed at the workspace root.
-A wildcard leaves out the rules tagged manual.
-A test_suite stands for itself, not for its tests.
-Not applied: .bazelignore, --deleted_packages,
---build_tag_filters, --build_tests_only, and the skipping
-of targets incompatible with the platform.
-Empty, the tree is rooted at every top-level point.";
+Root target patterns · empty: top-level
+-pattern removes · # comment · from workspace root
+wildcards skip manual · test_suite: itself only
+not applied: .bazelignore, --deleted_packages,
+--build_tag_filters, --build_tests_only, incompatible targets";
 
 /// What the points a target set roots a tree at are picked from, by the
 /// unit of the tree. Each graph is that of a scope of the unit its place
@@ -248,7 +243,7 @@ pub(super) fn field(
     palette: &Palette,
     cx: &Context<ExclusivePanel>,
 ) -> Stateful<Div> {
-    let tip = TooltipColors::from_colors(&palette.colors);
+    let tip = palette.colors.tooltip();
     div()
         .id("exclusive-roots")
         .key_context(KEY_CONTEXT)

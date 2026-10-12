@@ -11,10 +11,10 @@ use crate::column::{Folding, scrolling};
 use crate::{GraphPanel, Palette};
 use bviz_bazel_flags::Flag;
 use bviz_graph_layout::{Axis, Capabilities, Support};
-use bviz_ui_components::ListScroll;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
+use bviz_ui_components::{ListScroll, TextTooltip};
 use gpui::{ClickEvent, Context, Div, div, prelude::*};
 
 /// What the card does for a gesture in [`GESTURES`].
@@ -130,11 +130,16 @@ pub(crate) fn card(
     if gaps.is_empty() {
         return None;
     }
+    let hint = match view.missing.open {
+        true => "Hide supplying flags",
+        false => "Show supplying flags",
+    };
     let head = div().text_xs().text_color(palette.label).child(
         div()
             .id("missing-data")
             .w_full()
             .cursor_pointer()
+            .tooltip(TextTooltip::builder(hint.into(), palette.colors.tooltip()))
             .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
                 GESTURES.dispatch(Pointer::click(event), |intent| match intent {
                     MissingIntent::Toggle => {

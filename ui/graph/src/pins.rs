@@ -14,7 +14,7 @@ use bviz_graph_layout::{Facets, Id, Names};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll};
+use bviz_ui_components::{Button, ListScroll, TruncatingLabel};
 use gpui::{
     ClickEvent, Context, Div, IntoElement, Pixels, SharedString, Stateful, div, prelude::*, px,
     relative,
@@ -310,15 +310,7 @@ fn row(held: Held, palette: &Palette, cx: &Context<GraphPanel>) -> Stateful<Div>
                 }
             });
         }))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(held.label),
-        )
+        .child(TruncatingLabel::new("label", held.label).flex_1())
         .child(div().flex_none().child(label(held.pin)))
 }
 

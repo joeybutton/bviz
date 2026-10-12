@@ -1140,6 +1140,7 @@ fn request(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
                 view.settle_onto(&landing, cx);
             }
             crate::reveal::landed(view, cx);
+            view.drawing_moved(cx);
             view.invalidate_canvas(cx);
         },
     );

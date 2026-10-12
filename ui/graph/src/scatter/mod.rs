@@ -26,14 +26,14 @@ use axis::{Axes, Axis, Clocks};
 use bviz_bazel_flags::TRANSITIONS;
 use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
-use bviz_graph_layout::{Capabilities, Input, InputSet, Kind, Support};
+use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, DragEnd, Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState,
-    ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, TextTooltip, Toolbar,
-    TooltipColors, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
-    list_scrollbar, load_in_background, menu_chrome, paint_tooltip, paint_tooltip_box,
+    Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
+    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Toolbar,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, defer_hover_card,
+    defer_tooltip, legend_gestures, list_scrollbar, load_in_background, menu_chrome,
     tooltip_extent, track_drag,
 };
 use bviz_ui_components::{KeyStyle, key_text_within};
@@ -104,6 +104,8 @@ pub struct ScatterPanel {
     bounds: Option<Bounds<Pixels>>,
     /// The press over the plot, until the button comes up again.
     press: Option<Press>,
+    /// The card describing the point under the pointer.
+    card: HoverCard<Id>,
     /// How far the list of the points under a click has scrolled.
     pick_scroll: ListScroll,
     /// Whether the last click revealed a row of the list of points, whose
@@ -123,8 +125,28 @@ pub struct ScatterPanel {
 }
 
 impl ScatterPanel {
+    /// The mark the hover layer rings, hovered or aimed at on a list of
+    /// points, in the plot it is drawn in, and what the card describing it
+    /// reads while that is shown.
+    fn ringed(&self) -> Option<(Arc<Plotted>, usize, Option<Vec<String>>)> {
+        let plot = self.plot.as_ref()?;
+        let (mark, lines) = match &plot.pointer {
+            Pointer::Away => return None,
+            Pointer::Hover(hover) => {
+                let point = plot.plotted.marks[hover.mark].target.id;
+                let lines = self.card.shows(&point).then(|| hover.lines.clone());
+                (hover.mark, lines)
+            }
+            Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
+        };
+        Some((Arc::clone(&plot.plotted), mark, lines))
+    }
+
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |view, _, cx| {
+            if let Some(choice) = &view.choice {
+                choice.explain_times(&view.model, cx);
+            }
             view.replot(cx);
             cx.notify();
         });
@@ -160,6 +182,7 @@ impl ScatterPanel {
             canvas: cx.new(|_| ScatterCanvas { parent }),
             bounds: None,
             press: None,
+            card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             pick_scroll: ListScroll::new(),
             row_revealed: false,
             closes_on_blur: None,
@@ -193,6 +216,7 @@ impl ScatterPanel {
     fn choose_unit(&mut self, cx: &mut Context<Self>) {
         if let Some(choice) = &self.choice {
             choice.name_colourings(cx);
+            choice.explain_times(&self.model, cx);
         }
         self.measure(cx);
         cx.notify();
@@ -234,7 +258,9 @@ impl ScatterPanel {
         let Some(choice) = &mut self.choice else {
             return;
         };
-        if choice.offer_times(timed, cx) {
+        let fell_back = choice.offer_times(timed, cx);
+        choice.explain_times(&self.model, cx);
+        if fell_back {
             self.close_pick(cx);
             cx.notify();
         }
@@ -464,6 +490,10 @@ impl ScatterPanel {
     /// pointer, which names nothing else while it is up.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let picked = self.pick(at);
+        let point = picked
+            .as_ref()
+            .and_then(|picked| self.point_of(picked.mark));
+        self.card.hover(at, point.as_ref());
         let model = self.model.read(cx);
         let Some(plot) = &mut self.plot else {
             return;
@@ -490,8 +520,7 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Carries the zoom along with a press dragged past a click's reach, which
-    /// puts away the tooltip until the release.
+    /// Carries the zoom along with a press dragged past a click's reach.
     fn drag_to(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(press) = &mut self.press else {
             return;
@@ -503,8 +532,9 @@ impl ScatterPanel {
         }
         let by = at - press.last;
         press.last = at;
+        self.card.drag(at);
         if starts {
-            self.clear_hover(cx);
+            cx.notify();
         }
         if let Some(area) = self.area() {
             self.zoom_to(area.panned(by), at, cx);
@@ -553,14 +583,32 @@ impl ScatterPanel {
         self.model.update(cx, |model, cx| model.reveal(id, cx));
     }
 
-    /// Drops the tooltip, which names the mark under a pointer that has left.
+    /// Drops the card, which names the mark under a pointer that has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        let mut cleared = self.card.leave();
         if let Some(plot) = &mut self.plot
             && let Pointer::Hover(_) = plot.pointer
         {
             plot.pointer = Pointer::Away;
+            cleared = true;
+        }
+        if cleared {
             cx.notify();
         }
+    }
+
+    /// The point the card describes.
+    fn carded(&self, _: &App) -> Option<Id> {
+        match &self.plot.as_ref()?.pointer {
+            Pointer::Hover(hover) => self.point_of(hover.mark),
+            Pointer::Away | Pointer::Picking(_) => None,
+        }
+    }
+
+    /// The point the plotted mark `mark` stands for, which names it across
+    /// replots that renumber the marks.
+    fn point_of(&self, mark: usize) -> Option<Id> {
+        Some(self.plot.as_ref()?.plotted.marks[mark].target.id)
     }
 
     /// Whether a list of the points under a click is up.
@@ -709,7 +757,14 @@ impl Choice {
         // Until the unit is measured, whether any of its points is timed is
         // taken from whether any node of the graph is.
         let timed = loaded.times().is_ok();
-        let picker = UnitPicker::new("scatter-unit", inputs, None, ScatterPanel::choose_unit, cx)?;
+        let picker = UnitPicker::new(
+            "scatter-unit",
+            "Point unit",
+            inputs,
+            None,
+            ScatterPanel::choose_unit,
+            cx,
+        )?;
         let axes = Axes::OPENING;
         let names = Axis::ALL.map(Axis::name);
         let across_picker =
@@ -750,7 +805,24 @@ impl Choice {
             _colour_picked: colour_picked,
         };
         choice.offer_times(timed, cx);
+        choice.explain_times(model, cx);
         Some(choice)
+    }
+
+    /// Has each picker offering a choice that reads action time say what the
+    /// graph `model` holds of them.
+    fn explain_times(&self, model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) {
+        let unit = self.picker.chosen(cx).unit();
+        let times = (model.read(cx).loaded()).map_or(Err(Untimed::NoProfile), Loaded::times);
+        let note = |name| times_note(times, self.timed, unit, name);
+        let notes = [
+            (&self.across_picker, note("Horizontal axis")),
+            (&self.up_picker, note("Vertical axis")),
+            (&self.colour_picker, note("Point colouring")),
+        ];
+        for (picker, note) in notes {
+            picker.update(cx, |picker, cx| picker.set_tooltip(note, cx));
+        }
     }
 
     /// Names each colouring the picker offers as it reads for the unit
@@ -889,13 +961,6 @@ const SHOW_WHOLE: Entry<ScatterIntent> = Entry::new(
     ScatterIntent::ShowWholePlot,
 );
 
-const REVEAL: Entry<ScatterIntent> = Entry::new(
-    gesture::Input::click(gesture::Button::Left),
-    POINT,
-    "Show in graph or list points",
-    ScatterIntent::Reveal,
-);
-
 const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
     SHOW_WHOLE,
     Entry::new(
@@ -904,7 +969,12 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         "Pan",
         ScatterIntent::Pan,
     ),
-    REVEAL,
+    Entry::new(
+        gesture::Input::click(gesture::Button::Left),
+        POINT,
+        "Show in graph or list points",
+        ScatterIntent::Reveal,
+    ),
     Entry::new(
         gesture::Input::click(gesture::Button::Left),
         Place::On("a listed point"),
@@ -1007,7 +1077,7 @@ fn describe(
     lines.push(plotted.axes.readings(point, time));
     lines.extend(plotted.axes.unplaced(point, time));
     if let Hue::Ran(ran) = mark.hue {
-        lines.push(format!("runner: {}", ran.label()));
+        lines.push(ran.label().to_owned());
     }
     lines.push(format!(
         "fan-in {} · fan-out {}",
@@ -1022,8 +1092,7 @@ fn describe(
         lines.push(format!("{} {actions}", point.actions));
     }
     if others > 0 {
-        let click = REVEAL.gesture().input.text(KeyStyle::NATIVE);
-        lines.push(format!("+{others} more here · {click} to list"));
+        lines.push(format!("+{others} more here"));
     }
     lines
 }
@@ -1164,10 +1233,7 @@ impl Render for ScatterPanel {
                 .plot
                 .as_ref()
                 .is_some_and(|plot| plot.scope != scope || plot.plotted.axes != choice.axes);
-            let times = model
-                .loaded()
-                .map_or(Err(Untimed::NoProfile), Loaded::times);
-            strip(choice, scope, times, measuring, legend, &palette, cx)
+            strip(choice, scope, measuring, legend, &palette, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = scope.zip(capabilities);
@@ -1270,21 +1336,24 @@ impl Render for ScatterPanel {
 fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
-        move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
+        move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             view.update(cx, |view, _| view.bounds = Some(bounds));
+            let panel = view.read(cx);
+            let Some((plotted, mark, Some(lines))) = panel.ringed() else {
+                return;
+            };
+            let Some(area) = paint::data_area(&plotted, panel.zoom, bounds) else {
+                return;
+            };
+            let ring = paint::ring_bounds(&plotted.marks[mark], &area);
+            let tooltip = palette.colors.tooltip();
+            defer_hover_card(lines, CardAnchor::Item(ring), bounds, tooltip, window, cx);
         }
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
         let panel = view.read(cx);
         let (zoom, pressed) = (panel.zoom, panel.press.is_some());
-        let described = panel.plot.as_ref().and_then(|plot| {
-            let (mark, lines) = match &plot.pointer {
-                Pointer::Away => return None,
-                Pointer::Hover(hover) => (hover.mark, Some(hover.lines.clone())),
-                Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
-            };
-            Some((Arc::clone(&plot.plotted), mark, lines))
-        });
+        let ringed = panel.ringed();
         if pressed {
             track_drag(
                 window,
@@ -1293,16 +1362,11 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
                 |view, at, end, _, cx| view.end_press(at, end, cx),
             );
         }
-        let Some((plotted, mark, lines)) = described else {
+        let Some((plotted, mark, _)) = ringed else {
             return;
         };
-        let Some(area) = paint::data_area(&plotted, zoom, bounds) else {
-            return;
-        };
-        let center = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
-        if let Some(lines) = lines {
-            let tooltip = TooltipColors::from_colors(&palette.colors);
-            paint_tooltip_box(&lines, center, bounds, tooltip, window, cx);
+        if let Some(area) = paint::data_area(&plotted, zoom, bounds) {
+            paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
         }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
@@ -1349,12 +1413,12 @@ fn pick_layer(
     };
     let lines = pick.rows[aimed].tooltip.clone();
     let scroll = scroll.handle().clone();
-    placed.over(move |list, bounds, window, cx| {
+    placed.beside(move |list, bounds, window, cx| {
         let level = pick::row_top(scroll.bounds(), scroll.offset().y, row, aimed);
         let at = at.within(bounds);
-        let place = |extent| pick::flank(at, list, extent, level, bounds);
-        let tooltip = TooltipColors::from_colors(&palette.colors);
-        paint_tooltip(&lines, place, tooltip, window, cx);
+        let place = move |extent, frame| pick::flank_within(at, list, extent, level, bounds, frame);
+        let tooltip = palette.colors.tooltip();
+        defer_tooltip(lines, place, tooltip, window, cx);
     })
 }
 
@@ -1629,38 +1693,19 @@ const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 fn strip(
     choice: &Choice,
     scope: Scope,
-    times: Result<&NodeTimes, Untimed>,
     measuring: bool,
     legend: Option<Legend>,
     palette: &Palette,
     cx: &Context<ScatterPanel>,
 ) -> Toolbar {
     let unit = group("points", palette).child(choice.picker.dropdown());
-    let tip = TooltipColors::from_colors(&palette.colors);
-    let timed_picker = |id: &'static str, picker: &Entity<Dropdown>, read: &str| {
-        let note = times_note(times, choice.timed, scope.unit(), read);
-        div()
-            .id(id)
-            .tooltip(TextTooltip::builder(note, tip))
-            .child(picker.clone())
-    };
-    let time_axis = "place points by their action time";
-    let across = group("across", palette).child(timed_picker(
-        "scatter-across-why",
-        &choice.across_picker,
-        time_axis,
-    ));
-    let up =
-        group("up", palette).child(timed_picker("scatter-up-why", &choice.up_picker, time_axis));
-    let colour = group("colour", palette).child(timed_picker(
-        "scatter-colour-why",
-        &choice.colour_picker,
-        "colour points by where their actions ran",
-    ));
+    let across = group("across", palette).child(choice.across_picker.clone());
+    let up = group("up", palette).child(choice.up_picker.clone());
+    let colour = group("colour", palette).child(choice.colour_picker.clone());
     let toggles: Vec<_> = choice
         .loaded
         .inputs()
-        .map(|input| input_toggle(input, scope, palette, cx))
+        .map(|input| input_toggle(input, scope, cx))
         .collect();
     let inputs = group("inputs", palette).children(toggles);
     Toolbar::new()
@@ -1708,37 +1753,24 @@ fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
 
 /// Turns the loaded `input`'s share in the measure in `scope` on and off, and
 /// says why where it cannot.
-fn input_toggle(
-    input: Input,
-    scope: Scope,
-    palette: &Palette,
-    cx: &Context<ScatterPanel>,
-) -> Stateful<Div> {
+fn input_toggle(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Button {
     let name = input_name(input);
     let toggle = Toggle::of(scope, input);
     let many = unit_names(scope.unit()).many;
-    let why = match toggle {
-        Toggle::On | Toggle::Off => None,
-        Toggle::Lone => Some(format!(
-            "{name} is the only input on describing {many}, and a plot needs one"
-        )),
-        Toggle::Ignored => Some(format!("{name} describes no {many}")),
+    let hint = match toggle {
+        Toggle::On | Toggle::Off => format!("Include {name}"),
+        Toggle::Lone => "Disabled: only input".to_owned(),
+        Toggle::Ignored => format!("Disabled: no {many}"),
     };
-    let control = Button::new(
+    Button::new(
         ("scatter-input", input as usize),
         cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_input(input, cx)),
     )
     .label(name)
     .selected(matches!(toggle, Toggle::On | Toggle::Lone))
     .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
-    .compact();
-    let tip = TooltipColors::from_colors(&palette.colors);
-    div()
-        .id(("scatter-input-why", input as usize))
-        .child(control)
-        .when_some(why, |el, why| {
-            el.tooltip(TextTooltip::builder(why.into(), tip))
-        })
+    .compact()
+    .tooltip(hint)
 }
 
 /// What the status says of the points of `plot` left unplotted, where any are.
@@ -1770,21 +1802,18 @@ fn any_timed(times: Result<&NodeTimes, Untimed>, reference: &Measurement) -> boo
     })
 }
 
-/// What a picker offering to `read` action time says of it: as the graph's
-/// colour picker does, but where the graph places time on none of the points
-/// of `unit`, that it places none there.
+/// The hint of the picker `name`d, offering action time: as the graph's
+/// colour picker's, but where the graph places time on none of the points of
+/// `unit`, that it places none there.
 fn times_note(
     times: Result<&NodeTimes, Untimed>,
     timed: bool,
     unit: Unit,
-    read: &str,
+    name: &str,
 ) -> SharedString {
     match times {
-        Ok(times) if !timed => {
-            let many = unit_names(unit).many;
-            format!("{}, none of them on {many}", times.coverage().line()).into()
-        }
-        _ => colour::note(times, read),
+        Ok(_) if !timed => format!("No action time on {}", unit_names(unit).many).into(),
+        _ => colour::note(times, name),
     }
 }
 
@@ -1809,7 +1838,7 @@ fn legend(state: &Entity<LegendState>, plot: &Plot, palette: &Palette) -> Legend
     let measure = sizing_name(plot.plotted.sizing);
     // Inked apart from every hue, so the key reads as one of size, not colour.
     let size = Swatch::Sizes(palette.colors.text_muted);
-    let size = LegendEntry::new(size, measure).tooltip(format!("mark size: {measure}"));
+    let size = LegendEntry::new(size, measure).tooltip("Mark size");
     Legend::new("scatter-legend", state).entries(hues.chain([size]))
 }
 

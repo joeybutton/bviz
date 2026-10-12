@@ -78,20 +78,12 @@ pub(super) fn offered(
 }
 
 impl Caveat {
-    /// What the row rooting the tree at `label` says of it.
-    pub(super) fn explain(self, label: &str) -> String {
+    /// What the row rooting the tree at the target of a cell says of it.
+    pub(super) fn explain(self) -> &'static str {
         match self {
-            Caveat::Copies => format!(
-                "Roots the tree at the copy of {label} a build of it requests, \
-                 which may be another than this one"
-            ),
-            Caveat::Tool => format!(
-                "Roots the tree at the copy of {label} a build of it requests, \
-                 which this graph does not hold: its only copy here is built for a tool"
-            ),
-            Caveat::Actions => {
-                format!("Roots the tree at the actions a build of {label} starts from")
-            }
+            Caveat::Copies => "Roots the requested copy",
+            Caveat::Tool => "Requested copy not in graph",
+            Caveat::Actions => "Roots its actions",
         }
     }
 }

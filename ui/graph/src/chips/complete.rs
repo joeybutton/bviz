@@ -16,9 +16,7 @@ use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
-use bviz_ui_components::{
-    ListScroll, TextTooltip, TooltipColors, key_text_within, list_scrollbar, menu_chrome,
-};
+use bviz_ui_components::{ListScroll, TextTooltip, key_text_within, list_scrollbar, menu_chrome};
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
     MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
@@ -163,7 +161,7 @@ impl Few {
 
 /// The tooltip of every row offering one of [`Function::EXTENSIONS`] that
 /// evaluates over the graph.
-const EXTENSION_NOTE: &str = "bviz extension, not part of Bazel's query language";
+const EXTENSION_NOTE: &str = "Not in Bazel's query language";
 
 /// The kind a row offering `function` names, and its tooltip, if any, over a
 /// graph `commands` were read from whose data `readable` states.
@@ -184,11 +182,7 @@ fn function_note(
                 return None;
             }
             let commands: Vec<&str> = commands.iter().map(|command| command.name()).collect();
-            Some(format!(
-                "{}() is no {} function; bviz evaluates it",
-                function.name(),
-                commands.join(" or ")
-            ))
+            Some(format!("Not in {} · bviz-evaluated", commands.join(" or ")))
         });
     (kind, note)
 }
@@ -777,10 +771,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         aimed,
     ))
     .when_some(note, |row, note| {
-        row.tooltip(TextTooltip::builder(
-            note.into(),
-            TooltipColors::from_colors(colors),
-        ))
+        row.tooltip(TextTooltip::builder(note.into(), colors.tooltip()))
     })
     .w_full()
     .on_click(move |event: &ClickEvent, window, cx| {
@@ -941,7 +932,7 @@ mod tests {
             note(Function::Config, &[Command::Query, Command::Aquery]),
             (
                 "function",
-                Some("config() is no query or aquery function; bviz evaluates it".to_owned())
+                Some("Not in query or aquery · bviz-evaluated".to_owned())
             )
         );
         assert_eq!(

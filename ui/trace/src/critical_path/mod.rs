@@ -22,7 +22,7 @@ use bviz_invocation::Chosen;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     Button, KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip,
-    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header,
+    centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use by_height::ByHeight;
@@ -107,6 +107,8 @@ struct Column<K> {
 #[derive(Clone, Copy)]
 struct Sorts<K> {
     by: K,
+    /// What `by` orders the rows by, as the header's hint names it.
+    what: &'static str,
     /// Whether the column sorts descending on the first click on it.
     descending: bool,
 }
@@ -120,35 +122,76 @@ const fn column<K>(title: &'static str, width: Option<f32>) -> Column<K> {
     }
 }
 
-const fn sorting<K>(title: &'static str, width: f32, by: K, descending: bool) -> Column<K> {
+const fn sorting<K>(
+    title: &'static str,
+    width: f32,
+    by: K,
+    what: &'static str,
+    descending: bool,
+) -> Column<K> {
     Column {
         title,
         width: Some(width),
         modeled: false,
-        sorts: Some(Sorts { by, descending }),
+        sorts: Some(Sorts {
+            by,
+            what,
+            descending,
+        }),
     }
 }
 
 const COLUMNS: [Column<StepKey>; 7] = [
     column("Step", None),
-    sorting("Start", STATS_NUM_COL_WIDTH, StepKey::Start, false),
-    sorting("Waited", STATS_NUM_COL_WIDTH, StepKey::Waited, true),
-    sorting("Own", STATS_NUM_COL_WIDTH, StepKey::Own, true),
+    sorting(
+        "Start",
+        STATS_NUM_COL_WIDTH,
+        StepKey::Start,
+        "start time",
+        false,
+    ),
+    sorting(
+        "Waited",
+        STATS_NUM_COL_WIDTH,
+        StepKey::Waited,
+        "wait time",
+        true,
+    ),
+    sorting("Own", STATS_NUM_COL_WIDTH, StepKey::Own, "own time", true),
     Column {
         modeled: true,
-        ..sorting("Could save", STATS_NUM_COL_WIDTH, StepKey::CouldSave, true)
+        ..sorting(
+            "Could save",
+            STATS_NUM_COL_WIDTH,
+            StepKey::CouldSave,
+            "possible saving",
+            true,
+        )
     },
-    sorting("% of path", SHARE_WIDTH, StepKey::Share, true),
-    sorting("Wait and own time", BAR_COLUMN_WIDTH, StepKey::Total, true),
+    sorting("% of path", SHARE_WIDTH, StepKey::Share, "path share", true),
+    sorting(
+        "Wait and own time",
+        BAR_COLUMN_WIDTH,
+        StepKey::Total,
+        "wait + own time",
+        true,
+    ),
 ];
 
 const NEARLY_CRITICAL_COLUMNS: [Column<NearlyCriticalKey>; 3] = [
     column("Action", None),
-    sorting("Took", STATS_NUM_COL_WIDTH, NearlyCriticalKey::Took, true),
+    sorting(
+        "Took",
+        STATS_NUM_COL_WIDTH,
+        NearlyCriticalKey::Took,
+        "time taken",
+        true,
+    ),
     sorting(
         "Slack",
         STATS_NUM_COL_WIDTH,
         NearlyCriticalKey::Slack,
+        "slack",
         false,
     ),
 ];
@@ -336,8 +379,7 @@ impl CriticalPathPanel {
                 .child(lead(path, legends, palette))
                 .child(self.summary(path, legends, palette, fills, cx))
                 .children(modeled.map(|modeled| modeled_caption(path, modeled, palette)));
-            let choice =
-                || modeled.map(|modeled| self.listing_choice(modeled, listing, palette, cx));
+            let choice = || modeled.map(|modeled| self.listing_choice(modeled, listing, cx));
             match (listing, modeled) {
                 (Listing::NearlyCritical, Some(modeled)) => {
                     let header = header_row(
@@ -382,29 +424,19 @@ impl CriticalPathPanel {
 
     /// The choice of what the table lists, in place of its first column's
     /// title.
-    fn listing_choice(
-        &self,
-        modeled: &Modeled,
-        listing: Listing,
-        palette: &Palette,
-        cx: &Context<Self>,
-    ) -> Div {
+    fn listing_choice(&self, modeled: &Modeled, listing: Listing, cx: &Context<Self>) -> Div {
         let button = |id: &'static str, label: String, tip: &'static str, shows: Listing| {
             let panel = cx.entity();
-            div()
-                .id(("critical-path-list-choice", shows as usize))
-                .tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
-                .child(
-                    Button::new(id, move |_, _, cx| {
-                        panel.update(cx, |panel, cx| {
-                            panel.listing = shows;
-                            cx.notify();
-                        })
-                    })
-                    .compact()
-                    .selected(listing == shows)
-                    .label(label),
-                )
+            Button::new(id, move |_, _, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.listing = shows;
+                    cx.notify();
+                })
+            })
+            .compact()
+            .selected(listing == shows)
+            .label(label)
+            .tooltip(tip)
         };
         div()
             .flex()
@@ -672,7 +704,7 @@ fn modeled_caption(path: &CriticalPath, modeled: &Modeled, palette: &Palette) ->
         .text_color(palette.muted_label)
         .tooltip(TextTooltip::builder(
             words::modeled_tip(path, modeled).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(words::modeled_line(path, modeled)))
 }
@@ -733,8 +765,8 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
             div()
                 .id(("critical-path-lever", i))
                 .tooltip(TextTooltip::builder(
-                    words::lever_account(lever, bound).into(),
-                    palette.tooltip,
+                    words::lever_tip(lever).into(),
+                    palette.colors.tooltip(),
                 ))
                 .child(words::lever(lever, time, bound))
         });
@@ -836,7 +868,15 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
         match (column.width, title.take(), column.sorts) {
             (None, Some(title), _) => table_cell(None, [title]).into_any_element(),
             (width, _, None) => table_cell(width, [column.title]).into_any_element(),
-            (width, _, Some(Sorts { by, descending })) => table_cell(
+            (
+                width,
+                _,
+                Some(Sorts {
+                    by,
+                    what,
+                    descending,
+                }),
+            ) => table_cell(
                 width,
                 [sort_header(
                     column.title,
@@ -849,6 +889,10 @@ fn header_row<'c, K: Copy + PartialEq + 'static>(
             .id(column.title)
             .cursor_pointer()
             .hover(|cell| cell.bg(palette.hover))
+            .tooltip(TextTooltip::builder(
+                sort_hint(what),
+                palette.colors.tooltip(),
+            ))
             .on_click(cx.listener(move |panel, e, _, cx| {
                 GESTURES.dispatch(Pointer::click(e), |intent| match intent {
                     CriticalPathIntent::Sort => {
@@ -952,7 +996,7 @@ fn step_row(
         .min_w_0()
         .tooltip(TextTooltip::builder(
             words::step_tip(step, logged.given()).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(step.name().to_owned()))
         .children(tag)
@@ -962,7 +1006,7 @@ fn step_row(
     let total = step.gap() + step.own();
     let parts: Vec<(Part, Duration)> = step.parts().collect();
     let segments = parts.iter().map(|&(part, time)| {
-        let tip = words::part_tip(part, time, total, "the step's wait and own time");
+        let tip = words::part_tip(part, time, total, "step time");
         part_segment(part, time, tip.into(), fills)
     });
     let width = relative(words::fraction(total, longest) as f32);
@@ -1005,7 +1049,7 @@ fn step_row(
             let saved = div()
                 .id(("critical-path-could-save", index))
                 .when_some(words::could_save_tip(step), |cell, tip| {
-                    cell.tooltip(TextTooltip::builder(tip.into(), palette.tooltip))
+                    cell.tooltip(TextTooltip::builder(tip.into(), palette.colors.tooltip()))
                 })
                 .child(words::could_save(step));
             row.child(table_cell(could_save.width, [saved]))
@@ -1031,7 +1075,7 @@ fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette)
         .min_w_0()
         .tooltip(TextTooltip::builder(
             words::nearly_critical_tip(action).into(),
-            palette.tooltip,
+            palette.colors.tooltip(),
         ))
         .child(line(action.description.clone()))
         .when(!ran.is_empty(), |described| {
@@ -1067,7 +1111,7 @@ fn spawn_strip(
     fills: &Fills,
 ) -> Stateful<Div> {
     let action = spawned.time();
-    let of = "the action's time on the path";
+    let of = "action time";
     let drawn_width = |time| BAR_COLUMN_WIDTH * words::fraction(time, longest) as f32;
     let (wide, narrow): (Vec<_>, Vec<_>) = Phase::ALL
         .into_iter()
@@ -1170,7 +1214,7 @@ fn bar(
     gap: Pixels,
     palette: &Palette,
 ) -> Stateful<Div> {
-    let tooltip = palette.tooltip;
+    let tooltip = palette.colors.tooltip();
     let segments = segments.enumerate().map(move |(i, segment)| {
         let drawn = div()
             .id(i)

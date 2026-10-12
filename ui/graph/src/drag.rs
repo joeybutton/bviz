@@ -29,7 +29,7 @@ pub(crate) enum CanvasIntent {
     Pan,
     ToggleBox,
     Select,
-    Mark,
+    Hover,
     Zoom,
     PanAcross,
     Scroll,
@@ -67,8 +67,8 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
     Entry::new(
         Input::HOVER,
         BOX,
-        "Highlight box's neighbors",
-        CanvasIntent::Mark,
+        "Describe; highlight neighbors",
+        CanvasIntent::Hover,
     ),
     Entry::new(
         Input::SCROLL.holding(Held::SECONDARY),
@@ -154,6 +154,9 @@ pub(crate) fn drag_pan(
     if past_slop(pan.press, position) {
         pan.moved = true;
     }
+    if pan.moved {
+        view.box_card.drag(position, cx);
+    }
     let dx = f32::from(position.x) - f32::from(pan.last.x);
     let dy = f32::from(position.y) - f32::from(pan.last.y);
     pan.last = position;
@@ -187,7 +190,15 @@ pub(crate) fn end_drag(
     _: &mut Window,
     cx: &mut Context<GraphPanel>,
 ) {
-    match std::mem::take(&mut view.drag) {
+    let drag = std::mem::take(&mut view.drag);
+    if !matches!(drag, Drag::None) {
+        let over = view.framing.viewport().contains(&position);
+        match matches!(end, DragEnd::Released) && over {
+            true => view.hover_box_at(position, cx),
+            false => view.box_card.forget(cx),
+        }
+    }
+    match drag {
         Drag::None => {}
         Drag::Pan(Pan { moved, click, .. }) => {
             if !moved && matches!(end, DragEnd::Released) {

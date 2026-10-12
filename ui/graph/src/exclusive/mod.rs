@@ -30,18 +30,17 @@ use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    KeyScope, KeyStyle, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem, QueryField,
-    QueryFieldEvent, ShowLegend, Swatch, Toolbar, TooltipColors, beside_anchor, cached_layer,
-    centered_notice, centered_spinner, key_text_in, legend_gestures, load_in_background,
-    paint_tooltip,
+    CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
+    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
+    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
-use cell_menu::{Offer, PointFacts};
+use cell_menu::{Caveat, Offer, PointFacts};
 use gpui::{
     Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
     FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Size, Subscription, Task,
-    WeakEntity, Window, canvas, div, point, prelude::*, px, relative,
+    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Subscription, Task, WeakEntity,
+    Window, canvas, div, prelude::*, px, relative,
 };
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{
@@ -203,6 +202,8 @@ pub struct ExclusivePanel {
     drawing: Option<Task<()>>,
     /// The menu a right press put up over a cell, while it stands.
     menu: Option<CellMenu>,
+    /// The card describing the cell selected.
+    card: HoverCard<Holds>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -212,6 +213,27 @@ pub struct ExclusivePanel {
 }
 
 impl ExclusivePanel {
+    /// The selection of a tree at rest, which the hover layer rings.
+    fn at_rest_selection(&self) -> Option<&Selection> {
+        let drawn = self.drawn.as_ref()?;
+        let at_rest = drawn.transition.is_none();
+        drawn.selection.as_ref().filter(|_| at_rest)
+    }
+
+    /// What the card describing the selected cell reads and stands beside,
+    /// while it is shown.
+    fn card(&self) -> Option<(Vec<String>, CardAnchor)> {
+        let Selection { cell, by, lines } = self.at_rest_selection()?;
+        let anchor = match (by, self.card.pointer()) {
+            // The menu stands in for the cell's description.
+            (Picked::Menu, _) => return None,
+            _ if !self.card.shows(&cell.holds) => return None,
+            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
+            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
+        };
+        Some((lines.clone(), anchor))
+    }
+
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
@@ -267,6 +289,7 @@ impl ExclusivePanel {
             coloured: HashMap::new(),
             drawing: None,
             menu: None,
+            card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
@@ -518,7 +541,6 @@ impl ExclusivePanel {
                 as_targets,
                 history: History::new(None),
                 transition: None,
-                pointer: None,
                 selection: None,
                 pressed_clear: false,
             });
@@ -658,7 +680,7 @@ impl ExclusivePanel {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        let (selected, pointer) = (drawn.selection.take(), drawn.pointer);
+        let (selected, pointer) = (drawn.selection.take(), self.card.pointer());
         match selected {
             Some(Selection {
                 cell,
@@ -726,6 +748,7 @@ impl ExclusivePanel {
             None => cells.first().copied(),
         };
         if let Some(to) = to {
+            self.card.pick();
             self.select(to, Picked::Keys, cx);
         }
     }
@@ -905,7 +928,7 @@ impl ExclusivePanel {
             }
             Offer::Root { node, caveat } => {
                 let label = label(node);
-                let explained = caveat.map(|caveat| caveat.explain(&label));
+                let explained = caveat.map(Caveat::explain);
                 let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
                 match explained {
                     Some(explained) => item.tooltip(explained),
@@ -947,10 +970,10 @@ impl ExclusivePanel {
     /// go of a cell it selected.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let cell = self.cell_at(at);
+        self.card.hover(at, cell.as_ref().map(|cell| &cell.holds));
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        drawn.pointer = Some(at);
         match cell {
             Some(cell) => self.select(cell, Picked::Pointer, cx),
             None if drawn.picked_by_pointer() => self.deselect(cx),
@@ -960,12 +983,19 @@ impl ExclusivePanel {
 
     /// Lets go of the cell the pointer selected, which has left.
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawn) = &mut self.drawn {
-            drawn.pointer = None;
-            if drawn.picked_by_pointer() {
-                self.deselect(cx);
-            }
+        if self.card.leave() {
+            cx.notify();
         }
+        if self.drawn.as_ref().is_some_and(Drawn::picked_by_pointer) {
+            self.deselect(cx);
+        }
+    }
+
+    /// The cell the card describes: the cell selected, unless its menu stands
+    /// in for the card.
+    fn carded(&self, _: &App) -> Option<Holds> {
+        let selection = self.drawn.as_ref()?.selection.as_ref()?;
+        (selection.by != Picked::Menu).then_some(selection.cell.holds)
     }
 
     /// Repaints the cells along with the layer over them; every change to what
@@ -986,6 +1016,7 @@ fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> 
     let opening = Some(Unit::ConfiguredTarget);
     UnitPicker::new(
         "exclusive-unit",
+        "Cell unit",
         inputs,
         opening,
         ExclusivePanel::choose,
@@ -1143,8 +1174,6 @@ struct Drawn {
     /// The move to the focus drawn from the one drawn before, while it is
     /// under way.
     transition: Option<Transition>,
-    /// Where the pointer rests over the icicle, while it does.
-    pointer: Option<Point<Pixels>>,
     selection: Option<Selection>,
     /// Whether the last press landed clear of every cell, starting a click.
     pressed_clear: bool,
@@ -1382,9 +1411,9 @@ fn describe(
     let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let stand_on = |weight: u32, on: &str| exist_only_because(weight, &names, on);
+    let exclusive = |weight: u32| exclusive(weight, &names);
     let shares = |weight: u32, within: Option<Focused>| {
-        let of_build = format!("{} of the build", share(weight, tree.total()));
+        let of_build = format!("{} of build", share(weight, tree.total()));
         match within {
             Some(within) => {
                 let name = match within {
@@ -1407,22 +1436,13 @@ fn describe(
             let (count, weight) = (tree.shared_tops().len() as u32, tree.shared_weight());
             lines.push(shared_name(tree, by));
             lines.push(gathered_as_shared(count, by.word(), &names));
-            lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
+            lines.push(exclusive(weight));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = tree.weight(node);
-            let copies = coloured
-                .targets
-                .as_ref()
-                .map(|targets| targets.copies(node));
-            let this = if copies.is_some_and(|copies| copies > 1) {
-                "this copy"
-            } else {
-                "this"
-            };
-            lines.push(stand_on(weight, this));
+            lines.push(exclusive(weight));
             if let Some(targets) = &coloured.targets {
                 let held = targets.held(node);
                 lines.extend(targets_held(held.targets(), held.only_here()));
@@ -1439,9 +1459,9 @@ fn describe(
             let (count, weight) = (run.count(), run.weight());
             lines.push(match on_top {
                 true => run_name(tree, shared, by, run),
-                false => format!("{} too narrow to draw apart", names.counted(count)),
+                false => format!("{} · too narrow", names.counted(count)),
             });
-            lines.push(stand_on(weight, if count == 1 { "it" } else { "them" }));
+            lines.push(exclusive(weight));
             lines.push(shares(weight, focus.filter(|_| !on_top)));
         }
     }
@@ -1454,14 +1474,14 @@ fn describe(
 fn targets_held(targets: u32, only_here: u32) -> Option<String> {
     let elsewhere = match (targets, only_here) {
         (0, _) => return None,
-        (1, 0) => "also configured elsewhere".to_owned(),
+        (1, 0) => "configured elsewhere too".to_owned(),
         (1, _) => "configured only here".to_owned(),
-        (_, 0) => "each also configured elsewhere".to_owned(),
+        (_, 0) => "each configured elsewhere too".to_owned(),
         _ if only_here == targets => "all configured only here".to_owned(),
-        _ => format!("{only_here} of them configured only here"),
+        _ => format!("{only_here} configured only here"),
     };
     let covered = unit_names(Unit::Target).counted(targets);
-    Some(format!("covering {covered}, {elsewhere}"))
+    Some(format!("{covered} · {elsewhere}"))
 }
 
 /// Where the target of the configured target `id` stands in `targets`, the
@@ -1476,22 +1496,21 @@ fn as_target(targets: &Dominators, id: Id, by: RootedBy, shared: &Shared) -> Opt
         (None, Standing::Root { .. } | Standing::ReachedRoot(_)) => word.to_owned(),
         (None, Standing::Below(count)) => shared_by(count, word, names.of(count.value())),
     };
-    let held = exist_only_because(targets.weight(node), &names, "it");
-    Some(format!("as a target: {place}; {held}"))
+    let held = exclusive(targets.weight(node), &names);
+    Some(format!("as target: {place} · {held}"))
 }
 
-/// How a tooltip says that `weight` points, which `names` names, exist only
-/// because of `on`.
-fn exist_only_because(weight: u32, names: &KindNames, on: &str) -> String {
-    let exist = if weight == 1 { "exists" } else { "exist" };
-    format!("{} {exist} only because of {on}", names.counted(weight))
+/// How a tooltip counts the `weight` points, which `names` names, that exist
+/// only because of what it describes.
+fn exclusive(weight: u32, names: &KindNames) -> String {
+    format!("{} exclusive", names.counted(weight))
 }
 
 /// How a tooltip names `parent` of `tree` as the immediate dominator of the
 /// point it describes.
 fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
     let dominator = point_name(tree.id(parent), tree.scope().unit(), shared);
-    format!("immediately dominated by {dominator}")
+    format!("dominator {dominator}")
 }
 
 /// Pushes onto `lines` what a tooltip says of `node`, a top of `tree` whose
@@ -1506,9 +1525,9 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     let (count, said): (_, fn(Count, &str, &str) -> String) = match tree.standing(node) {
         Standing::Root { in_cycle } => {
             return match elsewhere {
-                None => lines.push(format!("{word}: {}", by.why(in_cycle))),
+                None => lines.push(format!("{word} · {}", by.why(in_cycle))),
                 Some(elsewhere) => {
-                    lines.push(format!("{word} here, and a dependency elsewhere:"));
+                    lines.push(format!("{word} here · dependency elsewhere:"));
                     lines.extend(elsewhere);
                 }
             };
@@ -1526,10 +1545,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     lines.extend(listed.map(|name| format!("{LISTED}{name}")));
     let more = count.less(named.len() as u32);
     if !named.is_empty() && more.value() > 0 {
-        lines.push(format!("{LISTED}and {more} more"));
+        lines.push(format!("{LISTED}+{more} more"));
     }
     if let Some(elsewhere) = elsewhere {
-        lines.push("and a dependency elsewhere:".to_owned());
+        lines.push("dependency elsewhere:".to_owned());
         lines.extend(elsewhere);
     }
 }
@@ -1541,10 +1560,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
 fn reached_elsewhere(elsewhere: Elsewhere, unit: Unit, shared: &Shared) -> Vec<String> {
     let dependent = point_name(elsewhere.dependent, unit, shared);
     let copy = match configuration(elsewhere.copy, shared) {
-        Some(configuration) => format!("its copy in {configuration}"),
-        None => "another copy of it".to_owned(),
+        Some(configuration) => format!("{configuration} copy"),
+        None => "another copy".to_owned(),
     };
-    let reached = format!("{LISTED}{dependent} reaches {copy}");
+    let reached = format!("{LISTED}{dependent} → {copy}");
     let more = other_copies(elsewhere.copies.saturating_sub(1));
     std::iter::once(reached).chain(more).collect()
 }
@@ -1554,8 +1573,8 @@ fn reached_elsewhere(elsewhere: Elsewhere, unit: Unit, shared: &Shared) -> Vec<S
 fn other_copies(more: u32) -> Option<String> {
     match more {
         0 => None,
-        1 => Some(format!("{LISTED}1 other copy is a dependency too")),
-        _ => Some(format!("{LISTED}{more} other copies are dependencies too")),
+        1 => Some(format!("{LISTED}+1 copy depended on")),
+        _ => Some(format!("{LISTED}+{more} copies depended on")),
     }
 }
 
@@ -1592,9 +1611,9 @@ impl RootedBy {
     /// cycle, which it is `in_cycle` with.
     fn why(self, in_cycle: bool) -> &'static str {
         match (self, in_cycle) {
-            (RootedBy::Tops, false) => "nothing depends on it",
-            (RootedBy::Tops, true) => "nothing outside its cycle depends on it",
-            (RootedBy::Targets, _) => "named by the target set",
+            (RootedBy::Tops, false) => "no dependents",
+            (RootedBy::Tops, true) => "no dependents outside its cycle",
+            (RootedBy::Targets, _) => "in the target set",
         }
     }
 }
@@ -1618,41 +1637,17 @@ fn what_is_shared(word: &str, named: &str) -> String {
 /// roots being called `word`.
 fn gathered_as_shared(count: u32, word: &str, names: &KindNames) -> String {
     let (shared, sharing) = (names.counted(count), names.many);
-    format!("{shared} that two or more {word} {sharing} depend on")
+    format!("{shared} · shared by 2+ {word} {sharing}")
 }
 
 /// How a reader says that `how_many` roots besides a root, called `word`
 /// `named`, reach it.
 fn reached_from(how_many: impl std::fmt::Display, word: &str, named: &str) -> String {
-    format!("{word}, and reached from {how_many} other {word} {named}")
+    format!("{word} · reached from {how_many} other {word} {named}")
 }
 
 /// The most roots a tooltip names as reaching a top.
 const NAMED_ROOTS: usize = 3;
-
-/// What a click on the cell holding `holds` under `top` does, along with the
-/// keys `up` that go up a level as a click on the top cell does, and where its
-/// menu offers `more` than the click that it does; absent where a click does
-/// nothing.
-fn gesture(holds: Holds, top: Holds, up: Option<&str>, more: bool) -> Option<String> {
-    let click = FOCUS_CELL.gesture().input.text(KeyStyle::NATIVE);
-    let does = match holds {
-        Holds::Build => return None,
-        _ if holds == top => match up {
-            Some(keys) => format!("{click} or {keys} to go up a level"),
-            None => format!("{click} to go up a level"),
-        },
-        Holds::Node(_) => format!("{click} to focus"),
-        Holds::Shared | Holds::Rest(_) => format!("{click} to open"),
-    };
-    Some(match more {
-        true => {
-            let menu = OPEN_MENU.gesture().input.text(KeyStyle::NATIVE);
-            format!("{does} · {menu} for more")
-        }
-        false => does,
-    })
-}
 
 /// How a cell names the whole build.
 const WHOLE_BUILD: &str = "the whole build";
@@ -1696,7 +1691,7 @@ impl Panel for ExclusivePanel {
     }
 
     fn description() -> Option<&'static str> {
-        Some("What exists only because of each target (the build's dominator tree)")
+        Some("Build's dominator tree")
     }
 
     fn gestures() -> Vec<GestureRow> {
@@ -1722,9 +1717,12 @@ impl Panel for ExclusivePanel {
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.shown = active;
-        if active {
-            self.focus_handle.focus(window, cx);
-            self.compute(cx);
+        match active {
+            true => {
+                self.focus_handle.focus(window, cx);
+                self.compute(cx);
+            }
+            false => self.clear_hover(cx),
         }
     }
 }
@@ -1968,28 +1966,26 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
     let row = || div().flex().items_center().min_w_0().overflow_hidden();
     // A name and the hint telling it apart give way in proportion to their
     // lengths, so neither is cut away before the other.
-    let part = |text: String| {
-        div()
-            .min_w_0()
-            .overflow_hidden()
-            .text_ellipsis()
-            .child(text)
-    };
-    let crumb = |name: String, hint: Option<String>| {
-        let hint = hint.map(|hint| part(format!("{HINT_SEPARATOR}{hint}")));
+    let crumb = |index: usize, name: String, hint: Option<String>| {
+        let hint = hint.map(|hint| {
+            TruncatingLabel::new(
+                ("exclusive-crumb-hint", index),
+                format!("{HINT_SEPARATOR}{hint}"),
+            )
+        });
         div()
             .flex()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
-            .child(part(name))
+            .child(TruncatingLabel::new(("exclusive-crumb-name", index), name))
             .children(hint)
     };
     let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
     let link = |index: usize, name: String, hint: Option<String>, to: Option<Focused>| {
         // A click landing once another tree is drawn names none of its nodes.
         let tree = Arc::clone(&drawn.coloured.tree);
-        crumb(name, hint)
+        crumb(index, name, hint)
             .id(("exclusive-crumb", index))
             .cursor_pointer()
             .text_color(palette.colors.text_muted)
@@ -2024,7 +2020,7 @@ fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) ->
         above.push(after(step.into_any_element()));
     }
     let focused = cell_name(tree, shared, by, focus.on.holds());
-    let last = after(crumb(focused, hint(focus.on)).into_any_element())
+    let last = after(crumb(focus.above.len() + 1, focused, hint(focus.on)).into_any_element())
         .flex_shrink_0()
         .max_w(relative(1.));
     Some(
@@ -2079,55 +2075,18 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                     drawn.selection = moved;
                 }
             });
+            if let Some((lines, anchor)) = view.read(cx).card() {
+                let tooltip = palette.colors.tooltip();
+                defer_hover_card(lines, anchor, bounds, tooltip, window, cx);
+            }
         }
     };
-    let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
-        let panel = view.read(cx);
-        let Some((drawn, Selection { cell, by, lines })) = panel
-            .drawn
-            .as_ref()
-            .filter(|drawn| drawn.transition.is_none())
-            .and_then(|drawn| Some((drawn, drawn.selection.as_ref()?)))
-        else {
-            return;
-        };
-        let more = panel.offers(cell.holds, cx).len() > 1;
-        let up = key_text_in(&FocusUp, &panel.focus_handle, window);
-        let gesture = gesture(cell.holds, drawn.top(), up.as_deref(), more);
-        let lines: Vec<String> = lines.iter().cloned().chain(gesture).collect();
-        let (cell, by, pointer) = (*cell, *by, drawn.pointer);
-        paint::paint_ring(&cell, &palette, window);
-        let at = match (by, pointer) {
-            // The menu stands in for the cell's description.
-            (Picked::Menu, _) => return,
-            (Picked::Pointer, Some(at)) => Some(at),
-            (Picked::Pointer, None) | (Picked::Keys, _) => None,
-        };
-        let place = |extent: Size<Pixels>| match at {
-            Some(at) => beside_anchor(at, extent, bounds),
-            None => beside_cell(cell.rect, extent, bounds),
-        };
-        let tooltip = TooltipColors::from_colors(&palette.colors);
-        paint_tooltip(&lines, place, tooltip, window, cx);
+    let paint = move |_: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
+        if let Some(Selection { cell, .. }) = view.read(cx).at_rest_selection() {
+            paint::paint_ring(cell, &palette, window);
+        }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
-}
-
-/// Where a tooltip of `extent` describing the cell at `rect` goes inside
-/// `bounds`: beside the middle of the cell's bottom edge, or of its top edge
-/// where there is no room below, so that it covers neither the cell nor its
-/// ring.
-fn beside_cell(
-    rect: Bounds<Pixels>,
-    extent: Size<Pixels>,
-    bounds: Bounds<Pixels>,
-) -> Point<Pixels> {
-    let x = rect.center().x;
-    let below = beside_anchor(point(x, rect.bottom()), extent, bounds);
-    match below.y >= rect.bottom() {
-        true => below,
-        false => beside_anchor(point(x, rect.top()), extent, bounds),
-    }
 }
 
 /// The layer the cells are drawn in, cached across frames that leave the tree
@@ -2187,7 +2146,6 @@ impl Render for IcicleCanvas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::size;
 
     #[test]
     fn every_gesture_is_reachable() {
@@ -2197,19 +2155,6 @@ mod tests {
     #[test]
     fn every_gesture_fits_the_keys_help() {
         assert_eq!(GESTURES.overlong(), []);
-    }
-
-    /// A tooltip for a cell with no room below it stands above the cell
-    /// rather than over it.
-    #[test]
-    fn a_cell_s_tooltip_stands_below_it_or_above_where_there_is_no_room() {
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
-        let extent = size(px(120.), px(60.));
-        let high = Bounds::new(point(px(100.), px(20.)), size(px(80.), px(20.)));
-        assert!(beside_cell(high, extent, bounds).y >= high.bottom());
-        let low = Bounds::new(point(px(100.), px(270.)), size(px(80.), px(20.)));
-        let placed = beside_cell(low, extent, bounds);
-        assert!(placed.y + extent.height <= low.top(), "{placed:?}");
     }
 
     #[test]
@@ -2223,9 +2168,9 @@ mod tests {
     #[test]
     fn the_other_copies_reached_are_counted_only_where_there_are_any() {
         assert_eq!(other_copies(0), None);
-        let one = "  · 1 other copy is a dependency too";
+        let one = "  · +1 copy depended on";
         assert_eq!(other_copies(1).unwrap(), one);
-        let several = "  · 2 other copies are dependencies too";
+        let several = "  · +2 copies depended on";
         assert_eq!(other_copies(2).unwrap(), several);
     }
 
@@ -2243,10 +2188,10 @@ mod tests {
         );
         assert_eq!(
             reached_from(3, targets.word(), many),
-            "requested, and reached from 3 other requested configured targets"
+            "requested · reached from 3 other requested configured targets"
         );
-        assert_eq!(targets.why(true), "named by the target set");
-        assert_eq!(tops.why(false), "nothing depends on it");
+        assert_eq!(targets.why(true), "in the target set");
+        assert_eq!(tops.why(false), "no dependents");
     }
 
     #[test]
@@ -2254,12 +2199,12 @@ mod tests {
         let read = |targets, only_here| targets_held(targets, only_here);
         assert_eq!(read(0, 0), None);
         let read = |targets, only_here| read(targets, only_here).unwrap();
-        assert_eq!(read(1, 0), "covering 1 target, also configured elsewhere");
-        assert_eq!(read(1, 1), "covering 1 target, configured only here");
-        let each_elsewhere = "covering 3 targets, each also configured elsewhere";
+        assert_eq!(read(1, 0), "1 target · configured elsewhere too");
+        assert_eq!(read(1, 1), "1 target · configured only here");
+        let each_elsewhere = "3 targets · each configured elsewhere too";
         assert_eq!(read(3, 0), each_elsewhere);
-        assert_eq!(read(3, 3), "covering 3 targets, all configured only here");
-        let some_here = "covering 3 targets, 1 of them configured only here";
+        assert_eq!(read(3, 3), "3 targets · all configured only here");
+        let some_here = "3 targets · 1 configured only here";
         assert_eq!(read(3, 1), some_here);
     }
 
@@ -2268,11 +2213,11 @@ mod tests {
         let names = unit_names(Unit::ConfiguredTarget);
         assert_eq!(
             gathered_as_shared(1, TOP_LEVEL, &names),
-            "1 configured target that two or more top-level configured targets depend on"
+            "1 configured target · shared by 2+ top-level configured targets"
         );
         assert_eq!(
             gathered_as_shared(7, REQUESTED, &names),
-            "7 configured targets that two or more requested configured targets depend on"
+            "7 configured targets · shared by 2+ requested configured targets"
         );
     }
 }
