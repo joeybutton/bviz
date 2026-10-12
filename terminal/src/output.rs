@@ -5,7 +5,7 @@
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use bviz_invocation::{Configurations, InvocationId, Outcomes};
+use bviz_invocation::{Configurations, InvocationId, Outcomes, Recorded};
 use prost::Message;
 
 use crate::bep::build_event_stream::{BuildEvent, build_event::Payload, build_event_id::Id};
@@ -71,9 +71,42 @@ impl BuildOutput {
     }
 }
 
-/// Read a whole build event binary stream. An event that does not decode fails
-/// the read.
-pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
+/// Why a build event binary stream cannot be read.
+#[derive(Debug)]
+pub enum ParseError {
+    Decode(prost::DecodeError),
+    /// The stream holds no whole event, as no build event stream does.
+    NoEvent,
+}
+
+impl From<prost::DecodeError> for ParseError {
+    fn from(e: prost::DecodeError) -> Self {
+        ParseError::Decode(e)
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Decode(e) => write!(f, "cannot parse build event stream: {e}"),
+            ParseError::NoEvent => write!(f, "not a build event stream"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseError::Decode(e) => Some(e),
+            ParseError::NoEvent => None,
+        }
+    }
+}
+
+/// Read a build event binary stream: whole, where it runs to the event Bazel
+/// marks its last, and up to where it ends otherwise. An event that does not
+/// decode fails the read, as does a stream that holds no whole event.
+pub fn parse(mut stream: &[u8]) -> Result<Recorded<BuildOutput>, ParseError> {
     let mut bytes = Vec::new();
     let mut frames = Vec::new();
     let mut anchors = Vec::new();
@@ -81,13 +114,23 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
     let mut outcomes = Outcomes::default();
     let mut columns = None;
     let mut show_timestamps = false;
-    while !stream.is_empty() {
+    let mut last_read = false;
+    let mut any_event = false;
+    let ended_whole = loop {
+        let event = match next_event(&mut stream)? {
+            Next::Event(event) => event,
+            Next::End => break true,
+            Next::CutOff => break false,
+        };
         let BuildEvent {
             id,
             children,
             payload,
+            last_message,
             ..
-        } = BuildEvent::decode_length_delimited(&mut stream)?;
+        } = BuildEvent::decode(event)?;
+        any_event = true;
+        last_read |= last_message;
         let id = id.and_then(|id| id.id);
         // An anchoring event ties its time to the frame boundary it falls on: the
         // number of progress frames already emitted.
@@ -125,8 +168,11 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
             }
             _ => {}
         }
+    };
+    if !any_event {
+        return Err(ParseError::NoEvent);
     }
-    Ok(BuildOutput {
+    let output = BuildOutput {
         configurations,
         outcomes,
         columns: columns.unwrap_or(Columns::DEFAULT),
@@ -134,7 +180,40 @@ pub fn parse(mut stream: &[u8]) -> Result<BuildOutput, prost::DecodeError> {
         frames,
         anchors,
         show_timestamps,
+    };
+    Ok(match ended_whole && last_read {
+        true => Recorded::Complete(output),
+        false => Recorded::CutOff(output),
     })
+}
+
+/// How the head of a stream holds its next event.
+enum Next<'a> {
+    Event(&'a [u8]),
+    End,
+    /// The stream ends inside the event.
+    CutOff,
+}
+
+/// The event at the head of `stream`, which it advances past the event.
+fn next_event<'a>(stream: &mut &'a [u8]) -> Result<Next<'a>, prost::DecodeError> {
+    if stream.is_empty() {
+        return Ok(Next::End);
+    }
+    let delimiter_ends = stream
+        .iter()
+        .take(MAX_DELIMITER_BYTES)
+        .any(|&b| b & VARINT_CONTINUES == 0);
+    if !delimiter_ends && stream.len() < MAX_DELIMITER_BYTES {
+        return Ok(Next::CutOff);
+    }
+    let length = prost::decode_length_delimiter(&mut *stream)?;
+    if length > stream.len() {
+        return Ok(Next::CutOff);
+    }
+    let (event, rest) = stream.split_at(length);
+    *stream = rest;
+    Ok(Next::Event(event))
 }
 
 /// Bytes [`probe_invocation_id`] reads from the head of a stream, many times
@@ -248,7 +327,7 @@ mod tests {
 
     #[test]
     fn reads_columns_and_output() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         assert_eq!(output.columns.get(), 100);
         // Bazel's curses progress display emits cursor-control escape sequences.
         assert!(
@@ -276,7 +355,7 @@ mod tests {
 
     #[test]
     fn reads_configurations_by_checksum() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         // The sample's two configurations share a mnemonic.
         let target = "55817e2200e2f24b506d68c96928ed7b9fa185d1fb462c4f511796269d8d06d4";
         let other = "91e24984663c795f7d9f904758d4b84ba1954389b2ab756f70a6f32db2a79020";
@@ -293,7 +372,10 @@ mod tests {
             configuration_event("0c3d9a77", "k8-opt-exec"),
         ]
         .concat();
-        let known = parse(&stream).expect("parse stream").configurations;
+        let known = parse(&stream)
+            .expect("parse stream")
+            .into_inner()
+            .configurations;
         assert_eq!(known.name(NULL_CONFIGURATION), None);
         assert_eq!(known.name(""), None);
         assert_eq!(known.name("0c3d9a77").as_deref(), Some("k8-opt-exec"));
@@ -338,7 +420,7 @@ mod tests {
     fn falls_back_from_a_width_the_emulator_cannot_hold() {
         for width in ["0", "1", "65535", "-3", "wide"] {
             let stream = [terminal_columns_event(width), progress_event("built\n")].concat();
-            let output = parse(&stream).expect("parse stream");
+            let output = parse(&stream).expect("parse stream").into_inner();
             assert_eq!(
                 output.columns,
                 Columns::DEFAULT,
@@ -352,7 +434,81 @@ mod tests {
     #[test]
     fn takes_the_first_width_the_emulator_can_hold() {
         let stream = [terminal_columns_event("0"), terminal_columns_event("120")].concat();
-        assert_eq!(parse(&stream).expect("parse stream").columns.get(), 120);
+        assert_eq!(
+            parse(&stream)
+                .expect("parse stream")
+                .into_inner()
+                .columns
+                .get(),
+            120
+        );
+    }
+
+    /// The offset each of the sample's events ends at, in stream order.
+    fn sample_event_ends() -> Vec<usize> {
+        let mut rest = SAMPLE;
+        let mut ends = Vec::new();
+        while !rest.is_empty() {
+            BuildEvent::decode_length_delimited(&mut rest).expect("sample event");
+            ends.push(SAMPLE.len() - rest.len());
+        }
+        ends
+    }
+
+    #[test]
+    fn reads_a_stream_ending_in_its_last_event_whole() {
+        assert!(matches!(parse(SAMPLE), Ok(Recorded::Complete(_))));
+    }
+
+    #[test]
+    fn a_stream_cut_off_keeps_the_events_ahead_of_the_cut() {
+        let cut_off = |cut: usize| match parse(&SAMPLE[..cut]) {
+            Ok(Recorded::CutOff(output)) => output,
+            _ => panic!("a stream cut at {cut} is cut off"),
+        };
+        let ends = sample_event_ends();
+        // Each event after the first but the last, which Bazel marks the last,
+        // cut before, inside, and right after its start.
+        for (&start, &end) in ends.iter().zip(&ends[1..ends.len() - 1]) {
+            let kept = cut_off(start);
+            for cut in [start + 1, (start + end) / 2, end - 1] {
+                let output = cut_off(cut);
+                assert_eq!(output.bytes, kept.bytes, "cut at {cut}");
+                assert_eq!(output.frames, kept.frames, "cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_that_holds_no_whole_event_is_no_stream() {
+        const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let first_end = sample_event_ends()[0];
+        for stream in [
+            &[][..],
+            &SAMPLE[..1],
+            &SAMPLE[..first_end - 1],
+            PNG_SIGNATURE,
+        ] {
+            assert!(
+                matches!(parse(stream), Err(ParseError::NoEvent)),
+                "{stream:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_event_that_does_not_decode_fails_the_read() {
+        let mut stream = progress_event("built\n");
+        let garbled = [0xff; 3];
+        prost::encode_length_delimiter(garbled.len(), &mut stream).expect("delimiter");
+        stream.extend(garbled);
+        assert!(parse(&stream).is_err());
+    }
+
+    #[test]
+    fn a_delimiter_running_past_its_longest_encoding_fails_the_read() {
+        let stream = [VARINT_CONTINUES; MAX_DELIMITER_BYTES + 1];
+        assert!(parse(&stream).is_err());
     }
 
     #[test]
@@ -425,7 +581,7 @@ mod tests {
 
     #[test]
     fn frames_partition_the_output() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         // Every progress event yields a frame, and frame ends are non-decreasing
         // offsets running up to the full output.
         assert!(!output.frames.is_empty());
@@ -436,13 +592,13 @@ mod tests {
     #[test]
     fn detects_show_timestamps_off() {
         // The sample was captured without --show_timestamps.
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         assert!(!output.show_timestamps);
     }
 
     #[test]
     fn anchors_bracket_the_build() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         // A completed build carries at least its start and finish times, in
         // non-decreasing wall-clock order, each tied to a real frame boundary.
         assert!(

@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn renders_final_build_output() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         let screen = Screen::from_output(&output);
         // The emulator was sized to the width the stream reported, so every
         // retained row spans it.

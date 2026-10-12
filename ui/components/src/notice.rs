@@ -92,3 +92,12 @@ pub fn note_strip(note: impl Into<SharedString>, colors: &ThemeColors) -> Div {
         .text_color(colors.text_muted)
         .child(note.into())
 }
+
+/// Says the `file` a view shows ends early, as an invocation interrupted or
+/// still running leaves it, and the view shows the `records` ahead of the cut.
+pub fn cut_off_note(file: &str, records: &str, colors: &ThemeColors) -> Div {
+    note_strip(
+        format!("This {file} ends early; showing the {records} before the cut."),
+        colors,
+    )
+}
