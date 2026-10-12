@@ -12,18 +12,22 @@ mod reorder;
 pub(crate) use complete::Completions;
 
 use crate::Palette;
+use crate::filter::DocumentFilter;
 use crate::model::{FilterChanged, GraphModel, QueryChanged, QueryRefused, SourceReplaced};
 use bviz_graph_layout::query_lang::{ChipId, Command, Evaluation, Stack};
 use bviz_graph_layout::{Id, Input};
-use bviz_ui_components::gesture::GestureRow;
+use bviz_ui_components::gesture::{
+    self, Button as PointerButton, Entry, GestureRow, Gestures, Place, Pointer,
+};
 use bviz_ui_components::{
-    Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
+    Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent, TextTooltip,
     load_in_background, menu_chrome, over_window, text_input,
 };
 use gpui::{
-    Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, KeyContext, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
-    Window, actions, div, point, prelude::*, px,
+    Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle,
+    Focusable, KeyBinding, KeyContext, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ScrollHandle, SharedString, Stateful, Subscription, Task, Window, actions, div, point,
+    prelude::*, px,
 };
 use rustc_hash::FxHashSet;
 
@@ -223,6 +227,9 @@ pub(crate) struct ChipBar {
     /// What the bar last has to say of an action taken on it, until the stack
     /// or the field changes.
     notice: Option<SharedString>,
+    /// How much of the holder's view the document's filter shows, as the
+    /// holder last counted it.
+    shown: Option<Shown>,
     /// Scrolls the row of chips.
     scroll: ScrollHandle,
     /// Where a press on a pill stands, which carried far enough drags the
@@ -245,6 +252,16 @@ pub(crate) struct ChipBar {
 
 /// The nodes a bar's holder draws, read as the completion ranks its rows.
 pub(crate) type Drawn = Box<dyn Fn(&App) -> FxHashSet<Id>>;
+
+/// How many of the points a view draws in its own unit the document's
+/// filter shows, each counted as [`crate::filter::Shown`] counts a node.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Shown {
+    pub(crate) shown: usize,
+    pub(crate) of: usize,
+    /// What the view calls its points, in the plural.
+    pub(crate) many: &'static str,
+}
 
 /// A chip the field holds the text of, as that text stood when the edit
 /// began. Another bar removing the chip or rewriting its text ends the edit,
@@ -324,6 +341,7 @@ impl ChipBar {
             landed: None,
             staged: false,
             notice: None,
+            shown: None,
             scroll: ScrollHandle::new(),
             gesture: reorder::Gesture::Idle,
             completer: complete::Completer::default(),
@@ -362,6 +380,15 @@ impl ChipBar {
             None => (!text.is_empty()).then(|| stack.push(text)),
         };
         (stack, draft)
+    }
+
+    /// Takes up how much of the holder's view the document's filter shows,
+    /// which the bar's status line reads.
+    pub(crate) fn set_shown(&mut self, shown: Option<Shown>, cx: &mut Context<Self>) {
+        if self.shown != shown {
+            self.shown = shown;
+            cx.notify();
+        }
     }
 
     /// The evaluation landed for the stack as it stands, if one has.
@@ -862,9 +889,24 @@ pub(crate) fn apply_staged(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     commit(view, cx);
 }
 
+/// What the status line does for a gesture in [`STATUS_GESTURES`].
+#[derive(Clone, Copy)]
+enum StatusIntent {
+    Focus,
+}
+
+const STATUS_GESTURES: Gestures<StatusIntent> = Gestures::new(&[Entry::new(
+    gesture::Input::press(PointerButton::Left),
+    Place::On("the query status"),
+    "Focus query field",
+    StatusIntent::Focus,
+)]);
+
 /// The gestures the bar answers to.
 pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
-    pill::GESTURES.rows().chain(complete::gestures())
+    (pill::GESTURES.rows())
+        .chain(STATUS_GESTURES.rows())
+        .chain(complete::gestures())
 }
 
 impl Render for ChipBar {
@@ -934,6 +976,98 @@ fn bar(
     let aimed = completing && complete::is_aimed(view);
     let completions = complete::list(view, palette, window, cx);
     let carrying = reorder::handlers(view, cx);
+    let staged_dot = || {
+        staged.then(|| {
+            div()
+                .flex_none()
+                .size(STAGED_DOT)
+                .rounded_full()
+                .bg(palette.colors.accent)
+        })
+    };
+    let status = status(view.model.read(cx).filter(), view.shown);
+    let whole =
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(!pills.is_empty(), |bar| {
+                bar.child(
+                    div()
+                        .id("graph-chip-row")
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1()
+                        .overflow_x_scroll()
+                        .track_scroll(&chips.scroll)
+                        .children(pills),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .relative()
+                    .key_context(FIELD_KEY_CONTEXT)
+                    .on_action(cx.listener(|view, _: &Commit, _, cx| commit(view, cx)))
+                    .capture_action(cx.listener(|view, _: &text_input::Backspace, window, cx| {
+                        if select_last(view, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .when(completing, |field| {
+                                field.key_context(completion_context(aimed))
+                            })
+                            .on_action(cx.listener(|view, _: &CompletePrevious, _, cx| {
+                                complete::aim(view, -1, cx)
+                            }))
+                            .on_action(cx.listener(|view, _: &CompleteNext, _, cx| {
+                                complete::aim(view, 1, cx)
+                            }))
+                            .on_action(cx.listener(|view, _: &AcceptCompletion, window, cx| {
+                                complete::accept(view, None, window, cx)
+                            }))
+                            .on_action(cx.listener(|view, _: &CloseCompletion, _, cx| {
+                                complete::close(view, cx)
+                            }))
+                            .child(chips.field.clone()),
+                    )
+                    .children(completions),
+            )
+            .children(
+                draft
+                    .and_then(|outcome| pill::draft(&outcome, palette))
+                    .map(|draft| draft.flex_none()),
+            )
+            .children(staged_dot())
+            .child(
+                div().flex_none().child(
+                    Button::new(
+                        "chips-apply",
+                        cx.listener(|view, _: &ClickEvent, _, cx| commit(view, cx)),
+                    )
+                    .label("apply")
+                    .keys_for(&Apply, &chips.focus_handle)
+                    .compact()
+                    .disabled(!staged),
+                ),
+            )
+            .children((!stack.is_empty() || staged).then(|| {
+                div().flex_none().child(
+                    Button::new(
+                        "chips-menu",
+                        cx.listener(|view, event: &ClickEvent, window, cx| {
+                            open_stack_menu(view, event.position(), window, cx)
+                        }),
+                    )
+                    .ghost()
+                    .icon("dots-three-vertical")
+                    .tooltip("Query menu"),
+                )
+            }))
+            .children(status.map(|status| status_line("chips-status", status, palette, cx)));
     div()
         .id("graph-chips")
         .relative()
@@ -973,94 +1107,8 @@ fn bar(
                 open_menu(view, id, at, window, cx);
             }
         }))
-        .flex()
-        .items_center()
-        .gap_1()
+        .child(whole)
         .children(carrying)
-        .when(!pills.is_empty(), |bar| {
-            bar.child(
-                div()
-                    .id("graph-chip-row")
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap_1()
-                    .overflow_x_scroll()
-                    .track_scroll(&chips.scroll)
-                    .children(pills),
-            )
-        })
-        .child(
-            div()
-                .flex_none()
-                .relative()
-                .key_context(FIELD_KEY_CONTEXT)
-                .on_action(cx.listener(|view, _: &Commit, _, cx| commit(view, cx)))
-                .capture_action(cx.listener(|view, _: &text_input::Backspace, window, cx| {
-                    if select_last(view, window, cx) {
-                        cx.stop_propagation();
-                    }
-                }))
-                .child(
-                    div()
-                        .when(completing, |field| {
-                            field.key_context(completion_context(aimed))
-                        })
-                        .on_action(cx.listener(|view, _: &CompletePrevious, _, cx| {
-                            complete::aim(view, -1, cx)
-                        }))
-                        .on_action(
-                            cx.listener(|view, _: &CompleteNext, _, cx| complete::aim(view, 1, cx)),
-                        )
-                        .on_action(cx.listener(|view, _: &AcceptCompletion, window, cx| {
-                            complete::accept(view, None, window, cx)
-                        }))
-                        .on_action(
-                            cx.listener(|view, _: &CloseCompletion, _, cx| {
-                                complete::close(view, cx)
-                            }),
-                        )
-                        .child(chips.field.clone()),
-                )
-                .children(completions),
-        )
-        .children(
-            draft
-                .and_then(|outcome| pill::draft(&outcome, palette))
-                .map(|draft| draft.flex_none()),
-        )
-        .children(staged.then(|| {
-            div()
-                .flex_none()
-                .size(STAGED_DOT)
-                .rounded_full()
-                .bg(palette.colors.accent)
-        }))
-        .child(
-            div().flex_none().child(
-                Button::new(
-                    "chips-apply",
-                    cx.listener(|view, _: &ClickEvent, _, cx| commit(view, cx)),
-                )
-                .label("apply")
-                .keys_for(&Apply, &chips.focus_handle)
-                .compact()
-                .disabled(!staged),
-            ),
-        )
-        .children((!stack.is_empty() || staged).then(|| {
-            div().flex_none().child(
-                Button::new(
-                    "chips-menu",
-                    cx.listener(|view, event: &ClickEvent, window, cx| {
-                        open_stack_menu(view, event.position(), window, cx)
-                    }),
-                )
-                .ghost()
-                .icon("dots-three-vertical")
-                .tooltip("Query menu"),
-            )
-        }))
         // The notice opens where the completion list does, which takes the
         // place while it is up.
         .children(
@@ -1074,6 +1122,68 @@ fn bar(
                 .map(|open| over_window(&open.menu, window)),
         )
 }
+
+/// The line saying what the filter the bar applies shows of the holder's
+/// view, `status`; a press on it takes the focus into the field.
+fn status_line(
+    id: &'static str,
+    status: String,
+    palette: &Palette,
+    cx: &Context<ChipBar>,
+) -> Stateful<Div> {
+    let text: SharedString = status.into();
+    let colors = &palette.colors;
+    let hover = colors.text;
+    div()
+        .id(id)
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(colors.text_muted)
+        .cursor_pointer()
+        .hover(move |style| style.text_color(hover))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                STATUS_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+                    StatusIntent::Focus => {
+                        focus(view, window, cx);
+                        cx.stop_propagation();
+                        true
+                    }
+                });
+            }),
+        )
+        .tooltip(TextTooltip::builder(text.clone(), colors.tooltip()))
+        .child(text)
+}
+
+/// What the document's `filter` does to the holder's view, which shows
+/// `shown` of its points: how many chips it applies and nodes a reader pinned
+/// hidden or faded, and how many points that leaves shown; `None` where it
+/// cannot leave out any node.
+fn status(filter: &DocumentFilter, shown: Option<Shown>) -> Option<String> {
+    if !filter.narrows() {
+        return None;
+    }
+    let counted = |count: usize, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        count => format!("{count} {many}"),
+    };
+    let chips = (filter.applied()).map(|applied| {
+        let enabled = applied.stack().chips().filter(|chip| chip.enabled());
+        counted(enabled.count(), "chip", "chips")
+    });
+    let pins = filter.narrowing_pins();
+    let pins = (pins > 0).then(|| counted(pins, "pin", "pins"));
+    let shown = shown.map(|Shown { shown, of, many }| format!("{shown} of {of} {many} shown"));
+    let parts: Vec<String> = [chips, pins, shown].into_iter().flatten().collect();
+    Some(parts.join(STATUS_SEPARATOR))
+}
+
+/// Stands between the parts of the bar's status line.
+const STATUS_SEPARATOR: &str = " · ";
 
 /// The key contexts from `holder`'s in to the field's text while its
 /// completion's list stands open.
@@ -1152,6 +1262,7 @@ const STAGED_DOT: Pixels = px(6.);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::select::{Pin, Visibility};
 
     /// An edit outlives a change to its chip's switches, and not one to its
     /// text or the chip's removal.
@@ -1170,5 +1281,30 @@ mod tests {
         assert!(!editing.survives(&stack));
         stack.remove(chip);
         assert!(!editing.survives(&stack));
+    }
+
+    #[test]
+    fn every_status_gesture_is_reachable_and_fits_the_help() {
+        assert_eq!(STATUS_GESTURES.unreachable(), []);
+        assert_eq!(STATUS_GESTURES.overlong(), []);
+    }
+
+    /// The status line is up only while the filter narrows the graph, and
+    /// reads what narrows it and how much of the view that leaves.
+    #[test]
+    fn the_status_line_reads_what_narrows_the_view_and_what_is_left() {
+        let mut filter = DocumentFilter::default();
+        let shown = Shown {
+            shown: 12,
+            of: 400,
+            many: "targets",
+        };
+        assert_eq!(status(&filter, Some(shown)), None);
+        filter.set_pins([(Id(3), Pin::Set(Visibility::Hidden))].into());
+        assert_eq!(status(&filter, None).as_deref(), Some("1 pin"));
+        assert_eq!(
+            status(&filter, Some(shown)).as_deref(),
+            Some("1 pin · 12 of 400 targets shown")
+        );
     }
 }

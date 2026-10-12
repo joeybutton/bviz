@@ -87,6 +87,7 @@ use legend::Legend;
 use mode::LayoutMode;
 use model::{
     FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested, SourceReplaced,
+    VerdictsLanded,
 };
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
@@ -367,6 +368,9 @@ pub struct GraphPanel {
     _map_placed: Subscription,
     /// Draws the graph through the document's filter as it changes.
     _filter_changed: Subscription,
+    /// Counts what the document's filter shows for the query bar's status
+    /// line as its verdicts land.
+    _verdicts_landed: Subscription,
     /// Whether the workspace shows the panel.
     shown: bool,
     _reveal_requested: Subscription,
@@ -431,6 +435,35 @@ impl GraphPanel {
             }
             _ => Some(self.camera().zoom),
         }
+    }
+
+    /// Tells the query bar how many points the document's filter shows, in
+    /// the finest unit the graph holds, where the panel is shown and the
+    /// filter narrows the graph, asking for the filter's verdicts where they
+    /// have yet to land.
+    fn restate_shown(&mut self, cx: &mut Context<Self>) {
+        if !self.shown {
+            return;
+        }
+        let shown = match self.model.read(cx).filter().narrows() {
+            false => None,
+            true => {
+                self.model.update(cx, |model, cx| model.verdicts(cx));
+                let model = self.model.read(cx);
+                let finest = (model.loaded())
+                    .and_then(|loaded| loaded.shared.inputs.inputs().last())
+                    .map(point::finest_unit);
+                finest.zip(model.judgement()).and_then(|(unit, judgement)| {
+                    let counted = judgement.shown(point::unit_kinds(unit))?;
+                    Some(chips::Shown {
+                        shown: counted.shown,
+                        of: counted.of,
+                        many: point::unit_names(unit).many,
+                    })
+                })
+            }
+        };
+        self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
     }
 
     /// The boxes the selected mode's layout lets the user open or close.
@@ -553,7 +586,11 @@ impl GraphPanel {
         });
         let filter_changed = cx.subscribe(&model, |view, _, event: &FilterChanged, cx| {
             derive::filter_changed(view, event.frame, cx);
+            view.restate_shown(cx);
             cx.notify();
+        });
+        let verdicts_landed = cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| {
+            view.restate_shown(cx)
         });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
@@ -594,6 +631,7 @@ impl GraphPanel {
             _source_replaced: source_replaced,
             _map_placed: map_placed,
             _filter_changed: filter_changed,
+            _verdicts_landed: verdicts_landed,
             shown: false,
             _reveal_requested: reveal_requested,
             hovered: None,
@@ -1180,6 +1218,7 @@ impl Panel for GraphPanel {
         self.shown = active;
         if active {
             derive::catch_up(self, cx);
+            self.restate_shown(cx);
             self.focus_handle.focus(window, cx);
             let panel = cx.entity();
             self.model

@@ -166,6 +166,7 @@ impl ScatterPanel {
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
+            view.restate_shown(cx);
             view.plotting = None;
             view.choice = Choice::of(&view.model, &view.focus, cx);
             if view.shown {
@@ -397,10 +398,22 @@ impl ScatterPanel {
                     colour,
                     timed,
                 });
+                view.restate_shown(cx);
                 view.invalidate_canvas(cx);
                 view.replot(cx);
             },
         ));
+    }
+
+    /// Tells the query bar how many points of its unit the plot drawn shows
+    /// of those it plots.
+    fn restate_shown(&self, cx: &mut Context<Self>) {
+        let shown = self.plot.as_ref().map(|plot| chips::Shown {
+            shown: plot.plotted.marks.len(),
+            of: plot.plotted.plotted,
+            many: unit_names(plot.scope.unit()).many,
+        });
+        self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
     }
 
     /// Repaints the marks along with the layer over them; every change to what
@@ -1087,13 +1100,10 @@ fn plotted_as(unit: Unit, kind: Kind) -> bool {
     unit != Unit::Action || kind == Kind::Action
 }
 
-/// How many points of `unit` the plot draws, of how many it plots.
-fn drawn_status(plotted: &Plotted, unit: Unit) -> String {
-    let many = unit_names(unit).many;
-    let drawn = match (plotted.marks.len(), plotted.plotted) {
-        (drawn, all) if drawn == all => format!("{all} {many}"),
-        (drawn, all) => format!("{drawn} of {all} {many}"),
-    };
+/// How many points of `unit` the plot plots; how many of them the filter
+/// shows is the query bar's to say.
+fn plotted_status(plotted: &Plotted, unit: Unit) -> String {
+    let drawn = format!("{} {}", plotted.plotted, unit_names(unit).many);
     match plotted.estimated {
         true => format!("{drawn}, counts estimated"),
         false => drawn,
@@ -1202,7 +1212,7 @@ impl Panel for ScatterPanel {
             None => MEASURING.into(),
             Some(plot) => {
                 let zoomed = (self.zoom != Zoom::WHOLE).then(|| show_whole_hint(cx));
-                let parts = [Some(drawn_status(&plot.plotted, plot.scope.unit()))];
+                let parts = [Some(plotted_status(&plot.plotted, plot.scope.unit()))];
                 let parts = parts.into_iter().chain([unplaced(plot), zoomed]);
                 parts.flatten().collect::<Vec<_>>().join(NOTICE_SEPARATOR)
             }

@@ -250,6 +250,7 @@ impl ExclusivePanel {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
+            view.restate_shown(cx);
             view.fade = None;
             view.rooting = None;
             view.choosing = None;
@@ -506,7 +507,29 @@ impl ExclusivePanel {
             return;
         }
         self.fade = Some(verdicts);
+        self.restate_shown(cx);
         self.invalidate_canvas(cx);
+    }
+
+    /// Tells the query bar how many points of the tree drawn the document's
+    /// filter leaves unfaded, where the filter narrows the graph.
+    fn restate_shown(&self, cx: &mut Context<Self>) {
+        let narrows = self.model.read(cx).filter().narrows();
+        let shown = self.drawn.as_ref().filter(|_| narrows).map(|drawn| {
+            let tree = &drawn.coloured.tree;
+            let shown = match &self.fade {
+                Some(fade) => (0..tree.total())
+                    .filter(|&node| !paint::fades(fade.get(tree.id(node))))
+                    .count(),
+                None => tree.total() as usize,
+            };
+            chips::Shown {
+                shown,
+                of: tree.total() as usize,
+                many: unit_names(tree.scope().unit()).many,
+            }
+        });
+        self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
     }
 
     /// Draws the unit chosen.
@@ -552,6 +575,7 @@ impl ExclusivePanel {
             if self.shown {
                 self.want(key, cx);
             }
+            self.restate_shown(cx);
             self.invalidate_canvas(cx);
             return;
         }

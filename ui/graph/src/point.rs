@@ -5,7 +5,7 @@ use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::facets::{ConfigRef, Tri};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::labels::{carried_label, package_label};
-use bviz_graph_layout::{Facets, Id, Kind, Names};
+use bviz_graph_layout::{Facets, Id, Input, Kind, Names};
 use bviz_label::shown::written_line;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -28,6 +28,27 @@ impl KindNames {
     /// `count` and how a reader names that many things of the kind.
     pub(crate) fn counted(&self, count: u32) -> String {
         format!("{count} {}", self.of(count))
+    }
+}
+
+/// The unit whose points are the finest the graph `input` reads holds:
+/// actions for an aquery, configured targets for a cquery, targets for a
+/// query.
+pub(crate) fn finest_unit(input: Input) -> Unit {
+    match input {
+        Input::Aquery => Unit::Action,
+        Input::Cquery => Unit::ConfiguredTarget,
+        Input::Query => Unit::Target,
+    }
+}
+
+/// The kinds of node standing as points of `unit`; a source file is a target
+/// of the query graph.
+pub(crate) fn unit_kinds(unit: Unit) -> &'static [Kind] {
+    match unit {
+        Unit::Action => &[Kind::Action],
+        Unit::ConfiguredTarget => &[Kind::ConfiguredTarget],
+        Unit::Target => &[Kind::Target, Kind::Source],
     }
 }
 

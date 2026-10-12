@@ -2,9 +2,11 @@
 //! out what that leaves.
 
 use bviz_graph_layout::Id;
+use bviz_graph_layout::Kind;
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::query_lang::Stack;
-use bviz_graph_layout::select::{Filter, Pin, Rule, Scope, Verdicts};
+use bviz_graph_layout::select::{Filter, Pin, Rule, Scope, Verdicts, Visibility};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -51,6 +53,20 @@ impl DocumentFilter {
         &self.pins
     }
 
+    /// Whether the filter can leave out or fade any node: a query is applied,
+    /// or a reader pinned a node hidden or faded. A pin showing a node only
+    /// widens what the rest of the filter leaves.
+    pub(crate) fn narrows(&self) -> bool {
+        self.applied.is_some() || self.narrowing_pins() > 0
+    }
+
+    /// How many nodes a reader pinned hidden or faded.
+    pub(crate) fn narrowing_pins(&self) -> usize {
+        (self.pins.values())
+            .filter(|pin| matches!(pin, Pin::Set(Visibility::Hidden | Visibility::Faded)))
+            .count()
+    }
+
     /// Replaces the query applied, reporting whether that changed the scope.
     pub(crate) fn set_applied(&mut self, applied: Option<Applied>) -> bool {
         let changed = self.scope() != applied.as_ref().map(Applied::scope);
@@ -85,7 +101,23 @@ impl DocumentFilter {
 pub(crate) struct Judgement {
     filter: Filter,
     graph: Arc<Graph>,
-    verdicts: OnceLock<Arc<Verdicts>>,
+    judged: OnceLock<Judged>,
+}
+
+/// The verdicts of a [`Judgement`], and how many nodes of each kind they
+/// show of how many the graph holds.
+struct Judged {
+    verdicts: Arc<Verdicts>,
+    tally: FxHashMap<Kind, Shown>,
+}
+
+/// How many nodes the verdicts show of how many there are. A node counts as
+/// shown wherever its verdict is drawn: shown, faded, or standing as the
+/// context of what is.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct Shown {
+    pub(crate) shown: usize,
+    pub(crate) of: usize,
 }
 
 impl Judgement {
@@ -93,7 +125,7 @@ impl Judgement {
         Judgement {
             filter,
             graph,
-            verdicts: OnceLock::new(),
+            judged: OnceLock::new(),
         }
     }
 
@@ -110,13 +142,36 @@ impl Judgement {
     /// that evaluation. Evaluation passes over every node of the graph, so
     /// this belongs off the UI thread.
     pub(crate) fn verdicts(&self) -> Arc<Verdicts> {
-        let evaluate = || Arc::new(self.filter.evaluate(&self.graph));
-        Arc::clone(self.verdicts.get_or_init(evaluate))
+        let evaluate = || {
+            let verdicts = self.filter.evaluate(&self.graph);
+            let mut tally: FxHashMap<Kind, Shown> = FxHashMap::default();
+            for node in &self.graph.nodes {
+                let counted = tally.entry(node.kind).or_default();
+                counted.of += 1;
+                counted.shown += usize::from(verdicts.get(node.id).drawn());
+            }
+            Judged {
+                verdicts: Arc::new(verdicts),
+                tally,
+            }
+        };
+        Arc::clone(&self.judged.get_or_init(evaluate).verdicts)
     }
 
     /// The verdicts, where they have been evaluated.
     pub(crate) fn evaluated(&self) -> Option<&Arc<Verdicts>> {
-        self.verdicts.get()
+        self.judged.get().map(|judged| &judged.verdicts)
+    }
+
+    /// How many of the graph's nodes of `kinds` the verdicts show, where they
+    /// have been evaluated.
+    pub(crate) fn shown(&self, kinds: &[Kind]) -> Option<Shown> {
+        let tally = &self.judged.get()?.tally;
+        let counted = kinds.iter().filter_map(|kind| tally.get(kind));
+        Some(counted.fold(Shown::default(), |sum, counted| Shown {
+            shown: sum.shown + counted.shown,
+            of: sum.of + counted.of,
+        }))
     }
 }
 
@@ -124,9 +179,8 @@ impl Judgement {
 mod tests {
     use super::*;
     use crate::rules::{self, BoxClass};
-    use bviz_graph_layout::Kind;
     use bviz_graph_layout::graph::Node;
-    use bviz_graph_layout::select::{Verdict, Visibility};
+    use bviz_graph_layout::select::Verdict;
     use std::collections::BTreeSet;
 
     /// A package holding a target holding an action.
@@ -175,6 +229,7 @@ mod tests {
         document.set_pins([(Id(2), Pin::Set(Visibility::Hidden))].into());
         let judgement = Judgement::new(document.filter(), Arc::clone(&graph));
         assert!(judgement.evaluated().is_none());
+        assert_eq!(judgement.shown(&[Kind::Action]), None);
         assert!(judgement.judges(&document.filter(), &graph));
         assert!(!judgement.judges(&DocumentFilter::default().filter(), &graph));
 
@@ -183,5 +238,22 @@ mod tests {
         assert!(judgement.evaluated().is_some());
         assert_eq!(first.get(Id(2)), Verdict::Hidden);
         assert_eq!(first.get(Id(1)), Verdict::Shown);
+        let action = Shown { shown: 0, of: 1 };
+        assert_eq!(judgement.shown(&[Kind::Action]), Some(action));
+        let both = Shown { shown: 2, of: 2 };
+        assert_eq!(judgement.shown(&[Kind::Package, Kind::Target]), Some(both));
+    }
+
+    /// Only a query applied or a pin hiding or fading a node narrows what
+    /// the filter shows.
+    #[test]
+    fn only_a_query_or_a_hiding_or_fading_pin_narrows_the_filter() {
+        let mut document = DocumentFilter::default();
+        assert!(!document.narrows());
+        document.set_pins([(Id(1), Pin::Revealed), (Id(2), Pin::Set(Visibility::Shown))].into());
+        assert!(!document.narrows());
+        document.set_pins([(Id(1), Pin::Revealed), (Id(2), Pin::Set(Visibility::Faded))].into());
+        assert!(document.narrows());
+        assert_eq!(document.narrowing_pins(), 1);
     }
 }
