@@ -480,6 +480,7 @@ impl GraphPanel {
             draw: |view, palette, window, cx| view.draw_overlays(palette, window, cx),
         });
         let chrome_follows = cx.observe_self(|view, cx| {
+            mode::sync(view, cx);
             view.toolbar.update(cx, |_, cx| cx.notify());
             view.overlays.update(cx, |_, cx| cx.notify());
             view.box_card.restate(cx);
@@ -825,8 +826,6 @@ impl GraphPanel {
             return false;
         }
         self.mode = mode;
-        self.layout_picker
-            .update(cx, |picker, cx| picker.set_selected(mode.index(), cx));
         self.hovered = None;
         self.box_card.forget(cx);
         self.emphasis.clear();

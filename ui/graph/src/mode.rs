@@ -1,3 +1,6 @@
+use crate::GraphPanel;
+use gpui::Context;
+
 /// Which layout the view draws.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum LayoutMode {
@@ -39,6 +42,13 @@ impl LayoutMode {
     pub(crate) fn honors_reduce(self) -> bool {
         matches!(self, Self::Layered)
     }
+}
+
+/// Makes the picker stand at the layout drawn.
+pub(crate) fn sync(view: &GraphPanel, cx: &mut Context<GraphPanel>) {
+    let index = view.mode.index();
+    view.layout_picker
+        .update(cx, |picker, cx| picker.set_selected(index, cx));
 }
 
 #[cfg(test)]
