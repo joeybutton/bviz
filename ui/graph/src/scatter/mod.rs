@@ -797,15 +797,11 @@ impl Choice {
     fn explain_times(&self, model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) {
         let unit = self.picker.chosen(cx).unit();
         let times = (model.read(cx).loaded()).map_or(Err(Untimed::NoProfile), Loaded::times);
-        let note = |read| times_note(times, self.timed, unit, read);
-        let time_axis = "place points by their action time";
+        let note = |name| times_note(times, self.timed, unit, name);
         let notes = [
-            (&self.across_picker, note(time_axis)),
-            (&self.up_picker, note(time_axis)),
-            (
-                &self.colour_picker,
-                note("colour points by where their actions ran"),
-            ),
+            (&self.across_picker, note("Horizontal axis")),
+            (&self.up_picker, note("Vertical axis")),
+            (&self.colour_picker, note("Point colouring")),
         ];
         for (picker, note) in notes {
             picker.update(cx, |picker, cx| picker.set_tooltip(note, cx));
@@ -1795,21 +1791,18 @@ fn any_timed(times: Result<&NodeTimes, Untimed>, reference: &Measurement) -> boo
     })
 }
 
-/// What a picker offering to `read` action time says of it: as the graph's
-/// colour picker does, but where the graph places time on none of the points
-/// of `unit`, that it places none there.
+/// The hint of the picker `name`d, offering action time: as the graph's
+/// colour picker's, but where the graph places time on none of the points of
+/// `unit`, that it places none there.
 fn times_note(
     times: Result<&NodeTimes, Untimed>,
     timed: bool,
     unit: Unit,
-    read: &str,
+    name: &str,
 ) -> SharedString {
     match times {
-        Ok(times) if !timed => {
-            let many = unit_names(unit).many;
-            format!("{}, none of them on {many}", times.coverage().line()).into()
-        }
-        _ => colour::note(times, read),
+        Ok(_) if !timed => format!("No action time on {}", unit_names(unit).many).into(),
+        _ => colour::note(times, name),
     }
 }
 
