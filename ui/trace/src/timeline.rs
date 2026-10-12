@@ -1191,10 +1191,7 @@ impl Timeline {
     /// closest the axis goes.
     fn scale_view(&mut self, x: f32, factor: f64, span: TimeSpan, time_w: f32) {
         self.view.zoom_at(x, factor);
-        self.view.px_per_us = self
-            .view
-            .px_per_us
-            .clamp(fit_px_per_us(span, time_w, EDGE_MARGIN_PX), MAX_PX_PER_US);
+        self.view.px_per_us = held_zoom(self.view.px_per_us, span, time_w);
     }
 
     fn on_pinch(&mut self, e: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1523,8 +1520,8 @@ impl Render for SliceCanvas {
 
 /// Prepaint fit: capture the painted viewport bounds, then fit the time view to
 /// the span before the first paint and, on a later width change, rescale the zoom
-/// relative to the window so a resize stays invertible; finally hold the fit as
-/// the zoom floor and clamp the pan to the span.
+/// relative to the window so a resize stays invertible; finally hold the zoom
+/// within its range and clamp the pan to the span.
 fn fit_prepaint(
     profile: Arc<Profile>,
     lanes: Rc<ChartLanes>,
@@ -1554,14 +1551,22 @@ fn fit_prepaint(
                     .view
                     .rescale_to_width(span, old_time_w, time_w, EDGE_MARGIN_PX);
             }
-            timeline.view.px_per_us =
-                timeline
-                    .view
-                    .px_per_us
-                    .max(fit_px_per_us(span, time_w, EDGE_MARGIN_PX));
+            timeline.view.px_per_us = held_zoom(timeline.view.px_per_us, span, time_w);
             timeline.view.clamp_to(span, time_w, EDGE_MARGIN_PX);
         });
     }
+}
+
+/// The zoom-out floor, in pixels per microsecond: the fit of the profile's whole
+/// `span` to a time column `width_px` wide, capped at [`MAX_PX_PER_US`] so a
+/// span too short to fill the column at the deepest zoom stands narrower.
+pub(crate) fn zoom_floor(span: TimeSpan, width_px: f32) -> f64 {
+    fit_px_per_us(span, width_px, EDGE_MARGIN_PX).min(MAX_PX_PER_US)
+}
+
+/// `px_per_us` held between [`zoom_floor`] and [`MAX_PX_PER_US`].
+fn held_zoom(px_per_us: f64, span: TimeSpan, width_px: f32) -> f64 {
+    px_per_us.clamp(zoom_floor(span, width_px), MAX_PX_PER_US)
 }
 
 /// Share of the time column left clear on each side of a revealed stretch of
@@ -1574,9 +1579,7 @@ const REVEAL_MARGIN_SHARE: f32 = 0.1;
 /// narrower than that, it stands centred.
 fn framing(time: TimeSpan, span: TimeSpan, width_px: f32) -> TimeView {
     let mut view = TimeView::fit(time, width_px, width_px * REVEAL_MARGIN_SHARE);
-    let bounded = view
-        .px_per_us
-        .clamp(fit_px_per_us(span, width_px, EDGE_MARGIN_PX), MAX_PX_PER_US);
+    let bounded = held_zoom(view.px_per_us, span, width_px);
     if bounded != view.px_per_us {
         let centre_us = (time.start_us as f64 + time.end_us as f64) / 2.0;
         view = TimeView {
@@ -2337,6 +2340,18 @@ mod tests {
         let view = framing(instant, WHOLE, width);
         assert_eq!(view.px_per_us, MAX_PX_PER_US);
         assert!((view.x_of(instant.start_us) - width / 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_empty_profile_holds_the_zoom_at_the_ceiling() {
+        let width = 1000.0;
+        let empty = TimeSpan {
+            start_us: 0,
+            end_us: 0,
+        };
+        assert_eq!(zoom_floor(empty, width), MAX_PX_PER_US);
+        assert_eq!(held_zoom(0.0, empty, width), MAX_PX_PER_US);
+        assert_eq!(framing(empty, empty, width).px_per_us, MAX_PX_PER_US);
     }
 
     #[test]

@@ -301,7 +301,7 @@ pub(crate) fn format_counter(value: f64, unit: CounterUnit) -> String {
 }
 
 /// The pixels-per-microsecond at which `span` fits `width_px` less `margin_px` of
-/// empty space at each end; the zoom-out floor, matching [`TimeView::fit`].
+/// empty space at each end, matching [`TimeView::fit`].
 pub(crate) fn fit_px_per_us(span: TimeSpan, width_px: f32, margin_px: f32) -> f64 {
     let span_us = (span.end_us - span.start_us).max(1) as f64;
     (width_px - 2.0 * margin_px).max(1.0) as f64 / span_us

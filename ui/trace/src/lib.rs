@@ -21,7 +21,7 @@ mod track_label;
 mod track_order;
 mod tracks_menu;
 
-use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
+use chart::{format_duration, format_time, nice_step, span_seconds};
 
 pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
@@ -30,7 +30,7 @@ use model::{SourceReplaced, TraceModel};
 use regions::{CountersStrip, DividerGrab, LaneBand, LaneHeights, Regions, clamp_gutter_width};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline};
+use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline, zoom_floor};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
@@ -1219,7 +1219,7 @@ fn scrollbar_geom(
     // bottom edge, ending left of the reserved vertical-bar column. Rounding the
     // extents to microseconds can leave a view sitting on the zoom floor a hair
     // wider than its own span, so the bar is gated on the floor itself.
-    let time = match tv.px_per_us > fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX) {
+    let time = match tv.px_per_us > zoom_floor(span, regions.time_w) {
         true => Scrollbar::new(
             Axis::Horizontal,
             Bounds::new(
@@ -1970,7 +1970,7 @@ mod tests {
         // Zoomed well past the width the span fits, so there is time to pan to.
         let tv = TimeView {
             start_us: 0.0,
-            px_per_us: 2.0 * fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX),
+            px_per_us: 2.0 * zoom_floor(span, regions.time_w),
         };
         let track = scrollbar_geom(span, tv, 0.0, regions, 0.0, 0.0)
             .time
