@@ -29,10 +29,9 @@ use gpui::{
     SharedString, Stateful, Subscription, TextStyleRefinement, Window, actions, div, prelude::*,
     px, relative, rems, uniform_list,
 };
-use index::Scope;
 #[cfg(test)]
 pub(crate) use index::tests::shared as fixture;
-pub(crate) use index::{Candidates, container, labelled, node_text, package_of, shown};
+pub(crate) use index::{Candidates, Scope, container, labelled, node_text, package_of, shown};
 use rustc_hash::FxHashSet;
 
 actions!(
@@ -204,10 +203,15 @@ impl JumpPalette {
         self.open.as_ref()?.painted
     }
 
-    /// Opens the palette, or takes the focus back to it where it is open
-    /// already; reports whether it opened. A graph still being read offers
-    /// nothing to find.
-    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Opens the palette offering what `scope` offers, or takes the focus
+    /// back to it where it is open already; reports whether it opened. A
+    /// graph still being read offers nothing to find.
+    pub(crate) fn open(
+        &mut self,
+        scope: Scope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let opened = self.open.is_none();
         if opened {
             let Some(candidates) = self.model.read(cx).candidates() else {
@@ -218,7 +222,7 @@ impl JumpPalette {
             self.open = Some(Jump {
                 field,
                 _edits: edits,
-                scope: Scope::default(),
+                scope,
                 matching: self.model.update(cx, |model, _| model.take_matcher()),
                 candidates,
                 aimed: 0,

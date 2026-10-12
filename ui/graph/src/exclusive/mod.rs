@@ -59,6 +59,7 @@ use gpui::{
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{MIN_CELL_WIDTH, Scene, point_name, run_name, shared_name};
 use roots::{Found, Within};
+use rustc_hash::FxHashSet;
 use selection::{LaidOut, Step};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -379,14 +380,37 @@ impl ExclusivePanel {
             let tree = &coloured.tree;
             landing::stands(tree, &shown.tree, shown.by.as_deref(), &coloured.over(), id)
         });
+        let panel = cx.weak_entity();
+        let drawn: chips::Drawn = Box::new(move |cx: &App| {
+            let panel = panel.upgrade();
+            let drawn = panel
+                .as_ref()
+                .and_then(|panel| panel.read(cx).drawn.as_ref());
+            drawn.map_or_else(Default::default, |drawn| Arc::clone(&drawn.shown.points))
+        });
         let (model, focus, chips) = (model.clone(), focus.clone(), chips.clone());
-        cx.new(|cx| JumpPalette::new(model, Holder::Exclusive, focus, chips, None, standing, cx))
+        cx.new(|cx| {
+            JumpPalette::new(
+                model,
+                Holder::Exclusive,
+                focus,
+                chips,
+                Some(drawn),
+                standing,
+                cx,
+            )
+        })
     }
 
     /// Opens the palette over the icicle, noting how the tree was drawn as
     /// it opened.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.jump.update(cx, |palette, cx| palette.open(window, cx)) {
+        let unit = self.scope(cx).map(|scope| scope.unit());
+        let scope = unit.map_or_else(jump::Scope::default, jump::Scope::of_unit);
+        if self
+            .jump
+            .update(cx, |palette, cx| palette.open(scope, window, cx))
+        {
             self.opened = self.drawn.as_ref().map(Opened::of);
         }
     }
@@ -892,10 +916,13 @@ impl ExclusivePanel {
                 let roots = spliced.roots().iter();
                 let reached = roots.clone().any(|&root| paint::reached(&tree, root));
                 let alike = was.filter(|was| was.tree == spliced);
+                let drawn = (0..tree.total()).filter(|&node| spliced.shows(node));
+                let points = Arc::new(drawn.map(|node| tree.id(node)).collect());
                 let shown = Shown {
                     tree: spliced,
                     by: verdicts,
                     reached,
+                    points,
                 };
                 (shown, alike)
             },
@@ -1629,6 +1656,8 @@ struct Shown {
     /// Whether the build also reaches a node `tree` draws under the whole
     /// build as a dependency.
     reached: bool,
+    /// The points `tree` shows, which a list over the icicle ranks first.
+    points: Arc<FxHashSet<Id>>,
 }
 
 impl Shown {

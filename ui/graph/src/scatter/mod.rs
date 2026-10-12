@@ -314,7 +314,12 @@ impl ScatterPanel {
     /// Opens the palette over the plot, noting the zoom it opened at.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pick(cx);
-        if self.jump.update(cx, |palette, cx| palette.open(window, cx)) {
+        let unit = self.scopes(cx).map(|(scope, _)| scope.unit());
+        let scope = unit.map_or_else(jump::Scope::default, jump::Scope::of_unit);
+        if self
+            .jump
+            .update(cx, |palette, cx| palette.open(scope, window, cx))
+        {
             self.opened_zoom = self.plot.as_ref().map(|plot| OpenedZoom {
                 zoom: self.zoom,
                 unit: plot.scope.unit(),

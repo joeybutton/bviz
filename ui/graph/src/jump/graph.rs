@@ -59,7 +59,11 @@ fn drawn_ids(view: &GraphPanel) -> FxHashSet<Id> {
 /// Opens the palette over the drawing, or takes the focus back to it where it
 /// is open, noting where the view stood as it opened.
 pub(crate) fn open(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
-    if view.jump.update(cx, |palette, cx| palette.open(window, cx)) {
+    let scope = super::Scope::default();
+    if view
+        .jump
+        .update(cx, |palette, cx| palette.open(scope, window, cx))
+    {
         view.jump_opened_at = view.framing.hold().map(|held| (view.mode, held));
     }
 }
