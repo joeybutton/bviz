@@ -23,6 +23,8 @@ jobs:
         with:
           bazelrc: common --config=ci
           bazelisk-cache: true
+          disk-cache: ${{ secrets.BUILDBUDDY_API_KEY == '' }}
+          repository-cache: ${{ secrets.BUILDBUDDY_API_KEY == '' }}
       - uses: ./.github/actions/buildbuddy
         with:
           api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
