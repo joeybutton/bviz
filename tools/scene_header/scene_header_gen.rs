@@ -1,4 +1,6 @@
 //! Generates the C header declaring the types gpui's Metal shaders share with Rust.
+//!
+//! Modified from source in the Zed editor; NOTICE names it.
 
 use std::path::PathBuf;
 

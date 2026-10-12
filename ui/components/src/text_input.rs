@@ -1,6 +1,8 @@
 //! The application's text field: a focusable editor with cursor and selection
 //! movement, mouse selection, clipboard, and IME composition, built on gpui's
 //! platform input handler.
+//!
+//! Modified from source in the Zed editor; NOTICE names it.
 
 use crate::{KeyScope, track_drag};
 use gpui::{

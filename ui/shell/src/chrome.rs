@@ -1,3 +1,5 @@
+//! Modified from source in the Zed editor; NOTICE names it.
+
 use crate::{CloseWindow, KEY_CONTEXT, Quit, Tab, TabPrev};
 use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
