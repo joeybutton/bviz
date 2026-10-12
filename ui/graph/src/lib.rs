@@ -1503,7 +1503,7 @@ mod tests {
     use crate::camera::{
         Rect, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen,
     };
-    use crate::paint::lane_polyline;
+    use crate::paint::connector::lane_polyline;
     use bviz_graph_layout::Box;
     use bviz_graph_layout::Kind;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;

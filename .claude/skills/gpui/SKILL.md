@@ -433,7 +433,7 @@ content to the viewport on the first frame); the paint closure draws with
 `window.paint_quad(quad(..))`, `window.paint_path(..)`, and a shaped line's
 `.paint(origin, ..)`. Both closures are `'static`, so capture **owned snapshots** of what
 you paint — a `Vec` of boxes, a `Palette` of theme-resolved colors — not borrows of the
-view. The graph viewer is the worked example: `ui/graph/src/paint.rs` (`Scene`,
+view. The graph viewer is the worked example: `ui/graph/src/paint/` (`Scene`,
 `canvas_body`, `paint_box`, `paint_connector`).
 
 **A custom `Element`** is heavier, for when you also need a typed layout → prepaint →
