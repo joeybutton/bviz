@@ -21,8 +21,8 @@ use crate::holder::Holder;
 use crate::hue::{Colouring, Hue};
 use crate::jump::{self, JumpEvent, JumpPalette};
 use crate::model::{
-    DominatorsLanded, ExclusionNamed, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey,
-    VerdictsLanded,
+    DominatorsLanded, ExclusionNamed, FilterChanged, GraphModel, SelectionChanged, Shared,
+    SourceReplaced, TreeKey, VerdictsLanded,
 };
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
@@ -243,6 +243,9 @@ pub struct ExclusivePanel {
     opened: Option<Opened>,
     offering: Offering,
     _exclusion_named: Subscription,
+    /// Rings the cell of a node another view selects, leaving the focus
+    /// where it is.
+    _selection_changed: Subscription,
     /// Lands what the palette picks.
     _jumped: Subscription,
     /// Redraws as the graph is read.
@@ -267,8 +270,9 @@ impl ExclusivePanel {
     fn card(&self) -> Option<(Vec<String>, CardAnchor)> {
         let Selection { spot, by, lines } = self.at_rest_selection()?;
         let anchor = match (by, self.card.pointer()) {
-            // The menu stands in for the description.
-            (Picked::Menu, _) => return None,
+            // The menu stands in for the description, and a cell another
+            // view selected is only marked.
+            (Picked::Menu | Picked::Linked, _) => return None,
             _ if !self.card.shows(&spot.stands()) => return None,
             (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
             (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(spot.rect()),
@@ -324,6 +328,11 @@ impl ExclusivePanel {
             )
         });
         let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let selection_changed = cx.subscribe(&model, |view, _, event: &SelectionChanged, cx| {
+            if event.by != cx.entity_id() {
+                view.take_up_selection(cx);
+            }
+        });
         let jump = Self::palette(&model, &focus_handle, &chips, cx);
         let jumped = cx.subscribe(&jump, |view, _, event: &JumpEvent, cx| {
             view.jumped(*event, cx)
@@ -335,6 +344,7 @@ impl ExclusivePanel {
             opened: None,
             offering: Offering::new(model.clone()),
             _exclusion_named: exclusion_named,
+            _selection_changed: selection_changed,
             _jumped: jumped,
             picker,
             model,
@@ -425,6 +435,7 @@ impl ExclusivePanel {
         }
         match event {
             JumpEvent::Go(id) => {
+                self.publish(Some(id), cx);
                 self.land(id, cx);
                 self.opened = None;
             }
@@ -525,13 +536,7 @@ impl ExclusivePanel {
         let (Some(drawn), Some(laid)) = (&self.drawn, self.laid_out()) else {
             return;
         };
-        let shown = &drawn.shown.tree;
-        let holds_node = |cell: &&Cell| match cell.holds {
-            Holds::Node(at) => at == node,
-            Holds::Rest(run) => run.siblings(shown).is_some_and(|run| run.contains(&node)),
-            Holds::Build | Holds::Shared => false,
-        };
-        let Some(&cell) = laid.cells.iter().find(holds_node) else {
+        let Some(cell) = holding(&laid, &drawn.shown.tree, node) else {
             return;
         };
         self.card.pick();
@@ -568,7 +573,8 @@ impl ExclusivePanel {
     }
 
     /// Takes up a tree drawn afresh: moves the card to where its node now
-    /// lands, and lands the jump waiting for the tree.
+    /// lands, lands the jump waiting for the tree, and rings the cell of the
+    /// node selected.
     fn redrawn(&mut self, cx: &mut Context<Self>) {
         let offer = self.offering.offer();
         let now = offer
@@ -577,6 +583,92 @@ impl ExclusivePanel {
         self.offering.redrawn(now, cx);
         if let Some(id) = self.offering.take_waiting() {
             self.land(id, cx);
+        }
+        self.relink(cx);
+    }
+
+    /// Selects `node`, or nothing for `None`, for every view of the graph.
+    fn publish(&mut self, node: Option<Id>, cx: &mut Context<Self>) {
+        let by = cx.entity_id();
+        self.model
+            .update(cx, |model, cx| model.select(node, by, cx));
+    }
+
+    /// Takes up a node another view selected: the cell the keys selected
+    /// gives way to it.
+    fn take_up_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(drawn) = &mut self.drawn
+            && drawn
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.by == Picked::Keys)
+        {
+            drawn.selection = None;
+        }
+        self.relink(cx);
+    }
+
+    /// What the node the document holds selected lands on in the tree drawn,
+    /// resolved once for each node selected in each drawing.
+    fn selection_landing(&mut self, cx: &App) -> Option<landing::Landing> {
+        let selected = self.model.read(cx).selected()?;
+        let drawn = self.drawn.as_ref()?;
+        if let Some((id, shown, landing)) = &drawn.landed
+            && *id == selected
+            && Arc::ptr_eq(shown, &drawn.shown)
+        {
+            return Some(*landing);
+        }
+        let landing = self.landing(selected)?;
+        let drawn = self.drawn.as_mut()?;
+        drawn.landed = Some((selected, Arc::clone(&drawn.shown), landing));
+        Some(landing)
+    }
+
+    /// The cell ringing the node the document holds selected: its own, or
+    /// where the cells drawn leave it out, that of the nearest node above it
+    /// they hold, among the icicle's cells and the ancestors over them. None
+    /// where the tree draws the node outside the cells drawn.
+    fn linked_cell(&mut self, cx: &App) -> Option<Cell> {
+        let landing::Landing::Cell { node, .. } = self.selection_landing(cx)? else {
+            return None;
+        };
+        let (drawn, laid) = (self.drawn.as_ref()?, self.laid_out()?);
+        let shown = &drawn.shown.tree;
+        let holding_whole = |whole: Holds| {
+            laid.spots().find_map(|spot| match spot {
+                Spot::Cell(cell) if cell.holds == whole => Some(cell),
+                _ => None,
+            })
+        };
+        let mut at = node;
+        loop {
+            if let Some(cell) = holding(&laid, shown, at) {
+                return Some(cell);
+            }
+            match shown.placing(at)?.above {
+                Above::Node(above) => at = above,
+                Above::Shared => return holding_whole(Holds::Shared),
+                Above::Roots => return holding_whole(Holds::Build),
+            }
+        }
+    }
+
+    /// Rings the cell of the node the document holds selected, as
+    /// [`Self::linked_cell`] finds it, where the keys, the pointer and a menu
+    /// ring no other.
+    fn relink(&mut self, cx: &mut Context<Self>) {
+        let linked = self.linked_cell(cx);
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        let ringed = drawn.selection.as_ref().map(|selection| selection.by);
+        match (ringed, linked) {
+            (None | Some(Picked::Linked), Some(cell)) => {
+                self.select(Spot::Cell(cell), Picked::Linked, cx)
+            }
+            (Some(Picked::Linked), None) => self.drop_selection(cx),
+            _ => {}
         }
     }
 
@@ -589,11 +681,21 @@ impl ExclusivePanel {
         }
     }
 
-    /// Puts away the card, or with none the selection.
+    /// Puts away the card; with none, a ring on a cell other than the one
+    /// ringing the node selected, which gives way to that one; and otherwise
+    /// the selection, here and in every other view.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
-        match self.offering.dismiss() {
-            true => cx.notify(),
-            false => self.deselect(cx),
+        if self.offering.dismiss() {
+            cx.notify();
+            return;
+        }
+        let ringed = (self.drawn.as_ref())
+            .and_then(|drawn| drawn.selection.as_ref())
+            .map(|selection| selection.spot.stands());
+        let linked = self.linked_cell(cx).map(|cell| Stands::Cell(cell.holds));
+        match ringed {
+            Some(stands) if Some(stands) != linked => self.let_go(cx),
+            _ => self.deselect(cx),
         }
     }
 
@@ -987,6 +1089,7 @@ impl ExclusivePanel {
             transition: None,
             selection: None,
             pressed_clear: false,
+            landed: None,
         });
         if self.shown {
             self.want(key, cx);
@@ -1082,7 +1185,8 @@ impl ExclusivePanel {
 
     /// Selects and describes afresh: where the keys selected, what they
     /// selected wherever it is still drawn and the cell on top where it is
-    /// not, and otherwise what is under the pointer.
+    /// not, and otherwise what is under the pointer, or with nothing there
+    /// the cell of the node selected.
     fn reselect(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
@@ -1112,7 +1216,10 @@ impl ExclusivePanel {
             }
             _ => match pointer {
                 Some(at) => self.hover_at(at, cx),
-                None => cx.notify(),
+                None => {
+                    self.relink(cx);
+                    cx.notify();
+                }
             },
         }
     }
@@ -1140,13 +1247,26 @@ impl ExclusivePanel {
         cx.notify();
     }
 
-    /// Selects nothing.
-    fn deselect(&mut self, cx: &mut Context<Self>) {
+    /// Rings no cell.
+    fn drop_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(drawn) = &mut self.drawn
             && drawn.selection.take().is_some()
         {
             cx.notify();
         }
+    }
+
+    /// Lets go of what the pointer selected, ringing the cell of the node
+    /// selected again.
+    fn let_go(&mut self, cx: &mut Context<Self>) {
+        self.drop_selection(cx);
+        self.relink(cx);
+    }
+
+    /// Selects nothing, here and in every other view of the graph.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        self.publish(None, cx);
+        self.drop_selection(cx);
     }
 
     /// Takes the selection a `step` through what is drawn, or selects the
@@ -1164,6 +1284,15 @@ impl ExclusivePanel {
         if let Some(to) = to {
             self.card.pick();
             self.select(to, Picked::Keys, cx);
+            if let Spot::Cell(Cell {
+                holds: Holds::Node(node),
+                ..
+            }) = to
+                && let Some(drawn) = &self.drawn
+            {
+                let id = drawn.coloured.tree.id(node);
+                self.publish(Some(id), cx);
+            }
         }
     }
 
@@ -1227,9 +1356,13 @@ impl ExclusivePanel {
         };
         if holds == drawn.top() {
             self.focus_up(cx);
-        } else {
-            self.focus_on(Focused::of(holds), cx);
+            return;
         }
+        if let Holds::Node(node) = holds {
+            let id = drawn.coloured.tree.id(node);
+            self.publish(Some(id), cx);
+        }
+        self.focus_on(Focused::of(holds), cx);
     }
 
     /// Acts on a press as [`GESTURES`] has it. A double click returns to the
@@ -1454,7 +1587,7 @@ impl ExclusivePanel {
         };
         match spot {
             Some(spot) => self.select(spot, Picked::Pointer, cx),
-            None if drawn.picked_by_pointer() => self.deselect(cx),
+            None if drawn.picked_by_pointer() => self.let_go(cx),
             None => {}
         }
     }
@@ -1465,7 +1598,7 @@ impl ExclusivePanel {
             cx.notify();
         }
         if self.drawn.as_ref().is_some_and(Drawn::picked_by_pointer) {
-            self.deselect(cx);
+            self.let_go(cx);
         }
     }
 
@@ -1473,7 +1606,7 @@ impl ExclusivePanel {
     /// for the card.
     fn carded(&self, _: &App) -> Option<Stands> {
         let selection = self.drawn.as_ref()?.selection.as_ref()?;
-        (selection.by != Picked::Menu).then_some(selection.spot.stands())
+        matches!(selection.by, Picked::Pointer | Picked::Keys).then_some(selection.spot.stands())
     }
 
     /// Repaints the cells along with the layer over them; every change to what
@@ -1715,6 +1848,9 @@ struct Drawn {
     selection: Option<Selection>,
     /// Whether the last press landed clear of every cell, starting a click.
     pressed_clear: bool,
+    /// What the node the document holds selected lands on in the tree as
+    /// the drawing named draws it, and that node.
+    landed: Option<(Id, Arc<Shown>, landing::Landing)>,
 }
 
 impl Drawn {
@@ -1876,6 +2012,24 @@ enum Picked {
     /// A right press, whose menu stands over the cell until it closes, the
     /// pointer leaving the cell for the menu letting go of nothing.
     Menu,
+    /// The document's selection, made in another view or in this one, which
+    /// the keys, the pointer and a menu each ring another cell over.
+    Linked,
+}
+
+/// The cell holding `tree`'s node `node` among those `laid` out, over the
+/// icicle or in it: its own, or that of the run of cells too narrow to draw
+/// apart it is among.
+fn holding(laid: &LaidOut, tree: &ShownTree, node: u32) -> Option<Cell> {
+    laid.spots().find_map(|spot| match spot {
+        Spot::Cell(cell) => match cell.holds {
+            Holds::Node(at) => at == node,
+            Holds::Rest(run) => run.siblings(tree).is_some_and(|run| run.contains(&node)),
+            Holds::Build | Holds::Shared => false,
+        }
+        .then_some(cell),
+        Spot::Hidden { .. } => None,
+    })
 }
 
 /// Takes each focus of `history` of `tree` up to what `drawn` still shows of
@@ -2755,8 +2909,9 @@ fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Lege
 /// The layer over the cells that rings and describes the one selected,
 /// painted apart from the cells so that neither repaints any of them, and
 /// only while they are at rest. Its layout records where the cells lie for
-/// the pointer handlers and the keys, and lets go of a cell the pointer
-/// selected where they are laid out elsewhere.
+/// the pointer handlers and the keys, lets go of a cell the pointer selected
+/// where they are laid out elsewhere, and rings the cell of the node selected
+/// among them.
 fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
@@ -2765,7 +2920,7 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                 bounds,
                 row: paint::row_height(window),
             };
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 if view.frame == Some(frame) {
                     return;
                 }
@@ -2774,10 +2929,12 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                 if let Some(drawn) = &mut view.drawn {
                     let moved = drawn.selection.take().and_then(|selection| {
                         let spot = laid.as_ref()?.find(&selection.spot)?;
-                        (selection.by == Picked::Keys).then_some(Selection { spot, ..selection })
+                        let kept = matches!(selection.by, Picked::Keys | Picked::Linked);
+                        kept.then_some(Selection { spot, ..selection })
                     });
                     drawn.selection = moved;
                 }
+                view.relink(cx);
             });
             // The palette stands over the cells, which a card describing the
             // cell its keys preview would cover it with.
