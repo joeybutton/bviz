@@ -13,6 +13,7 @@ mod transition;
 pub(crate) use roots::NOTICE_SEPARATOR;
 
 use crate::Palette;
+use crate::chips::{self, ChipBar, Holder};
 use crate::history::History;
 use crate::hue::{Colouring, Hue};
 use crate::model::{
@@ -200,6 +201,8 @@ pub struct ExclusivePanel {
     choosing: Option<Choosing>,
     /// The field naming the roots as a target set.
     roots_field: Entity<QueryField>,
+    /// The document's query bar, as this panel stands it.
+    chips: Entity<ChipBar>,
     /// The target set that last failed, which is not resolved again while
     /// the field holds it.
     failed: Option<Failed>,
@@ -283,6 +286,15 @@ impl ExclusivePanel {
         let focus_handle = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         let picker = unit_picker(&model, &focus_handle, cx);
+        let chips = cx.new(|cx| {
+            ChipBar::new(
+                model.clone(),
+                Holder::Exclusive,
+                focus_handle.clone(),
+                None,
+                cx,
+            )
+        });
         Self {
             focus_handle,
             legend,
@@ -296,6 +308,7 @@ impl ExclusivePanel {
             rooting: None,
             choosing: None,
             roots_field,
+            chips,
             failed: None,
             coloured: HashMap::new(),
             drawing: None,
@@ -1689,7 +1702,10 @@ impl Panel for ExclusivePanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().chain(legend_gestures()).collect()
+        (GESTURES.rows())
+            .chain(chips::gestures())
+            .chain(legend_gestures())
+            .collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1748,6 +1764,12 @@ impl Render for ExclusivePanel {
                 if let Some(picker) = &view.picker {
                     picker.cycle(cx);
                 }
+            }))
+            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
+                view.chips.update(cx, chips::apply_staged);
+            }))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| {
+                view.chips.update(cx, chips::copy_stack);
             }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1813,6 +1835,8 @@ impl Render for ExclusivePanel {
                 cx,
             )
         }));
+        let chips = &self.chips;
+        let root = root.child(OneRow::new("exclusive-query-bar").filling(|| chips.clone()));
         let rooting = self.rooting(cx);
         let report = match self.failure(cx) {
             Some(failed) => {

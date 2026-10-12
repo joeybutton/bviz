@@ -80,10 +80,11 @@ actions!(
 pub(crate) enum Holder {
     Graph,
     Scatter,
+    Exclusive,
 }
 
 impl Holder {
-    pub(crate) const ALL: [Holder; 2] = [Holder::Graph, Holder::Scatter];
+    pub(crate) const ALL: [Holder; 3] = [Holder::Graph, Holder::Scatter, Holder::Exclusive];
 
     /// The key scope of the view, from which the keys acting on its bar as a
     /// whole reach the bar.
@@ -91,6 +92,7 @@ impl Holder {
         match self {
             Holder::Graph => crate::KEY_CONTEXT,
             Holder::Scatter => crate::scatter::KEY_CONTEXT,
+            Holder::Exclusive => crate::exclusive::KEY_CONTEXT,
         }
     }
 }

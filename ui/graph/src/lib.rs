@@ -226,10 +226,19 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
-    bindings.extend(find_key_bindings(
-        exclusive::KEY_CONTEXT,
-        exclusive::FocusRoots,
-    ));
+    // The finder's keys reach the roots field from anywhere in the exclusive
+    // deps view but its query bar, whose field they would take the focus
+    // from; the slash, as the finder's own binding has it, wherever it types
+    // nothing.
+    let outside_query = format!("{} && !{}", exclusive::KEY_CONTEXT, chips::KEY_CONTEXT);
+    bindings.extend([
+        KeyBinding::new(
+            "secondary-f",
+            exclusive::FocusRoots,
+            Some(outside_query.as_str()),
+        ),
+        KeyBinding::new("/", exclusive::FocusRoots, exclusive_canvas),
+    ]);
     bindings
 }
 
@@ -1666,6 +1675,16 @@ mod tests {
             );
         }
         assert!(dispatched("q", IN_ROOTS).is_none());
+        let in_query_field = &[
+            exclusive::KEY_CONTEXT.id(),
+            chips::KEY_CONTEXT.id(),
+            chips::FIELD_KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        assert!(!is(
+            dispatched("secondary-f", in_query_field),
+            exclusive::FocusRoots
+        ));
         assert!(dispatched("/", IN_ROOTS).is_none());
     }
 
@@ -1853,6 +1872,10 @@ mod tests {
         use chips::Holder;
         assert_eq!(Holder::Graph.scope(), GraphPanel::kind().key_context);
         assert_eq!(Holder::Scatter.scope(), ScatterPanel::kind().key_context);
+        assert_eq!(
+            Holder::Exclusive.scope(),
+            ExclusivePanel::kind().key_context
+        );
     }
 
     /// The scatter plot's pick list leaves its keys to the query bar while
