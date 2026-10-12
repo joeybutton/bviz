@@ -33,7 +33,7 @@ use gpui::{
 #[cfg(test)]
 pub(crate) use index::tests::shared as fixture;
 use index::{Candidate, Scope};
-pub(crate) use index::{Candidates, container, labelled, node_text, package_of};
+pub(crate) use index::{Candidates, container, labelled, node_text, package_of, shown};
 use rustc_hash::FxHashSet;
 
 actions!(
