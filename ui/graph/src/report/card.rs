@@ -385,7 +385,7 @@ mod tests {
             selected(&outcomes, &format!("action:{GEN_OUTPUT}")),
             Some((
                 Status::RootCause,
-                "Genrule //gen:gen failed, failing 1 target".into(),
+                "Genrule //gen:gen failed · 1 target failed".into(),
                 None
             ))
         );

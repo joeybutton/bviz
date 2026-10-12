@@ -1126,14 +1126,14 @@ mod tests {
             rows(&outcomes),
             [read(
                 "Genrule //gen:gen",
-                "exited 1, failing 2 targets — bash failed: exit 1",
+                "exited 1 · 2 targets failed — bash failed: exit 1",
                 true
             )]
         );
         let report = report(&outcomes);
         assert_eq!(
             report.root_causes[0].hover(&configurations()),
-            "Genrule //gen:gen\nexited 1, failing 2 targets\n\nbash failed: exit 1\n\nUse --sandbox_debug"
+            "Genrule //gen:gen\nexited 1 · 2 targets failed\n\nbash failed: exit 1\n\nUse --sandbox_debug"
         );
         assert_eq!(
             report.root_causes[0].shown.node(),
@@ -1158,15 +1158,15 @@ mod tests {
         assert_eq!(
             rows(&outcomes),
             [
-                read("Genrule //gen:gen", "exited 1, failing 3 targets", true),
+                read("Genrule //gen:gen", "exited 1 · 3 targets failed", true),
                 read(
                     "Genrule //docs:site",
-                    "exited 2, failing 1 target · not in this graph",
+                    "exited 2 · 1 target failed · not in this graph",
                     false
                 ),
                 read(
                     "//app:late",
-                    "failed, and the build names no cause · not in this graph",
+                    "failed · no cause reported · not in this graph",
                     false
                 ),
             ]
@@ -1242,7 +1242,7 @@ mod tests {
             rows(&outcomes),
             [read(
                 "action writing bazel-out/k8/bin/docs/site.out",
-                "failed, failing 3 targets · not in this graph",
+                "failed · 3 targets failed · not in this graph",
                 true
             )]
         );
@@ -1257,7 +1257,7 @@ mod tests {
             rows(&elsewhere),
             [read(
                 "action writing bazel-out/k8/bin/docs/site.out",
-                "failed, failing 1 target · not in this graph",
+                "failed · 1 target failed · not in this graph",
                 false
             )]
         );
@@ -1316,7 +1316,7 @@ mod tests {
             rows(&outcomes),
             [read(
                 "//lib:broken",
-                "could not be loaded or analysed, failing 2 targets — no such attribute 'dep'",
+                "not loaded or analysed · 2 targets failed — no such attribute 'dep'",
                 true
             )]
         );
@@ -1328,7 +1328,7 @@ mod tests {
         );
         assert_eq!(
             rows(&uncaused),
-            [read("//lib:broken", "could not be analysed", true)]
+            [read("//lib:broken", "not analysed", true)]
         );
     }
 
@@ -1413,7 +1413,7 @@ mod tests {
                 ),
                 read(
                     "//app:unrun",
-                    "no status: the test did not run · not in this graph",
+                    "no status · not run · not in this graph",
                     false
                 ),
             ]
@@ -1566,14 +1566,14 @@ mod tests {
         assert_eq!(
             said_of(&report, "target://lib:broken"),
             Some((
-                "//lib:broken could not be loaded or analysed, failing 1 target".into(),
+                "//lib:broken not loaded or analysed · 1 target failed".into(),
                 None
             ))
         );
         assert_eq!(
             said_of(&report, &format!("action:{GEN_OUTPUT}")),
             Some((
-                "action writing bazel-out/k8/bin/gen/gen.out failed, failing 1 target".into(),
+                "action writing bazel-out/k8/bin/gen/gen.out failed · 1 target failed".into(),
                 None
             ))
         );
@@ -1607,11 +1607,11 @@ mod tests {
         );
         assert_eq!(
             said(failed(&[]), Some(test(TestStatus::FailedToBuild))),
-            "//app:check failed, and the build names no cause"
+            "//app:check failed · no cause reported"
         );
         assert_eq!(
             said(BuildOutcome::AnalysisFailed { causes: Vec::new() }, None),
-            "//app:check could not be analysed"
+            "//app:check not analysed"
         );
         assert_eq!(
             said(BuildOutcome::Built, Some(test(TestStatus::Passed))),

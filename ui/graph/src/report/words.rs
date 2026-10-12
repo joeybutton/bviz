@@ -103,10 +103,10 @@ fn ran(test: &TestOutcome) -> String {
         TestStatus::Failed => format!("failed{every_attempt} in {took}{spread}"),
         TestStatus::Timeout => format!("timed out{every_attempt} after {took}{spread}"),
         TestStatus::RemoteFailure => format!("failed remotely{every_attempt}{spread}"),
-        TestStatus::Incomplete => format!("incomplete: not every run ended{spread}"),
-        TestStatus::NoStatus => "no status: the test did not run".to_owned(),
-        TestStatus::ToolHaltedBeforeTesting => "not run: the build ended before testing".to_owned(),
-        TestStatus::FailedToBuild => "not run: the test could not be built".to_owned(),
+        TestStatus::Incomplete => format!("incomplete · some runs unfinished{spread}"),
+        TestStatus::NoStatus => "no status · not run".to_owned(),
+        TestStatus::ToolHaltedBeforeTesting => "not run · build ended first".to_owned(),
+        TestStatus::FailedToBuild => "not run · not built".to_owned(),
     }
 }
 
@@ -198,7 +198,7 @@ fn hover(name: &str, detail: &str, message: &str) -> String {
     let beyond = said.count();
     if beyond > 0 {
         text.push_str(&format!(
-            "\n… and {}",
+            "\n+{}",
             counted(beyond, "more line", "more lines")
         ));
     }
@@ -251,7 +251,7 @@ fn exited(action: &Action) -> String {
 fn blamed(what: &str, failing: usize) -> String {
     match failing {
         0 => what.to_owned(),
-        failing => format!("{what}, failing {}", counted(failing, "target", "targets")),
+        failing => format!("{what} · {} failed", counted(failing, "target", "targets")),
     }
 }
 
@@ -264,9 +264,9 @@ impl Listed {
             } => blamed(&exited(action), *failing),
             Listed::Target { came, failing, .. } => {
                 let what = match came {
-                    Unbuilt::Unanalysed => "could not be analysed",
-                    Unbuilt::Uncaused => "failed, and the build names no cause",
-                    Unbuilt::Unreported => "could not be loaded or analysed",
+                    Unbuilt::Unanalysed => "not analysed",
+                    Unbuilt::Uncaused => "failed · no cause reported",
+                    Unbuilt::Unreported => "not loaded or analysed",
                 };
                 blamed(what, *failing)
             }
@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(within.lines().count(), 3 + HOVER_LINES);
         let beyond = hover("name", "detail", &lines(HOVER_LINES + 2));
         assert_eq!(beyond.lines().count(), 3 + HOVER_LINES + 1);
-        assert!(beyond.ends_with("\n… and 2 more lines"), "{beyond}");
+        assert!(beyond.ends_with("\n+2 more lines"), "{beyond}");
         assert_eq!(hover("name", "detail", " \n"), "name\ndetail");
     }
 
