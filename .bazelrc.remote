@@ -1,3 +1,7 @@
+# Maintainers only: these endpoints are the project's own BuildBuddy, which
+# requires the maintainers' API key. For a remote backend of your own, set
+# the remote flags in user.bazelrc.
+
 build:remote --config=remote-bes --config=remote-cache --config=remote-exec
 
 # Diagnostic logs for troubleshooting remote builds.

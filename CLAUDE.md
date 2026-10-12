@@ -65,8 +65,8 @@ Interactive visualization and inspection tool for Bazel builds.
   committing. For toolchain changes, confirm with `--toolchain_resolution_debug`.
   Report outcomes honestly; flag side effects.
 - On a machine short of memory or cores, build with remote execution when it is
-  configured for you (`--config=remote`, credentials in `user.bazelrc`), so
-  builds do not overload it.
+  configured for you (`--config=remote`, maintainers only, credentials in
+  `user.bazelrc`), so builds do not overload it.
 - Verify a change to visual output by viewing the rendered result on real
   input, captured with the screenshot tools the gpui skill provides; a
   structural check does not catch visual faults.
