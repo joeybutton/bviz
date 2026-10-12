@@ -1760,7 +1760,7 @@ fn strip(
     let grouped = |picker: PickerGroup, priority| picker.group(priority, focus, window, cx);
     let switches = || {
         let switches = (choice.loaded.inputs()).map(|input| input_switch(input, scope, cx));
-        ToggleGroup::any_of("scatter-inputs", INPUTS_NAME, switches)
+        ToggleGroup::any_of("scatter-inputs", INPUTS_NAME, switches).tooltip("Inputs measured")
     };
     let inputs_set = (choice.loaded.inputs()).any(|input| Toggle::of(scope, input) == Toggle::Off);
     let inputs = ToolbarGroup::named(INPUTS, INPUTS_NAME, switches)

@@ -216,15 +216,17 @@ impl Dropdown {
             .get(self.selected)
             .map(|choice| choice.label.clone())
             .unwrap_or_default();
-        let trigger = menu_chrome::trigger(self.id.clone(), colors);
-        let popup = self.popup.downgrade();
-        (self.hint.clone())
-            .on_picker(trigger, colors.tooltip(), popup, Popup::is_open)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.popup.update(cx, |popup, cx| popup.toggle(window, cx));
-            }))
-            .child(menu_chrome::reading(option_width, label))
-            .child(menu_chrome::caret(colors))
+        let trigger = menu_chrome::trigger(
+            self.id.clone(),
+            colors,
+            self.hint.clone(),
+            (self.popup.downgrade(), Popup::is_open),
+            option_width,
+            label,
+        );
+        trigger.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.popup.update(cx, |popup, cx| popup.toggle(window, cx));
+        }))
     }
 
     fn menu(&self, colors: &ThemeColors, cx: &Context<Self>) -> impl IntoElement {

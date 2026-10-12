@@ -4,7 +4,7 @@
 
 use crate::button::Button;
 use crate::popup::{self, Popup};
-use crate::{SubmenuItem, TextTooltip, key_text_in, menu_chrome};
+use crate::{Hint, SubmenuItem, TextTooltip, key_text_in, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Action, App, ClickEvent, ElementId, Entity, FocusHandle, IntoElement, RenderOnce, SharedString,
@@ -181,6 +181,8 @@ pub struct ToggleGroup {
     label: SharedString,
     toggles: Toggles,
     presentation: Presentation,
+    /// What the collapsed trigger's tooltip reads.
+    hint: Hint,
 }
 
 impl ToggleGroup {
@@ -238,7 +240,14 @@ impl ToggleGroup {
             label: label.into(),
             toggles,
             presentation: Presentation::default(),
+            hint: Hint::default(),
         }
+    }
+
+    /// The collapsed trigger's tooltip reading `text`.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.hint = self.hint.text(text);
+        self
     }
 
     pub fn presentation(mut self, presentation: Presentation) -> Self {
@@ -322,15 +331,20 @@ impl ToggleGroup {
     ) -> impl IntoElement {
         let popup = window.use_keyed_state(self.id.clone(), cx, |_, cx| Popup::new(cx));
         let width = menu_chrome::widest(window, self.readings().into_iter());
-        let trigger = menu_chrome::trigger(self.id.clone(), colors)
-            .on_click({
-                let popup = popup.clone();
-                move |_: &ClickEvent, window, cx| {
-                    popup.update(cx, |popup, cx| popup.toggle(window, cx));
-                }
-            })
-            .child(menu_chrome::reading(width, self.reading()))
-            .child(menu_chrome::caret(colors));
+        let trigger = menu_chrome::trigger(
+            self.id.clone(),
+            colors,
+            self.hint.clone(),
+            (popup.downgrade(), Popup::is_open),
+            width,
+            self.reading(),
+        )
+        .on_click({
+            let popup = popup.clone();
+            move |_: &ClickEvent, window, cx| {
+                popup.update(cx, |popup, cx| popup.toggle(window, cx));
+            }
+        });
         let closes_on_choice = matches!(self.toggles, Toggles::One { .. });
         let menu = popup.read(cx).is_open().then(|| {
             menu(

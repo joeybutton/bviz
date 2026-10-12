@@ -282,19 +282,19 @@ impl MultiSelect {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let (checked, total) = self.rows.tally();
-        let trigger = menu_chrome::trigger(self.id.clone(), colors);
-        let open = |select: &Self| select.rows.open;
-        (self.hint.clone())
-            .on_picker(trigger, colors.tooltip(), cx.weak_entity(), open)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                let open = !this.rows.open;
-                this.set_open(open, window, cx);
-            }))
-            .child(menu_chrome::reading(
-                reading_width,
-                format!("{} {checked}/{total}", self.label).into(),
-            ))
-            .child(menu_chrome::caret(colors))
+        let open: fn(&Self) -> bool = |select| select.rows.open;
+        let trigger = menu_chrome::trigger(
+            self.id.clone(),
+            colors,
+            self.hint.clone(),
+            (cx.weak_entity(), open),
+            reading_width,
+            format!("{} {checked}/{total}", self.label).into(),
+        );
+        trigger.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            let open = !this.rows.open;
+            this.set_open(open, window, cx);
+        }))
     }
 
     fn menu(

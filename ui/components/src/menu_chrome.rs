@@ -3,12 +3,12 @@
 //! the window at a point — so they read alike wherever they sit.
 
 use crate::scrollbar::SCROLLBAR_THICKNESS;
-use crate::{CONTROL_HEIGHT, laid_out_width};
+use crate::{CONTROL_HEIGHT, Hint, laid_out_width};
 use bviz_ui_theme::{ThemeColors, over};
 use gpui::{
     AnyElement, App, Bounds, Deferred, Div, Edges, Element, ElementId, GlobalElementId, Hsla,
     InspectorElementId, LayoutId, MouseButton, Pixels, Point, Position, SharedString, Size,
-    Stateful, Style, Svg, Window, deferred, div, point, prelude::*, px,
+    Stateful, Style, Svg, WeakEntity, Window, deferred, div, point, prelude::*, px,
 };
 use std::panic::Location;
 
@@ -71,11 +71,20 @@ fn chosen_hover(colors: &ThemeColors) -> Hsla {
     ))
 }
 
-/// The button a menu opens under. The caller adds what it reads and the click
-/// that opens the menu.
-pub(crate) fn trigger(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
+/// The button a picker's menu opens under, reading `label` within `width`
+/// before a caret, and showing `hint` except while `open` holds of `picker`,
+/// whose open menu the hint would cover. The caller adds the click that opens
+/// the menu.
+pub(crate) fn trigger<V: 'static>(
+    id: ElementId,
+    colors: &ThemeColors,
+    hint: Hint,
+    (picker, open): (WeakEntity<V>, fn(&V) -> bool),
+    width: Pixels,
+    label: SharedString,
+) -> Stateful<Div> {
     let hover = colors.element_hover;
-    div()
+    let button = div()
         .id(id)
         .flex()
         .flex_row()
@@ -93,7 +102,10 @@ pub(crate) fn trigger(id: ElementId, colors: &ThemeColors) -> Stateful<Div> {
         // Keep the press from reaching an ancestor that focuses on mouse-down
         // (e.g. a toolbar); that would blur the menu and, via the controls'
         // dismiss-on-blur, close it just before this click reopens it.
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    hint.on_picker(button, colors.tooltip(), picker, open)
+        .child(reading(width, label))
+        .child(caret(colors))
 }
 
 /// The keys running what a row does, set at the end of the row.
@@ -105,7 +117,7 @@ pub fn row_keys(keys: SharedString, colors: &ThemeColors) -> Div {
 }
 
 /// The mark on a trigger saying it opens a menu.
-pub(crate) fn caret(colors: &ThemeColors) -> Svg {
+fn caret(colors: &ThemeColors) -> Svg {
     mark("caret-down", colors)
 }
 
@@ -117,7 +129,7 @@ fn mark(icon: &'static str, colors: &ThemeColors) -> Svg {
 
 /// A line of text held to `width`, so what a control reads does not change how
 /// wide it is drawn, and cut short where it runs wider than that.
-pub(crate) fn reading(width: Pixels, label: SharedString) -> Div {
+fn reading(width: Pixels, label: SharedString) -> Div {
     div()
         .w(width)
         .flex_none()

@@ -570,6 +570,7 @@ impl FlamePanel {
                 |direction| direction_segment(direction).keys_for(&CycleDirection, focus),
                 move |direction, _, cx| set_mode(FlameMode { direction, ..mode }, cx),
             )
+            .tooltip("Flame direction")
         };
         let weight = || {
             let set_mode = set_mode.clone();
@@ -581,6 +582,7 @@ impl FlamePanel {
                 |weight| weight_segment(weight).keys_for(&CycleWeight, focus),
                 move |weight, _, cx| set_mode(FlameMode { weight, ..mode }, cx),
             )
+            .tooltip("Box size")
         };
         let kinds = || {
             let set_mode = set_mode.clone();

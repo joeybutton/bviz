@@ -188,6 +188,7 @@ impl Marking {
             MARK_NAME,
             std::iter::once(neighbourhood).chain(critical_path),
         )
+        .tooltip("Marks drawn")
     }
 }
 
