@@ -14,7 +14,7 @@ mod transition;
 pub(crate) use roots::NOTICE_SEPARATOR;
 
 use crate::Palette;
-use crate::chips::{self, ChipBar};
+use crate::chips::{self, ChipBar, Unmarked};
 use crate::hidden::{self, Offering, Unshown};
 use crate::history::History;
 use crate::holder::Holder;
@@ -284,6 +284,7 @@ impl ExclusivePanel {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
+            (view.chips).update(cx, |bar, cx| bar.set_unmarked(None, cx));
             view.opened = None;
             view.offering.clear();
             view.restate_shown(cx);
@@ -592,6 +593,7 @@ impl ExclusivePanel {
         let by = cx.entity_id();
         self.model
             .update(cx, |model, cx| model.select(node, by, cx));
+        self.relink(cx);
     }
 
     /// Takes up a node another view selected: the cell the keys selected
@@ -656,9 +658,19 @@ impl ExclusivePanel {
 
     /// Rings the cell of the node the document holds selected, as
     /// [`Self::linked_cell`] finds it, where the keys, the pointer and a menu
-    /// ring no other.
+    /// ring no other, and has the query bar's status line say where no cell
+    /// rings it.
     fn relink(&mut self, cx: &mut Context<Self>) {
+        let landing = self.selection_landing(cx);
         let linked = self.linked_cell(cx);
+        let unmarked = match landing {
+            Some(landing::Landing::Cell { .. }) => {
+                (linked.is_none() && self.frame.is_some()).then_some(Unmarked::Outside)
+            }
+            landing => landing.and_then(landing::Landing::unmarked),
+        };
+        self.chips
+            .update(cx, |bar, cx| bar.set_unmarked(unmarked, cx));
         let Some(drawn) = &self.drawn else {
             return;
         };

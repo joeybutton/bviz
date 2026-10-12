@@ -1,4 +1,5 @@
 use crate::GraphPanel;
+use crate::chips::Unmarked;
 use crate::derive::Shown;
 use crate::neighborhood::{MarkingMemo, Neighborhood};
 use crate::relation::Relation;
@@ -68,17 +69,48 @@ pub(crate) fn acted_on(view: &GraphPanel, cx: &App) -> Option<Id> {
 }
 
 /// Marks the box standing for the document's selected node in the drawing as
-/// it is, opening none, and no box where the panel hides that node.
+/// it is, opening none, and no box where the panel hides that node, which the
+/// query bar's status line then says.
 pub(crate) fn remark(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let selected = view.model.read(cx).selected();
-    let marked = selected
-        .filter(|&id| hidden_by(view, id).is_none())
-        .and_then(|id| standing_for(view, id));
+    let marking = view.model.read(cx).selected().map(|id| Marking {
+        hidden: hidden_by(view, id).is_some(),
+        standing: standing_for(view, id),
+        settled: !view.derived.deriving(),
+    });
+    let (marked, unmarked) = marking.map_or((None, None), Marking::resolve);
+    view.chips
+        .update(cx, |bar, cx| bar.set_unmarked(unmarked, cx));
     if marked != view.selection.node() {
         view.selection.mark(marked);
         view.invalidate_canvas(cx);
     }
     crate::box_menu::remarked(view, cx);
+}
+
+/// What a panel's drawing makes of the node selected.
+struct Marking {
+    /// Whether the drawing hides it.
+    hidden: bool,
+    /// The box standing for it, which a hidden node may still have.
+    standing: Option<Id>,
+    /// Whether the drawing is the one the panel settles on, no derivation
+    /// being in flight.
+    settled: bool,
+}
+
+impl Marking {
+    /// The box marked for the node, or why there is none; a drawing still
+    /// being derived says nothing of a node it does not hold yet.
+    fn resolve(self) -> (Option<Id>, Option<Unmarked>) {
+        match self {
+            Marking { hidden: true, .. } => (None, Some(Unmarked::Hidden)),
+            Marking {
+                standing: Some(standing),
+                ..
+            } => (Some(standing), None),
+            Marking { settled, .. } => (None, settled.then_some(Unmarked::Absent)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +160,24 @@ mod tests {
             view: Arc::new(view),
             drawing: 0,
         }
+    }
+
+    #[test]
+    fn a_hidden_selection_marks_nothing_and_says_so() {
+        let marking = |hidden, standing, settled| {
+            Marking {
+                hidden,
+                standing,
+                settled,
+            }
+            .resolve()
+        };
+        let hidden = (None, Some(Unmarked::Hidden));
+        assert_eq!(marking(true, Some(Id(1)), true), hidden);
+        assert_eq!(marking(true, None, false), hidden);
+        assert_eq!(marking(false, Some(Id(1)), true), (Some(Id(1)), None));
+        assert_eq!(marking(false, None, true), (None, Some(Unmarked::Absent)));
+        assert_eq!(marking(false, None, false), (None, None));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! which a jump to it lands on.
 
 use super::plot::Plotted;
+use crate::chips::Unmarked;
 use crate::hidden::HiddenBy;
 use crate::jump::Stands;
 use crate::stand_in::{self, StandIns, Writers};
@@ -53,6 +54,17 @@ pub(crate) enum Absent {
     NotAPoint,
     /// The points standing for it have no measure on an axis.
     Unplaced,
+}
+
+impl Landing {
+    /// Why a plot landing a jump here marks no point.
+    pub(crate) fn unmarked(&self) -> Option<Unmarked> {
+        match self {
+            Landing::Marks(_) => None,
+            Landing::Hidden(..) => Some(Unmarked::Hidden),
+            Landing::Absent(_) => Some(Unmarked::Absent),
+        }
+    }
 }
 
 impl Absent {
@@ -191,6 +203,15 @@ mod tests {
     use bviz_graph_layout::metrics::{Count, Scope, Sizing};
     use bviz_graph_layout::select::{Filter, Pin, Visibility};
     use std::collections::HashMap;
+
+    #[test]
+    fn a_selection_landing_on_no_mark_is_unmarked_as_it_lands() {
+        assert_eq!(Landing::Marks(vec![0]).unmarked(), None);
+        let hidden = Landing::Hidden(Id(1), HiddenBy::Query);
+        assert_eq!(hidden.unmarked(), Some(Unmarked::Hidden));
+        let absent = Landing::Absent(Absent::NotAPoint);
+        assert_eq!(absent.unmarked(), Some(Unmarked::Absent));
+    }
 
     /// Every node of `kind` in `graph`, measured alike.
     fn measured(graph: &Graph, unit: Unit, kinds: &[Kind]) -> Measurement {

@@ -201,6 +201,9 @@ pub(crate) struct ChipBar {
     /// How much of the holder's view the document's filter shows, as the
     /// holder last counted it.
     shown: Option<Shown>,
+    /// Why the holder marks nothing for the node the document holds
+    /// selected.
+    unmarked: Option<Unmarked>,
     /// Scrolls the row of chips.
     scroll: ScrollHandle,
     /// Where a press on a pill stands, which carried far enough drags the
@@ -236,6 +239,27 @@ pub(crate) struct Shown {
     pub(crate) many: &'static str,
     /// What the view says of how it draws what is shown.
     pub(crate) note: Option<&'static str>,
+}
+
+/// Why a view marks nothing for the node its document holds selected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Unmarked {
+    /// The view's filter, or how it draws through it, hides the node.
+    Hidden,
+    /// Nothing the view draws stands for the node.
+    Absent,
+    /// The view draws the node, but not from where it stands.
+    Outside,
+}
+
+impl Unmarked {
+    fn describe(self) -> &'static str {
+        match self {
+            Unmarked::Hidden => "selection hidden",
+            Unmarked::Absent => "selection not in this view",
+            Unmarked::Outside => "selection outside this focus",
+        }
+    }
 }
 
 /// A chip the field holds the text of, as that text stood when the edit
@@ -318,6 +342,7 @@ impl ChipBar {
             staged: false,
             notice: None,
             shown: None,
+            unmarked: None,
             scroll: ScrollHandle::new(),
             gesture: reorder::Gesture::Idle,
             completer: complete::Completer::default(),
@@ -364,6 +389,15 @@ impl ChipBar {
     pub(crate) fn set_shown(&mut self, shown: Option<Shown>, cx: &mut Context<Self>) {
         if self.shown != shown {
             self.shown = shown;
+            cx.notify();
+        }
+    }
+
+    /// Takes up why the holder marks nothing for the node selected, which
+    /// the bar's status line says.
+    pub(crate) fn set_unmarked(&mut self, unmarked: Option<Unmarked>, cx: &mut Context<Self>) {
+        if self.unmarked != unmarked {
+            self.unmarked = unmarked;
             cx.notify();
         }
     }
@@ -972,7 +1006,7 @@ fn bar(
                 .bg(palette.colors.accent)
         })
     };
-    let status = status(view.model.read(cx).filter(), view.shown);
+    let status = status(view.model.read(cx).filter(), view.shown, view.unmarked);
     let status_line = |id| status_line(id, status.clone(), palette, cx);
     let whole =
         div()
@@ -1182,11 +1216,17 @@ fn status_line(
 
 /// What the document's `filter` does to the holder's view, which shows
 /// `shown` of its points: how many chips it applies and nodes a reader pinned
-/// hidden or faded, and how many points that leaves shown; `None` where it
-/// cannot leave out any node.
-fn status(filter: &DocumentFilter, shown: Option<Shown>) -> Option<String> {
+/// hidden or faded, and how many points that leaves shown; then why the view
+/// marks nothing for the node selected, where it is `unmarked`. `None` where
+/// there is nothing to say.
+fn status(
+    filter: &DocumentFilter,
+    shown: Option<Shown>,
+    unmarked: Option<Unmarked>,
+) -> Option<String> {
+    let unmarked = unmarked.map(|unmarked| unmarked.describe().to_owned());
     if !filter.narrows() {
-        return None;
+        return unmarked;
     }
     let counted = |count: usize, one: &str, many: &str| match count {
         1 => format!("1 {one}"),
@@ -1207,7 +1247,7 @@ fn status(filter: &DocumentFilter, shown: Option<Shown>) -> Option<String> {
         }) => (Some(format!("{shown} of {of} {many} shown")), note),
         None => (None, None),
     };
-    let parts = [chips, pins, shown, note.map(str::to_owned)];
+    let parts = [chips, pins, shown, note.map(str::to_owned), unmarked];
     let parts: Vec<String> = parts.into_iter().flatten().collect();
     Some(parts.join(STATUS_SEPARATOR))
 }
@@ -1342,11 +1382,11 @@ mod tests {
             many: "targets",
             note: None,
         };
-        assert_eq!(status(&filter, Some(shown)), None);
+        assert_eq!(status(&filter, Some(shown), None), None);
         filter.set_pins([(Id(3), Pin::Set(Visibility::Hidden))].into());
-        assert_eq!(status(&filter, None).as_deref(), Some("1 pin"));
+        assert_eq!(status(&filter, None, None).as_deref(), Some("1 pin"));
         assert_eq!(
-            status(&filter, Some(shown)).as_deref(),
+            status(&filter, Some(shown), None).as_deref(),
             Some("1 pin · 12 of 400 targets shown")
         );
         let noted = Shown {
@@ -1354,8 +1394,25 @@ mod tests {
             ..shown
         };
         assert_eq!(
-            status(&filter, Some(noted)).as_deref(),
+            status(&filter, Some(noted), None).as_deref(),
             Some("1 pin · 12 of 400 targets shown · widths count shown")
+        );
+    }
+
+    /// A view marking nothing for the node selected says so whether or not
+    /// the filter narrows the graph.
+    #[test]
+    fn the_status_line_says_where_the_selection_is_not_marked() {
+        let mut filter = DocumentFilter::default();
+        let hidden = Some(Unmarked::Hidden);
+        assert_eq!(
+            status(&filter, None, hidden).as_deref(),
+            Some("selection hidden")
+        );
+        filter.set_pins([(Id(3), Pin::Set(Visibility::Hidden))].into());
+        assert_eq!(
+            status(&filter, None, Some(Unmarked::Absent)).as_deref(),
+            Some("1 pin · selection not in this view")
         );
     }
 }

@@ -212,6 +212,7 @@ impl ScatterPanel {
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
             view.pulsed = None;
+            (view.chips).update(cx, |bar, cx| bar.set_unmarked(None, cx));
             view.opened_zoom = None;
             view.offering.clear();
             view.jumps = Jumps::default();
@@ -459,20 +460,25 @@ impl ScatterPanel {
     }
 
     /// Marks the points of the node selected in the plot drawn, resolving
-    /// them once for each node selected in each plot.
+    /// them once for each node selected in each plot, and has the query bar's
+    /// status line say where the plot marks none.
     fn remark(&mut self, cx: &mut Context<Self>) {
         let selected = self.selected(cx);
         let Some(plot) = &self.plot else {
             return;
         };
-        if plot.selection.as_ref().map(|(id, _)| *id) == selected {
-            return;
+        if plot.selection.as_ref().map(|(id, _)| *id) != selected {
+            let selection = selected.and_then(|id| Some((id, self.landing(id, cx)?)));
+            if let Some(plot) = &mut self.plot {
+                plot.selection = selection;
+            }
+            self.invalidate_canvas(cx);
         }
-        let selection = selected.and_then(|id| Some((id, self.landing(id, cx)?)));
-        if let Some(plot) = &mut self.plot {
-            plot.selection = selection;
-        }
-        self.invalidate_canvas(cx);
+        let unmarked = (self.plot.as_ref())
+            .and_then(|plot| plot.selection.as_ref())
+            .and_then(|(_, landing)| landing.unmarked());
+        self.chips
+            .update(cx, |bar, cx| bar.set_unmarked(unmarked, cx));
     }
 
     /// Takes up a plot drawn afresh: marks the points of the node selected,

@@ -1,6 +1,7 @@
 //! Where a node of the graph stands in a dominator tree the icicle draws,
 //! which a jump to it lands on.
 
+use crate::chips::Unmarked;
 use crate::hidden::HiddenBy;
 use crate::jump::Stands;
 use crate::stand_in::{self, StandIns, Writers};
@@ -19,6 +20,17 @@ pub(super) enum Landing {
     Hidden(Id, HiddenBy),
     /// The tree draws nothing for the node, for the reason given.
     Absent(&'static str),
+}
+
+impl Landing {
+    /// Why a tree landing a jump here rings no cell.
+    pub(super) fn unmarked(self) -> Option<Unmarked> {
+        match self {
+            Landing::Cell { .. } => None,
+            Landing::Hidden(..) => Some(Unmarked::Hidden),
+            Landing::Absent(_) => Some(Unmarked::Absent),
+        }
+    }
 }
 
 /// Why a tree draws nothing for a point of its unit: no root chosen reaches
@@ -108,5 +120,23 @@ pub(super) fn stands(
         Some(Landing::Cell { .. }) => Stands::Here,
         Some(Landing::Hidden(_, by)) => Stands::Hidden(by),
         Some(Landing::Absent(_)) | None => Stands::Absent,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selection_landing_on_no_cell_is_unmarked_as_it_lands() {
+        let cell = Landing::Cell {
+            node: 0,
+            above: Above::Roots,
+        };
+        assert_eq!(cell.unmarked(), None);
+        let hidden = Landing::Hidden(Id(1), HiddenBy::Pin);
+        assert_eq!(hidden.unmarked(), Some(Unmarked::Hidden));
+        let absent = Landing::Absent(OUTSIDE_ROOTS);
+        assert_eq!(absent.unmarked(), Some(Unmarked::Absent));
     }
 }
