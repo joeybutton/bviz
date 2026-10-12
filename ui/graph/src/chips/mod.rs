@@ -13,7 +13,9 @@ pub(crate) use complete::Completions;
 
 use crate::Palette;
 use crate::filter::DocumentFilter;
-use crate::model::{FilterChanged, GraphModel, QueryChanged, QueryRefused, SourceReplaced};
+use crate::model::{
+    FilterChanged, GraphModel, QueryChanged, QueryCounted, QueryRefused, SourceReplaced,
+};
 use bviz_graph_layout::query_lang::{ChipId, Command, Evaluation, Stack};
 use bviz_graph_layout::{Id, Input};
 use bviz_ui_components::gesture::{
@@ -242,6 +244,8 @@ pub(crate) struct ChipBar {
     _typed: Subscription,
     /// Counts the stack afresh as any bar over the document edits it.
     _staged: Subscription,
+    /// Shows the stack as the document counted it.
+    _counted: Subscription,
     /// Says why a query this bar asked to be applied was not.
     _refused: Subscription,
     /// Restates whether the stack is staged as another one is applied.
@@ -316,6 +320,7 @@ impl ChipBar {
             QueryFieldEvent::Settled => changed(view, cx),
         });
         let staged = cx.subscribe(&model, |view, _, _: &QueryChanged, cx| restacked(view, cx));
+        let counted = cx.subscribe(&model, |_, _, _: &QueryCounted, cx| cx.notify());
         let refused = cx.subscribe(&model, |view, _, refused: &QueryRefused, cx| {
             if refused.by == cx.entity_id() {
                 view.notice = Some(refused.why.clone());
@@ -349,6 +354,7 @@ impl ChipBar {
             _evaluating: Task::ready(()),
             _typed: typed,
             _staged: staged,
+            _counted: counted,
             _refused: refused,
             _applied: applied,
             _source_replaced: source_replaced,
@@ -470,7 +476,16 @@ fn changed(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     cx.notify();
 }
 
+/// Counts the stack with the field's text in place: the document counts the
+/// stack as staged once for every bar whose field holds nothing, and a bar
+/// counts its own only while its field holds text.
 fn evaluate(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    if view.field.read(cx).text(cx).trim().is_empty() {
+        view.landed = None;
+        view._evaluating = Task::ready(());
+        view.model.update(cx, GraphModel::count_query);
+        return;
+    }
     let (stack, draft) = view.with_field(view.model.read(cx).query(), cx);
     let generation = view.generation;
     // An empty stack names nothing, which needs no universe to know: a graph
@@ -925,12 +940,13 @@ fn bar(
     cx: &Context<ChipBar>,
 ) -> impl IntoElement + use<> {
     let chips = view;
-    let stack = view.model.read(cx).query();
+    let model = view.model.read(cx);
+    let stack = model.query();
     let current = chips.current();
-    let outcome = |id: ChipId| {
-        let landed = current.or(chips.landed.as_ref())?;
-        landed.evaluation.outcome(id).cloned()
-    };
+    let evaluation = (chips.landed.as_ref())
+        .map(|landed| &landed.evaluation)
+        .or(model.counted());
+    let outcome = |id: ChipId| evaluation?.outcome(id).cloned();
     let focused = chips.focus_handle.is_focused(window);
     let mut pills = Vec::with_capacity(stack.len());
     let mut after_source = false;

@@ -17,7 +17,7 @@ use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
-use bviz_graph_layout::query_lang::{Outcome, Prefixes, Stack, Universe};
+use bviz_graph_layout::query_lang::{Evaluation, Outcome, Prefixes, Stack, Universe};
 use bviz_graph_layout::select;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
@@ -551,6 +551,9 @@ pub(crate) struct VerdictsLanded;
 /// The chips staged in [`GraphModel::query`] changed.
 pub(crate) struct QueryChanged;
 
+/// The chips staged have been counted, as [`GraphModel::counted`] reads.
+pub(crate) struct QueryCounted;
+
 /// A query asked to be applied was not, for the reason it carries.
 pub(crate) struct QueryRefused {
     /// The query bar that asked for the apply.
@@ -672,6 +675,12 @@ pub(crate) struct GraphModel {
     /// Applies the query committed last; replacing it gives up an apply still
     /// under way.
     _applying: Task<()>,
+    /// The chips staged last counted over the loaded graph, and the stack
+    /// they were as it was counted.
+    counted: Option<(Stack, Arc<Evaluation>)>,
+    /// Counts the chips staged, and the stack being counted; absent while
+    /// none is.
+    counting: Option<(Stack, Task<()>)>,
     /// The matcher pool the lists over the graph — each panel's palette and
     /// each query bar's completion — take up in turn.
     matchers: fuzzy::Pool,
@@ -699,6 +708,7 @@ impl EventEmitter<VerdictsLanded> for GraphModel {}
 impl EventEmitter<QueryChanged> for GraphModel {}
 impl EventEmitter<QueryRefused> for GraphModel {}
 impl EventEmitter<QueryApplied> for GraphModel {}
+impl EventEmitter<QueryCounted> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -750,6 +760,8 @@ impl GraphModel {
                 };
                 model.take_up(cx);
                 model.judge();
+                model.counted = None;
+                model.counting = None;
                 cx.emit(SourceReplaced);
             },
         );
@@ -845,6 +857,8 @@ impl GraphModel {
             query: Stack::default(),
             prefixes: Arc::default(),
             _applying: Task::ready(()),
+            counted: None,
+            counting: None,
             matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
@@ -962,6 +976,59 @@ impl GraphModel {
     pub(crate) fn revert_query(&mut self, cx: &mut Context<Self>) {
         let applied = self.filter.applied().map(|applied| applied.stack().clone());
         self.edit_query(|query| *query = applied.unwrap_or_default(), cx);
+    }
+
+    /// Counts what the chips staged name off the UI thread, once for every
+    /// view showing them, emitting [`QueryCounted`] as the count lands; does
+    /// nothing where they are counted or being counted as they stand.
+    pub(crate) fn count_query(&mut self, cx: &mut Context<Self>) {
+        let stack = &self.query;
+        let held = |held: &Stack| held == stack;
+        if self
+            .counted
+            .as_ref()
+            .is_some_and(|(counted, _)| held(counted))
+            || self
+                .counting
+                .as_ref()
+                .is_some_and(|(counting, _)| held(counting))
+        {
+            return;
+        }
+        let stack = stack.clone();
+        // An empty stack names nothing, which needs no universe to know: a
+        // graph nobody queries never prepares one.
+        if stack.is_empty() {
+            let nothing = Evaluation {
+                chips: Vec::new(),
+                value: None,
+            };
+            self.counting = None;
+            self.counted = Some((stack, Arc::new(nothing)));
+            cx.emit(QueryCounted);
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let prefixes = Arc::clone(&self.prefixes);
+        let counted = stack.clone();
+        let task = load_in_background(
+            cx,
+            move || stack.evaluate(universe.get(), &prefixes),
+            move |model, evaluation, cx| {
+                model.counting = None;
+                model.counted = Some((counted, Arc::new(evaluation)));
+                cx.emit(QueryCounted);
+            },
+        );
+        self.counting = Some((self.query.clone(), task));
+    }
+
+    /// What the chips staged last counted name; of a stack since edited
+    /// where the count of the stack as it stands has yet to land.
+    pub(crate) fn counted(&self) -> Option<&Evaluation> {
+        self.counted.as_ref().map(|(_, evaluation)| &**evaluation)
     }
 
     /// A matching with no query, on the graph's matcher pool where no list
