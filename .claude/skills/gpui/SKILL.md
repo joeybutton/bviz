@@ -659,8 +659,10 @@ gpui windows are Wayland surfaces. Under GNOME, both the `org.gnome.Shell.Screen
 D-Bus API and the XDG screenshot portal refuse non-interactive callers, so they cannot
 capture a window unattended. Instead use `screenshot.sh` (next to this file), which runs
 the app inside a headless wlroots compositor (`cage`) and captures its offscreen output
-with `grim` — both fetched on demand from nixpkgs. The headless backend keeps it working
-while the GNOME screen is locked or idle (a nested window would not be presented then):
+with `grim`. The headless backend keeps it working while the GNOME screen is locked or
+idle (a nested window would not be presented then). Both screenshot scripts need
+[Nix](https://nixos.org/download/), from which they fetch their tools at the nixpkgs
+revision `nixpkgs.sh` pins:
 
 ```
 .claude/skills/gpui/screenshot.sh <out.png> <app-binary> [args...]
