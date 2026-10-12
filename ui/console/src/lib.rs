@@ -22,7 +22,7 @@ use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
+use gpui::{App, Entity, SharedString, Window, prelude::*};
 use std::path::PathBuf;
 
 /// A build's console output being read and reconstructed.
@@ -101,7 +101,7 @@ pub fn run() {
     };
     bviz_ui_workspace::run_panels(
         "bviz console",
-        size(px(1100.), px(720.)),
+        bviz_ui_workspace::TEXT_WINDOW_SIZE,
         first,
         loads.collect(),
         |load, window, cx| {

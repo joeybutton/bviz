@@ -25,7 +25,7 @@ use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     NavigationDirection, PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString,
-    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
+    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*,
 };
 use std::time::{Duration, Instant};
 
@@ -1498,7 +1498,7 @@ pub fn run() {
     });
     bviz_ui_workspace::run_panels(
         "bviz graph",
-        size(px(1280.), px(820.)),
+        bviz_ui_workspace::WINDOW_SIZE,
         Load::from(source),
         Vec::new(),
         |load: Load, window, cx| open(load, None, None, window, cx).into(),
@@ -1517,7 +1517,7 @@ mod tests {
     use bviz_graph_layout::Kind;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
     use bviz_ui_components::keymap_probe::{self, is};
-    use gpui::{Bounds, Size, point};
+    use gpui::{Bounds, Size, point, px, size};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {

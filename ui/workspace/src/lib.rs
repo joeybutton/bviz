@@ -39,7 +39,21 @@ pub use workspace::Workspace;
 
 use workspace::register_keys;
 
-use gpui::{App, AppContext, Pixels, Size, Window};
+use gpui::{App, AppContext, Pixels, Size, Window, px};
+
+/// Opening size of a window, roomy enough for a graph or a timeline to be
+/// worth looking at before it is resized.
+pub const WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1280.),
+    height: px(820.),
+};
+
+/// Opening size of a window of a viewer that shows lines of text or rows of a
+/// table, which read well in less room.
+pub const TEXT_WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1100.),
+    height: px(720.),
+};
 
 /// Runs an app whose one window frames the [`Document`]s `open` builds from
 /// `first` and then `rest`, their views laid out by [`Role`]. Each of

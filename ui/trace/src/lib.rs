@@ -1794,7 +1794,7 @@ pub fn run() {
     };
     bviz_ui_workspace::run_panels(
         "bviz trace",
-        size(px(1280.), px(820.)),
+        bviz_ui_workspace::WINDOW_SIZE,
         first,
         loads.collect(),
         |load, window, cx| open(load, None, None, window, cx).into(),

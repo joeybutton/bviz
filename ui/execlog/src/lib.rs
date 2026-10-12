@@ -18,7 +18,7 @@ use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, ViewSpec, document_label};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
-use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
+use gpui::{App, Entity, SharedString, Window, prelude::*};
 use model::{ExecLogModel, Read};
 use summary::Summary;
 
@@ -93,7 +93,7 @@ pub fn run() {
     };
     bviz_ui_workspace::run_panels(
         "bviz execlog",
-        size(px(1100.), px(720.)),
+        bviz_ui_workspace::TEXT_WINDOW_SIZE,
         first,
         loads.collect(),
         |load, window, cx| open(load, None, window, cx).into(),
