@@ -66,7 +66,7 @@ follows every rule below.
 | Zoom | `zoom_key_bindings` | secondary-scroll, pinch, about the pointer |
 | Show whole view | `0` | double-click empty space, whose first press was also clear |
 | Find | `find_key_bindings` | — |
-| Show legend | `legend_key_bindings` | click the legend's chip (`legend_gestures`) |
+| Show legend | `legend_key_bindings` | click the legend's toggle (`legend_gestures`) |
 | Focus the field scoping what is drawn (query, roots) | `q` | — |
 | History | Alt-← / Alt-→ ("Go back" / "Go forward") | mouse back / forward button |
 | List | ↑ / ↓ move the aim, Enter acts on the aimed row where moving does not, Esc closes the list or clears its choice | a click acts on the row |

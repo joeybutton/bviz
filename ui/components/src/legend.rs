@@ -1,17 +1,14 @@
-//! A view's colour key, held to one line of its toolbar so it never covers
-//! what it explains. Entries that do not fit fold into a chip opening the
-//! whole key.
+//! A view's colour key, opened from a toggle on its toolbar so it never covers
+//! what it explains until asked for.
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
-use crate::{CONTROL_HEIGHT, KeyScope, TextTooltip, action_label, key_text_in, menu_chrome};
+use crate::{Button, KeyScope, Priority, TextTooltip, ToolbarGroup, menu_chrome};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, ClickEvent, Context, Div, Element, ElementId, Entity,
-    FocusHandle, Font, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
-    LayoutId, Length, Pixels, SharedString, Style, Subscription, Window, div, prelude::*, px,
-    relative, size,
+    App, AvailableSpace, Bounds, Context, Div, ElementId, Entity, FocusHandle, Font, Hsla,
+    IntoElement, KeyBinding, MouseButton, Pixels, SharedString, Subscription, Window, div,
+    prelude::*, px, size,
 };
-use std::panic::Location;
 use std::rc::Rc;
 
 gpui::actions!(
@@ -50,7 +47,7 @@ enum LegendIntent {
 
 const GESTURES: Gestures<LegendIntent> = Gestures::new(&[Entry::new(
     Input::click(PointerButton::Left),
-    Place::On("a legend chip"),
+    Place::On("a legend toggle"),
     "Show or hide legend",
     LegendIntent::Toggle,
 )]);
@@ -59,6 +56,14 @@ const GESTURES: Gestures<LegendIntent> = Gestures::new(&[Entry::new(
 pub fn legend_gestures() -> impl Iterator<Item = GestureRow> {
     GESTURES.rows()
 }
+
+/// How long a legend's toolbar group holds out against its row narrowing:
+/// less than any other group.
+const LEGEND_PRIORITY: Priority = 0;
+
+/// What a [`LegendToggle`] reads, and the icon it carries.
+const TOGGLE_LABEL: &str = "legend";
+const TOGGLE_ICON: &str = "swatches";
 
 /// Every swatch's box, so a swatch of one kind lines up with one of another.
 const SWATCH_WIDTH: Pixels = px(16.);
@@ -73,7 +78,7 @@ const DASH_GAP: Pixels = px(2.);
 /// swatch's height.
 const SMALL_DOT: Pixels = px(4.);
 
-/// Text size of everything a legend reads, in the strip and the popover alike.
+/// Text size of everything the popover reads.
 const TEXT_SIZE: Pixels = px(12.);
 
 /// Room between a swatch and its label, and between entries.
@@ -235,7 +240,7 @@ struct Opened {
 /// Whether a legend's popover is open. The view showing the legend holds it,
 /// so that its [`ShowLegend`] handler can open the popover.
 pub struct LegendState {
-    /// Focus of the view the legend belongs to: what the chip's tooltip looks
+    /// Focus of the view the legend belongs to: what the toggle's tooltip looks
     /// [`ShowLegend`]'s keys up in, and where closing the popover hands focus
     /// when nothing held it as the popover opened.
     view_focus: FocusHandle,
@@ -302,55 +307,9 @@ impl LegendState {
     }
 }
 
-/// What a strip of a given width shows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Fold {
-    /// Every entry, and no chip.
-    All,
-    /// The first `shown` entries, then a chip opening the popover.
-    Leading { shown: usize },
-    /// No entry: one chip standing for the whole legend.
-    Whole,
-}
-
-/// What a strip `room` wide shows of entries `widths` wide, kept `ENTRY_GAP`
-/// apart, where a chip for `held` entries left out is `chip(held)` wide. Where
-/// the legend has `notes`, which only the popover shows, a chip always stands.
-fn fold(
-    widths: &[Pixels],
-    room: Pixels,
-    notes: bool,
-    mut chip: impl FnMut(usize) -> Pixels,
-) -> Fold {
-    let mut ends = Vec::with_capacity(widths.len() + 1);
-    ends.push(px(0.));
-    for (shown, &width) in widths.iter().enumerate() {
-        let gap = if shown == 0 { px(0.) } else { ENTRY_GAP };
-        ends.push(ends[shown] + gap + width);
-    }
-    let all = widths.len();
-    if !notes && ends[all] <= room {
-        return Fold::All;
-    }
-    (1..=all)
-        .rev()
-        .find(|&shown| ends[shown] + ENTRY_GAP + chip(all - shown) <= room)
-        .map_or(Fold::Whole, |shown| Fold::Leading { shown })
-}
-
-/// What a chip reads: the number of entries it holds back, or, where it holds
-/// back none, what it does hold.
-fn chip_label(fold: Fold, entries: usize) -> SharedString {
-    match fold {
-        Fold::Leading { shown } if shown < entries => format!("+{}", entries - shown).into(),
-        Fold::Leading { .. } => "Notes".into(),
-        Fold::All | Fold::Whole => "Legend".into(),
-    }
-}
-
-/// A view's legend, held to one line of `CONTROL_HEIGHT` that takes the room
-/// left on its row. Entries are given in priority order and fold from the end
-/// into a chip opening the popover, which shows every entry and the notes.
+/// A view's legend, standing on its toolbar as the [`toggle`](Self::toggle)
+/// opening the popover, which shows every entry and the notes.
+#[derive(Clone)]
 pub struct Legend {
     id: ElementId,
     state: Entity<LegendState>,
@@ -384,6 +343,23 @@ impl Legend {
         self
     }
 
+    /// The legend standing as a toggle that opens the whole key under itself.
+    pub fn toggle(self) -> LegendToggle {
+        LegendToggle {
+            legend: self,
+            labelled: true,
+        }
+    }
+
+    /// The legend as the group ending a toolbar: its toggle, standing icon-only
+    /// once the row has no room for its name, parted from the controls before
+    /// it.
+    pub fn toolbar_group(self) -> ToolbarGroup {
+        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle())
+            .or(self.toggle().icon_only())
+            .parted()
+    }
+
     /// What this frame reads of the legend's state.
     fn seen(&self, cx: &App) -> Seen {
         let state = self.state.read(cx);
@@ -409,33 +385,6 @@ impl Legend {
         self.state
             .update(cx, |state, _| state.measured = Some(kept));
         measured
-    }
-
-    /// A chip reading `label` that opens the popover under itself, the
-    /// popover's holder laid out to the chip's bounds.
-    fn chip(&self, label: SharedString, seen: &Seen, colors: &ThemeColors) -> Div {
-        let state = self.state.clone();
-        let view_focus = seen.view_focus.clone();
-        let tooltip_colors = colors.tooltip();
-        // A tooltip would cover the popover the chip holds open.
-        let chip = menu_chrome::trigger("chip".into(), colors)
-            .when(!seen.open, |chip| {
-                chip.tooltip(move |window, cx| {
-                    let label = action_label(&ShowLegend, cx).unwrap_or_default();
-                    let keys = key_text_in(&ShowLegend, &view_focus, window);
-                    TextTooltip::view(label.into(), keys, tooltip_colors, cx)
-                })
-            })
-            .on_click(move |event: &ClickEvent, window, cx| {
-                GESTURES.dispatch(Pointer::click(event), |intent| match intent {
-                    LegendIntent::Toggle => {
-                        state.update(cx, |state, cx| state.toggle(window, cx));
-                        true
-                    }
-                });
-            })
-            .child(label);
-        chip_holder(chip)
     }
 
     /// Every entry and note, opened under the element it is a child of, the
@@ -474,48 +423,63 @@ impl Legend {
             .children(notes);
         menu_chrome::under_trigger(sheet)
     }
+}
 
-    /// The strip as `fold` lays it out, with the popover in `columns` where it
-    /// is open: under the chip, or under the strip where no chip stands.
-    fn strip(
-        &mut self,
-        fold: Fold,
-        seen: &Seen,
-        popover: Option<u16>,
-        measured: &Measured,
-        colors: &ThemeColors,
-    ) -> AnyElement {
-        let all = self.entries.len();
-        let shown = match fold {
-            Fold::All => all,
-            Fold::Leading { shown } => shown,
-            Fold::Whole => 0,
-        };
-        let popover = popover.map(|columns| self.popover(seen, columns, measured, colors));
-        let (chip, unchipped) = match fold {
-            Fold::All => (None, popover),
-            _ => (
-                Some(
-                    self.chip(chip_label(fold, all), seen, colors)
-                        .children(popover),
-                ),
-                None,
-            ),
-        };
+/// A [`Legend`] standing as a toggle, made by [`Legend::toggle`].
+#[derive(IntoElement)]
+pub struct LegendToggle {
+    legend: Legend,
+    labelled: bool,
+}
+
+impl LegendToggle {
+    /// The toggle bearing its icon alone, its name left to the tooltip.
+    pub fn icon_only(mut self) -> Self {
+        self.labelled = false;
+        self
+    }
+}
+
+impl RenderOnce for LegendToggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let legend = self.legend;
+        let colors = bviz_ui_theme::theme(window, cx).colors;
+        let measured = legend.widths(window, cx);
+        let seen = legend.seen(cx);
+        // A legend keying nothing has nothing to show, whatever its state.
+        let open = seen.open && !measured.keys_nothing();
+        let popover = open.then(|| {
+            let inset = window.client_inset().unwrap_or_default();
+            let room = window.viewport_size().width - inset * 2.;
+            let columns = popover_columns(&measured.entry_widths, room);
+            legend.popover(&seen, columns, &measured, &colors)
+        });
+        let state = legend.state.clone();
+        let toggle = Button::new(legend.id.clone(), move |event, window, cx| {
+            GESTURES.dispatch(Pointer::click(event), |intent| match intent {
+                LegendIntent::Toggle => {
+                    state.update(cx, |state, cx| state.toggle(window, cx));
+                    true
+                }
+            });
+        })
+        .when(self.labelled, |toggle| toggle.label(TOGGLE_LABEL))
+        .leading_icon(TOGGLE_ICON)
+        .selected(open)
+        .disabled(measured.keys_nothing())
+        // A tooltip would cover the popover the toggle holds open.
+        .when(!open, |toggle| {
+            toggle.keys_for(&ShowLegend, &seen.view_focus)
+        });
         div()
             .relative()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(ENTRY_GAP)
-            .size_full()
-            .text_size(TEXT_SIZE)
-            .text_color(colors.text)
-            .children(self.entries.drain(..shown))
-            .children(chip)
-            .children(unchipped)
+            .flex_none()
+            // Keeps the press from an ancestor that focuses on it, which would
+            // close the popover just before the click toggles it open again.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(toggle)
+            .children(popover)
             .child(seen.drawn.mark())
-            .into_any_element()
     }
 }
 
@@ -571,35 +535,10 @@ pub struct Measured {
     /// the sheet takes its width from what it holds, so a note sizing itself
     /// would wrap as narrow as the sheet's holder.
     note_widths: Vec<Pixels>,
-    /// A chip's width by the number of entries it holds back.
-    chip_widths: Vec<Pixels>,
-    /// The chip standing for the whole legend, which the strip is never
-    /// narrower than; none where the legend keys nothing.
-    whole_chip: Pixels,
 }
 
 impl Measured {
     fn new(legend: &Legend, font: Font, window: &mut Window, cx: &mut App) -> Self {
-        let colors = bviz_ui_theme::theme(window, cx).colors;
-        let chip = |label: SharedString, window: &mut Window, cx: &mut App| {
-            let face = menu_chrome::trigger("measured-chip".into(), &colors).child(label);
-            measured(chip_holder(face), window, cx)
-        };
-        let all = legend.entries.len();
-        let chip_widths = (0..=all)
-            .map(|held| {
-                chip(
-                    chip_label(Fold::Leading { shown: all - held }, all),
-                    window,
-                    cx,
-                )
-            })
-            .collect();
-        let keys_nothing = all == 0 && legend.notes.is_empty();
-        let whole_chip = match keys_nothing {
-            true => px(0.),
-            false => chip(chip_label(Fold::Whole, all), window, cx),
-        };
         let entry_widths = legend
             .entries
             .iter()
@@ -620,8 +559,6 @@ impl Measured {
             note_texts: legend.notes.clone(),
             entry_widths,
             note_widths,
-            chip_widths,
-            whole_chip,
         }
     }
 
@@ -655,15 +592,6 @@ fn popover_columns(widths: &[Pixels], room: Pixels) -> u16 {
         .unwrap_or(1)
 }
 
-/// The box a chip stands in on the strip.
-fn chip_holder(chip: impl IntoElement) -> Div {
-    div()
-        .relative()
-        .flex_none()
-        .text_size(TEXT_SIZE)
-        .child(chip)
-}
-
 /// A note of the popover.
 fn note(text: &SharedString) -> Div {
     div().text_size(TEXT_SIZE).child(text.clone())
@@ -678,170 +606,12 @@ fn measured(element: impl IntoElement, window: &mut Window, cx: &mut App) -> Pix
         .width
 }
 
-impl IntoElement for Legend {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-/// Lays the strip out once its width is known: growing into the room its row
-/// leaves, which a sibling that also grows shares with it, and never narrower
-/// than the chip standing for the whole legend. A legend keying nothing takes
-/// no room, so a growing sibling has the row's room to itself.
-impl Element for Legend {
-    type RequestLayoutState = Rc<Measured>;
-    type PrepaintState = AnyElement;
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Rc<Measured>) {
-        let measured = self.widths(window, cx);
-        let style = Style {
-            flex_grow: if measured.keys_nothing() { 0. } else { 1. },
-            flex_shrink: 1.,
-            flex_basis: relative(0.).into(),
-            min_size: size(measured.whole_chip.into(), Length::Auto),
-            size: size(Length::Auto, CONTROL_HEIGHT.into()),
-            ..Style::default()
-        };
-        (window.request_layout(style, [], cx), measured)
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        measured: &mut Rc<Measured>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let colors = bviz_ui_theme::theme(window, cx).colors;
-        let seen = self.seen(cx);
-        let fold = fold(
-            &measured.entry_widths,
-            bounds.size.width,
-            !self.notes.is_empty(),
-            |held| measured.chip_widths[held],
-        );
-        let popover = seen.open.then(|| {
-            let inset = window.client_inset().unwrap_or_default();
-            let room = window.viewport_size().width - inset * 2.;
-            popover_columns(&measured.entry_widths, room)
-        });
-        let mut strip = self.strip(fold, &seen, popover, measured, &colors);
-        let room = size(
-            AvailableSpace::Definite(bounds.size.width),
-            AvailableSpace::Definite(bounds.size.height),
-        );
-        strip.prepaint_as_root(bounds.origin, room, window, cx);
-        strip
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Rc<Measured>,
-        strip: &mut AnyElement,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        strip.paint(window, cx);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A chip as wide as its count has digits, so a test can tell which
-    /// count it was measured for.
-    fn chip(held: usize) -> Pixels {
-        px(10. * (1 + held.to_string().len()) as f32)
-    }
-
     fn widths(each: &[f32]) -> Vec<Pixels> {
         each.iter().copied().map(px).collect()
-    }
-
-    #[test]
-    fn a_strip_with_room_for_every_entry_shows_them_all_and_no_chip() {
-        let widths = widths(&[50., 50., 50.]);
-        let room = px(50. * 3.) + ENTRY_GAP * 2.;
-        assert_eq!(fold(&widths, room, false, chip), Fold::All);
-    }
-
-    #[test]
-    fn entries_past_the_room_fold_from_the_end_into_the_chip() {
-        let widths = widths(&[50., 50., 50., 50.]);
-        let two_and_chip = px(50. * 2.) + ENTRY_GAP * 2. + chip(2);
-        assert_eq!(
-            fold(&widths, two_and_chip, false, chip),
-            Fold::Leading { shown: 2 }
-        );
-        assert_eq!(
-            fold(&widths, two_and_chip - px(1.), false, chip),
-            Fold::Leading { shown: 1 }
-        );
-    }
-
-    #[test]
-    fn the_room_the_chip_takes_is_kept_for_it() {
-        let widths = widths(&[50., 50.]);
-        let both = px(100.) + ENTRY_GAP;
-        assert_eq!(
-            fold(&widths, both - px(1.), false, chip),
-            Fold::Leading { shown: 1 }
-        );
-    }
-
-    #[test]
-    fn the_chip_is_measured_for_the_count_it_reads() {
-        let eleven = widths(&[50.; 11]);
-        let one_and_short_chip = px(50.) + ENTRY_GAP + chip(9);
-        assert_eq!(fold(&eleven, one_and_short_chip, false, chip), Fold::Whole);
-        let one_and_long_chip = px(50.) + ENTRY_GAP + chip(10);
-        assert_eq!(
-            fold(&eleven, one_and_long_chip, false, chip),
-            Fold::Leading { shown: 1 }
-        );
-    }
-
-    #[test]
-    fn a_legend_keying_nothing_shows_nothing_in_no_room() {
-        assert_eq!(fold(&[], px(0.), false, chip), Fold::All);
-    }
-
-    #[test]
-    fn a_strip_with_no_room_for_its_first_entry_stands_as_one_chip() {
-        let widths = widths(&[200., 50.]);
-        assert_eq!(fold(&widths, px(150.), false, chip), Fold::Whole);
-        assert_eq!(chip_label(Fold::Whole, 2), "Legend");
-    }
-
-    #[test]
-    fn notes_keep_a_chip_standing_where_every_entry_fits() {
-        let widths = widths(&[50., 50.]);
-        let fold = fold(&widths, px(1000.), true, chip);
-        assert_eq!(fold, Fold::Leading { shown: 2 });
-        assert_eq!(chip_label(fold, 2), "Notes");
-        assert_eq!(chip_label(Fold::Leading { shown: 1 }, 3), "+2");
     }
 
     #[test]
@@ -861,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn the_chip_click_is_reachable_and_fits_the_keys_help() {
+    fn the_toggle_click_is_reachable_and_fits_the_keys_help() {
         assert_eq!(GESTURES.unreachable(), []);
         assert_eq!(GESTURES.overlong(), []);
     }

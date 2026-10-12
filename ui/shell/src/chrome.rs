@@ -251,7 +251,7 @@ enum TitleBarIntent {
 const TITLE_BAR_GESTURES: Gestures<TitleBarIntent> = Gestures::new(&[Entry::new(
     Input::new(Motion::Click(gesture::Button::Left, Clicks::Double)),
     Place::On("the title bar"),
-    "Maximize or restore window",
+    "Maximise or restore window",
     TitleBarIntent::Zoom,
 )]);
 
@@ -321,13 +321,13 @@ fn title_bar(
                     Button::new("minimize", |_, window, _| window.minimize_window())
                         .ghost()
                         .icon("minus")
-                        .tooltip("Minimize window"),
+                        .tooltip("Minimise window"),
                 )
                 .child(
                     Button::new("maximize", |_, window, _| window.zoom_window())
                         .ghost()
                         .icon("square")
-                        .tooltip("Maximize or restore window"),
+                        .tooltip("Maximise or restore window"),
                 )
                 .child(
                     Button::new("close", |_, window, _| window.remove_window())

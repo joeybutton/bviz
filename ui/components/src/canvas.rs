@@ -1,7 +1,9 @@
 //! Window-agnostic canvas primitives: shaping text to fit a width, and painting a
 //! filled, bordered, labeled quad.
 
+use bviz_label::shown::{ELLIPSIS, cut_end};
 use gpui::{App, Bounds, Hsla, Pixels, Rgba, TextAlign, Window, fill, point, px, size};
+use std::ops::Range;
 
 /// Shapes `text` at `fs`, truncated with an ellipsis to fit `avail` pixels.
 pub fn shape_truncated(
@@ -17,14 +19,34 @@ pub fn shape_truncated(
     })
 }
 
-const ELLIPSIS: char = '…';
+/// Text set in two inks: the bytes `muted` of it in a muted one, the rest in
+/// the ink it is set in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inked<'a> {
+    pub text: &'a str,
+    pub muted: Range<usize>,
+}
 
-/// `text` shaped by `shape`, or, if wider than `avail`, its longest prefix that
-/// fits `avail` with an [`ELLIPSIS`] appended, down to none at all.
-///
-/// The whole line's glyph positions place the cut, which a shape or two
-/// confirms; finding it that way relies on an ellipsized prefix never narrowing
-/// as it lengthens.
+impl<'a> From<&'a str> for Inked<'a> {
+    fn from(text: &'a str) -> Self {
+        Self { text, muted: 0..0 }
+    }
+}
+
+impl Inked<'_> {
+    /// The runs of colour a line of the first `len` bytes of this, followed
+    /// by whatever cuts it short, is set in: `muted` over the muted bytes,
+    /// `ink` over the rest.
+    pub fn runs(&self, len: usize, ink: Hsla, muted: Hsla) -> Vec<(usize, Hsla)> {
+        let (start, end) = (self.muted.start.min(len), self.muted.end.min(len));
+        let runs = [(start, ink), (end - start, muted), (len - end, ink)];
+        runs.into_iter().filter(|&(len, _)| len > 0).collect()
+    }
+}
+
+/// `text` shaped by `shape`, cut short at its end as [`cut_end`] cuts it to
+/// fit `avail`. The whole line's glyph positions say roughly where the cut
+/// falls, which the cut starts its search from.
 fn truncated(
     text: &str,
     avail: f32,
@@ -34,39 +56,15 @@ fn truncated(
     if f32::from(line.width()) <= avail {
         return line;
     }
-    let chars = text.chars().count();
-    let ellipsis = shape(ELLIPSIS.to_string()).width();
-    let placed = line
+    let ellipsis = shape(ELLIPSIS.to_owned()).width();
+    let near = line
         .index_for_x(px(avail) - ellipsis)
-        .map_or(chars, |byte| {
+        .map_or(text.chars().count(), |byte| {
             text.char_indices().take_while(|&(i, _)| i < byte).count()
         });
-    let mut ellipsized = |keep: usize| {
-        let cut = text.char_indices().nth(keep).map_or(text.len(), |(i, _)| i);
-        let mut s = String::with_capacity(cut + ELLIPSIS.len_utf8());
-        s.push_str(&text[..cut]);
-        s.push(ELLIPSIS);
-        shape(s)
-    };
-    let fits = |line: &gpui::ShapedLine| f32::from(line.width()) <= avail;
-    let mut keep = placed;
-    let mut best = ellipsized(keep);
-    if fits(&best) {
-        while keep < chars {
-            let longer = ellipsized(keep + 1);
-            if !fits(&longer) {
-                break;
-            }
-            best = longer;
-            keep += 1;
-        }
-    } else {
-        while keep > 0 && !fits(&best) {
-            keep -= 1;
-            best = ellipsized(keep);
-        }
-    }
-    best
+    let width = |cut: &str| f32::from(shape(cut.to_owned()).width());
+    let cut = cut_end(text, avail, width, Some(near));
+    shape(cut)
 }
 
 /// Width of the muted leading column that divides a box from its neighbor.
@@ -96,11 +94,12 @@ impl LabelBoxStyle {
 
 /// Paints a filled box and, if it is wide enough, its name truncated to fit and
 /// centered vertically — the shared shape behind a flame-chart slice and a
-/// flame-graph node.
-pub fn paint_labeled_box(
+/// flame-graph node. The muted part of the name is set in the muted ink of
+/// the fill as it is seen opaque, faded as far as `label_color` is.
+pub fn paint_labeled_box<'a>(
     rect: Bounds<Pixels>,
     fill_color: Hsla,
-    name: &str,
+    name: impl Into<Inked<'a>>,
     label_color: Hsla,
     style: LabelBoxStyle,
     window: &mut Window,
@@ -136,7 +135,19 @@ pub fn paint_labeled_box(
     }
     let (avail, fs) = style.label_room(rect);
     let font = bviz_ui_assets::text_metrics(window).font;
-    let line = shape_truncated(name, avail, font, fs, label_color, window);
+    let name = name.into();
+    let opaque = Hsla {
+        a: 1.0,
+        ..fill_color
+    };
+    let muted = Hsla {
+        a: label_color.a,
+        ..bviz_ui_theme::muted_label_on(opaque)
+    };
+    let line = truncated(name.text, avail, |s| {
+        let runs = name.runs(s.len(), label_color, muted);
+        bviz_ui_assets::shape_runs(window, s, font.clone(), fs, &runs)
+    });
     let ty = rect.origin.y + px((h - f32::from(fs)) / 2.);
     let _ = line.paint(
         point(rect.origin.x + px(text_pad), ty),
@@ -154,8 +165,9 @@ mod tests {
     use gpui::{Font, FontWeight, SharedString, TextRun, WindowTextSystem, font};
     use std::sync::Arc;
 
-    /// The longest prefix whose ellipsized width fits, found by shaping every
-    /// prefix: the definition [`truncated`] must agree with.
+    /// The longest prefix, of at least one char, whose ellipsized width fits,
+    /// found by shaping every prefix: the definition [`truncated`] must agree
+    /// with.
     fn truncated_by_scan(
         text: &str,
         avail: f32,
@@ -166,16 +178,17 @@ mod tests {
             return line;
         }
         let chars: Vec<char> = text.chars().collect();
-        let mut ellipsized = |keep: usize| {
-            let mut s: String = chars[..keep].iter().collect();
-            s.push(ELLIPSIS);
-            shape(s)
+        let ellipsized = |keep: usize| -> String {
+            chars[..keep]
+                .iter()
+                .copied()
+                .chain(ELLIPSIS.chars())
+                .collect()
         };
-        let longest = (0..=chars.len())
+        let longest = (1..chars.len())
             .rev()
-            .find(|&keep| f32::from(ellipsized(keep).width()) <= avail)
-            .unwrap_or(0);
-        ellipsized(longest)
+            .find(|&keep| f32::from(shape(ellipsized(keep)).width()) <= avail);
+        shape(longest.map_or_else(String::new, ellipsized))
     }
 
     const TEXTS: &[&str] = &[

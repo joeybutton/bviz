@@ -30,6 +30,7 @@ rust_library(
     ],
     deps = [
         "//invocation",
+        "//label",
         "//ui/assets",
         "//ui/theme",
         "@crates//:gpui",

@@ -5,13 +5,13 @@ use crate::button::Button;
 use crate::list_scroll::{ListScroll, list_scrollbar};
 use crate::menu_chrome;
 use crate::scrollbar::ScrollbarColors;
-use crate::{Hint, KeyScope, TruncatingLabel};
+use crate::{Hint, KeyScope, SubmenuItem, TruncatingLabel};
 use bviz_ui_assets::TextMetrics;
 use bviz_ui_theme::ThemeColors;
 use gpui::{
-    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, Font, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Font, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, Pixels, Render, SharedString, Subscription, Window,
+    div, prelude::*, px,
 };
 
 gpui::actions!(
@@ -216,6 +216,25 @@ impl MultiSelect {
         self
     }
 
+    /// The values `multi_select` offers as the rows of a submenu, each checked
+    /// as it stands, a click reporting what a click on its row in the
+    /// control's own menu does.
+    pub fn submenu(multi_select: &Entity<Self>, cx: &App) -> Vec<SubmenuItem> {
+        (multi_select.read(cx).rows.options.iter().enumerate())
+            .map(|(index, option)| {
+                let multi_select = multi_select.clone();
+                SubmenuItem::new(option.label.clone(), move |_, cx| {
+                    multi_select.update(cx, |this, cx| {
+                        if let Some(event) = this.rows.clicked(index) {
+                            cx.emit(event);
+                        }
+                    })
+                })
+                .checked(option.checked)
+            })
+            .collect()
+    }
+
     /// Restates the values the control offers and which of them are checked.
     pub fn set_options(&mut self, options: Vec<MultiOption>, cx: &mut Context<Self>) {
         if self.rows.set_options(options) {
@@ -263,19 +282,19 @@ impl MultiSelect {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let (checked, total) = self.rows.tally();
-        let trigger = menu_chrome::trigger(self.id.clone(), colors);
-        let open = |select: &Self| select.rows.open;
-        (self.hint.clone())
-            .on_picker(trigger, colors.tooltip(), cx.weak_entity(), open)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                let open = !this.rows.open;
-                this.set_open(open, window, cx);
-            }))
-            .child(menu_chrome::reading(
-                reading_width,
-                format!("{} {checked}/{total}", self.label).into(),
-            ))
-            .child(menu_chrome::caret(colors))
+        let open: fn(&Self) -> bool = |select| select.rows.open;
+        let trigger = menu_chrome::trigger(
+            self.id.clone(),
+            colors,
+            self.hint.clone(),
+            (cx.weak_entity(), open),
+            reading_width,
+            format!("{} {checked}/{total}", self.label).into(),
+        );
+        trigger.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            let open = !this.rows.open;
+            this.set_open(open, window, cx);
+        }))
     }
 
     fn menu(

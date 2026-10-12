@@ -21,6 +21,7 @@ mod track_label;
 mod track_order;
 mod tracks_menu;
 
+use bviz_label::names::RepoNames;
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
 pub use critical_path::CriticalPathPanel;
@@ -41,9 +42,10 @@ use bviz_ui_components::gesture::{
     Button as PointerButton, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, cut_off_note, declare_scopes, find_key_bindings,
-    legend_key_bindings, overlay_canvas, text_input, track_drag, zoom_key_bindings,
+    Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, MenuItem, Nesting,
+    Pending, Priority, SCROLLBAR_THICKNESS, Scrollbar, ToolbarGroup, cut_off_note, declare_scopes,
+    find_key_bindings, legend_key_bindings, overlay_canvas, text_input, track_drag,
+    zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
@@ -119,6 +121,9 @@ pub fn register_keys(cx: &mut App) {
         KeyBinding::new("escape", Unchoose, stats),
         KeyBinding::new("0", ShowWholeTimeline, timeline_canvas),
         KeyBinding::new("0", ShowWholeFlameGraph, flame_canvas),
+        KeyBinding::new("d", flame_panel::CycleDirection, flame_canvas),
+        KeyBinding::new("w", flame_panel::CycleWeight, flame_canvas),
+        KeyBinding::new("k", flame_panel::ToggleKinds, flame_canvas),
     ]);
     cx.bind_keys(zoom_key_bindings(TIMELINE_KEY_CONTEXT));
     cx.bind_keys(zoom_key_bindings(flame_panel::FLAME_KEY_CONTEXT));
@@ -524,7 +529,7 @@ fn counters_divider(
 fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<String> {
     let window = window.filter(|w| !w.is_empty())?;
     let mut text = format!(
-        "Window: {} of {}",
+        "window: {} of {}",
         format_duration(window.total_us()),
         format_duration(span_us)
     );
@@ -538,11 +543,7 @@ fn time_window_summary(window: Option<&TimeSelection>, span_us: i64) -> Option<S
 /// The window the flame graph and stats cover, as a chip carrying the control
 /// that widens the next aggregate back to the whole timeline. Absent while no
 /// aggregate is shown, or the shown one covers the whole build.
-pub(crate) fn time_window_chip(
-    model: &Entity<TraceModel>,
-    palette: Palette,
-    cx: &App,
-) -> Option<Div> {
+fn time_window_chip(model: &Entity<TraceModel>, palette: Palette, cx: &App) -> Option<Div> {
     let summary = {
         let m = model.read(cx);
         let profile = m.profile()?;
@@ -553,7 +554,7 @@ pub(crate) fn time_window_chip(
             span.end_us - span.start_us,
         )?
     };
-    let clearing = model.clone();
+    let model = model.clone();
     Some(
         div()
             .flex()
@@ -566,14 +567,11 @@ pub(crate) fn time_window_chip(
             .bg(palette.selection)
             .border_1()
             .border_color(palette.accent)
-            .text_size(px(STATS_TEXT_SIZE))
             .text_color(palette.label)
             .child(summary)
             .child(
                 Button::new("trace-time-window-clear", move |_, _, cx| {
-                    clearing.update(cx, |m, cx| {
-                        m.set_time_selection(TimeSelection::default(), cx);
-                    });
+                    clear_time_window(&model, cx)
                 })
                 .ghost()
                 .compact()
@@ -581,6 +579,39 @@ pub(crate) fn time_window_chip(
                 .keys_for_focused(&ClearTimeSelection),
             ),
     )
+}
+
+/// [`time_window_chip`] as a toolbar group, which leaves the row for the
+/// overflow menu as the row clearing the window, its keys named where `focus`
+/// stands.
+pub(crate) fn time_window_group(
+    model: &Entity<TraceModel>,
+    palette: Palette,
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> Option<ToolbarGroup> {
+    let chip = time_window_chip(model, palette, cx)?;
+    let model = model.clone();
+    let row = MenuItem::action(
+        &ClearTimeSelection,
+        Some(focus),
+        window,
+        cx,
+        move |_, cx| clear_time_window(&model, cx),
+    );
+    Some(ToolbarGroup::new(TIME_WINDOW, chip).overflow(row, true))
+}
+
+/// How long the time window chip holds out against its toolbar narrowing:
+/// past every control, as what the panel shows is read against it.
+const TIME_WINDOW: Priority = Priority::MAX;
+
+/// Widens the next aggregate of `model` back to the whole timeline.
+fn clear_time_window(model: &Entity<TraceModel>, cx: &mut App) {
+    model.update(cx, |m, cx| {
+        m.set_time_selection(TimeSelection::default(), cx);
+    });
 }
 
 /// What the window chrome says about the loaded document, the same from whichever
@@ -1686,7 +1717,11 @@ fn configuration_label<'a>(checksum: &'a str, session: Option<&Session>) -> Cow<
 
 /// The lines of the tooltip for a hovered slice: its name, its category and
 /// duration, and its args.
-fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<String> {
+fn slice_tooltip(
+    hovered: &HoveredSlice,
+    session: Option<&Session>,
+    repos: &RepoNames,
+) -> Vec<String> {
     let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
     let category = profile.str(detail.category);
     let took = format_duration(slice.dur_us);
@@ -1695,7 +1730,11 @@ fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<Strin
         None => format!("{category} · {took}"),
     };
     let mut lines = vec![profile.str(slice.name).to_string(), timing];
-    lines.extend(profile.opt_str(detail.target).map(str::to_owned));
+    if let Some(target) = profile.opt_str(detail.target) {
+        let (shown, written) = repos.shown_with_written(target);
+        lines.push(shown);
+        lines.extend(written);
+    }
     let configuration = (profile.opt_str(detail.configuration))
         .map(|checksum| configuration_label(checksum, session).to_string());
     let ran: Vec<String> = [
@@ -2161,7 +2200,7 @@ mod tests {
     fn a_one_region_window_reads_as_a_share_of_the_build() {
         assert_eq!(
             time_window_summary(Some(&selection(&[(0, 2_500_000)])), BUILD_US).as_deref(),
-            Some("Window: 2.50s of 40.00s")
+            Some("window: 2.50s of 40.00s")
         );
     }
 
@@ -2174,7 +2213,7 @@ mod tests {
         ]);
         assert_eq!(
             time_window_summary(Some(&three), BUILD_US).as_deref(),
-            Some("Window: 3.00s of 40.00s · 3 regions")
+            Some("window: 3.00s of 40.00s · 3 regions")
         );
     }
 
@@ -2182,7 +2221,7 @@ mod tests {
     fn a_window_far_shorter_than_the_build_keeps_its_own_unit() {
         assert_eq!(
             time_window_summary(Some(&selection(&[(0, 4_200)])), BUILD_US).as_deref(),
-            Some("Window: 4.20ms of 40.00s")
+            Some("window: 4.20ms of 40.00s")
         );
     }
 

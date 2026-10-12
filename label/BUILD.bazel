@@ -1,0 +1,21 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+rust_library(
+    name = "label",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_label",
+    visibility = [
+        "//graph/layout:__pkg__",
+        "//ui/components:__pkg__",
+        "//ui/execlog:__pkg__",
+        "//ui/graph:__pkg__",
+        "//ui/trace:__pkg__",
+    ],
+)
+
+rust_test(
+    name = "label_test",
+    size = "small",
+    crate = ":label",
+)

@@ -30,7 +30,7 @@ pub(crate) enum Relation {
 }
 
 impl Relation {
-    /// Every relation, in the order the selector offers them.
+    /// Every relation, in the order a box's menu offers them.
     pub(crate) const ALL: [Self; 7] = [
         Self::None,
         Self::Direct(Direction::Both),
@@ -43,32 +43,14 @@ impl Relation {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::None => "no highlight",
-            Self::Direct(Direction::Both) => "direct neighbors",
-            Self::Direct(Direction::In) => "direct inputs",
-            Self::Direct(Direction::Out) => "direct outputs",
-            Self::Transitive(Direction::Both) => "all neighbors",
-            Self::Transitive(Direction::In) => "all inputs",
-            Self::Transitive(Direction::Out) => "all outputs",
+            Self::None => "No highlight",
+            Self::Direct(Direction::Both) => "Direct neighbours",
+            Self::Direct(Direction::In) => "Direct inputs",
+            Self::Direct(Direction::Out) => "Direct outputs",
+            Self::Transitive(Direction::Both) => "All neighbours",
+            Self::Transitive(Direction::In) => "All inputs",
+            Self::Transitive(Direction::Out) => "All outputs",
         }
-    }
-
-    /// This relation's place in [`ALL`](Self::ALL), which the selector reports
-    /// its choice by.
-    pub(crate) fn index(self) -> usize {
-        match self {
-            Self::None => 0,
-            Self::Direct(Direction::Both) => 1,
-            Self::Direct(Direction::In) => 2,
-            Self::Direct(Direction::Out) => 3,
-            Self::Transitive(Direction::Both) => 4,
-            Self::Transitive(Direction::In) => 5,
-            Self::Transitive(Direction::Out) => 6,
-        }
-    }
-
-    pub(crate) fn at(index: usize) -> Option<Self> {
-        Self::ALL.get(index).copied()
     }
 }
 
@@ -83,14 +65,6 @@ impl Default for Relation {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_relation_sits_at_the_index_it_reports() {
-        for relation in Relation::ALL {
-            assert_eq!(Relation::at(relation.index()), Some(relation));
-        }
-        assert_eq!(Relation::at(Relation::ALL.len()), None);
-    }
 
     #[test]
     fn every_relation_is_offered_under_a_name_of_its_own() {

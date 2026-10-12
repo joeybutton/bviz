@@ -28,7 +28,8 @@ pub(crate) enum CanvasIntent {
     ShowWhole,
     Pan,
     ToggleBox,
-    Select,
+    BoxMenu,
+    Deselect,
     Hover,
     Zoom,
     PanAcross,
@@ -61,13 +62,19 @@ pub(crate) const GESTURES: Gestures<CanvasIntent> = Gestures::new(&[
     Entry::new(
         Input::press(Button::Right),
         BOX,
-        "Select or deselect box",
-        CanvasIntent::Select,
+        "Open box menu",
+        CanvasIntent::BoxMenu,
+    ),
+    Entry::new(
+        Input::press(Button::Right),
+        Place::Empty,
+        "Deselect box",
+        CanvasIntent::Deselect,
     ),
     Entry::new(
         Input::HOVER,
         BOX,
-        "Describe; highlight neighbors",
+        "Describe; highlight neighbours",
         CanvasIntent::Hover,
     ),
     Entry::new(

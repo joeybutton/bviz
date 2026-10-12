@@ -189,6 +189,7 @@ mod tests {
         TEST_TIDS, TEST_VIEW, profile_of, profile_of_events, thread_events,
     };
     use bviz_invocation::Session;
+    use bviz_label::names::RepoNames;
     use bviz_trace_layout::{Lane, lay_out_lanes};
 
     const TEST_VIEWPORT: Viewport = Viewport {
@@ -341,7 +342,7 @@ mod tests {
         let hovered = cache
             .hit(drawn.x + drawn.w / 2.0, drawn.y + drawn.h / 2.0)
             .expect("the slice at its own center");
-        slice_tooltip(&hovered, session)
+        slice_tooltip(&hovered, session, &RepoNames::default())
     }
 
     #[test]

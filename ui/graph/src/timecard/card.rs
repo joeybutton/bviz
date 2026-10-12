@@ -4,8 +4,11 @@ use crate::legend;
 use crate::model::Loaded;
 use crate::reveal::reveal;
 use crate::timing::{Ran, Slowest};
-use crate::{GraphPanel, Palette};
+use crate::{GraphPanel, Palette, ToggleTiming};
 use bviz_graph_layout::Id;
+use bviz_label::names::RepoNames;
+use bviz_label::shown::Parts;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
@@ -56,22 +59,31 @@ fn timed<'a>(view: &GraphPanel, cx: &'a App) -> Option<&'a Loaded> {
     (!loaded.timecard().is_empty()).then_some(loaded)
 }
 
-fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.timecard.up = !view.timecard.up;
-    cx.notify();
+/// Puts the card up or away, where a profile records an action for it to read.
+pub(crate) fn toggle(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if timed(view, cx).is_some() {
+        view.timecard.up = !view.timecard.up;
+        cx.notify();
+    }
 }
 
 /// The toolbar's control putting the card up and away; `None` where no
-/// profile records an action.
-pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
+/// profile records an action. It reads its name where `labelled`, and is
+/// icon-only otherwise.
+pub(crate) fn control(
+    view: &GraphPanel,
+    labelled: bool,
+    cx: &Context<GraphPanel>,
+) -> Option<Button> {
     timed(view, cx)?;
     Some(
         Button::new(
             "timecard-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
-        .label("timing")
-        .tooltip("Toggle action timing")
+        .when(labelled, |toggle| toggle.label("timing"))
+        .leading_icon("timer")
+        .keys_for(&ToggleTiming, &view.focus_handle)
         .selected(view.timecard.up),
     )
 }
@@ -83,6 +95,7 @@ fn row(
     index: usize,
     slow: &Slow,
     mnemonic: Option<&str>,
+    names: &RepoNames,
     view: &Entity<GraphPanel>,
     palette: &Palette,
 ) -> Stateful<Div> {
@@ -97,8 +110,13 @@ fn row(
                 .whitespace_nowrap()
                 .child(mnemonic.to_owned())
         }))
-        // Paths sharing a directory differ at their tails.
-        .child(line(slow.subject().to_owned()).text_ellipsis_start());
+        .child({
+            let path = slow.subject();
+            let parts = Parts::of_path(path);
+            div()
+                .min_w_0()
+                .child(LabelLine::parted(path.to_owned(), parts, colors.text_muted))
+        });
     let listed = div()
         .id(("timecard-row", index))
         .w_full()
@@ -108,7 +126,7 @@ fn row(
         .px_1()
         .rounded_sm()
         .tooltip(TextTooltip::builder(
-            slow.hover(mnemonic).into(),
+            slow.hover(mnemonic, names).into(),
             colors.tooltip(),
         ))
         .child(legend::ran(Ran::On(slow.timing.runner), palette))
@@ -119,7 +137,7 @@ fn row(
                 .flex()
                 .flex_col()
                 .child(name)
-                .child(line(slow.detail()).text_color(colors.text_muted)),
+                .child(line(slow.detail(names)).text_color(colors.text_muted)),
         );
     match slow.shown.node() {
         Some(node) => {
@@ -155,7 +173,8 @@ fn listed(view: &GraphPanel, rows: usize, palette: &Palette, cx: &Context<GraphP
                     Shown::Action(node) => mnemonic(loaded, node),
                     Shown::Owner { .. } | Shown::Off => None,
                 };
-                row(index, slow, mnemonic, &entity, &palette)
+                let names = loaded.shared.labels.repos().names();
+                row(index, slow, mnemonic, names, &entity, &palette)
             })
             .collect::<Vec<_>>()
     })

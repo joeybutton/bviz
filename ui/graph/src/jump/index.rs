@@ -2,7 +2,9 @@
 //! it is matched by.
 
 use crate::model::Shared;
-use crate::point::{configuration_readings, mnemonic, primary_output, target_label};
+use crate::point::{configuration_readings, mnemonic, primary_output, written_target_label};
+use bviz_graph_layout::select::labels::package_label;
+use bviz_graph_layout::shown::{Parts, Shown};
 use bviz_graph_layout::{Id, Kind};
 use std::ops::Range;
 
@@ -73,7 +75,8 @@ impl Scope {
 pub(crate) struct Candidate {
     pub(crate) id: Id,
     pub(crate) kind: Kind,
-    /// What a query is matched against, which is also how the row reads.
+    /// What a query is matched against, as a reader writes it; the row reads
+    /// it as it is shown.
     pub(crate) text: Box<str>,
     /// The chars of `text` that are no part of the node's own name: the
     /// package path leading up to a label's name, and the directories of an
@@ -145,38 +148,41 @@ fn dependents(shared: &Shared) -> Vec<u32> {
 }
 
 /// The chars of `text`, the text of a node of `kind`, that lead up to the
-/// node's name: up to the last `:` of a label or the last `/` of a path, and
-/// for an action, the directories of the output following the space after its
-/// mnemonic.
+/// node's name: up to the `:` starting a label's name or past the last `/` of
+/// a path, and for an action, the directories of the output following the
+/// space after its mnemonic.
 fn path(text: &str, kind: Kind) -> Range<u32> {
     let mut start = 0;
     let mut end = 0;
     for (index, c) in (0u32..).zip(text.chars()) {
         match c {
             ' ' if kind == Kind::Action && start == 0 => (start, end) = (index + 1, index + 1),
-            ':' | '/' => end = index + 1,
+            ':' => return start..index,
+            '/' => end = index + 1,
             _ => {}
         }
     }
     start..end
 }
 
-/// What the node `id` of `kind` is matched by and read as.
+/// What the node `id` of `kind` is matched by, as a reader writes it.
 pub(crate) fn node_text(shared: &Shared, id: Id, kind: Kind) -> String {
     match kind {
-        Kind::Package => package_path(shared, id),
+        Kind::Package => {
+            package_path(shared, id).unwrap_or_else(|| node_label(shared, id).to_owned())
+        }
         Kind::Action => match primary_output(id, shared) {
             Some(output) => format!("{} {output}", mnemonic(id, shared)),
             None => mnemonic(id, shared).to_owned(),
         },
         Kind::Source | Kind::Artifact if !labelled(shared, id) => {
             let file = node_label(shared, id);
-            match target_label(id, shared) {
+            match written_target_label(id, shared) {
                 Some(owner) => format!("{}/{file}", package_of(&owner)),
                 None => file.to_owned(),
             }
         }
-        _ => target_label(id, shared).unwrap_or_else(|| node_label(shared, id).to_owned()),
+        _ => written_target_label(id, shared).unwrap_or_else(|| node_label(shared, id).to_owned()),
     }
 }
 
@@ -201,40 +207,41 @@ pub(crate) fn package_of(label: &str) -> &str {
     label.split_once(':').map_or(label, |(package, _)| package)
 }
 
-/// The whole path of the package box `id`. A box is captioned relative to the
-/// box holding it, and only an outermost one with its repository, so the path
-/// joins the captions from the outermost box in.
-fn package_path(shared: &Shared, id: Id) -> String {
-    let nodes = &shared.base.nodes;
-    let mut chain: Vec<&str> = Vec::new();
-    let mut at = Some(id);
-    while let Some(node) = at.and_then(|id| nodes.get(id.0 as usize)) {
-        chain.push(&node.label);
-        at = node.parent.filter(|_| node.kind == Kind::Package);
-    }
-    let mut path = String::with_capacity(chain.iter().map(|part| part.len() + 1).sum());
-    for part in chain.into_iter().rev() {
-        if !path.is_empty() && !path.ends_with('/') {
-            path.push('/');
-        }
-        path.push_str(part);
-    }
-    path
+/// The whole path of the package box `id`, as a reader writes it.
+fn package_path(shared: &Shared, id: Id) -> Option<String> {
+    let path = package_label(&shared.names, id)?;
+    Some(shared.labels.written(&path).into_owned())
 }
 
-/// What holds the node `id` of `kind`, where its [text](node_text) does not
-/// already read it: the package holding a package, and the target owning an
-/// action or a file that is no target itself.
+/// What holds the node `id` of `kind`, as a reader writes it, where its
+/// [text](node_text) does not already read it: the package holding a
+/// package, and the target owning an action or a file that is no target
+/// itself.
 pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
     match kind {
         Kind::Package => {
             let parent = shared.base.nodes.get(id.0 as usize)?.parent?;
-            Some(package_path(shared, parent))
+            package_path(shared, parent)
         }
-        Kind::Action => target_label(id, shared),
-        Kind::Source | Kind::Artifact if !labelled(shared, id) => target_label(id, shared),
+        Kind::Action => written_target_label(id, shared),
+        Kind::Source | Kind::Artifact if !labelled(shared, id) => written_target_label(id, shared),
         _ => None,
     }
+}
+
+/// How the row offering `candidate` reads its text: as the graph shows it,
+/// parted where that leads up to the node's own name.
+pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Parts) {
+    let shown = shared.labels.repos().names().show(&candidate.text);
+    let text = shown.text();
+    let parts = Parts::of_label(text).or_else(|| Parts::led(text, path(text, candidate.kind)));
+    (shown, parts.unwrap_or_default())
+}
+
+/// `written`, a label or package path as a reader writes it, as the graph
+/// shows it.
+pub(crate) fn shown(shared: &Shared, written: &str) -> String {
+    shared.labels.repos().names().show(written).into_text()
 }
 
 /// The short name of the configuration the node a row offers is built in.
@@ -367,7 +374,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_path_leads_up_to_the_name() {
-        assert_eq!(path("//app:lib", Kind::Target), 0..6);
+        assert_eq!(path("//app:lib", Kind::Target), 0..5);
+        assert_eq!(path("//app:sub/lib.cc", Kind::Source), 0..5);
         assert_eq!(path("//app/sub", Kind::Package), 0..6);
         assert_eq!(path("liblib.a", Kind::Artifact), 0..0);
         assert_eq!(path("//app/my lib.a", Kind::Artifact), 0..6);

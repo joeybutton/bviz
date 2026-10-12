@@ -18,6 +18,7 @@ use crate::exec_path::{ExecPath, ExecPaths, ExecPathsBuilder, LeftOutInputs};
 use crate::intern::Id;
 use crate::label;
 use crate::repo::{self, RepoCategory, RepoName, RepoOrigin};
+use bviz_label::names::RepoNames;
 
 /// A string interned in a [`FacetStrings`] table. The index is stored biased
 /// off one, so the handle is never zero and `Option<Sym>` is as wide as `Sym`
@@ -827,100 +828,34 @@ impl Facets {
     }
 }
 
-/// The repository part a reader writes each of one graph's repositories by,
-/// sigil and all, which is both the name drawn for it and the name a pattern
-/// reaches it by.
-///
-/// A repository is written by the name of the module whose repository it is,
-/// since `@rules_foo` is how that repository is written before a repository
-/// mapping resolves the name. A name several repositories would be written by
-/// says which of them a reader means no more than a dump says which one an
-/// apparent name reaches, so each of those holding a canonical name is written
-/// by that instead. The main repository, whose labels carry no repository part,
-/// is written by nothing at all.
+/// The names one graph's repositories are written and shown by, each
+/// reached by the [`RepoRef`] naming it.
 #[derive(Default, Clone)]
-pub struct WrittenRepos {
-    /// The name each repository is written by, at the position its [`RepoRef`]
-    /// names.
-    written: Vec<String>,
-    /// The canonical name an apparent name written here stands for, which is
-    /// the name labels carry.
-    canonical: HashMap<String, String>,
-    /// The name written for the repository part a label carries, sigil and all,
-    /// where the two read differently.
-    rewritten: HashMap<String, String>,
-}
+pub struct WrittenRepos(RepoNames);
 
 impl WrittenRepos {
     pub fn of(facets: &Facets) -> Self {
-        let mut claims: HashMap<Sym, usize> = HashMap::with_capacity(facets.repos().len());
-        for (_, entry) in facets.repos() {
-            if let Some(name) = written_apparently(entry) {
-                *claims.entry(name).or_default() += 1;
-            }
-        }
-        let mut repos = WrittenRepos {
-            written: Vec::with_capacity(facets.repos().len()),
-            canonical: HashMap::new(),
-            rewritten: HashMap::new(),
-        };
         let resolve = |name: Sym| facets.strings().resolve(name);
-        for (_, entry) in facets.repos() {
-            let unshared = written_apparently(entry).filter(|name| claims[name] == 1);
-            repos.written.push(match (entry.name(), unshared) {
-                // The name identifying a repository is the only one its labels
-                // carry, so it is written by that even where another repository
-                // is written alike.
-                (RepoName::Apparent(name), _) => format!("@{}", resolve(name)),
-                (RepoName::Canonical(canonical), Some(apparent)) => {
-                    let (canonical, apparent) = (resolve(canonical), resolve(apparent));
-                    repos
-                        .canonical
-                        .insert(apparent.to_string(), canonical.to_string());
-                    repos
-                        .rewritten
-                        .insert(format!("@@{canonical}"), format!("@{apparent}"));
-                    format!("@{apparent}")
-                }
-                (RepoName::Canonical(canonical), None) => match resolve(canonical) {
-                    "" => String::new(),
-                    canonical => format!("@@{canonical}"),
-                },
-            });
-        }
-        repos
+        let names: Vec<RepoName<&str>> = facets
+            .repos()
+            .map(|(_, entry)| entry.name().map(resolve))
+            .collect();
+        Self(RepoNames::of(&names))
     }
 
     /// The name `repo` is written by.
     pub fn written(&self, repo: RepoRef) -> &str {
-        &self.written[repo.index()]
+        self.0.written(repo.index())
     }
 
-    /// The canonical name the repository written `written` carries in its
-    /// labels, or `None` where that name is what its labels already carry.
-    pub fn canonical(&self, written: &str) -> Option<&str> {
-        self.canonical.get(written).map(String::as_str)
+    /// The name `repo` is shown by.
+    pub fn shown(&self, repo: RepoRef) -> Cow<'_, str> {
+        self.0.shown(repo.index())
     }
 
-    /// The canonical label `label` as a reader writes it, which is by the
-    /// repository name the same graph's boxes read.
-    pub fn written_label<'a>(&self, label: &'a str) -> Cow<'a, str> {
-        let Some((repo, rest)) = label.split_once("//") else {
-            return Cow::Borrowed(label);
-        };
-        match self.rewritten.get(repo) {
-            Some(written) => Cow::Owned(format!("{written}//{rest}")),
-            None => Cow::Borrowed(label),
-        }
-    }
-}
-
-/// The name a repository is written by short of a canonical one: the module
-/// name its canonical name encodes, or the apparent name identifying it.
-fn written_apparently(entry: &RepoEntry) -> Option<Sym> {
-    match *entry {
-        RepoEntry::Canonical { module, .. } => module,
-        RepoEntry::Apparent { name } => Some(name),
+    /// The names the graph's repositories are written and shown by.
+    pub fn names(&self) -> &RepoNames {
+        &self.0
     }
 }
 
@@ -1457,19 +1392,70 @@ mod tests {
         let written = WrittenRepos::of(&facets);
 
         assert_eq!(
-            written.written_label("@@rules_foo+1.2.3//bar:lib"),
+            written.names().written_label("@@rules_foo+1.2.3//bar:lib"),
             "@rules_foo//bar:lib"
         );
-        assert_eq!(written.written_label("//foo:app"), "//foo:app");
+        assert_eq!(written.names().written_label("//foo:app"), "//foo:app");
         assert_eq!(
-            written.written_label("@@rules_foo++ext+gen//bar:lib"),
+            written
+                .names()
+                .written_label("@@rules_foo++ext+gen//bar:lib"),
             "@@rules_foo++ext+gen//bar:lib"
         );
         assert_eq!(
-            written.written_label("@crates//serde:lib"),
+            written.names().written_label("@crates//serde:lib"),
             "@crates//serde:lib"
         );
-        assert_eq!(written.written_label("action7"), "action7");
+        assert_eq!(written.names().written_label("action7"), "action7");
+    }
+
+    /// A repository a module extension generated is shown by the name the
+    /// extension gave it wherever no other repository would read alike, and
+    /// is still written by its canonical name, which is what a command line
+    /// reaches it by.
+    #[test]
+    fn an_extension_s_repository_is_shown_by_its_given_name_where_that_is_unambiguous() {
+        let mut facets = Facets::default();
+        let main = facets.intern_repo("");
+        let module = facets.intern_repo("rules_foo+");
+        let unique = facets.intern_repo("llvm++llvm+llvm-project");
+        let twin = facets.intern_repo("rules_a++ext+tools");
+        let other_twin = facets.intern_repo("rules_b++ext+tools");
+        let shadowed = facets.intern_repo("rules_c++ext+crates");
+        let named_apparently = facets.intern_apparent_repo("crates");
+
+        let written = WrittenRepos::of(&facets);
+
+        assert_eq!(written.shown(main), "");
+        assert_eq!(written.shown(module), "@rules_foo");
+        assert_eq!(written.shown(unique), "@llvm-project");
+        assert_eq!(written.written(unique), "@@llvm++llvm+llvm-project");
+        assert_eq!(written.shown(twin), "@@rules_a++ext+tools");
+        assert_eq!(written.shown(other_twin), "@@rules_b++ext+tools");
+        assert_eq!(written.shown(shadowed), "@@rules_c++ext+crates");
+        assert_eq!(written.shown(named_apparently), "@crates");
+        assert_eq!(
+            written.names().canonical("llvm-project"),
+            Some("llvm++llvm+llvm-project")
+        );
+        assert_eq!(written.names().canonical("tools"), None);
+        assert_eq!(
+            written
+                .names()
+                .shown_label("@@llvm++llvm+llvm-project//llvm:Support"),
+            "@llvm-project//llvm:Support"
+        );
+        assert_eq!(
+            written.names().shown_label("@@rules_foo+//bar:lib"),
+            "@rules_foo//bar:lib"
+        );
+        assert_eq!(written.names().shown_label("//foo:app"), "//foo:app");
+        assert_eq!(
+            written
+                .names()
+                .shown_label("@@llvm++llvm+llvm-project//llvm:llvm"),
+            "@llvm-project//llvm"
+        );
     }
 
     /// A name two repositories would be written by says which of them a reader

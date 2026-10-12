@@ -9,6 +9,7 @@ mod pick;
 mod placed;
 mod plot;
 
+use crate::CycleColouring;
 use crate::Palette;
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
@@ -20,7 +21,8 @@ use crate::point::{
     configuration_readings, identify, mnemonic, point_label, primary_output, unit_names,
 };
 use crate::timing::{NodeTimes, Untimed};
-use crate::toolbar::{busy, group};
+use crate::toolbar::PickerGroup;
+use crate::unit_picker::CyclePoints;
 use crate::unit_picker::UnitPicker;
 use axis::{Axes, Axis, Clocks};
 use bviz_bazel_flags::TRANSITIONS;
@@ -28,10 +30,12 @@ use bviz_graph_layout::metrics::{Measurement, Metrics, Scope, Sizing, Unit};
 use bviz_graph_layout::select::Filter;
 use bviz_graph_layout::{Capabilities, Id, Input, InputSet, Kind, Support};
 use bviz_invocation::Revision;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
-    Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
-    LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Toolbar,
+    CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
+    LegendState, ListScroll, MenuItem, Nesting, OneRow, Presentation, Priority,
+    SCROLLBAR_THICKNESS, ShowLegend, Swatch, Switch, ToggleGroup, ToggleSegment, ToolbarGroup,
     ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, defer_hover_card,
     defer_tooltip, legend_gestures, list_scrollbar, load_in_background, menu_chrome,
     tooltip_extent, track_drag,
@@ -39,10 +43,10 @@ use bviz_ui_components::{
 use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, Rems, Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
-    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, rems, uniform_list,
+    App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Render,
+    Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful, Subscription, Task,
+    WeakEntity, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use menu_chrome::{ROW_INSET, SHEET_BORDER};
@@ -74,6 +78,10 @@ gpui::actions!(
         RevealAimed,
         /// Close pick list
         ClosePickList,
+        /// Cycle across axis
+        CycleAcross,
+        /// Cycle up axis
+        CycleUp,
     ]
 );
 
@@ -153,7 +161,7 @@ impl ScatterPanel {
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
             view.plotting = None;
-            view.choice = Choice::of(&view.model, cx);
+            view.choice = Choice::of(&view.model, &view.focus, cx);
             if view.shown {
                 view.measure(cx);
             }
@@ -171,10 +179,11 @@ impl ScatterPanel {
         let parent = cx.entity().downgrade();
         let focus = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
+        let choice = Choice::of(&model, &focus, cx);
         Self {
             focus,
             legend,
-            choice: Choice::of(&model, cx),
+            choice,
             model,
             shown: false,
             plot: None,
@@ -209,6 +218,13 @@ impl ScatterPanel {
                 .update(cx, |model, cx| model.want_metrics(&[scope, reference], cx));
         }
         self.replot(cx);
+    }
+
+    /// Steps the picker `of` the choice to its next option.
+    fn cycle(&self, of: impl FnOnce(&Choice) -> Entity<Dropdown>, cx: &mut Context<Self>) {
+        if let Some(picker) = self.choice.as_ref().map(of) {
+            picker.update(cx, |picker, cx| picker.cycle(cx));
+        }
     }
 
     /// Measures the graph's points in the unit chosen, over the inputs last
@@ -644,12 +660,10 @@ impl ScatterPanel {
             .map(|((mark, mnemonic, label), hint)| {
                 let drawn = &plot.plotted.marks[*mark];
                 let point = &drawn.target;
-                let (package, name) = pick::split_label(label);
                 PickRow {
                     mark: *mark,
                     mnemonic: mnemonic.map(|mnemonic| mnemonic.to_owned().into()),
-                    package: package.to_owned().into(),
-                    name: name.to_owned().into(),
+                    label: label.clone().into(),
                     hint: hint.map(SharedString::from),
                     measures: plot.plotted.axes.values(point, drawn.time).into(),
                     x: drawn.x,
@@ -751,7 +765,11 @@ struct Choice {
 impl Choice {
     /// The finest unit the graph `model` has read is measured in, over every
     /// input describing it; absent until the graph is read.
-    fn of(model: &Entity<GraphModel>, cx: &mut Context<ScatterPanel>) -> Option<Self> {
+    fn of(
+        model: &Entity<GraphModel>,
+        focus: &FocusHandle,
+        cx: &mut Context<ScatterPanel>,
+    ) -> Option<Self> {
         let loaded = model.read(cx).loaded()?;
         let inputs = loaded.shared.inputs;
         // Until the unit is measured, whether any of its points is timed is
@@ -762,20 +780,25 @@ impl Choice {
             "Point unit",
             inputs,
             None,
+            focus,
             ScatterPanel::choose_unit,
             cx,
         )?;
         let axes = Axes::OPENING;
         let names = Axis::ALL.map(Axis::name);
-        let across_picker =
-            cx.new(|cx| Dropdown::new("scatter-across", names, axes.x().index(), cx));
+        let across_picker = cx.new(|cx| {
+            Dropdown::new("scatter-across", names, axes.x().index(), cx)
+                .keys_for(&CycleAcross, focus)
+        });
         let across_picked = cx.subscribe(&across_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
             if let Some(&axis) = Axis::ALL.get(*index) {
                 view.choose_axes(|axes| axes.across(axis), cx);
             }
         });
-        let up_picker = cx.new(|cx| Dropdown::new("scatter-up", names, axes.y().index(), cx));
+        let up_picker = cx.new(|cx| {
+            Dropdown::new("scatter-up", names, axes.y().index(), cx).keys_for(&CycleUp, focus)
+        });
         let up_picked = cx.subscribe(&up_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
             if let Some(&axis) = Axis::ALL.get(*index) {
@@ -784,7 +807,10 @@ impl Choice {
         });
         let unit = picker.chosen(cx).unit();
         let names = ColourBy::ALL.map(|by| by.label(unit));
-        let colour_picker = cx.new(|cx| Dropdown::new("scatter-colour", names, 0, cx));
+        let colour_picker = cx.new(|cx| {
+            Dropdown::new("scatter-colour", names, ColourBy::OPENING.index(), cx)
+                .keys_for(&CycleColouring, focus)
+        });
         let colour_picked = cx.subscribe(&colour_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
             if let Some(&by) = ColourBy::ALL.get(*index) {
@@ -800,7 +826,7 @@ impl Choice {
             up_picker,
             _up_picked: up_picked,
             timed,
-            colour: ColourBy::ALL[0],
+            colour: ColourBy::OPENING,
             colour_picker,
             _colour_picked: colour_picked,
         };
@@ -816,9 +842,9 @@ impl Choice {
         let times = (model.read(cx).loaded()).map_or(Err(Untimed::NoProfile), Loaded::times);
         let note = |name| times_note(times, self.timed, unit, name);
         let notes = [
-            (&self.across_picker, note("Horizontal axis")),
-            (&self.up_picker, note("Vertical axis")),
-            (&self.colour_picker, note("Point colouring")),
+            (&self.across_picker, note(ACROSS_HINT)),
+            (&self.up_picker, note(UP_HINT)),
+            (&self.colour_picker, note(COLOUR_HINT)),
         ];
         for (picker, note) in notes {
             picker.update(cx, |picker, cx| picker.set_tooltip(note, cx));
@@ -1213,6 +1239,20 @@ impl Render for ScatterPanel {
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend.update(cx, |legend, cx| legend.show(window, cx));
             }))
+            .on_action(cx.listener(|view, _: &CyclePoints, _, cx| {
+                if let Some(choice) = &view.choice {
+                    choice.picker.cycle(cx);
+                }
+            }))
+            .on_action(cx.listener(|view, _: &CycleAcross, _, cx| {
+                view.cycle(|choice| choice.across_picker.clone(), cx);
+            }))
+            .on_action(cx.listener(|view, _: &CycleUp, _, cx| {
+                view.cycle(|choice| choice.up_picker.clone(), cx);
+            }))
+            .on_action(cx.listener(|view, _: &CycleColouring, _, cx| {
+                view.cycle(|choice| choice.colour_picker.clone(), cx);
+            }))
             .track_focus(&self.focus)
             .flex_1()
             .flex()
@@ -1224,16 +1264,21 @@ impl Render for ScatterPanel {
             return root.child(placeholder);
         }
         let scope = self.choice.as_ref().map(|choice| choice.picker.chosen(cx));
-        let legend = self
-            .plot
-            .as_ref()
-            .map(|plot| legend(&self.legend, plot, &palette));
+        let legend = legend(&self.legend, self.plot.as_ref(), &palette);
         let root = root.children(self.choice.as_ref().zip(scope).map(|(choice, scope)| {
             let measuring = self
                 .plot
                 .as_ref()
                 .is_some_and(|plot| plot.scope != scope || plot.plotted.axes != choice.axes);
-            strip(choice, scope, measuring, legend, &palette, cx)
+            let times = model
+                .loaded()
+                .map_or(Err(Untimed::NoProfile), Loaded::times);
+            let shown = Shown {
+                scope,
+                times,
+                measuring,
+            };
+            strip(choice, shown, legend, &self.focus, window, cx)
         }));
         let capabilities = model.loaded().map(|loaded| &loaded.shared.capabilities);
         let dropped = scope.zip(capabilities);
@@ -1425,10 +1470,6 @@ fn pick_layer(
 /// Room between the parts a row of the list of points under a click reads.
 const PICK_GAP: Pixels = px(8.);
 
-/// The least room the package of a row of the list of points is shown in, cut
-/// short from its start; with less, the row leaves the package out.
-const PACKAGE_MIN_WIDTH: Rems = rems(2.5);
-
 /// What the header of a list of `rows` points of `unit` reads over the points.
 fn pick_heading(rows: usize, unit: Unit) -> String {
     format!("{rows} {} here", unit_names(unit).many)
@@ -1455,7 +1496,7 @@ fn pick_width(rows: &[PickRow], unit: Unit, axes: Axes, window: &mut Window) -> 
     let heading =
         measure(&pick_heading(rows.len(), unit).into()) + PICK_GAP + measure(&axes.names().into());
     let widest = rows.iter().fold(heading, |widest, row| {
-        let label = measure(&row.package) + measure(&row.name);
+        let label = measure(&row.label);
         let parts = [
             row.mnemonic.as_ref(),
             row.hint.as_ref(),
@@ -1563,53 +1604,6 @@ fn pick_part(text: SharedString) -> Div {
         .child(text)
 }
 
-/// The label of the row `listed`, its package and name abutting on a `line`
-/// tall, the package read in `muted`.
-///
-/// Laid out right to left and wrapping, the package goes onto a second, clipped
-/// line when less than its least room is left beside the name, and otherwise
-/// grows into what the name leaves. Its flex basis is that least room, all the
-/// label would ask of the row, so the label stands over an unseen copy of
-/// itself asking for its whole width.
-fn pick_label(listed: &PickRow, muted: Hsla, line: Pixels) -> Div {
-    let package = pick_part(listed.package.clone())
-        .flex_basis(PACKAGE_MIN_WIDTH)
-        .flex_grow_1()
-        .text_ellipsis_start()
-        // An elided line falls short of its box by up to a glyph; aligned
-        // right, that slack stands before the ellipsis, not before the name.
-        .text_right()
-        .text_color(muted);
-    let name = pick_part(listed.name.clone()).text_ellipsis();
-    let whole = div()
-        .flex()
-        .min_w_0()
-        .h(px(0.))
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .child(div().min_w(PACKAGE_MIN_WIDTH).child(listed.package.clone()))
-        .child(listed.name.clone());
-    let label = div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_row_reverse()
-        .flex_wrap()
-        .justify_start()
-        .content_start()
-        .overflow_hidden()
-        .child(name)
-        .child(package);
-    div()
-        .relative()
-        .flex()
-        .min_w_0()
-        .mr_auto()
-        .h(line)
-        .child(whole)
-        .child(label)
-}
-
 /// The row `index` of a list of points, reading `listed`: the colour its mark
 /// is drawn in, what its point is, what tells it apart from the rows reading
 /// alike, and its measures.
@@ -1664,7 +1658,15 @@ fn pick_row(
             .clone()
             .map(|mnemonic| div().flex_none().whitespace_nowrap().child(mnemonic)),
     )
-    .child(pick_label(listed, colors.text_muted, style.line))
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .mr_auto()
+            .h(style.line)
+            .child(LabelLine::new(listed.label.clone(), colors.text_muted)),
+    )
     .children(listed.hint.clone().map(|hint| {
         pick_part(hint)
             .text_ellipsis_start()
@@ -1687,37 +1689,96 @@ const SWATCH_ALPHA: f32 = 0.7;
 /// twice the smallest mark's, so its hue reads.
 const SWATCH_DIAMETER: f32 = 4.0 * MIN_RADIUS;
 
-/// The strip choosing what the plot measures, now `scope`, which reads
-/// `measuring` while a new choice is measured over the plot drawn for the last,
-/// and ends in the `legend` of the plot drawn.
+/// What the strip reads of the plot it chooses.
+struct Shown<'a> {
+    scope: Scope,
+    /// The action times its time-reading pickers explain themselves by.
+    times: Result<&'a NodeTimes, Untimed>,
+    /// Whether a new choice is measured over the plot drawn for the last.
+    measuring: bool,
+}
+
+/// How long each group of the strip holds out against the panel narrowing,
+/// the unit plotted longest.
+const POINTS: Priority = 5;
+const AXES: Priority = 4;
+const COLOUR: Priority = 3;
+const INPUTS: Priority = 2;
+
+/// The words naming each group, beside it in the strip and on its row of the
+/// overflow menu.
+const ACROSS_NAME: &str = "across";
+const UP_NAME: &str = "up";
+const COLOUR_NAME: &str = "colour";
+const INPUTS_NAME: &str = "inputs";
+
+/// What each time-reading picker's hint names it where the graph places time
+/// on its points.
+const ACROSS_HINT: &str = "Horizontal axis";
+const UP_HINT: &str = "Vertical axis";
+const COLOUR_HINT: &str = "Point colouring";
+
+/// The strip choosing what the plot measures, its pickers' keys named where
+/// `focus` stands, ending in the toggle opening the plot's `legend`.
 fn strip(
     choice: &Choice,
-    scope: Scope,
-    measuring: bool,
-    legend: Option<Legend>,
-    palette: &Palette,
+    shown: Shown,
+    legend: Legend,
+    focus: &FocusHandle,
+    window: &Window,
     cx: &Context<ScatterPanel>,
-) -> Toolbar {
-    let unit = group("points", palette).child(choice.picker.dropdown());
-    let across = group("across", palette).child(choice.across_picker.clone());
-    let up = group("up", palette).child(choice.up_picker.clone());
-    let colour = group("colour", palette).child(choice.colour_picker.clone());
-    let toggles: Vec<_> = choice
-        .loaded
-        .inputs()
-        .map(|input| input_toggle(input, scope, cx))
-        .collect();
-    let inputs = group("inputs", palette).children(toggles);
-    Toolbar::new()
-        .child(unit)
-        .child(across)
-        .child(up)
-        .child(colour)
-        .child(inputs)
-        .when_some(legend, Toolbar::child)
-        .when(measuring, |bar| {
-            bar.trailing(busy("scatter-measuring", "measuring…", palette))
-        })
+) -> OneRow {
+    let Shown {
+        scope,
+        times,
+        measuring,
+    } = shown;
+    let points = (choice.picker).group(POINTS, focus, window, cx);
+    let note = |name: &str| Some(times_note(times, choice.timed, scope.unit(), name));
+    let opening = Axes::OPENING;
+    let across = PickerGroup {
+        name: ACROSS_NAME,
+        dropdown: &choice.across_picker,
+        action: &CycleAcross,
+        note: note(ACROSS_HINT),
+        set: choice.axes.x() != opening.x(),
+    };
+    let up = PickerGroup {
+        name: UP_NAME,
+        dropdown: &choice.up_picker,
+        action: &CycleUp,
+        note: note(UP_HINT),
+        set: choice.axes.y() != opening.y(),
+    };
+    let colour = PickerGroup {
+        name: COLOUR_NAME,
+        dropdown: &choice.colour_picker,
+        action: &CycleColouring,
+        note: note(COLOUR_HINT),
+        set: choice.colour != ColourBy::OPENING,
+    };
+    let grouped = |picker: PickerGroup, priority| picker.group(priority, focus, window, cx);
+    let switches = || {
+        let switches = (choice.loaded.inputs()).map(|input| input_switch(input, scope, cx));
+        ToggleGroup::any_of("scatter-inputs", INPUTS_NAME, switches).tooltip("Inputs measured")
+    };
+    let inputs_set = (choice.loaded.inputs()).any(|input| Toggle::of(scope, input) == Toggle::Off);
+    let inputs = ToolbarGroup::named(INPUTS, INPUTS_NAME, switches)
+        .or(switches().presentation(Presentation::Collapsed))
+        .overflow(
+            MenuItem::submenu(INPUTS_NAME, switches().submenu(window)),
+            inputs_set,
+        )
+        .parted();
+    let legend = legend.toolbar_group();
+    OneRow::new("scatter-controls")
+        .group(points)
+        .group(grouped(across, AXES))
+        .group(grouped(up, AXES))
+        .group(grouped(colour, COLOUR))
+        .group(inputs)
+        .when(measuring, |row| row.busy("scatter-measuring", "measuring…"))
+        .trailing(legend)
 }
 
 /// The band beneath the strip saying `text` of what the measure leaves out,
@@ -1753,24 +1814,21 @@ fn dropped_edges(scope: Scope, capabilities: &Capabilities) -> Option<String> {
 
 /// Turns the loaded `input`'s share in the measure in `scope` on and off, and
 /// says why where it cannot.
-fn input_toggle(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Button {
+fn input_switch(input: Input, scope: Scope, cx: &Context<ScatterPanel>) -> Switch {
     let name = input_name(input);
     let toggle = Toggle::of(scope, input);
     let many = unit_names(scope.unit()).many;
-    let hint = match toggle {
-        Toggle::On | Toggle::Off => format!("Include {name}"),
-        Toggle::Lone => "Disabled: only input".to_owned(),
-        Toggle::Ignored => format!("Disabled: no {many}"),
+    let segment = match toggle {
+        Toggle::On | Toggle::Off => ToggleSegment::new(name).tooltip(format!("Include {name}")),
+        Toggle::Lone => ToggleSegment::new(name).unavailable("Disabled: only input"),
+        Toggle::Ignored => ToggleSegment::new(name).unavailable(format!("Disabled: no {many}")),
     };
-    Button::new(
-        ("scatter-input", input as usize),
-        cx.listener(move |view, _: &ClickEvent, _, cx| view.toggle_input(input, cx)),
+    let view = cx.entity();
+    Switch::new(
+        segment,
+        matches!(toggle, Toggle::On | Toggle::Lone),
+        move |_, _, cx| view.update(cx, |view, cx| view.toggle_input(input, cx)),
     )
-    .label(name)
-    .selected(matches!(toggle, Toggle::On | Toggle::Lone))
-    .disabled(matches!(toggle, Toggle::Lone | Toggle::Ignored))
-    .compact()
-    .tooltip(hint)
 }
 
 /// What the status says of the points of `plot` left unplotted, where any are.
@@ -1826,8 +1884,13 @@ fn sizing_name(sizing: Sizing) -> &'static str {
 }
 
 /// The legend of `plot`, open as `state` says: what each colour a mark is
-/// drawn in stands for, then what a mark's size stands for.
-fn legend(state: &Entity<LegendState>, plot: &Plot, palette: &Palette) -> Legend {
+/// drawn in stands for, then what a mark's size stands for; keying nothing
+/// until a plot is drawn.
+fn legend(state: &Entity<LegendState>, plot: Option<&Plot>, palette: &Palette) -> Legend {
+    let legend = Legend::new("scatter-legend", state);
+    let Some(plot) = plot else {
+        return legend;
+    };
     let hues = plot.legend.iter().map(|(name, hue)| {
         let fill = Rgba {
             a: SWATCH_ALPHA,
@@ -1839,7 +1902,7 @@ fn legend(state: &Entity<LegendState>, plot: &Plot, palette: &Palette) -> Legend
     // Inked apart from every hue, so the key reads as one of size, not colour.
     let size = Swatch::Sizes(palette.colors.text_muted);
     let size = LegendEntry::new(size, measure).tooltip("Mark size");
-    Legend::new("scatter-legend", state).entries(hues.chain([size]))
+    legend.entries(hues.chain([size]))
 }
 
 /// How to leave a zoom: by the gesture, or by the keys that show the whole

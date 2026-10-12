@@ -6,6 +6,7 @@ use crate::timing::{Ran, Slowest, Timed};
 use bviz_bazel_flags::PROFILE_PRIMARY_OUTPUT;
 use bviz_graph_layout::Id;
 use bviz_invocation::{Share, Spent};
+use bviz_label::names::RepoNames;
 
 /// `count` actions, in words.
 fn actions(count: u32) -> String {
@@ -135,24 +136,37 @@ impl Slow {
 
     /// How long the action took and where it ran, and where the graph does
     /// not hold it, what holds it in its place, if anything.
-    pub(super) fn detail(&self) -> String {
+    pub(super) fn detail(&self, names: &RepoNames) -> String {
+        self.described(names).0
+    }
+
+    /// [`Self::detail`], with the line naming an owner it shows shorter than
+    /// it is written as written, where it does.
+    fn described(&self, names: &RepoNames) -> (String, Option<String>) {
         let ran = Ran::On(self.timing.runner).label();
         let took = lasted(self.timing.wall);
         match &self.shown {
-            Shown::Action(_) => format!("{took} · {ran}"),
-            Shown::Owner { owner, .. } => format!("{took} · {ran} · {NOT_DRAWN} {owner}"),
-            Shown::Off => format!("{took} · {ran} · {OFF_GRAPH}"),
+            Shown::Action(_) => (format!("{took} · {ran}"), None),
+            Shown::Owner { owner, .. } => {
+                let (owner, written) = names.shown_with_written(owner);
+                (format!("{took} · {ran} · {NOT_DRAWN} {owner}"), written)
+            }
+            Shown::Off => (format!("{took} · {ran} · {OFF_GRAPH}"), None),
         }
     }
 
     /// The row's hover: what the action is, `mnemonic` saying of what kind,
     /// over its detail.
-    pub(super) fn hover(&self, mnemonic: Option<&str>) -> String {
+    pub(super) fn hover(&self, mnemonic: Option<&str>, names: &RepoNames) -> String {
         let named = match mnemonic {
             Some(mnemonic) => format!("{mnemonic} writing {}", self.primary_output),
             None => self.primary_output.clone(),
         };
-        format!("{named}\n{}", self.detail())
+        let (detail, written) = self.described(names);
+        match written {
+            Some(written) => format!("{named}\n{detail}\n{written}"),
+            None => format!("{named}\n{detail}"),
+        }
     }
 }
 
@@ -294,9 +308,12 @@ mod tests {
             timing: timing(12_300, Runner::RemoteCacheHit),
             shown: Shown::Action(Id(3)),
         };
-        assert_eq!(held.detail(), "12.3s · remote cache hit");
         assert_eq!(
-            held.hover(Some("CppCompile")),
+            held.detail(&RepoNames::default()),
+            "12.3s · remote cache hit"
+        );
+        assert_eq!(
+            held.hover(Some("CppCompile"), &RepoNames::default()),
             "CppCompile writing bazel-out/bin/app/app.o\n12.3s · remote cache hit"
         );
         let in_owner = Slow {
@@ -307,20 +324,41 @@ mod tests {
             ..held.clone()
         };
         assert_eq!(
-            in_owner.detail(),
-            "12.3s · remote cache hit · not drawn · owner //app:app"
+            in_owner.detail(&RepoNames::default()),
+            "12.3s · remote cache hit · not drawn · owner //app"
         );
         let elsewhere = Slow {
             shown: Shown::Off,
             ..held
         };
         assert_eq!(
-            elsewhere.detail(),
+            elsewhere.detail(&RepoNames::default()),
             "12.3s · remote cache hit · not in this graph"
         );
         assert_eq!(
-            elsewhere.hover(None),
+            elsewhere.hover(None, &RepoNames::default()),
             "bazel-out/bin/app/app.o\n12.3s · remote cache hit · not in this graph"
+        );
+    }
+
+    /// An owner shown shorter than it is written is named as written too.
+    #[test]
+    fn a_slow_action_s_hover_names_an_owner_shown_shorter_as_written() {
+        let owner = "@@llvm++llvm+llvm-project//llvm:Support";
+        let names = RepoNames::of_labels([owner].into_iter());
+        let slow = Slow {
+            primary_output: "bazel-out/bin/llvm/Support.o".to_owned(),
+            timing: timing(12_300, Runner::RemoteCacheHit),
+            shown: Shown::Owner {
+                node: Id(2),
+                owner: owner.to_owned(),
+            },
+        };
+        assert_eq!(
+            slow.hover(None, &names),
+            "bazel-out/bin/llvm/Support.o\n\
+             12.3s · remote cache hit · not drawn · owner @llvm-project//llvm:Support\n\
+             written @@llvm++llvm+llvm-project//llvm:Support"
         );
     }
 }

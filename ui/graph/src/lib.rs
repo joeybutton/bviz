@@ -29,6 +29,7 @@ use gpui::{
 use std::time::{Duration, Instant};
 
 mod actions;
+mod box_menu;
 mod boxes;
 mod build;
 mod camera;
@@ -49,7 +50,6 @@ mod hover;
 mod hue;
 mod jump;
 mod legend;
-mod menu;
 mod missing;
 mod mode;
 mod model;
@@ -98,10 +98,20 @@ use spatial::{Indexed, SpatialMemo};
 actions!(
     bviz_graph,
     [
-        /// Toggle neighbor highlighting
+        /// Toggle neighbour highlighting
         ToggleNeighborhood,
         /// Toggle transitive reduction
         ToggleReduce,
+        /// Toggle map layout
+        ToggleMap,
+        /// Cycle colouring
+        CycleColouring,
+        /// Toggle critical path
+        ToggleCriticalPath,
+        /// Toggle build outcomes
+        ToggleOutcomes,
+        /// Toggle action timing
+        ToggleTiming,
         /// Dismiss card, selection or paths
         Dismiss,
         /// Go back
@@ -110,6 +120,8 @@ actions!(
         JumpForward,
         /// Show whole graph
         ShowWholeGraph,
+        /// Open box menu
+        OpenBoxMenu,
     ]
 );
 
@@ -149,8 +161,15 @@ fn bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
+        KeyBinding::new("m", ToggleMap, unless_typing),
+        KeyBinding::new("c", CycleColouring, unless_typing),
+        KeyBinding::new("p", ToggleCriticalPath, unless_typing),
+        KeyBinding::new("o", ToggleOutcomes, unless_typing),
+        KeyBinding::new("t", ToggleTiming, unless_typing),
         KeyBinding::new("escape", Dismiss, unless_typing),
         KeyBinding::new("0", ShowWholeGraph, unless_typing),
+        KeyBinding::new("shift-f10", OpenBoxMenu, unless_typing),
+        KeyBinding::new("menu", OpenBoxMenu, unless_typing),
         KeyBinding::new("enter", reveal::Accept, unless_typing),
         KeyBinding::new("alt-left", JumpBack, unless_typing),
         KeyBinding::new("alt-right", JumpForward, unless_typing),
@@ -164,6 +183,10 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("tab", jump::NextScope, jumping),
         KeyBinding::new("shift-tab", jump::PreviousScope, jumping),
         KeyBinding::new("0", scatter::ShowWholePlot, scatter_canvas),
+        KeyBinding::new("u", unit_picker::CyclePoints, scatter_canvas),
+        KeyBinding::new("x", scatter::CycleAcross, scatter_canvas),
+        KeyBinding::new("y", scatter::CycleUp, scatter_canvas),
+        KeyBinding::new("c", CycleColouring, scatter_canvas),
         KeyBinding::new("0", exclusive::ShowWholeBuild, exclusive_canvas),
         KeyBinding::new("backspace", exclusive::FocusUp, exclusive_canvas),
         KeyBinding::new("left", exclusive::SelectPrevious, exclusive_canvas),
@@ -173,6 +196,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
         KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
         KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
+        KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
         KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),
@@ -295,9 +319,9 @@ pub struct GraphPanel {
     emphasis: Emphasis,
     morph: Morph,
     mode: LayoutMode,
-    mode_picker: Entity<Dropdown>,
+    layout_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
-    _mode_choices: Subscription,
+    _layout_choices: Subscription,
     colouring: Colouring,
     colour_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`colour::set`].
@@ -332,13 +356,9 @@ pub struct GraphPanel {
     hover_marking: MarkingMemo,
     spatial: SpatialMemo,
     /// The box whose related nodes stay marked, and how far that marking reaches;
-    /// set by a secondary click and offered by the toolbar's relation picker.
+    /// set by a secondary click, which puts up the box's menu.
     selection: Selection,
-    /// Outlives the stretches where the strip leaves it out, so the option it
-    /// stands on is still the one chosen when the next selection brings it back.
-    relation_picker: Entity<Dropdown>,
-    /// Carries the picker's selections into [`GraphPanel::set_relation`].
-    _relation_choices: Subscription,
+    box_menu: Option<box_menu::BoxMenu>,
     /// Whether hovering a box marks its neighborhood; off until the `h` key or
     /// the toolbar toggle turns it on.
     neighborhood_enabled: bool,
@@ -406,8 +426,9 @@ impl GraphPanel {
     }
 
     fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
         let mode = LayoutMode::default();
-        let mode_picker = cx.new(|cx| {
+        let layout_picker = cx.new(|cx| {
             Dropdown::new(
                 "layout-mode",
                 LayoutMode::ALL.map(LayoutMode::label),
@@ -415,10 +436,11 @@ impl GraphPanel {
                 cx,
             )
             .tooltip("Graph layout")
+            .keys_for(&ToggleMap, &focus_handle)
         });
         // The picker notifies on every repaint it makes, and only a selection
         // should move the view off its layout.
-        let choices = cx.subscribe(&mode_picker, |view, _, event, cx| {
+        let layout_choices = cx.subscribe(&layout_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
             if let Some(mode) = LayoutMode::at(*index) {
                 view.set_mode(mode, cx);
@@ -434,7 +456,8 @@ impl GraphPanel {
                 colouring.index(),
                 cx,
             )
-            .tooltip(hint);
+            .tooltip(hint)
+            .keys_for(&CycleColouring, &focus_handle);
             colour::offer(&mut picker, offered, cx);
             picker
         });
@@ -444,24 +467,8 @@ impl GraphPanel {
                 colour::set(view, colouring, cx);
             }
         });
-        let selection = Selection::none();
-        let relation_picker = cx.new(|cx| {
-            Dropdown::new(
-                "selection-relation",
-                Relation::ALL.map(Relation::label),
-                selection.relation().index(),
-                cx,
-            )
-            .tooltip("Marked with selection")
-        });
-        let relations = cx.subscribe(&relation_picker, |view, _, event, cx| {
-            let DropdownEvent::Changed(index) = event;
-            if let Some(relation) = Relation::at(*index) {
-                view.set_relation(relation, cx);
-            }
-        });
         let boxes = cx.new(|cx| {
-            MultiSelect::new("graph-boxes", "boxes", Vec::new(), cx).tooltip("Box types drawn")
+            MultiSelect::new("graph-boxes", boxes::NAME, Vec::new(), cx).tooltip("Box types drawn")
         });
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
@@ -480,6 +487,7 @@ impl GraphPanel {
             draw: |view, palette, window, cx| view.draw_overlays(palette, window, cx),
         });
         let chrome_follows = cx.observe_self(|view, cx| {
+            mode::sync(view, cx);
             view.toolbar.update(cx, |_, cx| cx.notify());
             view.overlays.update(cx, |_, cx| cx.notify());
             view.box_card.restate(cx);
@@ -510,7 +518,6 @@ impl GraphPanel {
             }
         });
         let derived = Derived::new();
-        let focus_handle = cx.focus_handle();
         let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         let (panel, filter) = (cx.entity(), derived.filter().clone());
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
@@ -524,8 +531,8 @@ impl GraphPanel {
             emphasis: Emphasis::none(),
             morph: Morph::none(),
             mode,
-            mode_picker,
-            _mode_choices: choices,
+            layout_picker,
+            _layout_choices: layout_choices,
             colouring,
             colour_picker,
             _colour_choices: colour_choices,
@@ -544,11 +551,10 @@ impl GraphPanel {
             box_card: hover::BoxCard::new(cx),
             hover_marking: MarkingMemo::default(),
             spatial: SpatialMemo::default(),
-            selection,
-            relation_picker,
-            _relation_choices: relations,
-            neighborhood_enabled: false,
-            critical_path_enabled: true,
+            selection: Selection::none(),
+            box_menu: None,
+            neighborhood_enabled: NEIGHBOURHOOD_AT_REST,
+            critical_path_enabled: CRITICAL_PATH_AT_REST,
             missing: missing::Missing::new(),
             pins: pins::Pins::new(),
             reveal: reveal::Reveal::Idle,
@@ -574,6 +580,7 @@ impl GraphPanel {
     /// Draws the graph the document holds, once it is read, and offers the box
     /// classes it carries.
     fn take_up_source(&mut self, cx: &mut Context<Self>) {
+        box_menu::close(self, cx);
         derive::opened(self, cx);
         boxes::adopt(self, cx);
     }
@@ -688,6 +695,7 @@ impl GraphPanel {
             .child(cached_layer(self.overlays.clone()))
             .child(cached_layer(self.box_card.layer()))
             .children(chips::menu(self, window))
+            .children(box_menu::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
             // installs them for the gesture that press begins.
@@ -709,8 +717,15 @@ impl GraphPanel {
             .into_any_element()
     }
 
-    /// The key to the view drawn, placed in the toolbar.
-    fn legend(
+    /// The key to the view drawn, placed in the toolbar, blank where nothing
+    /// drawn is keyed.
+    fn legend(&mut self, palette: &Palette, cx: &Context<Self>) -> bviz_ui_components::Legend {
+        self.keyed(palette, cx)
+            .unwrap_or_else(|| legend::blank(&self.legend_state))
+    }
+
+    /// The key to the view drawn, where it keys anything.
+    fn keyed(
         &mut self,
         palette: &Palette,
         cx: &Context<Self>,
@@ -754,30 +769,10 @@ impl GraphPanel {
         window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let legend = self.legend(palette, cx);
-        let traced = self
-            .model
-            .read(cx)
-            .loaded()
-            .is_some_and(|loaded| loaded.critical().any());
         let controls = Controls {
-            mode: self.mode,
-            chips: chips::bar(self, palette, window, cx),
-            picker: self.mode_picker.clone(),
-            boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
-            relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
-            pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
-            why_controls: why::controls(self, cx).map(IntoElement::into_any_element),
-            colour_picker: self.colour_picker.clone(),
-            report_control: report::control(self, cx).map(IntoElement::into_any_element),
-            timecard_control: timecard::control(self, cx).map(IntoElement::into_any_element),
-            neighborhood_enabled: self.neighborhood_enabled,
-            critical_path: traced.then_some(self.critical_path_enabled),
-            reduced: self.derived.reduced(),
-            relaying: self.derived.deriving(),
-            legend,
+            legend: self.legend(palette, cx),
         };
-        toolbar::toolbar(controls, palette, &self.focus_handle, cx).into_any_element()
+        toolbar::toolbar(self, controls, palette, window, cx).into_any_element()
     }
 
     fn draw_overlays(
@@ -825,8 +820,6 @@ impl GraphPanel {
             return false;
         }
         self.mode = mode;
-        self.mode_picker
-            .update(cx, |picker, cx| picker.set_selected(mode.index(), cx));
         self.hovered = None;
         self.box_card.forget(cx);
         self.emphasis.clear();
@@ -866,11 +859,22 @@ impl GraphPanel {
         self.invalidate_canvas_only(cx);
     }
 
-    fn on_secondary_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_secondary_down(
+        &mut self,
+        e: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         jump::dismiss(self, cx);
-        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
-            CanvasIntent::Select => {
-                select_box_at(self, e.position, cx);
+        let hit = self.box_id_at(e.position, cx);
+        GESTURES.dispatch(Pointer::press(e), |intent| match (intent, hit) {
+            (CanvasIntent::BoxMenu, Some(node)) => {
+                box_menu::open(self, node, e.position, window, cx);
+                true
+            }
+            (CanvasIntent::Deselect, None) => {
+                self.selection.clear();
+                self.invalidate_canvas(cx);
                 true
             }
             _ => false,
@@ -1056,22 +1060,26 @@ impl GraphPanel {
         self.invalidate_canvas(cx);
     }
 
+    /// Whether the invocation's critical path lands on the graph, which is
+    /// where its halo has anything to draw.
+    fn traced(&self, cx: &App) -> bool {
+        self.model
+            .read(cx)
+            .loaded()
+            .is_some_and(|loaded| loaded.critical().any())
+    }
+
     fn toggle_critical_path(&mut self, cx: &mut Context<Self>) {
-        self.critical_path_enabled = !self.critical_path_enabled;
-        self.invalidate_canvas(cx);
+        if self.traced(cx) {
+            self.critical_path_enabled = !self.critical_path_enabled;
+            self.invalidate_canvas(cx);
+        }
     }
 
     /// Widens or narrows what the selected box marks.
     fn set_relation(&mut self, relation: Relation, cx: &mut Context<Self>) {
         self.selection.set_relation(relation);
         self.invalidate_canvas(cx);
-    }
-
-    fn toggle_reduce(&mut self, cx: &mut Context<Self>) {
-        if !self.mode.honors_reduce() || self.derived.reduced().is_none() {
-            return;
-        }
-        derive::toggle_reduce(self, cx);
     }
 }
 
@@ -1152,7 +1160,16 @@ impl Render for GraphPanel {
             .on_action(
                 cx.listener(|view, _: &ToggleNeighborhood, _, cx| view.toggle_neighborhood(cx)),
             )
-            .on_action(cx.listener(|view, _: &ToggleReduce, _, cx| view.toggle_reduce(cx)))
+            .on_action(
+                cx.listener(|view, _: &ToggleReduce, _, cx| mode::toggle_reduction(view, cx)),
+            )
+            .on_action(cx.listener(|view, _: &ToggleMap, _, cx| mode::toggle_map(view, cx)))
+            .on_action(cx.listener(|view, _: &CycleColouring, _, cx| colour::cycle(view, cx)))
+            .on_action(
+                cx.listener(|view, _: &ToggleCriticalPath, _, cx| view.toggle_critical_path(cx)),
+            )
+            .on_action(cx.listener(|view, _: &ToggleOutcomes, _, cx| report::toggle(view, cx)))
+            .on_action(cx.listener(|view, _: &ToggleTiming, _, cx| timecard::toggle(view, cx)))
             .on_action(cx.listener(|view, _: &Dismiss, _, cx| view.dismiss(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
@@ -1164,6 +1181,9 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
             .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
+            .on_action(cx.listener(|view, _: &OpenBoxMenu, window, cx| {
+                box_menu::open_selected(view, window, cx)
+            }))
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend_state
                     .update(cx, |legend, cx| legend.show(window, cx));
@@ -1278,39 +1298,18 @@ impl Render for GraphCanvas {
     }
 }
 
-/// What the toolbar's controls show.
+/// The toolbar's parts that take more to build than a shared borrow of the
+/// panel: the panel itself mutably.
 struct Controls {
-    mode: LayoutMode,
-    /// The query bar.
-    chips: AnyElement,
-    picker: Entity<Dropdown>,
-    /// The boxes menu, offered only where the loaded graph carries a box class.
-    boxes: Option<Entity<MultiSelect>>,
-    /// The picker naming what the selected box marks, offered only while a box
-    /// is selected: with none there is no marking for it to widen or narrow.
-    relation_picker: Option<Entity<Dropdown>>,
-    /// The override offered on the selected box, which stands beside that
-    /// picker.
-    pin_control: Option<AnyElement>,
-    /// The questions asked of the selected box, which stand beside the pin.
-    why_controls: Option<AnyElement>,
-    /// Chooses what the boxes' fills say.
-    colour_picker: Entity<Dropdown>,
-    /// Puts the card reading what the build reported up and away, offered
-    /// where the build reported anything.
-    report_control: Option<AnyElement>,
-    /// Puts the card saying where the profile's action time went up and
-    /// away, offered where a profile places time on the graph.
-    timecard_control: Option<AnyElement>,
-    neighborhood_enabled: bool,
-    /// Whether the critical path's halo is drawn, offered only where a path
-    /// lands on the graph.
-    critical_path: Option<bool>,
-    /// `None` where the drawing offers no choice of edge set.
-    reduced: Option<bool>,
-    relaying: bool,
-    legend: Option<bviz_ui_components::Legend>,
+    legend: bviz_ui_components::Legend,
 }
+
+/// Whether a freshly opened graph marks the neighbourhood of the box under
+/// the pointer.
+const NEIGHBOURHOOD_AT_REST: bool = false;
+
+/// Whether a freshly opened graph haloes its critical path, where it has one.
+const CRITICAL_PATH_AT_REST: bool = true;
 
 /// The box a pointer at `pos` (window px) resolves to, which every gesture that
 /// names a box — the hover that marks a neighborhood, the click that opens or
@@ -1370,27 +1369,6 @@ fn click_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<Grap
     view.box_card.forget(cx);
     derive::toggle_expansion(view, id, cx);
     view.emphasis.toggled(id);
-    view.invalidate_canvas(cx);
-}
-
-/// Selects the box under `pos` (window px), or drops the selection where `pos`
-/// lands on no box or off the canvas. Selecting the already-selected box drops it
-/// too, so the same gesture puts the marking away.
-fn select_box_at(view: &mut GraphPanel, pos: Point<Pixels>, cx: &mut Context<GraphPanel>) {
-    let vp = view.framing.viewport();
-    let camera = view.camera();
-    let morph = view.morph_frame();
-    let hit = view
-        .drawn()
-        .filter(|_| vp.contains(&pos))
-        .and_then(|drawn| {
-            let (_, g) = view.spatial.indexed(&drawn, camera.zoom, cx)?;
-            box_at(&view.titles, &g, morph.as_ref(), vp, camera, pos).map(|b| b.id)
-        });
-    match hit {
-        Some(id) => view.selection.toggle(id),
-        None => view.selection.clear(),
-    }
     view.invalidate_canvas(cx);
 }
 
@@ -1546,9 +1524,31 @@ mod tests {
     fn the_panels_letters_stand_down_in_any_text_field() {
         assert!(is(dispatched("h", IN_PANEL), ToggleNeighborhood));
         assert!(is(dispatched("r", IN_PANEL), ToggleReduce));
+        assert!(is(dispatched("p", IN_PANEL), ToggleCriticalPath));
+        assert!(is(dispatched("o", IN_PANEL), ToggleOutcomes));
+        assert!(is(dispatched("t", IN_PANEL), ToggleTiming));
+        assert!(is(dispatched("m", IN_PANEL), ToggleMap));
+        assert!(is(dispatched("c", IN_PANEL), CycleColouring));
         for field in [IN_CHIP_FIELD, IN_FIELD] {
-            assert!(dispatched("h", field).is_none());
-            assert!(dispatched("r", field).is_none());
+            for letter in ["h", "r", "p", "o", "t", "m", "c"] {
+                assert!(dispatched(letter, field).is_none(), "{letter}");
+            }
+        }
+    }
+
+    /// The keys opening a context menu open the selected chip's on the chips,
+    /// the selected box's elsewhere, and leave a text field's own to it.
+    #[test]
+    fn the_menu_keys_open_the_menu_of_what_is_selected_outside_a_text_field() {
+        for keys in ["shift-f10", "menu"] {
+            assert!(is(dispatched(keys, IN_PANEL), OpenBoxMenu), "{keys}");
+            assert!(
+                is(dispatched(keys, IN_CHIPS), chips::OpenChipMenu),
+                "{keys}"
+            );
+            for field in [IN_FIELD, IN_CHIP_FIELD, IN_PALETTE] {
+                assert!(dispatched(keys, field).is_none(), "{keys}");
+            }
         }
     }
 
@@ -1762,6 +1762,21 @@ mod tests {
         ));
         assert!(dispatched("secondary-z", IN_PANEL).is_none());
         assert!(dispatched("secondary-shift-c", IN_FIELD).is_none());
+    }
+
+    /// No keystroke is bound twice under one predicate, where the later
+    /// binding would silently take the key from the earlier.
+    #[test]
+    fn no_key_is_bound_twice_in_one_context() {
+        let mut seen = std::collections::HashSet::new();
+        for binding in bindings() {
+            let keys: Vec<String> = binding.keystrokes().iter().map(|k| k.to_string()).collect();
+            let predicate = binding.predicate().map(|p| p.to_string());
+            assert!(
+                seen.insert((keys.clone(), predicate.clone())),
+                "{keys:?} bound twice under {predicate:?}"
+            );
+        }
     }
 
     /// Each key reaching the query bar from the panel and from within the bar

@@ -5,11 +5,12 @@ use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
+use crate::point::{point_label, written_name};
 use crate::rules;
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
-use bviz_ui_components::{Button, TruncatingLabel};
+use bviz_ui_components::{Button, LabelLine, TruncatingLabel};
 use bviz_ui_workspace::PanelEvent;
 use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
 
@@ -304,7 +305,9 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
         return None;
     };
     let loaded = view.model.read(cx).loaded()?;
-    let name = pins::name(&loaded.shared.names, &loaded.shared.facets, node);
+    let shared = &loaded.shared;
+    let name = point_label(node, shared);
+    let written = written_name(&shared.names, &shared.facets, shared.labels.repos(), node);
     Some(
         div()
             .w_full()
@@ -317,7 +320,7 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
             .bg(palette.container)
             .text_xs()
             .text_color(palette.label)
-            .child(TruncatingLabel::new("reveal-name", name))
+            .child(LabelLine::new(name, palette.colors.text_muted).hinted("reveal-name", written))
             .child(TruncatingLabel::new("reveal-reason", by.describe()))
             .child(
                 div()

@@ -1,10 +1,13 @@
 //! How a reader names the points of a measure, and what each one is.
 
 use crate::model::Shared;
+use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::facets::{ConfigRef, Tri};
 use bviz_graph_layout::metrics::Unit;
-use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::{Facets, Id, Kind};
+use bviz_graph_layout::select::labels::{carried_label, package_label};
+use bviz_graph_layout::{Facets, Id, Kind, Names};
+use bviz_label::shown::written_line;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// How a reader names one thing of a kind, and several.
@@ -58,11 +61,14 @@ pub(crate) fn kind_names(kind: Kind) -> KindNames {
 /// Pushes onto `lines` what the point `id`, of `kind`, is as a point of
 /// `unit`, a line at a time.
 pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &mut Vec<String>) {
-    let facets = &shared.facets;
-    let label = point_label(id, shared);
+    let (facets, repos) = (&shared.facets, shared.labels.repos());
+    let written = written_name(&shared.names, facets, repos, id);
+    let label = repos.names().show(&written).into_text();
+    let written = written_line(&written, &label);
     match unit {
         Unit::Action => {
             lines.push(format!("{} {label}", mnemonic(id, shared)));
+            lines.extend(written);
             let aspects = facets.aspects().values(id);
             let aspects = (!aspects.is_empty()).then(|| {
                 let aspects = aspects.iter().map(|&a| facets.strings().resolve(a));
@@ -79,30 +85,51 @@ pub(crate) fn identify(id: Id, kind: Kind, unit: Unit, shared: &Shared, lines: &
         }
         Unit::ConfiguredTarget => {
             lines.push(label);
+            lines.extend(written);
             lines.extend(configuration(id, shared));
         }
         Unit::Target => {
-            let repo = match facets.repo(id) {
-                Some(repo) => match shared.labels.repos().written(repo) {
-                    "" => MAIN_REPO,
-                    written => written,
-                },
+            let repo = facets.repo(id).map(|repo| repos.shown(repo));
+            let repo = match repo.as_deref() {
+                Some("") => MAIN_REPO,
+                Some(shown) => shown,
                 None => UNKNOWN_REPO,
             };
-            lines.extend([label, format!("{} · {repo}", kind_names(kind).one)]);
+            lines.push(label);
+            lines.extend(written);
+            lines.push(format!("{} · {repo}", kind_names(kind).one));
         }
     }
 }
 
-/// The label of the target the node `id` is or belongs to, where one is
-/// carried, and its name otherwise.
+/// How the node `id` is shown wherever a view names it, as [`written_name`]
+/// writes it.
 pub(crate) fn point_label(id: Id, shared: &Shared) -> String {
-    target_label(id, shared).unwrap_or_else(|| shared.names.resolve(id).to_owned())
+    shown_name(&shared.names, &shared.facets, shared.labels.repos(), id)
 }
 
-/// The label of the target the node `id` is or belongs to, where one is
-/// carried.
-pub(crate) fn target_label(id: Id, shared: &Shared) -> Option<String> {
+/// How a reader writes the node `id`: as the label of the target it is or
+/// belongs to, or as the path of the package box it is, each by the names
+/// `repos` writes repositories by; and by its node name where it is neither.
+pub(crate) fn written_name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> String {
+    let label = carried_label(names, facets, id).map(Cow::Borrowed);
+    match label.or_else(|| package_label(names, id).map(Cow::Owned)) {
+        Some(label) => repos.names().written_label(&label).into_owned(),
+        None => names.resolve(id).to_owned(),
+    }
+}
+
+/// How the node `id` is shown: [`written_name`] as `repos` shows it.
+pub(crate) fn shown_name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> String {
+    repos
+        .names()
+        .show(&written_name(names, facets, repos, id))
+        .into_text()
+}
+
+/// The label of the target the node `id` is or belongs to as a command line
+/// takes it, where one is carried.
+pub(crate) fn written_target_label(id: Id, shared: &Shared) -> Option<String> {
     let label = carried_label(&shared.names, &shared.facets, id)?;
     Some(shared.labels.written(label).into_owned())
 }

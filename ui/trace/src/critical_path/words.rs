@@ -5,6 +5,7 @@ use bviz_critical_path::{
     Coverage, CriticalPath, Fit, Lever, Modeled, NearlyCritical, Part, Phase, Ran, SpanSplit,
     SpawnRunner, Spawned, Step, StepModel, Work,
 };
+use bviz_label::names::RepoNames;
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ pub(crate) const AROUND_SPAWNS: &str = "around spawns";
 /// What a step's Waited cell shows where it waited no time.
 const NO_WAIT: &str = "—";
 /// The share of the profile's action spans under which so few match the
-/// action graph that the modeled build's tooltip warns of it.
+/// action graph that the modelled build's tooltip warns of it.
 const FEW_MATCHED: f64 = 0.5;
 
 pub(crate) fn part_name(part: Part) -> &'static str {
@@ -190,7 +191,7 @@ pub(crate) fn folded(names: &[&str]) -> String {
 /// What opens the line of levers.
 pub(crate) const LEVERS: &str = "Levers:";
 
-/// The most pulling a lever acting on `time` can shorten the modeled build
+/// The most pulling a lever acting on `time` can shorten the modelled build
 /// by, its `ceiling`, where that falls short of the time.
 pub(crate) fn lever_bound(ceiling: Option<Duration>, time: Duration) -> Option<Duration> {
     ceiling.filter(|&ceiling| ceiling < time)
@@ -319,12 +320,24 @@ pub(crate) fn part_account(part: Part, path: &CriticalPath) -> String {
 
 /// A step's tooltip: everything known of what it ran. `logged` says whether
 /// an execution log of the invocation was given.
-pub(crate) fn step_tip(step: &Step, logged: bool) -> String {
+pub(crate) fn step_tip(step: &Step, logged: bool, repos: &RepoNames) -> String {
     let mut lines = vec![step.name().to_owned()];
-    let known = [step.mnemonic(), step.target(), step.primary_output()];
-    lines.extend(known.into_iter().flatten().map(str::to_owned));
+    lines.extend(step.mnemonic().map(str::to_owned));
+    lines.extend(
+        step.target()
+            .into_iter()
+            .flat_map(|target| named(target, repos)),
+    );
+    lines.extend(step.primary_output().map(str::to_owned));
     lines.extend(work_note(step.work(), logged));
     lines.join("\n")
+}
+
+/// The lines a tooltip names `target`, a label as the profile prints it, in:
+/// as `repos` shows it, and as written where that reads otherwise.
+fn named(target: &str, repos: &RepoNames) -> impl Iterator<Item = String> {
+    let (shown, written) = repos.shown_with_written(target);
+    std::iter::once(shown).chain(written)
 }
 
 /// What a step's Could save cell shows: its ceiling, nothing where the
@@ -341,13 +354,13 @@ pub(crate) fn could_save_tip(step: &Step) -> Option<String> {
         ceiling,
     } = step.model()?;
     if modeled.is_zero() {
-        return Some("no action span · modeled as zero".to_owned());
+        return Some("no action span · modelled as zero".to_owned());
     }
     let (modeled, ceiling) = (duration(modeled), duration(ceiling));
     // A ceiling that reads the same as the duration shows the reader no bound.
     Some(match ceiling == modeled {
-        true => format!("modeled {modeled}"),
-        false => format!("modeled {modeled} · capped by another chain"),
+        true => format!("modelled {modeled}"),
+        false => format!("modelled {modeled} · capped by another chain"),
     })
 }
 
@@ -365,7 +378,7 @@ pub(crate) fn modeled_line(path: &CriticalPath, modeled: &Modeled) -> String {
 /// and where it holds too little of the build or the path to go by, what.
 pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
     let mut tip = format!(
-        "modeled build {} · path's actions {}\n\
+        "modelled build {} · path's actions {}\n\
          match: \"Could save\" holds\n\
          well below: scheduling held the build back\n\
          graph from aquery · times from profile · untimed as zero",
@@ -385,7 +398,7 @@ pub(crate) fn modeled_tip(path: &CriticalPath, modeled: &Modeled) -> String {
             modeled.spanned(),
         ));
     } else if unmodeled > 0 {
-        tip.push_str(&format!("\n{unmodeled} of {steps} steps unmodeled"));
+        tip.push_str(&format!("\n{unmodeled} of {steps} steps unmodelled"));
     }
     tip
 }
@@ -400,7 +413,7 @@ fn fraction_of(part: usize, whole: usize) -> f64 {
 
 /// The title of the list of a path's steps, beside that of the actions
 /// nearly critical.
-pub(crate) const STEPS_TITLE: &str = "Steps";
+pub(crate) const STEPS_TITLE: &str = "steps";
 
 /// The tooltip of the choice of the list of a path's steps.
 pub(crate) const STEPS_TIP: &str = "Critical path steps";
@@ -410,7 +423,7 @@ pub(crate) const NEARLY_CRITICAL_TIP: &str = "Nearly critical actions";
 
 /// The title of the list of actions nearly critical.
 pub(crate) fn nearly_critical_title(modeled: &Modeled) -> String {
-    format!("Nearly critical ({})", modeled.nearly_critical().len())
+    format!("nearly critical ({})", modeled.nearly_critical().len())
 }
 
 /// What stands in the list of actions nearly critical where it holds none.
@@ -418,14 +431,12 @@ pub(crate) const NO_NEARLY_CRITICAL: &str = "No action off the path can turn cri
 
 /// An action nearly critical's tooltip: everything known of it, and its
 /// slack.
-pub(crate) fn nearly_critical_tip(action: &NearlyCritical) -> String {
+pub(crate) fn nearly_critical_tip(action: &NearlyCritical, repos: &RepoNames) -> String {
     let mut lines = vec![action.description.clone()];
-    let known = [
-        action.mnemonic.as_deref(),
-        action.target.as_deref(),
-        Some(action.primary_output.as_str()),
-    ];
-    lines.extend(known.into_iter().flatten().map(str::to_owned));
+    lines.extend(action.mnemonic.clone());
+    let target = action.target.as_deref();
+    lines.extend(target.into_iter().flat_map(|target| named(target, repos)));
+    lines.push(action.primary_output.clone());
     lines.push(format!(
         "{} · slack {}",
         duration(action.duration),
@@ -612,9 +623,9 @@ pub(super) mod tests {
         assert_eq!(could_save(compile), "800µs");
         assert_eq!(
             could_save_tip(compile).as_deref(),
-            Some("modeled 2.00ms · capped by another chain")
+            Some("modelled 2.00ms · capped by another chain")
         );
-        assert_eq!(could_save_tip(link).as_deref(), Some("modeled 400µs"));
+        assert_eq!(could_save_tip(link).as_deref(), Some("modelled 400µs"));
         assert_eq!(could_save(written), "0µs");
         assert!(could_save_tip(written).is_some_and(|tip| tip.starts_with("no action span")));
         assert_eq!(could_save(checked), "");
@@ -631,10 +642,10 @@ pub(super) mod tests {
         );
         let tip = modeled_tip(&path, modeled);
         assert!(
-            tip.starts_with("modeled build 2.70ms · path's actions 2.40ms\n"),
+            tip.starts_with("modelled build 2.70ms · path's actions 2.40ms\n"),
             "{tip}"
         );
-        assert!(tip.ends_with("\n1 of 4 steps unmodeled"), "{tip}");
+        assert!(tip.ends_with("\n1 of 4 steps unmodelled"), "{tip}");
     }
 
     #[test]
@@ -651,9 +662,9 @@ pub(super) mod tests {
     fn an_action_nearly_critical_says_what_it_is_and_its_slack() {
         let path = modeled_path(&MODELED_OUTPUTS);
         let modeled = path.modeled().expect("modeled");
-        assert_eq!(nearly_critical_title(modeled), "Nearly critical (2)");
+        assert_eq!(nearly_critical_title(modeled), "nearly critical (2)");
         assert_eq!(
-            nearly_critical_tip(&modeled.nearly_critical()[1]),
+            nearly_critical_tip(&modeled.nearly_critical()[1], &RepoNames::default()),
             "Compiling b.c\nCppCompile\n//b\nbazel-out/b.o\n1.50ms · slack 800µs"
         );
     }
@@ -710,5 +721,22 @@ pub(super) mod tests {
         assert_eq!(waited(0, Duration::ZERO), "");
         assert_eq!(waited(1, Duration::ZERO), NO_WAIT);
         assert_eq!(waited(1, ms(6)), "6.00ms");
+    }
+
+    /// A target shown shorter than the profile prints it is named as
+    /// written too.
+    #[test]
+    fn a_target_shown_shorter_is_named_as_written_too() {
+        let target = "@@llvm++llvm+llvm-project//llvm:Support";
+        let repos = RepoNames::of_labels([target].into_iter());
+        assert_eq!(
+            named(target, &repos).collect::<Vec<_>>(),
+            [
+                "@llvm-project//llvm:Support",
+                "written @@llvm++llvm+llvm-project//llvm:Support"
+            ]
+        );
+        let plain = "//a:b";
+        assert_eq!(named(plain, &repos).collect::<Vec<_>>(), ["//a:b"]);
     }
 }

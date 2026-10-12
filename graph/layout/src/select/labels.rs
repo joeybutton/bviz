@@ -62,7 +62,12 @@ impl LabelIndex {
 
     /// The canonical label `label` as a reader writes it.
     pub fn written<'a>(&self, label: &'a str) -> Cow<'a, str> {
-        self.repos.written_label(label)
+        self.repos.names().written_label(label)
+    }
+
+    /// The canonical label `label` as it is shown.
+    pub fn shown(&self, label: &str) -> String {
+        self.repos.names().shown_label(label)
     }
 
     /// The names the graph's repositories are written by.

@@ -6,6 +6,8 @@ use crate::pan_bench::{self, Tally};
 use crate::status::Status;
 use bviz_graph_layout::Id;
 use bviz_graph_layout::layout::{CARET_RESERVE, LABEL_BAND};
+use bviz_graph_layout::shown::fit_label;
+use bviz_ui_components::Inked;
 use gpui::{
     App, BorderStyle, Bounds, Hsla, PathBuilder, Pixels, Point, Rgba, TextAlign, Window, point, px,
     quad, size,
@@ -170,6 +172,30 @@ pub(crate) fn title_at(titles: &[TitleTarget], pos: Point<Pixels>) -> Option<Id>
     titles.iter().find(|t| t.plate.contains(&pos)).map(|t| t.id)
 }
 
+/// `text`, a caption, fitted to `avail` as [`fit_label`] fits it and shaped in
+/// `font` at `size`, set in the first of `inks` and where a label's
+/// repository and package are, in the second.
+fn shape_fitted(
+    text: &str,
+    avail: f32,
+    font: gpui::Font,
+    size: Pixels,
+    [ink, muted]: [Hsla; 2],
+    window: &mut Window,
+) -> gpui::ShapedLine {
+    let mut width = |text: &str| {
+        let line = bviz_ui_assets::shape_line(window, text.to_owned(), font.clone(), size, ink);
+        f32::from(line.width())
+    };
+    let fitted = fit_label(text, avail, &mut width);
+    let inked = Inked {
+        text: fitted.text(),
+        muted: fitted.muted(),
+    };
+    let runs = inked.runs(fitted.text().len(), ink, muted);
+    bviz_ui_assets::shape_runs(window, fitted.text().to_owned(), font, size, &runs)
+}
+
 /// What a painted label leaves for the passes after it.
 pub(super) struct PaintedLabel {
     pub(super) title: Option<TitleTarget>,
@@ -202,12 +228,13 @@ pub(super) fn paint_box_label(
     let base = bviz_ui_assets::text_metrics(window).font;
     let font = if b.compound { base.bold() } else { base };
     pan_bench::tally(Tally::ShapedLabels, 1);
-    let line = bviz_ui_components::shape_truncated(
+    let muted = faded(bviz_ui_theme::muted_label_on(b.fill).into(), b.alpha);
+    let line = shape_fitted(
         b.label,
         placement.avail,
         font,
         px(fs),
-        label_color.into(),
+        [label_color.into(), muted.into()],
         window,
     );
     let plate = placement.plate(rect, f32::from(line.width()));

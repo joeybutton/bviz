@@ -52,6 +52,29 @@ pub fn shape_line(
         .shape_line(text, font_size, &[run], None)
 }
 
+/// Shape `text` in a single font and size as runs of colour, each a byte
+/// length of it and the colour that stretch is set in, the lengths summing to
+/// the length of `text`.
+pub fn shape_runs(
+    window: &mut Window,
+    text: impl Into<SharedString>,
+    font: Font,
+    font_size: Pixels,
+    runs: &[(usize, Hsla)],
+) -> ShapedLine {
+    let text = text.into();
+    let runs: Vec<TextRun> = runs
+        .iter()
+        .map(|&(len, color)| TextRun {
+            len,
+            ..plain_run("", font.clone(), color)
+        })
+        .collect();
+    window
+        .text_system()
+        .shape_line(text, font_size, &runs, None)
+}
+
 /// Shape `text` as [`shape_line`] does, one line per row of it: each
 /// `\n`-separated line broken into rows at most `wrap_width` wide where
 /// [`wrap::rows`] breaks it.
@@ -120,6 +143,8 @@ pub fn load_fonts(cx: &App) {
 fn icon_svg(file: &str) -> Option<&'static [u8]> {
     Some(match file {
         "arrow-down.svg" => embedded!("arrow-down.svg"),
+        "arrow-left.svg" => embedded!("arrow-left.svg"),
+        "arrow-up.svg" => embedded!("arrow-up.svg"),
         "arrows-in.svg" => embedded!("arrows-in.svg"),
         "caret-double-down.svg" => embedded!("caret-double-down.svg"),
         "caret-double-up.svg" => embedded!("caret-double-up.svg"),
@@ -131,6 +156,7 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "circle-notch.svg" => embedded!("circle-notch.svg"),
         "circle.svg" => embedded!("circle.svg"),
         "dots-three-vertical.svg" => embedded!("dots-three-vertical.svg"),
+        "list-checks.svg" => embedded!("list-checks.svg"),
         "minus.svg" => embedded!("minus.svg"),
         "pause.svg" => embedded!("pause.svg"),
         "play.svg" => embedded!("play.svg"),
@@ -139,6 +165,8 @@ fn icon_svg(file: &str) -> Option<&'static [u8]> {
         "skip-back.svg" => embedded!("skip-back.svg"),
         "skip-forward.svg" => embedded!("skip-forward.svg"),
         "square.svg" => embedded!("square.svg"),
+        "swatches.svg" => embedded!("swatches.svg"),
+        "timer.svg" => embedded!("timer.svg"),
         "x.svg" => embedded!("x.svg"),
         _ => return None,
     })
@@ -160,5 +188,11 @@ impl AssetSource for Assets {
 
 /// A regular-weight Phosphor icon, tinted by the element's text color.
 pub fn icon(name: &str) -> Svg {
-    svg().path(format!("assets/regular/{name}.svg"))
+    svg().path(icon_path(name))
+}
+
+/// Where the asset source serves the regular-weight Phosphor icon `name`,
+/// for a canvas painting it with `Window::paint_svg`.
+pub fn icon_path(name: &str) -> SharedString {
+    format!("assets/regular/{name}.svg").into()
 }

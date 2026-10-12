@@ -933,6 +933,7 @@ name = "bviz_graph_layout"
 version = "0.1.0"
 dependencies = [
  "bviz_bazel_flags",
+ "bviz_label",
  "bviz_parallel",
  "fastrand 2.5.0",
  "fixedbitset",
@@ -950,6 +951,10 @@ dependencies = [
 
 [[package]]
 name = "bviz_invocation"
+version = "0.1.0"
+
+[[package]]
+name = "bviz_label"
 version = "0.1.0"
 
 [[package]]
@@ -1037,6 +1042,7 @@ name = "bviz_ui_components"
 version = "0.1.0"
 dependencies = [
  "bviz_invocation",
+ "bviz_label",
  "bviz_ui_assets",
  "bviz_ui_theme",
  "gpui",
@@ -1074,6 +1080,7 @@ dependencies = [
  "bviz_alloc",
  "bviz_execlog",
  "bviz_invocation",
+ "bviz_label",
  "bviz_ui_assets",
  "bviz_ui_components",
  "bviz_ui_execlog_args",
@@ -1098,6 +1105,7 @@ dependencies = [
  "bviz_bazel_flags",
  "bviz_graph_layout",
  "bviz_invocation",
+ "bviz_label",
  "bviz_parallel",
  "bviz_ui_assets",
  "bviz_ui_components",
@@ -1168,6 +1176,7 @@ dependencies = [
  "bviz_alloc",
  "bviz_critical_path",
  "bviz_invocation",
+ "bviz_label",
  "bviz_trace_layout",
  "bviz_trace_profile",
  "bviz_ui_assets",

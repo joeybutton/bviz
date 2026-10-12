@@ -7,6 +7,9 @@ use super::{
 use crate::duration::lasted;
 use crate::status::Status;
 use bviz_invocation::{Configurations, ConfiguredTarget, TestOutcome, TestStatus};
+use bviz_label::names::RepoNames;
+use bviz_label::shown::Parts;
+use std::borrow::Cow;
 
 /// `count` of a thing named `one`, or `many` where there is not one of it.
 fn counted(count: usize, one: &str, many: &str) -> String {
@@ -224,16 +227,37 @@ impl<'a> Name<'a> {
         }
     }
 
-    /// The label or path naming the thing.
-    fn subject(self) -> &'a str {
+    /// The label naming the thing as `names` shows it, or the path naming
+    /// it.
+    pub(super) fn subject(self, names: &RepoNames) -> Cow<'a, str> {
         match self {
-            Name::Owned { owner: subject, .. }
-            | Name::Writing {
-                primary_output: subject,
-                ..
+            Name::Owned { owner: label, .. } | Name::Label(label) => {
+                Cow::Owned(names.shown_label(label))
             }
-            | Name::Label(subject) => subject,
+            Name::Writing { primary_output, .. } => Cow::Borrowed(primary_output),
         }
+    }
+
+    /// [`Self::subject`], with the line naming a label it shows shorter than
+    /// a command line takes it as written, where it does.
+    fn subject_with_written(self, names: &RepoNames) -> (Cow<'a, str>, Option<String>) {
+        match self {
+            Name::Owned { owner: label, .. } | Name::Label(label) => {
+                let (shown, written) = names.shown_with_written(label);
+                (Cow::Owned(shown), written)
+            }
+            Name::Writing { primary_output, .. } => (Cow::Borrowed(primary_output), None),
+        }
+    }
+
+    /// How [`Self::subject`] is parted where it is cut short to fit: a
+    /// label as a label is, a path keeping its file name.
+    pub(super) fn parts(self, subject: &str) -> Parts {
+        match self {
+            Name::Owned { .. } | Name::Label(_) => Parts::of_label(subject),
+            Name::Writing { .. } => Some(Parts::of_path(subject)),
+        }
+        .unwrap_or_default()
     }
 }
 
@@ -277,11 +301,11 @@ impl Listed {
     /// What the card says of the node of the thing listed, in the words of
     /// its row. What the build said of the thing is left to the row, whose
     /// hover has the room for it.
-    fn sentence(&self) -> String {
+    fn sentence(&self, names: &RepoNames) -> String {
         let (name, account) = (self.name(), self.account());
         match name.lead() {
-            Some(lead) => format!("{lead} {} {account}", name.subject()),
-            None => format!("{} {account}", name.subject()),
+            Some(lead) => format!("{lead} {} {account}", name.subject(names)),
+            None => format!("{} {account}", name.subject(names)),
         }
     }
 
@@ -300,17 +324,24 @@ impl Row {
         self.listed.name().lead()
     }
 
-    /// The row's subject, followed where another row names its thing alike
-    /// by the configuration of its own, as `configurations` names it.
-    pub(super) fn subject(&self, configurations: &Configurations) -> String {
-        let subject = self.listed.name().subject();
-        match self.listed.configuration().filter(|_| self.alike) {
-            Some(checksum) => {
-                let configuration = configurations.name_or_checksum(checksum);
-                format!("{subject} ({configuration})")
-            }
-            None => subject.to_owned(),
-        }
+    /// What names the row's thing.
+    pub(super) fn name(&self) -> Name<'_> {
+        self.listed.name()
+    }
+
+    /// `subject`, the row's subject as a view shows it, followed where
+    /// another row names its thing alike by the configuration of its own, as
+    /// `configurations` names it.
+    pub(super) fn configured(&self, subject: &str, configurations: &Configurations) -> String {
+        let configuration = self.configuration(configurations).unwrap_or_default();
+        format!("{subject}{configuration}")
+    }
+
+    /// What follows the row's subject where another row names its thing
+    /// alike: the configuration of its own, as `configurations` names it.
+    pub(super) fn configuration(&self, configurations: &Configurations) -> Option<String> {
+        let checksum = self.listed.configuration().filter(|_| self.alike)?;
+        Some(format!(" ({})", configurations.name_or_checksum(checksum)))
     }
 
     /// The row's account of the thing listed, which says so where the graph
@@ -333,11 +364,16 @@ impl Row {
         }
     }
 
-    pub(super) fn hover(&self, configurations: &Configurations) -> String {
-        let subject = self.subject(configurations);
+    pub(super) fn hover(&self, configurations: &Configurations, names: &RepoNames) -> String {
+        let (subject, written) = self.listed.name().subject_with_written(names);
+        let subject = self.configured(&subject, configurations);
         let name = match self.lead() {
             Some(lead) => format!("{lead} {subject}"),
             None => subject,
+        };
+        let name = match written {
+            Some(written) => format!("{name}\n{written}"),
+            None => name,
         };
         hover(&name, &self.account(), self.listed.message())
     }
@@ -345,34 +381,41 @@ impl Row {
 
 impl Traced {
     /// What the cause says of the failure of `failed`.
-    fn words(&self, failed: ConfiguredTarget<&str>) -> String {
+    fn words(&self, failed: ConfiguredTarget<&str>, names: &RepoNames) -> String {
         match self {
             Traced::Action(action) => {
                 let (kind, exited) = (kind(&action.mnemonic), exited(action));
                 match action.owner.as_ref().map(ConfiguredTarget::borrowed) {
                     Some(owner) if owner == failed => format!("its {kind} action {exited}"),
-                    Some(owner) => format!("{} ({kind}) {exited}", owner.label()),
+                    Some(owner) => {
+                        format!("{} ({kind}) {exited}", names.shown_label(owner.label()))
+                    }
                     None => format!("the {kind} writing {} {exited}", action.primary_output),
                 }
             }
-            Traced::Target { label, error } => match error.trim().lines().next() {
-                Some(error) if label == failed.label() => error.to_owned(),
-                Some(error) => format!("{label} could not be loaded or analysed: {error}"),
-                None => format!("{label} could not be loaded or analysed"),
-            },
+            Traced::Target { label, error } => {
+                let shown = names.shown_label(label);
+                match error.trim().lines().next() {
+                    Some(error) if label == failed.label() => error.to_owned(),
+                    Some(error) => format!("{shown} could not be loaded or analysed: {error}"),
+                    None => format!("{shown} could not be loaded or analysed"),
+                }
+            }
         }
     }
 }
 
 impl Fate {
-    fn words(&self) -> String {
+    fn words(&self, names: &RepoNames) -> String {
         let target = self.target.borrowed();
-        let label = target.label();
+        let label = names.shown_label(target.label());
         let failed = |how: &str, causes: &Option<Causes>| match causes {
-            Some(Causes { named, more: 0 }) => format!("{label} {how}: {}", named.words(target)),
+            Some(Causes { named, more: 0 }) => {
+                format!("{label} {how}: {}", named.words(target, names))
+            }
             Some(Causes { named, more }) => format!(
                 "{label} {how}: {}, and {}",
-                named.words(target),
+                named.words(target, names),
                 counted(*more, "more cause", "more causes")
             ),
             None => format!("{label} {how}, and the build names no cause"),
@@ -389,10 +432,10 @@ impl Fate {
 }
 
 impl Said<'_> {
-    pub(super) fn words(&self) -> String {
+    pub(super) fn words(&self, names: &RepoNames) -> String {
         match self.saying {
-            Saying::RootCause(row) => row.listed.sentence(),
-            Saying::Target(fate) => fate.words(),
+            Saying::RootCause(row) => row.listed.sentence(names),
+            Saying::Target(fate) => fate.words(names),
         }
     }
 }
@@ -413,11 +456,11 @@ fn holds(status: Status) -> &'static str {
 
 impl Badged<'_> {
     /// What the card says of a box badged `status` for this.
-    pub(super) fn words(&self, status: Status) -> String {
+    pub(super) fn words(&self, status: Status, names: &RepoNames) -> String {
         let held = holds(status);
         match self {
-            Badged::Reported(said) => said.words(),
-            Badged::ReportedAndHeld(said) => format!("{}; {held}", said.words()),
+            Badged::Reported(said) => said.words(names),
+            Badged::ReportedAndHeld(said) => format!("{}; {held}", said.words(names)),
             Badged::Held => held.to_owned(),
         }
     }
@@ -523,16 +566,22 @@ mod tests {
             cause: None,
             of: Id(0),
         };
+        let names = RepoNames::of_labels(["@@llvm++llvm+llvm-project//llvm:llvm"].into_iter());
+        let llvm = Fate {
+            target: ConfiguredTarget::new("@@llvm++llvm+llvm-project//llvm:llvm".to_owned(), None),
+            ended: Ended::Built,
+        };
+        assert_eq!(llvm.words(&names), "@llvm-project//llvm built");
         assert_eq!(
-            Badged::Reported(said).words(Status::Succeeded),
-            "//gen:gen built"
+            Badged::Reported(said).words(Status::Succeeded, &RepoNames::default()),
+            "//gen built"
         );
         assert_eq!(
-            Badged::ReportedAndHeld(said).words(Status::RootCause),
-            "//gen:gen built; this box holds the root cause of a failure"
+            Badged::ReportedAndHeld(said).words(Status::RootCause, &RepoNames::default()),
+            "//gen built; this box holds the root cause of a failure"
         );
         assert_eq!(
-            Badged::Held.words(Status::Flaky),
+            Badged::Held.words(Status::Flaky, &RepoNames::default()),
             "this box holds a flaky test"
         );
     }

@@ -25,6 +25,7 @@ rust_library(
     ],
     deps = [
         "//bazel_flags",
+        "//label",
         "//util/parallel",
         "@bazel_query_proto//:bazel_query_rust_proto",
         "@crates//:fixedbitset",

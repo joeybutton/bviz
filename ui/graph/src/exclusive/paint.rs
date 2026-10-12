@@ -1,6 +1,7 @@
 //! Painting the icicle: each cell a box filled for what it holds and named
 //! where it is wide enough to read.
 
+use super::ancestry::{self, Spot};
 use super::icicle::{self, Cell, Holds, Parent, Run};
 use super::transition::{Placed, Transition};
 use super::{RootedBy, SEVERAL, WHOLE_BUILD, what_is_shared};
@@ -9,19 +10,23 @@ use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
 use crate::model::Shared;
 use crate::paint::UNMARKED_FADE;
-use crate::point::{configuration_readings, mnemonic, point_label, primary_output, unit_names};
+use crate::point::{
+    KindNames, configuration_readings, mnemonic, point_label, primary_output, unit_names,
+};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Dominators, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
+use bviz_graph_layout::shown::{ELLIPSIS, fit_label, name_start};
 use bviz_ui_assets::shape_line;
-use bviz_ui_components::{LabelBoxStyle, paint_labeled_box};
+use bviz_ui_components::{Inked, LabelBoxStyle, paint_labeled_box};
 use bviz_ui_theme::{label_on, mix, over};
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point,
-    px, quad, size,
+    App, BorderStyle, Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Rgba,
+    TransformationMatrix, Window, point, px, quad, size,
 };
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -113,16 +118,21 @@ pub(crate) struct Scene {
     /// The move to `top` from the focus before it, where it is under way.
     pub(crate) transition: Option<Transition>,
     pub(crate) shared: Shared,
-    /// The dominators the breadcrumb names above the cell on top, whose names
-    /// the cells' are told apart from.
-    pub(crate) above: Vec<u32>,
     /// The verdict of the filter the cells are faded by on each node, absent
     /// where none fades them.
     pub(crate) verdicts: Option<Arc<Verdicts>>,
     pub(crate) palette: Palette,
 }
 
-/// Paints the icicle of `scene` filling `bounds` as it stands at `now`.
+/// Paints the icicle of `scene` filling `bounds` as it stands at `now`, under
+/// the rows of the ancestors of the cell it is drawn from.
+///
+/// While the icicle moves between two cells, one over the other, it is drawn
+/// from as many rows down as stand over the cell it is drawn from at that
+/// moment of the move, and a cell it carries up past that row takes on the
+/// look of a row over it as it goes, so that each end of the move is drawn as
+/// at rest. The rows under the moving cells are those over the higher cell
+/// for the first half of the move and those over the lower for the second.
 pub(crate) fn paint_icicle(
     scene: &Scene,
     bounds: Bounds<Pixels>,
@@ -132,95 +142,249 @@ pub(crate) fn paint_icicle(
 ) {
     let row = row_height(window);
     let tree = &*scene.tree;
-    let placed = match &scene.transition {
-        None => Placed::still(icicle::lay_out(
-            tree,
-            scene.top,
-            bounds,
-            row,
-            MIN_CELL_WIDTH,
-        )),
-        Some(transition) => {
-            let lowered = transition.lowered(now);
-            transition.cells(tree, bounds, row, MIN_CELL_WIDTH, lowered)
-        }
-    };
-    let mask = ContentMask { bounds };
-    window.with_content_mask(Some(mask), |window| {
-        paint_cells(scene, &placed, window, cx);
+    let lowered = scene
+        .transition
+        .as_ref()
+        .map(|transition| transition.lowered(now));
+    let (rows, region, placed) = frame(
+        tree,
+        scene.top,
+        scene.transition.as_ref().zip(lowered),
+        bounds,
+        row,
+    );
+    let (above, _) = ancestry::lay_out(&rows, bounds, row);
+    let trail: Vec<u32> = above
+        .iter()
+        .filter_map(|spot| match spot {
+            Spot::Cell(cell) => cell.holds.node(),
+            Spot::Hidden { .. } => None,
+        })
+        .collect();
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        paint_above(scene, &above, &trail, window, cx);
+        paint_cells(scene, &placed, &trail, region.top(), row, window, cx);
     });
 }
 
-/// Paints `placed`, the cells of the icicle of `scene`.
-fn paint_cells(scene: &Scene, placed: &[Placed], window: &mut Window, cx: &mut App) {
-    let palette = &scene.palette;
-    let style = LabelBoxStyle {
+/// The rows over the icicle of `tree` drawn from `top` in `bounds`, a `row`
+/// tall each, where the icicle under them starts, and its cells: at rest, or
+/// `lowered` of the way through a move.
+fn frame(
+    tree: &impl icicle::Tree,
+    top: Holds,
+    moving: Option<(&Transition, f32)>,
+    bounds: Bounds<Pixels>,
+    row: Pixels,
+) -> (Vec<ancestry::Row>, Bounds<Pixels>, Vec<Placed>) {
+    match moving {
+        None => {
+            let rows = ancestry::rows(tree, top);
+            let under = ancestry::below(bounds, row * rows.len() as f32);
+            let cells = icicle::lay_out(tree, top, under, row, MIN_CELL_WIDTH);
+            (rows, under, Placed::still(cells))
+        }
+        Some((transition, lowered)) => {
+            let (higher, lower) = (
+                ancestry::rows(tree, transition.higher()),
+                ancestry::rows(tree, transition.lower()),
+            );
+            let (from, to) = (higher.len() as f32, lower.len() as f32);
+            let region = ancestry::below(bounds, row * (from + (to - from) * lowered));
+            let cells = transition.cells(tree, region, bounds, row, MIN_CELL_WIDTH, lowered);
+            let rows = if lowered < HALF_WAY { higher } else { lower };
+            (rows, region, cells)
+        }
+    }
+}
+
+/// How far through a move the rows over it turn from those over the higher
+/// cell to those over the lower.
+const HALF_WAY: f32 = 0.5;
+
+/// The style every box of the icicle is drawn in.
+fn box_style(palette: &Palette) -> LabelBoxStyle {
+    LabelBoxStyle {
         background: palette.background,
         seam_mix: SEAM_MIX,
         label_min_px: f32::from(LABEL_MIN_WIDTH),
         text_pad: TEXT_PAD,
-    };
+    }
+}
+
+/// Paints `placed`, the cells of the icicle of `scene`, under the ancestors
+/// of the nodes `trail` their names are told apart from. A cell lying above
+/// `top`, the top of the icicle, a `row` tall each, is filled as a row over
+/// the icicle as far as it lies above it.
+fn paint_cells(
+    scene: &Scene,
+    placed: &[Placed],
+    trail: &[u32],
+    top: Pixels,
+    row: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let cells: Vec<Cell> = placed.iter().map(|placed| placed.cell).collect();
-    let hints = hints_among(&scene.tree, &scene.shared, &scene.above, &cells);
+    let hints = hints_among(&scene.tree, &scene.shared, trail, &cells);
     for &Placed { cell, on_top } in placed {
-        let fill = fill(scene, cell.holds);
-        let (rect, label) = (drawn_rect(&cell), label_on(fill));
-        let name = match (on_top, cell.holds) {
-            _ if cell.rect.size.width < LABEL_MIN_WIDTH => String::new(),
-            (true, Holds::Rest(run)) => run_name(&scene.tree, &scene.shared, scene.by, run),
-            (_, Holds::Rest(run)) => {
-                let (room, font_size) = style.label_room(rect);
-                let width = text_width(window, font_size, label);
-                rest_name(run.count(), room, width)
+        let live = over(fill(scene, cell.holds), scene.palette.background);
+        let above = ((top - cell.rect.top()) / row).clamp(0., 1.);
+        let fill = mix(live, context_fill(live, &scene.palette), above);
+        paint_cell(scene, cell, on_top, fill, &hints, window, cx);
+    }
+}
+
+/// Paints `above`, the rows over the cell the icicle of `scene` is drawn from,
+/// each filled as context for the icicle. Their names are told apart by the
+/// nodes of `trail`, the ancestors drawn, and the cell on top alone.
+fn paint_above(scene: &Scene, above: &[Spot], trail: &[u32], window: &mut Window, cx: &mut App) {
+    let palette = &scene.palette;
+    let named: Vec<u32> = trail.iter().copied().chain(scene.top.node()).collect();
+    let hints = hints_among(&scene.tree, &scene.shared, &named, &[]);
+    for &spot in above {
+        match spot {
+            Spot::Cell(cell) => {
+                let fill = context_fill(fill(scene, cell.holds), palette);
+                paint_cell(scene, cell, false, fill, &hints, window, cx);
             }
-            (_, Holds::Shared) => {
-                let (room, font_size) = style.label_room(rect);
-                let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
-                let count = scene.tree.shared_tops().len();
-                let width = text_width(window, font_size, label);
-                shared_cell_name(whole, count, room, width)
-            }
-            (_, holds) => {
-                let name = cell_name(&scene.tree, &scene.shared, scene.by, holds);
-                let hint = match holds {
-                    Holds::Node(node) => hints.get(&node),
-                    Holds::Build | Holds::Shared | Holds::Rest(_) => None,
-                };
-                match hint {
-                    Some(hint) => {
-                        let (room, font_size) = style.label_room(rect);
-                        fit_apart(&name, hint, room, text_width(window, font_size, label))
-                    }
-                    None => name,
-                }
-            }
-        };
-        let strength = match cell.holds {
-            Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
-            _ => 1.0,
-        };
-        let drawn_fill = Rgba {
-            a: fill.a * strength,
-            ..fill
-        };
-        paint_labeled_box(
-            rect,
-            drawn_fill.into(),
-            &name,
-            Hsla {
-                a: label.a * strength,
-                ..label
-            },
-            style,
-            window,
-            cx,
-        );
-        if let Holds::Node(node) = cell.holds
-            && reached(&scene.tree, node)
-        {
-            paint_notch(rect, notch_ink(drawn_fill, palette.background), window);
+            Spot::Hidden { rect, count } => paint_hidden(rect, count, palette, window, cx),
         }
     }
+}
+
+/// How far a row over the focus is carried from the hue of the cell it stands
+/// for towards the neutral a point without a hue wears: far enough that its
+/// hue reads only as a hint of what it is, which no other channel of the
+/// icicle draws with.
+const CONTEXT_GREY: f32 = 0.7;
+
+/// How far a row over the focus then recedes towards the canvas: little, as
+/// the filter's fade is what recedes far, and the two must not read alike.
+const CONTEXT_RECEDE: f32 = 0.3;
+
+/// The fill of a row over the focus standing for a cell filled `fill`, which
+/// reads as context for the icicle rather than as a cell of it.
+fn context_fill(fill: Rgba, palette: &Palette) -> Rgba {
+    let opaque = over(fill, palette.background);
+    let grey = mix(opaque, palette.data.neutral, CONTEXT_GREY);
+    mix(grey, palette.background, CONTEXT_RECEDE)
+}
+
+/// Paints `cell` of the icicle of `scene` in `fill`, named as the cell on top
+/// where it is `on_top`, by `hints` telling names reading alike apart.
+fn paint_cell(
+    scene: &Scene,
+    cell: Cell,
+    on_top: bool,
+    fill: Rgba,
+    hints: &HashMap<u32, String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let palette = &scene.palette;
+    let style = box_style(palette);
+    let (rect, label) = (drawn_rect(cell.rect), label_on(fill));
+    let name = match (on_top, cell.holds) {
+        _ if cell.rect.size.width < LABEL_MIN_WIDTH => CellName::default(),
+        (true, Holds::Rest(run)) => {
+            let names = unit_names(scene.tree.scope().unit());
+            CellName::plain(run_on_top(run.count(), run.weight(), &names))
+        }
+        (_, Holds::Rest(run)) => {
+            let (room, font_size) = style.label_room(rect);
+            let width = text_width(window, font_size, label);
+            CellName::plain(rest_name(run.count(), room, width))
+        }
+        (_, Holds::Shared) => {
+            let (room, font_size) = style.label_room(rect);
+            let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
+            let count = scene.tree.shared_tops().len();
+            let width = text_width(window, font_size, label);
+            CellName::plain(shared_cell_name(whole, count, room, width))
+        }
+        (_, Holds::Node(node)) => {
+            let tree = &scene.tree;
+            let name = PointName::of(tree.id(node), tree.scope().unit(), &scene.shared);
+            let (room, font_size) = style.label_room(rect);
+            let hint = hints.get(&node).map(String::as_str);
+            name.fitted(hint, room, text_width(window, font_size, label))
+        }
+        (_, holds) => CellName::plain(cell_name(&scene.tree, &scene.shared, scene.by, holds)),
+    };
+    let strength = match cell.holds {
+        Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
+        _ => 1.0,
+    };
+    let drawn_fill = Rgba {
+        a: fill.a * strength,
+        ..fill
+    };
+    paint_labeled_box(
+        rect,
+        drawn_fill.into(),
+        name.inked(),
+        Hsla {
+            a: label.a * strength,
+            ..label
+        },
+        style,
+        window,
+        cx,
+    );
+    if let Holds::Node(node) = cell.holds
+        && reached(&scene.tree, node)
+    {
+        paint_notch(rect, notch_ink(drawn_fill, palette.background), window);
+    }
+}
+
+/// Paints the row at `rect` gathering `count` ancestors left out, which
+/// reads how many and bears the caret of what opens a list.
+fn paint_hidden(
+    rect: Bounds<Pixels>,
+    count: u32,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let style = box_style(palette);
+    let (rect, fill) = (drawn_rect(rect), context_fill(rest_fill(palette), palette));
+    let label = label_on(fill);
+    let name = hidden_name(count);
+    paint_labeled_box(rect, fill.into(), name.as_str(), label, style, window, cx);
+    let (room, font_size) = style.label_room(rect);
+    let width = text_width(window, font_size, label)(&name);
+    let left = rect.left() + px(TEXT_PAD + width + CARET_GAP);
+    if rect.size.width < LABEL_MIN_WIDTH || width + CARET_GAP + f32::from(font_size) > room {
+        return;
+    }
+    let caret = Bounds::new(
+        point(left, rect.center().y - font_size / 2.),
+        size(font_size, font_size),
+    );
+    window
+        .paint_svg(
+            caret,
+            bviz_ui_assets::icon_path(CARET),
+            None,
+            TransformationMatrix::default(),
+            label,
+            cx,
+        )
+        .ok();
+}
+
+/// The icon closing the name of the row of hidden ancestors, which opens the
+/// list of them.
+const CARET: &str = "caret-down";
+
+/// Room between the name of the row of hidden ancestors and its caret.
+const CARET_GAP: f32 = 2.0;
+
+/// What the row gathering `count` hidden ancestors reads, ahead of its caret.
+pub(crate) fn hidden_name(count: u32) -> String {
+    format!("{ELLIPSIS} {}", more(count))
 }
 
 /// The ink of a notch on a cell drawn in `fill` over `background`: the ink a
@@ -234,9 +398,9 @@ pub(crate) fn notch_ink(fill: Rgba, background: Rgba) -> Rgba {
     over(Rgba { a: fill.a, ..ink }, cell)
 }
 
-/// The part of `cell`'s row its box covers, clear of the gap to the next row.
-pub(crate) fn drawn_rect(cell: &Cell) -> Bounds<Pixels> {
-    let rect = cell.rect;
+/// The part of the row at `rect` a box covers, clear of the gap to the next
+/// row.
+pub(crate) fn drawn_rect(rect: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
         rect.origin,
         size(rect.size.width, rect.size.height - ROW_GAP),
@@ -245,10 +409,10 @@ pub(crate) fn drawn_rect(cell: &Cell) -> Bounds<Pixels> {
 
 const RING_WIDTH: Pixels = px(2.);
 
-/// Rings the box of `cell`.
-pub(crate) fn paint_ring(cell: &Cell, palette: &Palette, window: &mut Window) {
+/// Rings the box drawn in the row at `rect`.
+pub(crate) fn paint_ring(rect: Bounds<Pixels>, palette: &Palette, window: &mut Window) {
     window.paint_quad(quad(
-        drawn_rect(cell),
+        drawn_rect(rect),
         px(0.),
         Hsla::transparent_black(),
         RING_WIDTH,
@@ -302,7 +466,7 @@ fn rest_fill(palette: &Palette) -> Rgba {
 
 /// What the cell holding `holds` of `tree`, whose roots were chosen `by`,
 /// reads.
-pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
+fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
         Holds::Build => format!("whole build · {} {many}", tree.total()),
@@ -311,7 +475,7 @@ pub(crate) fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds:
             format!("{name} · {count}")
         }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
-        Holds::Rest(run) => format!("{} more", run.count()),
+        Holds::Rest(run) => more(run.count()),
     }
 }
 
@@ -331,23 +495,23 @@ fn text_width(window: &mut Window, font_size: Pixels, ink: Hsla) -> impl FnMut(&
     }
 }
 
-/// What tells apart, by node, the names that read alike among the crumbs
-/// naming `crumbs` and the cells `cells` of `tree` wide enough to name. Each
+/// What tells apart, by node, the names that read alike among the nodes
+/// `named` of `tree` and the cells `cells` wide enough to name. Each
 /// such name is told apart by its configuration, as
 /// [`configuration_readings`] reads it, and an action's also by the file it
 /// writes first. A node whose name no other reads alike has none.
 pub(crate) fn hints_among(
     tree: &Dominators,
     shared: &Shared,
-    crumbs: &[u32],
+    named: &[u32],
     cells: &[Cell],
 ) -> HashMap<u32, String> {
     let unit = tree.scope().unit();
-    let named = cells.iter().filter_map(|cell| match cell.holds {
+    let wide = cells.iter().filter_map(|cell| match cell.holds {
         Holds::Node(node) if cell.rect.size.width >= LABEL_MIN_WIDTH => Some(node),
         _ => None,
     });
-    let nodes: Vec<u32> = crumbs.iter().copied().chain(named).collect();
+    let nodes: Vec<u32> = named.iter().copied().chain(wide).collect();
     let names: Vec<String> = nodes
         .iter()
         .map(|&node| point_name(tree.id(node), unit, shared))
@@ -368,66 +532,44 @@ pub(crate) fn hints_among(
         .collect()
 }
 
-/// Between a name and what tells it apart from others reading alike.
-pub(crate) const HINT_SEPARATOR: &str = " · ";
+/// Between the parts a cell's name reads: a name and what tells it apart
+/// from others reading alike, or a count and what it weighs.
+pub(crate) const PART_SEPARATOR: &str = " · ";
 
-/// `name` followed by `hint` within `room` as `width` measures text: whole
-/// where it fits, else with `name` cut short so the hint still reads beside
-/// it, and where that leaves the name less than [`NAME_SHARE`] of the room,
-/// `name` alone.
-fn fit_apart(name: &str, hint: &str, room: f32, mut width: impl FnMut(&str) -> f32) -> String {
-    let whole = format!("{name}{HINT_SEPARATOR}{hint}");
-    if width(&whole) <= room {
-        return whole;
-    }
-    let tail = format!("{ELLIPSIS}{HINT_SEPARATOR}{hint}");
-    let name_room = room - width(&tail);
-    if name_room < room * NAME_SHARE {
-        return name.to_owned();
-    }
-    let chars: Vec<char> = name.chars().collect();
-    // Bisects for the most characters of `name` fitting `name_room`.
-    let (mut fits, mut over) = (0, chars.len());
-    while over - fits > 1 {
-        let mid = (fits + over) / 2;
-        match width(&chars[..mid].iter().collect::<String>()) <= name_room {
-            true => fits = mid,
-            false => over = mid,
-        }
-    }
-    let kept: String = chars[..fits].iter().collect();
-    format!("{kept}{tail}")
+/// How a name counts `count` siblings or ancestors left out of the cells.
+fn more(count: u32) -> String {
+    format!("{count} more")
 }
 
-/// The least of a cell's room a name keeps beside the hint telling it apart,
-/// so a long hint never reads in place of the name.
-const NAME_SHARE: f32 = 0.5;
-
-/// Ends a name cut short.
-const ELLIPSIS: char = '…';
-
-/// What a run of `tree`, whose roots were chosen `by`, reads drawn on top,
+/// How a tooltip names a run of `tree`, whose roots were chosen `by`,
 /// naming what its siblings stand under.
 pub(crate) fn run_name(tree: &Dominators, shared: &Shared, by: RootedBy, run: Run) -> String {
     let count = run.count();
     match run.parent() {
         Parent::Node(parent) => {
             let parent = point_name(tree.id(parent), tree.scope().unit(), shared);
-            format!("{count} more under {parent}")
+            format!("{} under {parent}", more(count))
         }
         Parent::Shared => {
             let shared = what_is_shared(by.word(), unit_names(tree.scope().unit()).many);
-            format!("{count} more of {shared}")
+            format!("{} of {shared}", more(count))
         }
-        Parent::Build => format!("{count} more under {WHOLE_BUILD}"),
+        Parent::Build => format!("{} under {WHOLE_BUILD}", more(count)),
     }
+}
+
+/// What a run of `count` siblings weighing `weight` points, named `names`,
+/// reads drawn on top, where the cell over it just above names what they
+/// stand under.
+fn run_on_top(count: u32, weight: u32, names: &KindNames) -> String {
+    format!("{}{PART_SEPARATOR}{}", more(count), names.counted(weight))
 }
 
 /// What a cell gathering `count` siblings reads within `room` as `width`
 /// measures text: a count cut short says nothing, so its name is left whole,
 /// or failing that the bare count, or failing that nothing.
 fn rest_name(count: u32, room: f32, width: impl FnMut(&str) -> f32) -> String {
-    first_fitting([format!("{count} more"), count.to_string()], room, width)
+    first_fitting([more(count), count.to_string()], room, width)
 }
 
 /// What the cell gathering `count` shared tops, named `whole`, reads within
@@ -459,10 +601,91 @@ fn first_fitting<const N: usize>(
 
 /// How a cell names the point `id` of `unit`.
 pub(crate) fn point_name(id: Id, unit: Unit, shared: &Shared) -> String {
-    let label = point_label(id, shared);
-    match unit {
-        Unit::Action => format!("{} {label}", mnemonic(id, shared)),
-        Unit::ConfiguredTarget | Unit::Target => label,
+    let PointName { lead, label } = PointName::of(id, unit, shared);
+    lead + &label
+}
+
+/// How a cell names a point: by the label it carries, or failing that its
+/// node's name, led for an action by its mnemonic.
+struct PointName {
+    lead: String,
+    label: String,
+}
+
+impl PointName {
+    fn of(id: Id, unit: Unit, shared: &Shared) -> Self {
+        let lead = match unit {
+            Unit::Action => format!("{} ", mnemonic(id, shared)),
+            Unit::ConfiguredTarget | Unit::Target => String::new(),
+        };
+        let label = point_label(id, shared);
+        Self { lead, label }
+    }
+
+    /// What a cell reads of this followed by `hint` within `room` as `width`
+    /// measures text. Whole where it fits; else the label is cut short as
+    /// [`fit_label`] cuts it so the hint still reads beside it, unless that
+    /// leaves the label less than [`NAME_SHARE`] of the room, where it is cut
+    /// short alone.
+    fn fitted(
+        &self,
+        hint: Option<&str>,
+        room: f32,
+        mut width: impl FnMut(&str) -> f32,
+    ) -> CellName {
+        let tail = hint.map_or_else(String::new, |hint| format!("{PART_SEPARATOR}{hint}"));
+        let whole = format!("{}{}{tail}", self.lead, self.label);
+        if width(&whole) <= room {
+            let place = name_start(&self.label).unwrap_or(0);
+            return self.inked(whole, 0..place);
+        }
+        let lead = width(&self.lead);
+        let beside = room - lead - width(&tail);
+        let (room, tail) = match beside >= room * NAME_SHARE {
+            true => (beside, tail),
+            false => (room - lead, String::new()),
+        };
+        let label = fit_label(&self.label, room, &mut width);
+        self.inked(
+            format!("{}{}{tail}", self.lead, label.text()),
+            label.muted(),
+        )
+    }
+
+    /// `text`, led by this's lead, with the `place` bytes of the label
+    /// following the lead muted.
+    fn inked(&self, text: String, place: Range<usize>) -> CellName {
+        let lead = self.lead.len();
+        CellName {
+            text,
+            muted: lead + place.start..lead + place.end,
+        }
+    }
+}
+
+/// The least of a cell's room a label keeps beside the hint telling it
+/// apart, so a long hint never reads in place of the label.
+const NAME_SHARE: f32 = 0.5;
+
+/// What a cell reads, the part of it saying where a label's target lives
+/// muted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CellName {
+    text: String,
+    /// The bytes of `text` set in the muted ink.
+    muted: Range<usize>,
+}
+
+impl CellName {
+    fn plain(text: String) -> Self {
+        Self { text, muted: 0..0 }
+    }
+
+    fn inked(&self) -> Inked<'_> {
+        Inked {
+            text: &self.text,
+            muted: self.muted.clone(),
+        }
     }
 }
 
@@ -568,15 +791,49 @@ mod tests {
         assert!(along(name.origin) >= NOTCH);
     }
 
+    fn named(label: &str) -> PointName {
+        PointName {
+            lead: String::new(),
+            label: label.to_owned(),
+        }
+    }
+
     #[test]
-    fn a_name_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
+    fn a_label_cut_short_keeps_the_hint_while_it_keeps_the_larger_part() {
         let label = "@llvm//toolchain:linux_x86_64_cc_toolchain";
-        let fit = |room| fit_apart(label, "k8", room, chars);
-        assert_eq!(fit(100.0), format!("{label} · k8"));
-        assert_eq!(fit(40.0), "@llvm//toolchain:linux_x86_64_cc_t… · k8");
-        assert_eq!(fit(20.0), "@llvm//toolcha… · k8");
+        let fit = |room| named(label).fitted(Some("k8"), room, chars);
+        assert_eq!(fit(100.0).text, format!("{label} · k8"));
+        assert_eq!(fit(100.0).muted, 0..16);
+        let cut = fit(40.0);
+        assert_eq!(cut.text, "@llvm//t…:linux_x86_64_cc_toolchain · k8");
+        assert_eq!(cut.muted, 0..11);
         let long = "a-long-configuration-name (exec, 3f2a)";
-        assert_eq!(fit_apart(label, long, 60.0, chars), label);
+        let alone = named(label).fitted(Some(long), 40.0, chars);
+        assert_eq!(alone.text, "@llvm//too…ain:linux_x86_64_cc_toolchain");
+    }
+
+    #[test]
+    fn an_action_keeps_its_mnemonic_ahead_of_its_label_cut_short() {
+        let name = PointName {
+            lead: "CppCompile ".to_owned(),
+            label: "@r//a/b/c:lib".to_owned(),
+        };
+        let cut = name.fitted(None, 21.0, chars);
+        assert_eq!(cut.text, "CppCompile @r//a…:lib");
+        assert_eq!(cut.muted, 11..19);
+    }
+
+    #[test]
+    fn a_name_that_is_no_label_is_cut_short_at_its_end() {
+        let cut = named("action:bazel-out/k8/bin/a.o").fitted(None, 10.0, chars);
+        assert_eq!((cut.text.as_str(), cut.muted), ("action:ba…", 0..0));
+    }
+
+    #[test]
+    fn a_run_on_top_reads_its_count_and_weight() {
+        let names = unit_names(Unit::Target);
+        assert_eq!(run_on_top(663, 1204, &names), "663 more · 1204 targets");
+        assert_eq!(run_on_top(2, 1, &names), "2 more · 1 target");
     }
 
     #[test]
@@ -585,6 +842,91 @@ mod tests {
         assert_eq!(rest_name(22, 6.0, chars), "22");
         assert_eq!(rest_name(22, 2.0, chars), "22");
         assert_eq!(rest_name(22, 1.0, chars), "");
+    }
+
+    /// Each end of a move between two cells deep enough that the rows over
+    /// them gather some ancestors is drawn as the icicle is at rest there:
+    /// the same rows, the same cells under them, and over them only the cell
+    /// carried up, standing where the row for it stands.
+    #[test]
+    fn a_deep_move_starts_and_ends_as_drawn_at_rest() {
+        use super::super::icicle::tests::{Laid, ROW, Spec, area, leaf};
+        let chain = Spec(
+            9,
+            vec![Spec(
+                8,
+                vec![Spec(
+                    7,
+                    vec![Spec(6, vec![Spec(5, vec![leaf(2), leaf(2)])])],
+                )],
+            )],
+        );
+        let tree = Laid::of(&[chain]);
+        let (higher, lower) = (Holds::Node(4), Holds::Node(5));
+        let bounds = area(100., 12.);
+        let down = Transition::between(&tree, higher, lower, Instant::now()).unwrap();
+        let at_rest = |top| frame(&tree, top, None, bounds, ROW);
+        let cells = |placed: &[Placed], within: Bounds<Pixels>| -> Vec<Cell> {
+            let inside = placed
+                .iter()
+                .filter(|placed| placed.cell.rect.top() >= within.top());
+            let mut cells: Vec<Cell> = inside.map(|placed| placed.cell).collect();
+            let at = |cell: &Cell| (f32::from(cell.rect.top()), f32::from(cell.rect.left()));
+            cells.sort_by(|a, b| {
+                let ((a_top, a_left), (b_top, b_left)) = (at(a), at(b));
+                a_top.total_cmp(&b_top).then(a_left.total_cmp(&b_left))
+            });
+            cells
+        };
+        let (rows, region, placed) = frame(&tree, higher, Some((&down, 0.)), bounds, ROW);
+        let (rest_rows, rest_region, rest) = at_rest(higher);
+        assert_eq!((rows, region), (rest_rows, rest_region));
+        assert_eq!(cells(&placed, region), cells(&rest, rest_region));
+        let (rows, region, placed) = frame(&tree, higher, Some((&down, 1.)), bounds, ROW);
+        let (rest_rows, rest_region, rest) = at_rest(lower);
+        assert_eq!((&rows, region), (&rest_rows, rest_region));
+        assert_eq!(cells(&placed, region), cells(&rest, rest_region));
+        let carried: Vec<Cell> = placed
+            .iter()
+            .map(|placed| placed.cell)
+            .filter(|cell| cell.rect.top() < region.top())
+            .collect();
+        let (above, _) = ancestry::lay_out(&rows, bounds, ROW);
+        assert_eq!(carried.len(), 1, "{carried:#?}");
+        assert_eq!(above.last().map(Spot::rect), Some(carried[0].rect));
+    }
+
+    /// A row over the focus reads apart from the live cell it stands for and
+    /// from that cell as the filter fades it, and its name still reads on it.
+    #[test]
+    fn a_row_over_the_focus_reads_as_neither_a_live_nor_a_faded_cell() {
+        use bviz_ui_theme::{
+            MIN_DISTINCT_COLOR, MIN_TEXT_CONTRAST, built_in_themes, contrast_ratio, distance,
+        };
+        for theme in built_in_themes().iter() {
+            let palette = Palette::from_theme(theme);
+            let fills = palette.data.chromatic().into_iter().map(Rgba::from);
+            for fill in fills.chain([palette.data.neutral.into()]) {
+                let context = context_fill(fill, &palette);
+                let faded = over(
+                    Rgba {
+                        a: UNMARKED_FADE,
+                        ..fill
+                    },
+                    palette.background,
+                );
+                for (other, what) in [(over(fill, palette.background), "live"), (faded, "faded")] {
+                    let apart = distance(context, other);
+                    assert!(
+                        apart >= MIN_DISTINCT_COLOR,
+                        "{} {what}: {apart}",
+                        theme.name
+                    );
+                }
+                let contrast = contrast_ratio(label_on(context), context);
+                assert!(contrast >= MIN_TEXT_CONTRAST, "{}: {contrast}", theme.name);
+            }
+        }
     }
 
     /// The cell of the shared tops reads apart from every hue a point is

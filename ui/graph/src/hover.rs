@@ -1,13 +1,14 @@
 //! The card describing the box under the pointer.
 
 use crate::GraphPanel;
-use crate::jump::{container, node_text};
+use crate::jump::{container, node_text, shown};
 use crate::model::Loaded;
 use crate::point::{configuration, kind_names};
 use crate::status::Statuses;
 use crate::timecard::part_of;
 use crate::timing::{Ran, Slowest, Timed};
 use bviz_graph_layout::{Id, Kind};
+use bviz_label::shown::written_line;
 use bviz_ui_components::{CardAnchor, HoverCard, ShownCard, hover_card_canvas};
 use gpui::{
     App, Context, Entity, IntoElement, Pixels, Point, Render, WeakEntity, Window, prelude::*,
@@ -196,7 +197,7 @@ impl GraphPanel {
 }
 
 /// The most lines a card reads.
-const CARD_LINES: usize = 7;
+const CARD_LINES: usize = 8;
 
 /// What the card describing `pointed` reads of what `loaded` knows: its name,
 /// then what it is, how its build went and what its actions took.
@@ -208,18 +209,23 @@ fn describe(pointed: &Pointed, loaded: &Loaded) -> Vec<String> {
         lines.push(pointed.caption.clone());
         lines.push(kind_names(Kind::MergeGroup).one.to_owned());
     } else {
-        let text = node_text(shared, id, kind);
-        lines.push(match text.is_empty() {
-            true => pointed.caption.clone(),
-            false => text,
-        });
+        let written = node_text(shared, id, kind);
+        match written.is_empty() {
+            true => lines.push(pointed.caption.clone()),
+            false => {
+                let named = shown(shared, &written);
+                let written = written_line(&written, &named);
+                lines.push(named);
+                lines.extend(written);
+            }
+        }
         let what = kind_names(kind).one;
         lines.push(match configuration(id, shared) {
             Some(config) => format!("{what} · {config}"),
             None => what.to_owned(),
         });
         if kind != Kind::Package {
-            lines.extend(container(shared, id, kind));
+            lines.extend(container(shared, id, kind).map(|written| shown(shared, &written)));
         }
     }
     lines.extend(outcome(id, loaded.statuses()));

@@ -26,6 +26,9 @@ impl ColourBy {
     /// declared in.
     pub(crate) const ALL: [ColourBy; 2] = [ColourBy::Identity, ColourBy::Runner];
 
+    /// What a plot is coloured by when it is first drawn.
+    pub(crate) const OPENING: ColourBy = ColourBy::Identity;
+
     /// Where the picker offers it.
     pub(crate) fn index(self) -> usize {
         self as usize

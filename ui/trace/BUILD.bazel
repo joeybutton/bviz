@@ -13,6 +13,7 @@ rust_library(
     deps = [
         "//critical_path",
         "//invocation",
+        "//label",
         "//trace/layout",
         "//trace/profile",
         "//ui/assets",

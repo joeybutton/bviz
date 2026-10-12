@@ -9,8 +9,8 @@ use crate::{
 };
 use bviz_trace_profile::{LaneClass, Profile};
 use bviz_ui_components::{
-    Button, Hint, ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, TruncatingLabel,
-    list_scrollbar,
+    Hint, ListScroll, SCROLLBAR_THICKNESS, TextInput, TextTooltip, ToggleGroup, ToggleSegment,
+    TruncatingLabel, list_scrollbar,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, Focusable, IntoElement, MouseButton, MouseDownEvent,
@@ -283,29 +283,22 @@ impl TracksMenu {
     /// group's tracks in, the standing one filled in.
     fn sort_row(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let standing = self.model.read(cx).track_sort();
-        let choice =
-            |id: &'static str, label: &'static str, hint: &'static str, sort: TrackSort| {
-                Button::new(
-                    id,
-                    cx.listener(move |this, _, _, cx| this.choose_sort(sort, cx)),
-                )
-                .ghost()
-                .compact()
-                .selected(standing == sort)
-                .label(label)
-                .tooltip(hint)
-            };
-        let by_name = choice(
-            "tracks-sort-name",
-            "Name",
-            "Sort tracks by name",
-            TrackSort::Name,
-        );
-        let by_weight = choice(
-            "tracks-sort-weight",
-            "Busiest",
-            "Busiest tracks first",
-            TrackSort::Weight,
+        let choice = ToggleGroup::one_of(
+            "tracks-sort",
+            "order",
+            [TrackSort::Name, TrackSort::Weight],
+            standing,
+            |sort| {
+                let (label, hint) = match sort {
+                    TrackSort::Name => ("name", "Sort tracks by name"),
+                    TrackSort::Weight => ("busiest", "Busiest tracks first"),
+                };
+                ToggleSegment::new(label).tooltip(hint)
+            },
+            {
+                let menu = cx.entity();
+                move |sort, _, cx| menu.update(cx, |this, cx| this.choose_sort(sort, cx))
+            },
         );
         div()
             .flex()
@@ -315,9 +308,8 @@ impl TracksMenu {
             .mx_1()
             .px_2()
             .py_1()
-            .child(div().text_color(palette.muted_label).child("Order"))
-            .child(by_name)
-            .child(by_weight)
+            .child(div().text_color(palette.muted_label).child("order"))
+            .child(choice)
     }
 
     /// Stands every group's tracks in `sort`, reflowing the timeline over the
@@ -433,7 +425,7 @@ impl TracksMenu {
                         this.reflow_timeline(cx);
                         cx.notify();
                     }))
-                    .child(if all_visible { "Hide all" } else { "Show all" })
+                    .child(if all_visible { "hide all" } else { "show all" })
             })
             .child(self.menu_list(rows, palette, cx))
     }

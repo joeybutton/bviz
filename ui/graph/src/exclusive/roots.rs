@@ -4,10 +4,11 @@
 use super::{ExclusivePanel, LeaveRoots, RootedBy};
 use crate::Palette;
 use crate::model::{GraphModel, Prepared};
-use crate::point::{point_label, unit_names};
+use crate::point::{unit_names, written_name};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
+use bviz_graph_layout::shown::written_by_place;
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
 use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
@@ -24,6 +25,10 @@ pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
 
 /// Width the field is drawn at, wide enough for its placeholder.
 pub(super) const FIELD_WIDTH: Pixels = px(380.);
+
+/// The narrowest the field stands in its toolbar, the other controls giving
+/// way before it narrows further.
+pub(super) const FIELD_LEAST: Pixels = px(120.);
 
 pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//tools/...";
 
@@ -117,7 +122,10 @@ pub(super) fn find(
     } = set.resolve(index)?;
     let mut notices: Vec<String> = Vec::new();
     let shared = targets.shared();
-    let left_out = left_out.iter().map(|&id| point_label(id, shared));
+    let repos = shared.labels.repos();
+    let left_out = left_out
+        .iter()
+        .map(|&id| written_name(&shared.names, &shared.facets, repos, id));
     notices.extend(manual_left_out(left_out.collect()));
     notices.extend(manual_untold(&set, index.tags()).map(str::to_owned));
     let (base, facets) = (&shared.base, &shared.facets);
@@ -173,14 +181,7 @@ fn manual_left_out(mut left_out: Vec<String>) -> Option<String> {
 /// as `//foo/bar:bar` is what `//foo/bar` names, and `@repo//:repo` what
 /// `@repo` does.
 fn names_its_package(label: &str) -> bool {
-    let Some((package, name)) = label.rsplit_once(':') else {
-        return true;
-    };
-    let last = match package.strip_suffix("//") {
-        Some(repo) => repo.trim_start_matches('@'),
-        None => package.rsplit_once('/').map_or(package, |(_, last)| last),
-    };
-    last == name
+    !label.contains(':') || written_by_place(label)
 }
 
 /// What the field notes of `set` where `tags`, how far the inputs state the
@@ -251,7 +252,8 @@ pub(super) fn field(
             view.focus_handle.focus(window, cx);
         }))
         .tooltip(TextTooltip::builder(HELP.into(), tip))
-        .flex_none()
+        .flex_1()
+        .min_w_0()
         .child(input.clone())
 }
 

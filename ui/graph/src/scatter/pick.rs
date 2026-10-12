@@ -38,11 +38,8 @@ pub(super) struct PickRow {
     pub(super) mark: usize,
     /// The mnemonic of the action the point is.
     pub(super) mnemonic: Option<SharedString>,
-    /// The part of the point's label that names its package, read muted and
-    /// cut short first.
-    pub(super) package: SharedString,
-    /// The rest of the point's label.
-    pub(super) name: SharedString,
+    /// The point's label as it is shown.
+    pub(super) label: SharedString,
     /// What tells the point apart from the others whose rows read alike, as
     /// [`hints`] chooses it.
     pub(super) hint: Option<SharedString>,
@@ -54,16 +51,6 @@ pub(super) struct PickRow {
     pub(super) y: u32,
     /// What the tooltip for the point reads while the row is aimed at.
     pub(super) tooltip: Vec<String>,
-}
-
-/// `label` parted into its package and the target's name, `:name`, at the last
-/// colon, so that each can be cut short apart; all of it names the target
-/// where it has no colon.
-pub(super) fn split_label(label: &str) -> (&str, &str) {
-    match label.rfind(':') {
-        Some(colon) => label.split_at(colon),
-        None => ("", label),
-    }
 }
 
 /// `path` within the output tree of the configuration it is built in,
@@ -87,8 +74,7 @@ pub(super) fn order(rows: &mut [PickRow]) {
         key(a)
             .cmp(&key(b))
             .then_with(|| a.mnemonic.cmp(&b.mnemonic))
-            .then_with(|| a.package.cmp(&b.package))
-            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.label.cmp(&b.label))
             .then_with(|| a.hint.cmp(&b.hint))
             .then_with(|| a.mark.cmp(&b.mark))
     });
@@ -249,24 +235,13 @@ mod tests {
         PickRow {
             mark,
             mnemonic: None,
-            package: SharedString::default(),
-            name: label.to_owned().into(),
+            label: label.to_owned().into(),
             hint,
             measures: SharedString::default(),
             x,
             y,
             tooltip: Vec::new(),
         }
-    }
-
-    #[test]
-    fn a_label_parts_at_the_colon_naming_the_target() {
-        assert_eq!(
-            split_label("//third_party:protobuf_package_metadata"),
-            ("//third_party", ":protobuf_package_metadata")
-        );
-        assert_eq!(split_label("@repo//a/b:c:d"), ("@repo//a/b:c", ":d"));
-        assert_eq!(split_label("//pkg"), ("", "//pkg"));
     }
 
     #[test]

@@ -8,13 +8,16 @@
 use crate::column::{Folding, line, scrolling};
 use crate::mode::LayoutMode;
 use crate::paint::paint_diamond;
+use crate::point::{shown_name, written_name};
 use crate::{GraphPanel, Palette, derive};
 use bviz_bazel_flags::TRANSITIONS;
-use bviz_graph_layout::facets::{ConfigRef, Sym};
+use bviz_graph_layout::facets::{ConfigRef, Sym, WrittenRepos};
 use bviz_graph_layout::paths::{self, Paths};
-use bviz_graph_layout::select::labels::{carried_label, package_label};
+use bviz_graph_layout::select::labels::package_label;
+use bviz_graph_layout::shown::name_start;
 use bviz_graph_layout::transition::{Difference, Transition, Transitions};
 use bviz_graph_layout::{Axis, Capabilities, Facets, Id, Input, Names, Support};
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::{
     Button, ListScroll, TextTooltip, TruncatingLabel, load_in_background, overlay_canvas,
 };
@@ -78,14 +81,16 @@ enum Answering {
 }
 
 /// A node as the card names it: by the target name and configuration that tell
-/// it from its neighbours on a path, over the package holding it, with its full
-/// label for the reader who needs the rest.
+/// it from its neighbours on a path, or by its whole label, with the label as
+/// written for the reader who needs to take it elsewhere.
 #[derive(Clone)]
 struct Named {
     id: Id,
     target: SharedString,
-    package: Option<SharedString>,
+    /// The label as it is shown.
     label: SharedString,
+    /// The label as a command line takes it, which the hover reads.
+    written: SharedString,
     config: Option<Config>,
 }
 
@@ -112,18 +117,9 @@ enum Answer {
 /// How the card names `id`: by the label of the target it belongs to, and the
 /// configuration it is built in where it states one, which tells the configured
 /// targets of one label apart. A package box is named whole by its path.
-fn name(names: &Names, facets: &Facets, id: Id) -> Named {
-    if let Some(package) = package_label(names, id) {
-        let package = SharedString::from(package);
-        return Named {
-            id,
-            target: package.clone(),
-            package: None,
-            label: package,
-            config: None,
-        };
-    }
-    let label = carried_label(names, facets, id).unwrap_or_else(|| names.resolve(id));
+fn name(names: &Names, facets: &Facets, repos: &WrittenRepos, id: Id) -> Named {
+    let label = shown_name(names, facets, repos, id);
+    let written = written_name(names, facets, repos, id).into();
     let config = facets.config(id).map(|config| Config {
         handle: config,
         mnemonic: facets
@@ -132,15 +128,15 @@ fn name(names: &Names, facets: &Facets, id: Id) -> Named {
             .map(|mnemonic| facets.strings().resolve(mnemonic).to_string().into()),
         checksum: facets.strings().resolve(config.sym()).to_string().into(),
     });
-    let (package, target) = match label.rsplit_once(':') {
-        Some((package, target)) => (Some(package), format!(":{target}")),
-        None => (None, label.to_string()),
+    let target = match package_label(names, id) {
+        Some(_) => &label[..],
+        None => &label[name_start(&label).unwrap_or(0)..],
     };
     Named {
         id,
-        target: target.into(),
-        package: package.map(|package| package.to_string().into()),
-        label: label.to_string().into(),
+        target: target.to_owned().into(),
+        label: label.into(),
+        written,
         config,
     }
 }
@@ -194,22 +190,28 @@ impl Spelling {
     /// `named`'s target and configuration, where `named` is one of the nodes
     /// this was spelled for.
     fn name(&self, named: &Named) -> SharedString {
-        match &named.config {
-            Some(config) => format!("{} ({})", named.target, self.spelled[&config.handle]).into(),
-            None => named.target.clone(),
-        }
+        let config = self.config(named).unwrap_or_default();
+        format!("{}{config}", named.target).into()
     }
 
-    /// `named`'s full label, with its configuration's whole checksum.
+    /// The configuration `named` is built in as [`Self::name`] reads it,
+    /// where it states one.
+    fn config(&self, named: &Named) -> Option<String> {
+        let config = named.config.as_ref()?;
+        Some(format!(" ({})", self.spelled[&config.handle]))
+    }
+
+    /// `named`'s label as a command line takes it, with its configuration's
+    /// whole checksum.
     fn full(&self, named: &Named) -> SharedString {
         match &named.config {
             Some(Config {
                 mnemonic: Some(mnemonic),
                 checksum,
                 ..
-            }) => format!("{} ({mnemonic}, {checksum})", named.label).into(),
-            Some(Config { checksum, .. }) => format!("{} ({checksum})", named.label).into(),
-            None => named.label.clone(),
+            }) => format!("{} ({mnemonic}, {checksum})", named.written).into(),
+            Some(Config { checksum, .. }) => format!("{} ({checksum})", named.written).into(),
+            None => named.written.clone(),
         }
     }
 }
@@ -320,6 +322,14 @@ fn tally(nodes: usize) -> SharedString {
     }
 }
 
+/// Whether the question open is about a dependency other than `node`, which
+/// [`ask_from`] can narrow to the paths from it.
+pub(crate) fn asking_about_another(view: &GraphPanel, node: Id) -> bool {
+    view.why
+        .dependency()
+        .is_some_and(|dependency| dependency != node)
+}
+
 /// Asks why `dependency` is in the build, keeping the dependent already named.
 pub(crate) fn ask_why(view: &mut GraphPanel, dependency: Id, cx: &mut Context<GraphPanel>) {
     let dependent = view
@@ -362,14 +372,16 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
     let Some(shared) = view.model.read(cx).loaded().map(|l| &l.shared) else {
         return;
     };
-    let (base, names, facets) = (
+    let (base, names, facets, labels) = (
         Arc::clone(&shared.base),
         Arc::clone(&shared.names),
         Arc::clone(&shared.facets),
+        Arc::clone(&shared.labels),
     );
+    let repos = labels.repos();
     let question = Question {
-        dependency: name(&names, &facets, dependency),
-        dependent: dependent.map(|dependent| name(&names, &facets, dependent)),
+        dependency: name(&names, &facets, repos, dependency),
+        dependent: dependent.map(|dependent| name(&names, &facets, repos, dependent)),
         switched_from: view
             .why
             .asked
@@ -391,7 +403,7 @@ fn ask(view: &mut GraphPanel, dependency: Id, dependent: Option<Id>, cx: &mut Co
                     .shortest
                     .iter()
                     .rev()
-                    .map(|&id| name(&names, &facets, id))
+                    .map(|&id| name(&names, &facets, labels.repos(), id))
                     .collect();
                 let nodes = between.paths.nodes.len();
                 Some((between.paths, Answer::Between { nodes, shortest }))
@@ -467,43 +479,8 @@ pub(crate) fn reset(view: &mut GraphPanel) {
     view.why = Why::new();
 }
 
-/// The controls asking about the box a secondary click has selected: why it is
-/// in the build and, while a dependency is asked about, the paths from it down
-/// to that dependency. `None` while no box is selected.
-pub(crate) fn controls(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Div> {
-    let node = view.selection.node()?;
-    let asking = view
-        .why
-        .dependency()
-        .filter(|&dependency| dependency != node);
-    Some(
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new(
-                    "why-selected",
-                    cx.listener(move |view, _: &ClickEvent, _, cx| ask_why(view, node, cx)),
-                )
-                .ghost()
-                .label("why")
-                .tooltip("Show why box is in build"),
-            )
-            .children(asking.map(|_| {
-                Button::new(
-                    "from-selected",
-                    cx.listener(move |view, _: &ClickEvent, _, cx| ask_from(view, node, cx)),
-                )
-                .ghost()
-                .label("from here")
-                .tooltip("Show only paths from box")
-            })),
-    )
-}
-
-/// An endpoint of the question: its name after `lead`, over the package holding
-/// it, with its full label on hover.
+/// An endpoint of the question: its label and configuration after `lead`, with
+/// its label as written on hover.
 fn endpoint(
     key: &'static str,
     lead: &str,
@@ -512,19 +489,18 @@ fn endpoint(
     palette: &Palette,
 ) -> Stateful<Div> {
     let tip = palette.colors.tooltip();
+    let fixed = |text: String| div().flex_none().whitespace_nowrap().child(text);
     div()
         .id(key)
         .flex()
-        .flex_col()
         .min_w_0()
         .tooltip(TextTooltip::builder(spelling.full(named), tip))
-        .child(line(format!("{lead}{}", spelling.name(named))))
-        .children(named.package.clone().map(|package| {
-            // Packages sharing a prefix differ at their tails.
-            line(package)
-                .text_ellipsis_start()
-                .text_color(palette.colors.text_muted)
-        }))
+        .child(fixed(lead.to_owned()))
+        .child(div().min_w_0().child(LabelLine::new(
+            named.label.clone(),
+            palette.colors.text_muted,
+        )))
+        .children(spelling.config(named).map(fixed))
 }
 
 /// The shortest chain's links, from the dependent down to the dependency,
@@ -733,7 +709,7 @@ mod tests {
         facets.set_label(configured, target);
         let config = facets.intern_config(checksum, Some(mnemonic), Tri::No);
         facets.set_config(configured, Some(config));
-        name(names, facets, configured)
+        name(names, facets, &WrittenRepos::default(), configured)
     }
 
     #[test]
@@ -742,31 +718,24 @@ mod tests {
         let named = worker(&mut names, &mut facets, "0123456789", "k8-opt-exec");
         let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), ":worker (k8-opt-exec)");
-        assert_eq!(
-            named.package.as_deref(),
-            Some("//src/main/java/com/example")
-        );
+        assert_eq!(&*named.label, "//src/main/java/com/example:worker");
         assert_eq!(
             spelling.full(&named),
             "//src/main/java/com/example:worker (k8-opt-exec, 0123456789)"
         );
 
         let action = names.intern("action7");
-        let unlabelled = name(&names, &facets, action);
-        assert_eq!(
-            (spelling.name(&unlabelled).as_ref(), unlabelled.package),
-            ("action7", None)
-        );
+        let unlabelled = name(&names, &facets, &WrittenRepos::default(), action);
+        assert_eq!(spelling.name(&unlabelled), "action7");
     }
 
     #[test]
     fn a_package_is_named_whole_by_its_path() {
         let (mut names, facets) = (Names::default(), Facets::default());
         let package = names.intern("pkg:ui/components");
-        let named = name(&names, &facets, package);
+        let named = name(&names, &facets, &WrittenRepos::default(), package);
         let spelling = Spelling::of(&facets, [&named].into_iter());
         assert_eq!(spelling.name(&named), "//ui/components");
-        assert_eq!(named.package, None);
         assert_eq!(spelling.full(&named), "//ui/components");
     }
 
@@ -894,7 +863,10 @@ mod tests {
             node("app", "a", "fastbuild", "", None),
             node("tool", "b", "opt", &long, Some("//:wrap")),
         );
-        let (app, tool) = (name(&names, &facets, app), name(&names, &facets, tool));
+        let (app, tool) = (
+            name(&names, &facets, &WrittenRepos::default(), app),
+            name(&names, &facets, &WrittenRepos::default(), tool),
+        );
 
         assert_eq!(
             crossing(&facets, Transition::Flag, &tool, &app),

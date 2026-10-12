@@ -7,14 +7,16 @@
 //! leave.
 
 use crate::column::scrolling;
+use crate::point::written_name;
 use crate::{GraphPanel, Palette, derive};
-use bviz_graph_layout::select::labels::carried_label;
+use bviz_graph_layout::facets::WrittenRepos;
 use bviz_graph_layout::select::{Filter, Pin, Visibility};
 use bviz_graph_layout::{Facets, Id, Names};
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TruncatingLabel};
+use bviz_ui_components::{Button, ListScroll};
 use gpui::{
     ClickEvent, Context, Div, IntoElement, Pixels, SharedString, Stateful, div, prelude::*, px,
     relative,
@@ -47,7 +49,7 @@ const PANEL_WIDTH: Pixels = px(320.);
 /// the canvas's foot and every row it lists can be reached.
 const MAX_HEIGHT_SHARE: f32 = 0.6;
 
-/// How a reader is offered the override `pin`, and how it is listed.
+/// How the override `pin` is listed.
 fn label(pin: Pin) -> &'static str {
     match pin {
         Pin::Set(Visibility::Shown) => "always show",
@@ -55,6 +57,15 @@ fn label(pin: Pin) -> &'static str {
         Pin::Set(Visibility::Faded) => "always fade",
         Pin::Revealed => "revealed",
     }
+}
+
+/// The menu row pinning a box to `visibility`, worded as the pin it sets is
+/// listed.
+pub(crate) fn offer(visibility: Visibility) -> String {
+    let listed = label(Pin::Set(visibility));
+    let mut rest = listed.chars();
+    let first = rest.next().map(|first| first.to_ascii_uppercase());
+    format!("{}{} box", String::from_iter(first), rest.as_str())
 }
 
 /// `filter` with `node` pinned to `visibility`, or with its pin dropped where
@@ -105,15 +116,6 @@ fn unpinned(filter: &Filter, node: Id) -> Filter {
     }
 }
 
-/// The name `node` is listed under: the canonical label of the target it
-/// belongs to, and its node name where it belongs to none.
-pub(crate) fn name(names: &Names, facets: &Facets, node: Id) -> SharedString {
-    carried_label(names, facets, node)
-        .unwrap_or_else(|| names.resolve(node))
-        .to_string()
-        .into()
-}
-
 /// `filter` with every override dropped, leaving each node to the rules again.
 pub(crate) fn cleared(filter: &Filter) -> Filter {
     Filter {
@@ -139,17 +141,24 @@ impl Pins {
 /// One override in force.
 struct Held {
     node: Id,
+    /// The node's name as it is shown.
     label: SharedString,
+    /// The node's name as a reader writes it.
+    written: SharedString,
     pin: Pin,
 }
 
 /// The overrides `filter` holds, by the name each is listed under.
-fn held(filter: &Filter, names: &Names, facets: &Facets) -> Vec<Held> {
+fn held(filter: &Filter, names: &Names, facets: &Facets, repos: &WrittenRepos) -> Vec<Held> {
     let mut held: Vec<Held> = Vec::with_capacity(filter.pins.len());
-    held.extend(filter.pins.iter().map(|(&node, &pin)| Held {
-        node,
-        label: name(names, facets, node),
-        pin,
+    held.extend(filter.pins.iter().map(|(&node, &pin)| {
+        let written = written_name(names, facets, repos, node);
+        Held {
+            node,
+            label: repos.names().show(&written).into_text().into(),
+            written: written.into(),
+            pin,
+        }
     }));
     held.sort_by(|one, other| (&one.label, one.node.0).cmp(&(&other.label, other.node.0)));
     held
@@ -183,22 +192,6 @@ fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     derive::set_filter(view, filter, cx);
 }
 
-/// The override offered on the box a secondary click has selected: dropping it
-/// from the drawing, which is what a reader reaches for on a box in front of
-/// them. `None` while no box is selected.
-pub(crate) fn control(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Button> {
-    let node = view.selection.node()?;
-    Some(
-        Button::new(
-            "pin-selected",
-            cx.listener(move |view, _: &ClickEvent, _, cx| set(view, node, Visibility::Hidden, cx)),
-        )
-        .ghost()
-        .label(label(Pin::Set(Visibility::Hidden)))
-        .tooltip("Always hide box"),
-    )
-}
-
 /// The overrides in force, for the caller to place over the drawing; `None`
 /// while there are none.
 pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel>) -> Option<Div> {
@@ -207,6 +200,7 @@ pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPane
         view.derived.filter(),
         &loaded.shared.names,
         &loaded.shared.facets,
+        loaded.shared.labels.repos(),
     );
     if held.is_empty() {
         return None;
@@ -310,7 +304,9 @@ fn row(held: Held, palette: &Palette, cx: &Context<GraphPanel>) -> Stateful<Div>
                 }
             });
         }))
-        .child(TruncatingLabel::new("label", held.label).flex_1())
+        .child(div().flex_1().min_w_0().child(
+            LabelLine::new(held.label, palette.colors.text_muted).hinted("label", held.written),
+        ))
         .child(div().flex_none().child(label(held.pin)))
 }
 
@@ -449,6 +445,11 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pin_is_offered_on_a_box_in_the_words_it_is_listed_by() {
+        assert_eq!(offer(Visibility::Hidden), "Always hide box");
+    }
+
     /// Pinning what is already pinned that way is how an override is taken back
     /// off, and pinning it the other way replaces it.
     #[test]
@@ -479,10 +480,15 @@ mod tests {
             Visibility::Hidden,
         );
 
-        let listed: Vec<(String, Pin)> = held(&filter, &fixture.names, &fixture.facets)
-            .into_iter()
-            .map(|held| (held.label.to_string(), held.pin))
-            .collect();
+        let listed: Vec<(String, Pin)> = held(
+            &filter,
+            &fixture.names,
+            &fixture.facets,
+            &WrittenRepos::default(),
+        )
+        .into_iter()
+        .map(|held| (held.label.to_string(), held.pin))
+        .collect();
 
         assert_eq!(
             listed,

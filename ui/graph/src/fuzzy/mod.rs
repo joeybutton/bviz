@@ -4,6 +4,7 @@
 mod rank;
 
 use crate::GraphPanel;
+use bviz_label::shown::Shown;
 use gpui::{
     Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
     px, rems,
@@ -11,6 +12,7 @@ use gpui::{
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Injector, Matcher, Nucleo, Utf32Str, Utf32String};
 pub(crate) use rank::{Row, Standing};
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,8 +50,10 @@ pub(crate) type TakeUp = fn(&mut GraphPanel, &mut Context<GraphPanel>);
 pub(crate) struct Matching {
     nucleo: Nucleo<u32>,
     /// Finds the characters each row's query matched, for ranking the rows
-    /// and highlighting them.
-    matcher: Matcher,
+    /// and highlighting them, on a row's text as written and as shown.
+    matcher: RefCell<Matcher>,
+    /// The pattern `rows` were ranked by.
+    pattern: Pattern,
     /// The query last handed to the matcher, which an edit extending it
     /// narrows rather than matches afresh.
     query: SharedString,
@@ -97,7 +101,8 @@ impl Matching {
             .reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
         Matching {
             nucleo,
-            matcher: Matcher::new(config()),
+            matcher: RefCell::new(Matcher::new(config())),
+            pattern: Pattern::default(),
             query: SharedString::default(),
             ranked: SharedString::default(),
             rows: Vec::new(),
@@ -174,11 +179,12 @@ impl Matching {
         let found = snapshot
             .matched_items(..)
             .map(|item| (*item.data, item.matcher_columns[0].slice(..)));
+        self.pattern = snapshot.pattern().column_pattern(0).clone();
         self.rows = rank::rank(
             found,
             &self.query,
-            snapshot.pattern().column_pattern(0),
-            &mut self.matcher,
+            &self.pattern,
+            self.matcher.get_mut(),
             standing,
         );
     }
@@ -318,6 +324,50 @@ pub(crate) fn rank_few<'a>(
     rank::rank(found, query, &pattern, &mut matcher, standing)
 }
 
+impl Matching {
+    /// The chars of `shown`, a row's text as it is shown, that pick out what
+    /// the query matched of `row`'s text as written, ascending: where each
+    /// matched char stands in `shown` while every one of them shows there, and
+    /// otherwise the chars of `shown` the query matches, where it matches.
+    pub(crate) fn picked(&self, shown: &Shown, row: &Row) -> Vec<u32> {
+        picked(
+            shown,
+            &row.matched,
+            &self.pattern,
+            &mut self.matcher.borrow_mut(),
+        )
+    }
+}
+
+/// [`Matching::picked`] for `matched`, the chars of the text as written that
+/// `pattern` matched, as `matcher` matches.
+fn picked(shown: &Shown, matched: &[u32], pattern: &Pattern, matcher: &mut Matcher) -> Vec<u32> {
+    if matched.iter().all(|&at| shown.at(at).is_some()) {
+        return shown_matches(shown, matched);
+    }
+    let mut chars = Vec::new();
+    let text = Utf32Str::new(shown.text(), &mut chars);
+    let mut rematched: Vec<u32> = Vec::with_capacity(matched.len());
+    match pattern.indices(text, matcher, &mut rematched) {
+        Some(_) => {
+            rematched.sort_unstable();
+            rematched.dedup();
+            rematched
+        }
+        None => shown_matches(shown, matched),
+    }
+}
+
+/// The chars of `shown` standing for the chars `matched` of the text as it
+/// is written, ascending. A shorthand shows a name's chars where its place
+/// reads them, ahead of the chars of the place matched before them.
+fn shown_matches(shown: &Shown, matched: &[u32]) -> Vec<u32> {
+    let mut shown_matched: Vec<u32> = matched.iter().filter_map(|&at| shown.at(at)).collect();
+    shown_matched.sort_unstable();
+    shown_matched.dedup();
+    shown_matched
+}
+
 /// `text` with its `path` muted and the `matched` chars picked out over it.
 pub(crate) fn highlighted(
     text: SharedString,
@@ -346,22 +396,27 @@ pub(crate) fn highlights(
                     color: Some(muted),
                     ..HighlightStyle::default()
                 },
-                // Picked out by colour and an underline but in the row's own
-                // weight: a row is cut to fit as measured in that weight, so a
-                // wider one would run past the cut and be clipped unmarked.
-                Style::Matched => HighlightStyle {
-                    color: Some(picked),
-                    underline: Some(UnderlineStyle {
-                        thickness: MATCH_UNDERLINE,
-                        color: Some(picked),
-                        wavy: false,
-                    }),
-                    ..HighlightStyle::default()
-                },
+                Style::Matched => matched_style(picked),
             };
             (range, highlight)
         })
         .collect()
+}
+
+/// How the chars a query matched are picked out, in `picked`: by colour and
+/// an underline but in the row's own weight, since a row is cut to fit as
+/// measured in that weight, so a wider one would run past the cut and be
+/// clipped unmarked.
+pub(crate) fn matched_style(picked: Hsla) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(picked),
+        underline: Some(UnderlineStyle {
+            thickness: MATCH_UNDERLINE,
+            color: Some(picked),
+            wavy: false,
+        }),
+        ..HighlightStyle::default()
+    }
 }
 
 /// How a run of a row's text is drawn apart from the candidate's name.
@@ -399,6 +454,56 @@ fn styled_runs(text: &str, path: &Range<u32>, matched: &[u32]) -> Vec<(Range<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_label::names::RepoNames;
+
+    /// The chars of `written` as `names` shows it that [`picked`] picks out
+    /// for `query`, matched against `written` as a list matches it.
+    fn picked_for(names: &RepoNames, written: &str, query: &str) -> Vec<u32> {
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut matcher = Matcher::new(config());
+        let mut chars = Vec::new();
+        let mut matched = Vec::new();
+        let text = Utf32Str::new(written, &mut chars);
+        pattern.indices(text, &mut matcher, &mut matched).unwrap();
+        matched.sort_unstable();
+        matched.dedup();
+        picked(&names.show(written), &matched, &pattern, &mut matcher)
+    }
+
+    /// A query matching the text as written in the part of a repository's
+    /// name its shown name leaves out picks out what it matches of the text
+    /// shown, its `@` the `@` shown.
+    #[test]
+    fn a_match_in_a_part_left_out_is_found_in_the_text_shown() {
+        let written = "@@llvm++glibc+glibc//:glibc_crt1.object";
+        let names = RepoNames::of_labels([written].into_iter());
+        assert_eq!(names.show(written).text(), "@glibc//:glibc_crt1.object");
+        assert_eq!(picked_for(&names, written, "@glibc"), [0, 1, 2, 3, 4, 5]);
+        let picked = picked_for(&names, written, "glibc");
+        assert_eq!(picked.len(), "glibc".len());
+        assert!(picked.iter().all(|&at| at > 0));
+    }
+
+    /// Where the query matches nothing of the text shown, as one naming the
+    /// part a shortening leaves out does, the chars that show of those it
+    /// matched are picked out, and none in their stead.
+    #[test]
+    fn a_match_the_text_shown_lacks_keeps_what_shows_of_it() {
+        let written = "@@llvm++glibc+glibc//:crt1";
+        let names = RepoNames::of_labels([written].into_iter());
+        assert_eq!(names.show(written).text(), "@glibc//:crt1");
+        assert_eq!(picked_for(&names, written, "@@llvm"), [0]);
+    }
+
+    /// A match whose every char shows keeps where it fell, even where the
+    /// text shown reads it elsewhere too.
+    #[test]
+    fn a_match_that_shows_is_picked_out_where_it_fell() {
+        let written = "//a/lib:lib";
+        let names = RepoNames::of_labels([written].into_iter());
+        assert_eq!(names.show(written).text(), "//a/lib");
+        assert_eq!(picked_for(&names, written, "a"), [2]);
+    }
 
     #[test]
     fn the_path_is_muted_and_the_matched_chars_picked_out_over_it() {

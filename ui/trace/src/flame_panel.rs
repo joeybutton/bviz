@@ -3,7 +3,7 @@ use crate::model::{AggregateBuildStarted, SourceReplaced, TraceModel};
 use crate::theme::{self, Palette, RemainderPaint};
 use crate::{
     METRICS, MIN_SLICE_PX, STATS_TEXT_SIZE, ShowWholeFlameGraph, drawn_scroll, profile_status,
-    scroll_request, thumb_offset, time_window_chip,
+    scroll_request, thumb_offset, time_window_group,
 };
 use bviz_trace_layout::{
     FlameBox, FlameBoxContent, FlameDirection, FlameLabels, FlameMetrics, FlameMode,
@@ -14,10 +14,11 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer, pinch_factor,
 };
 use bviz_ui_components::{
-    Axis, Button, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
-    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, ShownCard, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
+    Axis, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
+    MenuItem, OneRow, Presentation, Priority, SCROLLBAR_THICKNESS, Scrollbar, ShowLegend,
+    ShownCard, Switch, ToggleGroup, ToggleSegment, ToolbarGroup, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
     cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
-    paint_labeled_box, spinner, track_drag,
+    paint_labeled_box, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
@@ -28,6 +29,18 @@ use gpui::{
 };
 use std::rc::Rc;
 use std::sync::Arc;
+
+gpui::actions!(
+    bviz_trace,
+    [
+        /// Cycle direction
+        CycleDirection,
+        /// Cycle weight
+        CycleWeight,
+        /// Toggle merging by kind
+        ToggleKinds,
+    ]
+);
 
 /// The key context scoping the flame graph's own bindings, so a key pressed here
 /// reaches this panel and no other.
@@ -84,27 +97,44 @@ const GESTURES: Gestures<FlameIntent> = Gestures::new(&[
     ),
 ]);
 
-/// The weights the toolbar offers, each with its button's id, label and hint,
-/// in the order the buttons stand.
-pub(crate) const WEIGHT_CHOICES: [(&str, &str, &str, FlameWeight); 2] = [
-    (
-        "flame-summed-time",
-        "Summed time",
-        "Size by summed time",
-        FlameWeight::Duration,
-    ),
-    (
-        "flame-wall-time",
-        "Wall time",
-        "Size by wall time",
-        FlameWeight::WallShare,
-    ),
-];
+/// The directions the toolbar offers, in the order it shows them.
+const DIRECTIONS: [FlameDirection; 2] = [FlameDirection::TopDown, FlameDirection::BottomUp];
 
-/// Whether the toolbar's button for `weight` reads as chosen while `mode`
-/// stands, and the mode a click on it asks for.
-pub(crate) fn weight_choice(mode: FlameMode, weight: FlameWeight) -> (bool, FlameMode) {
-    (mode.weight == weight, FlameMode { weight, ..mode })
+fn direction_segment(direction: FlameDirection) -> ToggleSegment {
+    let (label, hint) = match direction {
+        FlameDirection::TopDown => ("top-down", "Top-down: callees"),
+        FlameDirection::BottomUp => ("bottom-up", "Bottom-up: callers"),
+    };
+    ToggleSegment::new(label).tooltip(hint)
+}
+
+/// How long each mode choice of the toolbar holds out against the panel
+/// narrowing, the direction longest.
+const DIRECTION: Priority = 4;
+const WEIGHT: Priority = 3;
+const KINDS: Priority = 2;
+
+/// The words naming each choice, beside it, on its collapsed trigger and on its
+/// row of the overflow menu.
+const DIRECTION_NAME: &str = "direction";
+const WEIGHT_NAME: &str = "weight";
+const LABELS_NAME: &str = "labels";
+
+/// The weights the toolbar offers, in the order it shows them.
+const WEIGHTS: [FlameWeight; 2] = [FlameWeight::Duration, FlameWeight::WallShare];
+
+fn weight_segment(weight: FlameWeight) -> ToggleSegment {
+    let (label, hint) = match weight {
+        FlameWeight::Duration => ("summed time", "Size by summed time"),
+        FlameWeight::WallShare => ("wall time", "Size by wall time"),
+    };
+    ToggleSegment::new(label).tooltip(hint)
+}
+
+/// The choice among `choices` after `standing`, round to the first.
+fn after<T: Copy + PartialEq>(choices: &[T], standing: T) -> T {
+    let at = choices.iter().position(|&choice| choice == standing);
+    choices[at.map_or(0, |at| (at + 1) % choices.len())]
 }
 
 /// The flame graph's laid-out boxes together with the inputs that determine
@@ -337,7 +367,7 @@ fn paint_remainder(
     paint_labeled_box(
         rect,
         wash,
-        &remainder_label(remainder),
+        remainder_label(remainder).as_str(),
         bviz_ui_theme::label_on(wash),
         palette.label_box(),
         window,
@@ -465,8 +495,8 @@ impl FlamePanel {
             this.reset_aggregate_derived();
             this.invalidate_canvas(cx);
         });
-        // The boxes still address the shown graph; only the pill above them needs
-        // the frame.
+        // The boxes still address the shown graph; only the toolbar's cue of the
+        // build needs the frame.
         let build_start = cx.subscribe(&model, |_, _, _: &AggregateBuildStarted, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |this, _, _: &SourceReplaced, cx| {
             this.reset_view();
@@ -519,93 +549,93 @@ impl FlamePanel {
         self.card.leave();
     }
 
-    /// The panel's toolbar: the window the graph covers, then the controls that
-    /// choose which graph is aggregated and the legend for the colours it is
-    /// drawn in.
-    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> Toolbar {
+    /// The panel's toolbar: the controls choosing which graph is aggregated,
+    /// then the window it covers, ending in the toggle opening the legend for
+    /// the colours it is drawn in.
+    fn toolbar(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> OneRow {
+        let mode = self.model.read(cx).flame_mode();
+        let at_rest = FlameMode::default();
+        let view = cx.entity();
+        let focus = &self.focus;
+        let set_mode = move |to: FlameMode, cx: &mut App| {
+            view.update(cx, |this, cx| this.set_mode(to, cx));
+        };
+        let direction = || {
+            let set_mode = set_mode.clone();
+            ToggleGroup::one_of(
+                "flame-direction",
+                DIRECTION_NAME,
+                DIRECTIONS,
+                mode.direction,
+                |direction| direction_segment(direction).keys_for(&CycleDirection, focus),
+                move |direction, _, cx| set_mode(FlameMode { direction, ..mode }, cx),
+            )
+            .tooltip("Flame direction")
+        };
+        let weight = || {
+            let set_mode = set_mode.clone();
+            ToggleGroup::one_of(
+                "flame-weight",
+                WEIGHT_NAME,
+                WEIGHTS,
+                mode.weight,
+                |weight| weight_segment(weight).keys_for(&CycleWeight, focus),
+                move |weight, _, cx| set_mode(FlameMode { weight, ..mode }, cx),
+            )
+            .tooltip("Box size")
+        };
+        let kinds = || {
+            let set_mode = set_mode.clone();
+            ToggleGroup::any_of(
+                "flame-kinds",
+                LABELS_NAME,
+                [Switch::new(
+                    ToggleSegment::new("kinds")
+                        .tooltip("Merge spans by kind")
+                        .keys_for(&ToggleKinds, focus),
+                    mode.labels == FlameLabels::Kind,
+                    move |kinds, _, cx| {
+                        let labels = match kinds {
+                            true => FlameLabels::Kind,
+                            false => FlameLabels::Name,
+                        };
+                        set_mode(FlameMode { labels, ..mode }, cx)
+                    },
+                )],
+            )
+        };
+        let choice = |priority, name: &'static str, toggles: &dyn Fn() -> ToggleGroup, set| {
+            ToolbarGroup::named(priority, name, toggles)
+                .or(toggles().presentation(Presentation::Collapsed))
+                .overflow(MenuItem::submenu(name, toggles().submenu(window)), set)
+        };
+        let direction = choice(
+            DIRECTION,
+            DIRECTION_NAME,
+            &direction,
+            mode.direction != at_rest.direction,
+        );
+        let weight = choice(WEIGHT, WEIGHT_NAME, &weight, mode.weight != at_rest.weight);
+        let kinds = ToolbarGroup::named(KINDS, LABELS_NAME, kinds).overflow(
+            MenuItem::submenu(LABELS_NAME, kinds().submenu(window)),
+            mode.labels != at_rest.labels,
+        );
         let legend =
             Legend::new("flame-legend", &self.legend).entries(theme::role_legend(&palette));
-        time_window_chip(&self.model, palette, cx)
-            .into_iter()
-            .chain(self.mode_controls(palette, cx))
-            .fold(Toolbar::new(), Toolbar::child)
-            .child(legend)
-    }
-
-    /// The graph's mode controls, one group for each choice they offer, so that
-    /// a toolbar wrapping them keeps the buttons of one choice on one row.
-    fn mode_controls(&self, palette: Palette, cx: &mut Context<Self>) -> [Div; 3] {
-        let mode = self.model.read(cx).flame_mode();
-        let kinds = mode.labels == FlameLabels::Kind;
-        let button =
-            |id: &'static str, label: &'static str, hint: &'static str, on: bool, to: FlameMode| {
-                let view = cx.entity();
-                Button::new(id, move |_, _, cx| {
-                    view.update(cx, |this, cx| this.set_mode(to, cx));
-                })
-                .ghost()
-                .compact()
-                .selected(on)
-                .label(label)
-                .tooltip(hint)
-            };
-        let group = || {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .text_size(px(STATS_TEXT_SIZE))
-        };
-        // The outline holds an exclusive pair together, so two pairs side by
-        // side read as two choices.
-        let pair = || {
-            group()
-                .rounded_md()
-                .border_1()
-                .border_color(palette.divider)
-        };
-        [
-            pair()
-                .child(button(
-                    "flame-top-down",
-                    "Top-down",
-                    "Top-down: callees",
-                    mode.direction == FlameDirection::TopDown,
-                    FlameMode {
-                        direction: FlameDirection::TopDown,
-                        ..mode
-                    },
-                ))
-                .child(button(
-                    "flame-bottom-up",
-                    "Bottom-up",
-                    "Bottom-up: callers",
-                    mode.direction == FlameDirection::BottomUp,
-                    FlameMode {
-                        direction: FlameDirection::BottomUp,
-                        ..mode
-                    },
-                )),
-            pair().children(WEIGHT_CHOICES.map(|(id, label, hint, weight)| {
-                let (chosen, to) = weight_choice(mode, weight);
-                button(id, label, hint, chosen, to)
-            })),
-            group().child(button(
-                "flame-kinds",
-                "Kinds",
-                "Merge spans by kind",
-                kinds,
-                FlameMode {
-                    labels: if kinds {
-                        FlameLabels::Name
-                    } else {
-                        FlameLabels::Kind
-                    },
-                    ..mode
-                },
-            )),
-        ]
+        // While a rebuild for a new selection runs off the thread, the prior
+        // graph stays shown and interactive.
+        let building = self.model.read(cx).aggregate_building();
+        OneRow::new("flame-controls")
+            .text_size(px(STATS_TEXT_SIZE))
+            .group(direction)
+            .group(weight)
+            .group(kinds)
+            .when_some(
+                time_window_group(&self.model, palette, focus, window, cx),
+                |row, chip| row.group(chip.parted()),
+            )
+            .when(building, |row| row.busy("flame-rebuild", "updating…"))
+            .trailing(legend.toolbar_group())
     }
 
     /// Applies a mode chosen on the toolbar, leaving the view alone for a click
@@ -940,7 +970,7 @@ impl Panel for FlamePanel {
 impl Render for FlamePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
-        let toolbar = self.toolbar(palette, cx);
+        let toolbar = self.toolbar(palette, window, cx);
         let body = self.graph_body(palette, cx);
         div()
             .key_context(Self::kind().key_context)
@@ -957,6 +987,24 @@ impl Render for FlamePanel {
             }))
             .on_action(cx.listener(|this, _: &ShowLegend, window, cx| {
                 this.legend.update(cx, |legend, cx| legend.show(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CycleDirection, _, cx| {
+                let mode = this.model.read(cx).flame_mode();
+                let direction = after(&DIRECTIONS, mode.direction);
+                this.set_mode(FlameMode { direction, ..mode }, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CycleWeight, _, cx| {
+                let mode = this.model.read(cx).flame_mode();
+                let weight = after(&WEIGHTS, mode.weight);
+                this.set_mode(FlameMode { weight, ..mode }, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleKinds, _, cx| {
+                let mode = this.model.read(cx).flame_mode();
+                let labels = match mode.labels {
+                    FlameLabels::Kind => FlameLabels::Name,
+                    FlameLabels::Name => FlameLabels::Kind,
+                };
+                this.set_mode(FlameMode { labels, ..mode }, cx);
             }))
             .flex()
             .flex_col()
@@ -991,36 +1039,6 @@ impl FlamePanel {
                 track_drag(window, &entity, flame_on_drag, flame_end_drag);
             }
         });
-        // While a rebuild for a new selection runs off the thread, the prior graph
-        // stays shown and interactive; a spinner pill signals the update, since
-        // aggregating a large selection can take a moment.
-        let spinner = self.model.read(cx).aggregate_building().then(|| {
-            div()
-                .absolute()
-                .top_2()
-                .left_0()
-                .right_0()
-                .flex()
-                .flex_row()
-                .justify_center()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(palette.panel)
-                        .border_1()
-                        .border_color(palette.border)
-                        .text_color(palette.label)
-                        .text_size(px(STATS_TEXT_SIZE))
-                        .child(spinner("flame-rebuild", px(14.), palette.label))
-                        .child("Updating…"),
-                )
-        });
         self.panel_handlers(
             div()
                 .id("flame-graph-panel")
@@ -1030,8 +1048,7 @@ impl FlamePanel {
                 .overflow_hidden()
                 .child(boxes)
                 .child(overlay)
-                .child(card)
-                .children(spinner),
+                .child(card),
             cx,
         )
         .into_any_element()
@@ -1204,6 +1221,18 @@ mod tests {
         FlameDirection, FlameGraph, FlameLabels, FlameMode, FlameWeight, TimeSelection,
     };
     use bviz_trace_profile::Profile;
+
+    #[test]
+    fn stepping_a_mode_choice_wraps_round_to_the_first() {
+        assert_eq!(
+            after(&DIRECTIONS, FlameDirection::TopDown),
+            FlameDirection::BottomUp
+        );
+        assert_eq!(
+            after(&DIRECTIONS, FlameDirection::BottomUp),
+            FlameDirection::TopDown
+        );
+    }
 
     #[test]
     fn every_gesture_is_reachable() {

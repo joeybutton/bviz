@@ -2,6 +2,7 @@
 //! targets or targets: the dominator tree of the graph's points of one unit,
 //! drawn as an icicle.
 
+mod ancestry;
 mod cell_menu;
 mod icicle;
 mod paint;
@@ -14,16 +15,16 @@ pub(crate) use roots::NOTICE_SEPARATOR;
 use crate::Palette;
 use crate::history::History;
 use crate::hue::{Colouring, Hue};
-use crate::menu::over_window;
 use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
 use crate::point::{
-    KindNames, built_for_tool, configuration, identify, point_label, target_label, unit_names,
+    KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
 };
-use crate::toolbar::{busy, group};
-use crate::unit_picker::UnitPicker;
+use crate::unit_picker::{CyclePoints, UnitPicker};
+use ancestry::{Spot, Stands};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
+use bviz_graph_layout::select::labels::carried_label;
 use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::gesture::{
@@ -31,24 +32,22 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
+    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
     centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
+    over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
 use gpui::{
-    Action, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    NavigationDirection, Pixels, Point, Render, Rgba, SharedString, Subscription, Task, WeakEntity,
-    Window, canvas, div, prelude::*, px, relative,
+    Action, App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, NavigationDirection, Pixels, Point,
+    Render, Rgba, SharedString, Subscription, Task, WeakEntity, Window, canvas, div, prelude::*,
+    px,
 };
 use icicle::{Cell, Holds, Parent, Run};
-use paint::{
-    HINT_SEPARATOR, MIN_CELL_WIDTH, Scene, cell_name, hints_among, point_name, run_name,
-    shared_name,
-};
+use paint::{MIN_CELL_WIDTH, Scene, point_name, run_name, shared_name};
 use roots::{Found, Within};
-use selection::Step;
+use selection::{LaidOut, Step};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -66,10 +65,11 @@ pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 enum ExclusiveIntent {
     ShowWholeBuild,
     FocusCell,
+    FocusAncestor,
+    ListHidden,
     OpenMenu,
     GoBack,
     GoForward,
-    FocusCrumb,
     SelectCell,
 }
 
@@ -80,6 +80,20 @@ const FOCUS_CELL: Entry<ExclusiveIntent> = Entry::new(
     CELL,
     "Focus cell or go up one level",
     ExclusiveIntent::FocusCell,
+);
+
+const FOCUS_ANCESTOR: Entry<ExclusiveIntent> = Entry::new(
+    Input::new(Motion::Press(Button::Left, Clicks::Single)),
+    Place::On("an ancestor row"),
+    "Focus ancestor",
+    ExclusiveIntent::FocusAncestor,
+);
+
+const LIST_HIDDEN: Entry<ExclusiveIntent> = Entry::new(
+    Input::new(Motion::Press(Button::Left, Clicks::Single)),
+    Place::On("the hidden ancestors row"),
+    "List hidden ancestors",
+    ExclusiveIntent::ListHidden,
 );
 
 const OPEN_MENU: Entry<ExclusiveIntent> = Entry::new(
@@ -97,6 +111,8 @@ const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
         ExclusiveIntent::ShowWholeBuild,
     ),
     FOCUS_CELL,
+    FOCUS_ANCESTOR,
+    LIST_HIDDEN,
     OPEN_MENU,
     Entry::new(
         Input::press(Button::Back),
@@ -109,12 +125,6 @@ const GESTURES: Gestures<ExclusiveIntent> = Gestures::new(&[
         Place::Anywhere,
         "Go forward",
         ExclusiveIntent::GoForward,
-    ),
-    Entry::new(
-        Input::click(Button::Left),
-        Place::On("a breadcrumb"),
-        "Focus what it names",
-        ExclusiveIntent::FocusCrumb,
     ),
     Entry::new(
         Input::HOVER,
@@ -202,8 +212,8 @@ pub struct ExclusivePanel {
     drawing: Option<Task<()>>,
     /// The menu a right press put up over a cell, while it stands.
     menu: Option<CellMenu>,
-    /// The card describing the cell selected.
-    card: HoverCard<Holds>,
+    /// The card describing what is selected.
+    card: HoverCard<Stands>,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -220,16 +230,16 @@ impl ExclusivePanel {
         drawn.selection.as_ref().filter(|_| at_rest)
     }
 
-    /// What the card describing the selected cell reads and stands beside,
+    /// What the card describing what is selected reads and stands beside,
     /// while it is shown.
     fn card(&self) -> Option<(Vec<String>, CardAnchor)> {
-        let Selection { cell, by, lines } = self.at_rest_selection()?;
+        let Selection { spot, by, lines } = self.at_rest_selection()?;
         let anchor = match (by, self.card.pointer()) {
-            // The menu stands in for the cell's description.
+            // The menu stands in for the description.
             (Picked::Menu, _) => return None,
-            _ if !self.card.shows(&cell.holds) => return None,
+            _ if !self.card.shows(&spot.stands()) => return None,
             (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
-            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
+            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(spot.rect()),
         };
         Some((lines.clone(), anchor))
     }
@@ -245,7 +255,7 @@ impl ExclusivePanel {
             view.failed = None;
             view.coloured.clear();
             view.drawing = None;
-            view.picker = unit_picker(&view.model, cx);
+            view.picker = unit_picker(&view.model, &view.focus_handle, cx);
             view.compute(cx);
         });
         let dominators_landed = cx.subscribe(&model, |view, _, landed: &DominatorsLanded, cx| {
@@ -263,6 +273,7 @@ impl ExclusivePanel {
                 roots::FIELD_WIDTH,
                 cx,
             )
+            .narrowing_to(roots::FIELD_LEAST)
         });
         let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
             QueryFieldEvent::Edited | QueryFieldEvent::CursorMoved => {}
@@ -271,10 +282,11 @@ impl ExclusivePanel {
         let parent = cx.entity().downgrade();
         let focus_handle = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
+        let picker = unit_picker(&model, &focus_handle, cx);
         Self {
             focus_handle,
             legend,
-            picker: unit_picker(&model, cx),
+            picker,
             model,
             shown: false,
             drawn: None,
@@ -587,27 +599,24 @@ impl ExclusivePanel {
         ));
     }
 
-    /// The cells drawn from the focus at rest, where they are laid out.
-    fn laid_out(&self) -> Option<Vec<Cell>> {
+    /// The rows over the focus and the cells drawn from it at rest, where
+    /// they are laid out.
+    fn laid_out(&self) -> Option<LaidOut> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
         let tree = &*drawn.coloured.tree;
-        Some(icicle::lay_out(
-            tree,
-            drawn.top(),
-            frame.bounds,
-            frame.row,
-            MIN_CELL_WIDTH,
-        ))
+        let rows = ancestry::rows(tree, drawn.top());
+        let (above, under) = ancestry::lay_out(&rows, frame.bounds, frame.row);
+        let cells = icicle::lay_out(tree, drawn.top(), under, frame.row, MIN_CELL_WIDTH);
+        Some(LaidOut { above, cells })
     }
 
-    /// The cell a pointer at `at` is over, where the cells are drawn and at
-    /// rest.
-    fn cell_at(&self, at: Point<Pixels>) -> Option<Cell> {
+    /// What a pointer at `at` is over, where the icicle is drawn and at rest.
+    fn spot_at(&self, at: Point<Pixels>) -> Option<Spot> {
         if self.drawn.as_ref()?.transition.is_some() {
             return None;
         }
-        let cells = self.laid_out()?;
-        cells.into_iter().find(|cell| cell.rect.contains(&at))
+        let laid = self.laid_out()?;
+        laid.spots().find(|spot| spot.rect().contains(&at))
     }
 
     /// Draws the icicle from `on`, or from the whole build where there is
@@ -673,9 +682,9 @@ impl ExclusivePanel {
         }
     }
 
-    /// Selects and describes afresh: where the keys selected, the cell they
+    /// Selects and describes afresh: where the keys selected, what they
     /// selected wherever it is still drawn and the cell on top where it is
-    /// not, and otherwise the cell under the pointer.
+    /// not, and otherwise what is under the pointer.
     fn reselect(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
@@ -683,14 +692,14 @@ impl ExclusivePanel {
         let (selected, pointer) = (drawn.selection.take(), self.card.pointer());
         match selected {
             Some(Selection {
-                cell,
+                spot,
                 by: Picked::Keys,
                 ..
             }) => {
-                let cells = self.laid_out().unwrap_or_default();
-                let kept = cells.iter().find(|drawn| drawn.holds == cell.holds);
-                match kept.or(cells.first()) {
-                    Some(&kept) => self.select(kept, Picked::Keys, cx),
+                let laid = self.laid_out();
+                let kept = laid.and_then(|laid| laid.find(&spot).or(laid.top()));
+                match kept {
+                    Some(kept) => self.select(kept, Picked::Keys, cx),
                     None => cx.notify(),
                 }
             }
@@ -701,9 +710,9 @@ impl ExclusivePanel {
         }
     }
 
-    /// Selects `cell` as `by` picked it, describing it unless it is the cell
+    /// Selects `spot` as `by` picked it, describing it unless it is what is
     /// selected already.
-    fn select(&mut self, cell: Cell, by: Picked, cx: &mut Context<Self>) {
+    fn select(&mut self, spot: Spot, by: Picked, cx: &mut Context<Self>) {
         let as_targets = self
             .target_key()
             .and_then(|key| self.model.read(cx).dominators(&key).cloned());
@@ -712,19 +721,22 @@ impl ExclusivePanel {
         };
         let focus = drawn.focused();
         match &mut drawn.selection {
-            Some(selection) if selection.cell == cell => selection.by = by,
+            Some(selection) if selection.spot == spot => selection.by = by,
             selection => {
-                *selection = Some(Selection {
-                    cell,
-                    by,
-                    lines: describe(&drawn.coloured, as_targets.as_deref(), cell.holds, focus),
-                });
+                let coloured = &drawn.coloured;
+                let lines = match spot {
+                    Spot::Cell(cell) => {
+                        describe(coloured, as_targets.as_deref(), cell.holds, focus)
+                    }
+                    Spot::Hidden { count, .. } => describe_hidden(coloured, count, focus),
+                };
+                *selection = Some(Selection { spot, by, lines });
             }
         }
         cx.notify();
     }
 
-    /// Selects no cell.
+    /// Selects nothing.
     fn deselect(&mut self, cx: &mut Context<Self>) {
         if let Some(drawn) = &mut self.drawn
             && drawn.selection.take().is_some()
@@ -733,19 +745,17 @@ impl ExclusivePanel {
         }
     }
 
-    /// Takes the selection a `step` through the cells drawn, or selects the
-    /// cell on top where none is selected.
+    /// Takes the selection a `step` through what is drawn, or selects the
+    /// cell on top where nothing is selected.
     fn step(&mut self, step: Step, cx: &mut Context<Self>) {
-        let (Some(drawn), Some(cells)) = (&self.drawn, self.laid_out()) else {
+        let (Some(drawn), Some(laid)) = (&self.drawn, self.laid_out()) else {
             return;
         };
-        let selected = drawn.selection.as_ref().and_then(|selection| {
-            let holds = selection.cell.holds;
-            cells.iter().find(|cell| cell.holds == holds)
-        });
+        let selected = drawn.selection.as_ref();
+        let selected = selected.and_then(|selection| laid.find(&selection.spot));
         let to = match selected {
-            Some(from) => selection::stepped(&cells, from, step, &*drawn.coloured.tree),
-            None => cells.first().copied(),
+            Some(from) => laid.stepped(&from, step, &*drawn.coloured.tree),
+            None => laid.top(),
         };
         if let Some(to) = to {
             self.card.pick();
@@ -753,14 +763,19 @@ impl ExclusivePanel {
         }
     }
 
-    /// Focuses what a click on the selected cell asks for.
-    fn focus_selected(&mut self, cx: &mut Context<Self>) {
+    /// Does what a click on what is selected does.
+    fn focus_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self
             .drawn
             .as_ref()
             .and_then(|drawn| drawn.selection.as_ref());
-        if let Some(holds) = selected.map(|selection| selection.cell.holds) {
-            self.click_cell(holds, cx);
+        match selected.map(|selection| selection.spot) {
+            Some(Spot::Cell(cell)) => self.click_cell(cell.holds, cx),
+            Some(spot @ Spot::Hidden { .. }) => {
+                let at = spot.rect().bottom_left();
+                self.list_hidden(spot, at, window, cx);
+            }
+            None => {}
         }
     }
 
@@ -770,10 +785,11 @@ impl ExclusivePanel {
             return;
         };
         if let Some(Selection {
-            cell: Cell {
-                holds: Holds::Node(node),
-                ..
-            },
+            spot:
+                Spot::Cell(Cell {
+                    holds: Holds::Node(node),
+                    ..
+                }),
             ..
         }) = drawn.selection
         {
@@ -788,22 +804,14 @@ impl ExclusivePanel {
         (self.drawn.as_ref()).is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
     }
 
-    /// Focuses `on` of `tree` as [`Self::focus_on`] does, where `tree` is
-    /// still the tree drawn.
-    fn focus_on_in(&mut self, tree: &Arc<Dominators>, on: Option<Focused>, cx: &mut Context<Self>) {
-        if self.draws(tree) {
-            self.focus_on(on, cx);
-        }
-    }
-
     /// Draws the icicle from what the focus stands under.
     fn focus_up(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &self.drawn else {
             return;
         };
         if let Some(on) = drawn.focused() {
-            let up = Crumb::of(on.parent(&drawn.coloured.tree));
-            self.focus_on(up.map(Focused::from), cx);
+            let up = on.holds().parent(&*drawn.coloured.tree);
+            self.focus_on(up.and_then(Focused::of), cx);
         }
     }
 
@@ -824,46 +832,112 @@ impl ExclusivePanel {
     /// whole build only where its first press also landed clear of every cell;
     /// a later press of a click begun on a cell does nothing, the cell under it
     /// being whatever the first press moved there.
-    fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
-        let cell = self.cell_at(e.position);
+    fn on_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let spot = self.spot_at(e.position);
+        let above = spot.is_some_and(|spot| {
+            let laid = self.laid_out();
+            laid.is_some_and(|laid| laid.is_above(&spot))
+        });
         let Some(drawn) = &mut self.drawn else {
             return;
         };
         let pressed_clear = std::mem::take(&mut drawn.pressed_clear);
-        // The cell under a press while the icicle moves is not the one the
-        // reader aimed at.
+        // What is under a press while the icicle moves is not what the reader
+        // aimed at.
         if drawn.transition.is_some() {
             return;
         }
-        drawn.pressed_clear = cell.is_none() && e.click_count == 1;
-        GESTURES.dispatch(Pointer::press(e), |intent| match intent {
-            ExclusiveIntent::ShowWholeBuild if cell.is_none() && pressed_clear => {
+        drawn.pressed_clear = spot.is_none() && e.click_count == 1;
+        GESTURES.dispatch(Pointer::press(e), |intent| match (intent, spot) {
+            (ExclusiveIntent::ShowWholeBuild, None) if pressed_clear => {
                 self.focus_on(None, cx);
                 true
             }
-            ExclusiveIntent::FocusCell => match cell {
-                Some(cell) => {
-                    self.click_cell(cell.holds, cx);
-                    true
-                }
-                None => false,
-            },
+            (ExclusiveIntent::FocusCell, Some(Spot::Cell(cell))) if !above => {
+                self.click_cell(cell.holds, cx);
+                true
+            }
+            (ExclusiveIntent::FocusAncestor, Some(Spot::Cell(cell))) if above => {
+                self.click_cell(cell.holds, cx);
+                true
+            }
+            (ExclusiveIntent::ListHidden, Some(spot @ Spot::Hidden { .. })) => {
+                self.list_hidden(spot, e.position, window, cx);
+                true
+            }
             _ => false,
         });
     }
 
-    /// Selects the cell under a right press and puts up the menu of what can
+    /// Selects what is under a right press and puts up the menu of what can
     /// be done with it, opening where the press landed.
     fn open_menu(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(cell) = self.cell_at(e.position) else {
+        match self.spot_at(e.position) {
+            Some(spot @ Spot::Cell(cell)) => {
+                self.select(spot, Picked::Menu, cx);
+                let items = self.menu_items(cell.holds, window, cx);
+                self.put_up(items, e.position, window, cx);
+            }
+            Some(spot @ Spot::Hidden { .. }) => self.list_hidden(spot, e.position, window, cx),
+            None => {}
+        }
+    }
+
+    /// Selects the row of hidden ancestors `spot` and puts up the menu
+    /// listing them at `at`, choosing one focusing it.
+    fn list_hidden(
+        &mut self,
+        spot: Spot,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drawn) = &self.drawn else {
             return;
         };
-        self.select(cell, Picked::Menu, cx);
-        let items = self.menu_items(cell.holds, window, cx);
+        let (tree, shared, by) = (
+            &drawn.coloured.tree,
+            &drawn.coloured.shared,
+            drawn.coloured.by(),
+        );
+        let panel = cx.weak_entity();
+        let hidden = ancestry::hidden(&**tree, drawn.top());
+        let nodes: Vec<u32> = hidden.iter().filter_map(|holds| holds.node()).collect();
+        let hints = paint::hints_among(tree, shared, &nodes, &[]);
+        let items: Vec<MenuItem> = hidden
+            .into_iter()
+            .filter_map(|holds| {
+                let name = Focused::of(holds)?.name(tree, shared, by);
+                let hint = holds.node().and_then(|node| hints.get(&node));
+                let name = match hint {
+                    Some(hint) => format!("{name}{}{hint}", paint::PART_SEPARATOR),
+                    None => name,
+                };
+                let (panel, tree) = (panel.clone(), Arc::clone(tree));
+                Some(MenuItem::new(name, move |_: &mut Window, cx: &mut App| {
+                    let done =
+                        panel.update(cx, |view, cx| view.take(&Deed::Click(holds), &tree, cx));
+                    done.ok();
+                }))
+            })
+            .collect();
+        self.select(spot, Picked::Menu, cx);
+        self.put_up(items, at, window, cx);
+    }
+
+    /// Puts up the menu of `items` at `at` over what is selected, which stays
+    /// selected until it closes; nothing where there are no items.
+    fn put_up(
+        &mut self,
+        items: Vec<MenuItem>,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if items.is_empty() {
             return;
         }
-        let menu = cx.new(|cx| Menu::new(items, e.position, window, cx));
+        let menu = cx.new(|cx| Menu::new(items, at, window, cx));
         let dismissed = cx.subscribe_in(&menu, window, |view, _, event: &MenuEvent, window, cx| {
             let MenuEvent::Dismissed { holding_focus } = event;
             view.menu = None;
@@ -889,7 +963,7 @@ impl ExclusivePanel {
         let facts = |node: u32| {
             let id = tree.id(node);
             PointFacts {
-                labelled: target_label(id, shared).is_some(),
+                labelled: carried_label(&shared.names, &shared.facets, id).is_some(),
                 copies: targets.map_or(1, |targets| targets.copies(node)),
                 for_tool: built_for_tool(id, shared),
             }
@@ -905,7 +979,7 @@ impl ExclusivePanel {
         };
         let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
         let offers = self.offers(holds, cx);
-        let label = |node: u32| point_label(tree.id(node), shared);
+        let written = |node: u32| written_target_label(tree.id(node), shared);
         let panel = cx.weak_entity();
         let deed = |deed: Deed| {
             let (panel, tree) = (panel.clone(), Arc::clone(tree));
@@ -919,27 +993,27 @@ impl ExclusivePanel {
         let keys_in = Some(&self.focus_handle);
         let action =
             |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
-        let items = offers.into_iter().map(|offer| match offer {
-            Offer::Focus => action(&FocusSelected, deed(Deed::Click(holds))),
-            Offer::Up => action(&FocusUp, deed(Deed::Click(holds))),
+        let items = offers.into_iter().filter_map(|offer| match offer {
+            Offer::Focus => Some(action(&FocusSelected, deed(Deed::Click(holds)))),
+            Offer::Up => Some(action(&FocusUp, deed(Deed::Click(holds)))),
             Offer::Show { node, can } => {
                 let item = action(&ShowSelected, deed(Deed::Reveal(node)));
-                if can { item } else { item.disabled() }
+                Some(if can { item } else { item.disabled() })
             }
             Offer::Root { node, caveat } => {
-                let label = label(node);
+                let label = written(node)?;
                 let explained = caveat.map(Caveat::explain);
                 let item = MenuItem::new("Use as root", deed(Deed::Root(label.into())));
-                match explained {
+                Some(match explained {
                     Some(explained) => item.tooltip(explained),
                     None => item,
-                }
+                })
             }
             Offer::CopyLabel { node } => {
-                let label = label(node);
-                MenuItem::new("Copy label", move |_, cx| {
+                let label = written(node)?;
+                Some(MenuItem::new("Copy label", move |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(label.clone()));
-                })
+                }))
             }
         });
         items.collect()
@@ -969,13 +1043,14 @@ impl ExclusivePanel {
     /// Selects the cell the pointer at `at` is over; a pointer over none lets
     /// go of a cell it selected.
     fn hover_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let cell = self.cell_at(at);
-        self.card.hover(at, cell.as_ref().map(|cell| &cell.holds));
+        let spot = self.spot_at(at);
+        self.card
+            .hover(at, spot.as_ref().map(Spot::stands).as_ref());
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        match cell {
-            Some(cell) => self.select(cell, Picked::Pointer, cx),
+        match spot {
+            Some(spot) => self.select(spot, Picked::Pointer, cx),
             None if drawn.picked_by_pointer() => self.deselect(cx),
             None => {}
         }
@@ -991,11 +1066,11 @@ impl ExclusivePanel {
         }
     }
 
-    /// The cell the card describes: the cell selected, unless its menu stands
-    /// in for the card.
-    fn carded(&self, _: &App) -> Option<Holds> {
+    /// What the card describes: what is selected, unless its menu stands in
+    /// for the card.
+    fn carded(&self, _: &App) -> Option<Stands> {
         let selection = self.drawn.as_ref()?.selection.as_ref()?;
-        (selection.by != Picked::Menu).then_some(selection.cell.holds)
+        (selection.by != Picked::Menu).then_some(selection.spot.stands())
     }
 
     /// Repaints the cells along with the layer over them; every change to what
@@ -1011,7 +1086,11 @@ impl ExclusivePanel {
 /// something no other action reads, so they stand directly under the whole
 /// build, each a sliver of its row, while configured targets mostly stand
 /// under one another and leave the row to cells wide enough to name.
-fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> Option<UnitPicker> {
+fn unit_picker(
+    model: &Entity<GraphModel>,
+    focus: &FocusHandle,
+    cx: &mut Context<ExclusivePanel>,
+) -> Option<UnitPicker> {
     let inputs = model.read(cx).loaded()?.shared.inputs;
     let opening = Some(Unit::ConfiguredTarget);
     UnitPicker::new(
@@ -1019,6 +1098,7 @@ fn unit_picker(model: &Entity<GraphModel>, cx: &mut Context<ExclusivePanel>) -> 
         "Cell unit",
         inputs,
         opening,
+        focus,
         ExclusivePanel::choose,
         cx,
     )
@@ -1242,29 +1322,12 @@ impl Focused {
         }
     }
 
-    /// The node this is, where it is one.
-    fn node(self) -> Option<u32> {
-        match self {
-            Self::Node(node) => Some(node),
-            Self::Shared | Self::Run(_) => None,
-        }
-    }
-
-    /// What this stands under in `tree`.
-    fn parent(self, tree: &Dominators) -> Parent {
-        match self {
-            Self::Shared => Crumb::Shared.parent(tree),
-            Self::Node(node) => Crumb::Node(node).parent(tree),
-            Self::Run(run) => run.parent(),
-        }
-    }
-
     /// The points of `tree` this stands over.
     fn weight(self, tree: &Dominators) -> u32 {
         self.holds().weight(tree)
     }
 
-    /// How a tooltip or the breadcrumb names this in `tree`, whose roots
+    /// How a tooltip names this in `tree`, whose roots
     /// were chosen `by`.
     fn name(self, tree: &Dominators, shared: &Shared, by: RootedBy) -> String {
         match self {
@@ -1275,70 +1338,19 @@ impl Focused {
     }
 }
 
-/// What a focus stands under short of the whole build, which the breadcrumb
-/// names a step for.
-#[derive(Clone, Copy, PartialEq)]
-enum Crumb {
-    /// The shared tops.
-    Shared,
-    Node(u32),
-}
-
-impl Crumb {
-    /// The step for `parent`; none for the whole build.
-    fn of(parent: Parent) -> Option<Self> {
-        match parent {
-            Parent::Build => None,
-            Parent::Shared => Some(Self::Shared),
-            Parent::Node(node) => Some(Self::Node(node)),
-        }
-    }
-
-    /// What this stands under in `tree`.
-    fn parent(self, tree: &Dominators) -> Parent {
-        match self {
-            Self::Shared => Parent::Build,
-            Self::Node(node) => icicle::Tree::parent(tree, node),
-        }
-    }
-}
-
-impl From<Crumb> for Focused {
-    fn from(crumb: Crumb) -> Self {
-        match crumb {
-            Crumb::Shared => Self::Shared,
-            Crumb::Node(node) => Self::Node(node),
-        }
-    }
-}
-
 /// Where the icicle is drawn from, with what is read of the tree for it
 /// taken once as the focus is set.
 #[derive(Clone, PartialEq)]
 struct Focus {
     on: Focused,
-    /// Top first, those nearest `on` at most [`CRUMBS`] of them.
-    above: Vec<Crumb>,
-    /// Whether more steps stand above those of `above`.
-    elided: bool,
     /// Whether a cell drawn from `on` can stand for a root the build also
     /// reaches as a dependency: `on` itself, or where it is a run of roots,
     /// one it gathers.
     reached: bool,
 }
 
-/// The most steps above the focus the breadcrumb names.
-const CRUMBS: usize = 4;
-
 impl Focus {
     fn on(tree: &Dominators, on: Focused) -> Self {
-        let mut above: Vec<Crumb> = Vec::with_capacity(CRUMBS + 1);
-        let nearest = Crumb::of(on.parent(tree));
-        let up = std::iter::successors(nearest, |above| Crumb::of(above.parent(tree)));
-        above.extend(up.take(CRUMBS + 1));
-        let elided = above.len() > CRUMBS;
-        above.truncate(CRUMBS);
-        above.reverse();
         let reached = match on {
             Focused::Node(node) => paint::reached(tree, node),
             Focused::Run(run) if run.parent() == Parent::Build => {
@@ -1346,19 +1358,14 @@ impl Focus {
             }
             Focused::Shared | Focused::Run(_) => false,
         };
-        Self {
-            on,
-            above,
-            elided,
-            reached,
-        }
+        Self { on, reached }
     }
 }
 
-/// The cell ringed and described in the tooltip, described once as it is
-/// selected, so a pointer moving within the cell only moves the tooltip.
+/// What is ringed and described in the tooltip, described once as it is
+/// selected, so a pointer moving within it only moves the tooltip.
 struct Selection {
-    cell: Cell,
+    spot: Spot,
     by: Picked,
     lines: Vec<String>,
 }
@@ -1429,6 +1436,8 @@ fn describe(
         }
     };
     let on_top = Focused::of(holds) == focus;
+    // A share of the focus is told only of what stands under it.
+    let under = focus.filter(|focus| ancestry::ancestors(tree, holds).contains(&focus.holds()));
     let mut lines = Vec::new();
     match holds {
         Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
@@ -1437,7 +1446,7 @@ fn describe(
             lines.push(shared_name(tree, by));
             lines.push(gathered_as_shared(count, by.word(), &names));
             lines.push(exclusive(weight));
-            lines.push(shares(weight, focus.filter(|_| !on_top)));
+            lines.push(shares(weight, under));
         }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
@@ -1447,7 +1456,7 @@ fn describe(
                 let held = targets.held(node);
                 lines.extend(targets_held(held.targets(), held.only_here()));
             }
-            lines.push(shares(weight, focus.filter(|_| !on_top)));
+            lines.push(shares(weight, under));
             match tree.parent(node) {
                 Some(parent) => lines.push(dominated_by(tree, parent, shared)),
                 None => standing(tree, node, by, shared, &mut lines),
@@ -1462,10 +1471,22 @@ fn describe(
                 false => format!("{} · too narrow", names.counted(count)),
             });
             lines.push(exclusive(weight));
-            lines.push(shares(weight, focus.filter(|_| !on_top)));
+            lines.push(shares(weight, under));
         }
     }
     lines
+}
+
+/// What the tooltip over the row gathering the `count` ancestors of `focus`
+/// left out in the tree of `coloured` reads.
+fn describe_hidden(coloured: &Coloured, count: u32, focus: Option<Focused>) -> Vec<String> {
+    let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
+    let ancestors = if count == 1 { "ancestor" } else { "ancestors" };
+    let hidden = format!("{count} hidden {ancestors}");
+    vec![match focus {
+        Some(focus) => format!("{hidden} of {}", focus.name(tree, shared, by)),
+        None => hidden,
+    }]
 }
 
 /// What a tooltip says of the `targets` distinct targets a configured
@@ -1741,12 +1762,19 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
             .on_action(cx.listener(|view, _: &Deselect, _, cx| view.deselect(cx)))
-            .on_action(cx.listener(|view, _: &FocusSelected, _, cx| view.focus_selected(cx)))
+            .on_action(cx.listener(|view, _: &FocusSelected, window, cx| {
+                view.focus_selected(window, cx);
+            }))
             .on_action(cx.listener(|view, _: &ShowSelected, _, cx| view.show_selected(cx)))
             .on_action(cx.listener(|view, _: &FocusBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &FocusForward, _, cx| view.go_forward(cx)))
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend.update(cx, |legend, cx| legend.show(window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &CyclePoints, _, cx| {
+                if let Some(picker) = &view.picker {
+                    picker.cycle(cx);
+                }
             }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1792,10 +1820,25 @@ impl Render for ExclusivePanel {
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
-            let field = roots::field(&self.roots_field, &palette, cx);
-            let crumbs = drawn.and_then(|drawn| breadcrumb(drawn, &palette, cx));
+            let travels = drawn.map_or_else(Travels::default, |drawn| Travels {
+                back: drawn.history.has_back(),
+                up: drawn.focused().is_some(),
+            });
+            let scoping = Scoping {
+                roots: &self.roots_field,
+                computing,
+                travels,
+            };
             let legend = legend(&self.legend, drawn, &palette);
-            strip(picker, field, crumbs, legend, computing, &palette)
+            strip(
+                picker,
+                scoping,
+                legend,
+                &self.focus_handle,
+                &palette,
+                window,
+                cx,
+            )
         }));
         let rooting = self.rooting(cx);
         let report = match self.failure(cx) {
@@ -1832,7 +1875,9 @@ impl Render for ExclusivePanel {
                 .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                    cx.listener(|view, e: &MouseDownEvent, window, cx| {
+                        view.on_mouse_down(e, window, cx);
+                    }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
@@ -1869,37 +1914,96 @@ impl Render for ExclusivePanel {
     }
 }
 
-/// The strip choosing the unit drawn and the roots `field`, followed by
-/// `crumbs` and the `legend` of the tree drawn, which reads `computing` while
-/// the roots of a new choice are chosen and its tree is computed over the one
-/// drawn for the last.
+/// How long the points picker holds out against the panel narrowing.
+const POINTS: Priority = 2;
+
+/// What the strip holds past its picker.
+struct Scoping<'a> {
+    /// The field choosing the roots of the tree.
+    roots: &'a Entity<QueryField>,
+    /// Whether the roots of a new choice are chosen and its tree computed over
+    /// the one drawn for the last.
+    computing: bool,
+    travels: Travels,
+}
+
+/// Where the focus of the tree drawn can be taken from where it stands.
+#[derive(Clone, Copy, Default)]
+struct Travels {
+    /// Back to the focus drawn before it.
+    back: bool,
+    /// Up to what it stands under.
+    up: bool,
+}
+
+/// How long the back and up buttons hold out against the panel narrowing.
+const TRAVEL: Priority = 1;
+
+/// The buttons taking the focus back or up as `travels` allows, their keys
+/// named where `focus` stands, leaving for the overflow menu as a row each.
+fn travel(
+    travels: Travels,
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &Context<ExclusivePanel>,
+) -> ToolbarGroup {
+    let back = bviz_ui_components::Button::new(
+        "exclusive-back",
+        cx.listener(|view, _, _, cx| view.go_back(cx)),
+    )
+    .ghost()
+    .icon(BACK_ICON)
+    .keys_for(&FocusBack, focus)
+    .disabled(!travels.back);
+    let up = bviz_ui_components::Button::new(
+        "exclusive-up",
+        cx.listener(|view, _, _, cx| view.focus_up(cx)),
+    )
+    .ghost()
+    .icon(UP_ICON)
+    .keys_for(&FocusUp, focus)
+    .disabled(!travels.up);
+    let row = |action: &dyn Action,
+               can: bool,
+               does: fn(&mut ExclusivePanel, &mut Context<ExclusivePanel>)| {
+        let panel = cx.weak_entity();
+        let item = MenuItem::action(action, Some(focus), window, cx, move |_, cx: &mut App| {
+            panel.update(cx, does).ok();
+        });
+        if can { item } else { item.disabled() }
+    };
+    let back_row = row(&FocusBack, travels.back, ExclusivePanel::go_back);
+    let up_row = row(&FocusUp, travels.up, ExclusivePanel::focus_up);
+    ToolbarGroup::new(TRAVEL, div().flex().items_center().child(back).child(up)).overflow_rows(
+        back_row,
+        [up_row],
+        false,
+    )
+}
+
+const BACK_ICON: &str = "arrow-left";
+const UP_ICON: &str = "arrow-up";
+
+/// The strip choosing the unit drawn and the roots, its picker's keys named
+/// where `focus` stands, ending in the toggle opening the tree's `legend`.
 fn strip(
     picker: &UnitPicker,
-    field: impl IntoElement,
-    crumbs: Option<Div>,
+    scoping: Scoping,
     legend: Legend,
-    computing: bool,
+    focus: &FocusHandle,
     palette: &Palette,
-) -> Toolbar {
-    Toolbar::new()
-        .child(group("points", palette).child(picker.dropdown()))
-        .child(field)
-        .child(match crumbs {
-            // The legend takes only the room the crumbs leave.
-            Some(crumbs) => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .flex_1()
-                .min_w(CRUMBS_MIN_WIDTH)
-                .child(crumbs)
-                .child(legend)
-                .into_any_element(),
-            None => legend.into_any_element(),
+    window: &Window,
+    cx: &Context<ExclusivePanel>,
+) -> OneRow {
+    let points = picker.group(POINTS, focus, window, cx);
+    OneRow::new("exclusive-controls")
+        .group(travel(scoping.travels, focus, window, cx))
+        .group(points)
+        .filling(|| roots::field(scoping.roots, palette, cx))
+        .when(scoping.computing, |row| {
+            row.busy("exclusive-computing", "computing…")
         })
-        .when(computing, |bar| {
-            bar.trailing(busy("exclusive-computing", "computing…", palette))
-        })
+        .trailing(legend.toolbar_group())
 }
 
 /// The legend of `drawn`, open as `state` says: what each hue its cells wear
@@ -1953,100 +2057,6 @@ fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Lege
     ]
 }
 
-/// The path from the whole build down to the focus of `drawn`, each step but
-/// the focus a click away; absent at the whole build. Where the path outgrows
-/// its room the dominators above the focus give way first, and the focus is
-/// cut short only once they are gone. A name reading alike with another
-/// crumb's is followed by what tells it apart.
-fn breadcrumb(drawn: &Drawn, palette: &Palette, cx: &Context<ExclusivePanel>) -> Option<Div> {
-    let focus = drawn.focus()?;
-    let (tree, shared) = (&drawn.coloured.tree, &drawn.coloured.shared);
-    let by = drawn.coloured.by();
-    // A row whose steps shrink to fit it.
-    let row = || div().flex().items_center().min_w_0().overflow_hidden();
-    // A name and the hint telling it apart give way in proportion to their
-    // lengths, so neither is cut away before the other.
-    let crumb = |index: usize, name: String, hint: Option<String>| {
-        let hint = hint.map(|hint| {
-            TruncatingLabel::new(
-                ("exclusive-crumb-hint", index),
-                format!("{HINT_SEPARATOR}{hint}"),
-            )
-        });
-        div()
-            .flex()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(TruncatingLabel::new(("exclusive-crumb-name", index), name))
-            .children(hint)
-    };
-    let after = |step: AnyElement| row().gap_1().pl_1().child(separator()).child(step);
-    let link = |index: usize, name: String, hint: Option<String>, to: Option<Focused>| {
-        // A click landing once another tree is drawn names none of its nodes.
-        let tree = Arc::clone(&drawn.coloured.tree);
-        crumb(index, name, hint)
-            .id(("exclusive-crumb", index))
-            .cursor_pointer()
-            .text_color(palette.colors.text_muted)
-            .hover(|style| style.text_color(palette.label))
-            .on_click(cx.listener(move |view, e: &ClickEvent, _, cx| {
-                GESTURES.dispatch(Pointer::click(e), |intent| match intent {
-                    ExclusiveIntent::FocusCrumb => {
-                        view.focus_on_in(&tree, to, cx);
-                        true
-                    }
-                    _ => false,
-                });
-            }))
-    };
-    let mut above: Vec<Div> = Vec::with_capacity(CRUMBS + 1);
-    if focus.elided {
-        above.push(after(ELIDED.into_any_element()));
-    }
-    let above_focus = focus.above.iter().map(|&above| Focused::from(above));
-    let steps = above_focus.chain([focus.on]);
-    let crumbs: Vec<u32> = steps.filter_map(Focused::node).collect();
-    let hints = hints_among(tree, shared, &crumbs, &[]);
-    let hint = |step: Focused| step.node().and_then(|node| hints.get(&node).cloned());
-    for (index, &step) in focus.above.iter().enumerate() {
-        let step = Focused::from(step);
-        let step = link(
-            index + 1,
-            step.name(tree, shared, by),
-            hint(step),
-            Some(step),
-        );
-        above.push(after(step.into_any_element()));
-    }
-    let focused = cell_name(tree, shared, by, focus.on.holds());
-    let last = after(crumb(focus.above.len() + 1, focused, hint(focus.on)).into_any_element())
-        .flex_shrink_0()
-        .max_w(relative(1.));
-    Some(
-        row()
-            .text_sm()
-            .text_color(palette.label)
-            .child(link(0, WHOLE_BUILD_CRUMB.to_owned(), None, None).flex_shrink_0())
-            .child(row().child(row().children(above)).child(last)),
-    )
-}
-
-/// The least width the breadcrumb and the legend after it are laid out at:
-/// with less left beside the strip's controls, they take a row of the strip
-/// to themselves.
-const CRUMBS_MIN_WIDTH: Pixels = px(320.);
-
-/// What the breadcrumb names the whole build.
-const WHOLE_BUILD_CRUMB: &str = "Whole build";
-
-/// Stands in the breadcrumb for the dominators it leaves out.
-const ELIDED: &str = "…";
-
-fn separator() -> AnyElement {
-    "›".into_any_element()
-}
-
 /// The layer over the cells that rings and describes the one selected,
 /// painted apart from the cells so that neither repaints any of them, and
 /// only while they are at rest. Its layout records where the cells lie for
@@ -2065,12 +2075,11 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                     return;
                 }
                 view.frame = Some(frame);
-                let cells = view.laid_out().unwrap_or_default();
+                let laid = view.laid_out();
                 if let Some(drawn) = &mut view.drawn {
                     let moved = drawn.selection.take().and_then(|selection| {
-                        let holds = selection.cell.holds;
-                        let cell = *cells.iter().find(|cell| cell.holds == holds)?;
-                        (selection.by == Picked::Keys).then_some(Selection { cell, ..selection })
+                        let spot = laid.as_ref()?.find(&selection.spot)?;
+                        (selection.by == Picked::Keys).then_some(Selection { spot, ..selection })
                     });
                     drawn.selection = moved;
                 }
@@ -2082,8 +2091,8 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
         }
     };
     let paint = move |_: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
-        if let Some(Selection { cell, .. }) = view.read(cx).at_rest_selection() {
-            paint::paint_ring(cell, &palette, window);
+        if let Some(Selection { spot, .. }) = view.read(cx).at_rest_selection() {
+            paint::paint_ring(spot.rect(), &palette, window);
         }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
@@ -2109,10 +2118,6 @@ impl Render for IcicleCanvas {
                 by: drawn.coloured.by(),
                 top: drawn.top(),
                 transition: drawn.transition.clone(),
-                above: drawn.focus().map_or_else(Vec::new, |focus| {
-                    let above = focus.above.iter().map(|&above| Focused::from(above));
-                    above.filter_map(Focused::node).collect()
-                }),
                 shared: drawn.coloured.shared.clone(),
                 palette,
             })

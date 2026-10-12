@@ -397,6 +397,15 @@ fn reading(
     (entries, notes)
 }
 
+/// The key's id, the same whether it keys a drawing or stands blank.
+const ID: &str = "graph-legend";
+
+/// The key to a view drawing nothing it keys, which holds the toggle's place
+/// in the toolbar while a layout runs.
+pub(crate) fn blank(state: &Entity<LegendState>) -> bviz_ui_components::Legend {
+    bviz_ui_components::Legend::new(ID, state)
+}
+
 /// The key to `found`, open as `state` says: what the fills read first, then
 /// the marks boxes wear, then the routes.
 fn strip(
@@ -426,7 +435,7 @@ fn strip(
     if entries.is_empty() {
         return None;
     }
-    let legend = bviz_ui_components::Legend::new("graph-legend", state).entries(entries);
+    let legend = bviz_ui_components::Legend::new(ID, state).entries(entries);
     Some(
         notes
             .into_iter()

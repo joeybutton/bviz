@@ -38,4 +38,4 @@ the relevant one before writing similar code. Grouped by what they teach.
 gpui itself ships no widget library, and Zed's is GPL-licensed (see the licence boundary in
 `SKILL.md`), so higher-level widgets are built here. `//ui/components` holds them; the
 `#[derive(IntoElement)]` + `impl RenderOnce` component idiom is shown by `Button` and
-`Toolbar` there, and `examples/input.rs` covers a focusable, IME-aware field.
+`OneRow` there, and `examples/input.rs` covers a focusable, IME-aware field.
