@@ -42,9 +42,10 @@ fn advise_no_thp(ptr: *mut std::os::raw::c_void, len: usize) {
 #[cfg(not(target_os = "linux"))]
 fn advise_no_thp(_ptr: *mut std::os::raw::c_void, _len: usize) {}
 
-/// Hashes an interner key. Non-cryptographic: the keys are short,
-/// non-adversarial profile strings interned tens of millions of times, where
-/// the default SipHash is the dominant lookup cost.
+/// Hashes an interner key. Non-cryptographic: the keys are short profile
+/// strings interned tens of millions of times, where the default SipHash is the
+/// dominant lookup cost. That trades resistance to hash flooding for speed: a
+/// profile crafted to collide can slow only its own load.
 fn intern_hash(s: &str) -> u64 {
     use std::hash::BuildHasher;
     rustc_hash::FxBuildHasher.hash_one(s)
