@@ -300,14 +300,14 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Plots the measured points through the filter the graph's other views
-    /// draw through, where the plot drawn is not of the chosen scope, axes and
-    /// colouring, not drawn through that filter, or not of the action times
-    /// the graph holds, once the choices reading action time are offered as
-    /// the unit's measure has any. A hidden panel waits until it is shown, and
-    /// a plotting running replots once it lands. The filter is evaluated over
-    /// every node of the graph, so this runs off the UI thread, and the plot
-    /// drawn stays until the new one lands.
+    /// Plots the measured points through the document's filter, where the plot
+    /// drawn is not of the chosen scope, axes and colouring, not drawn through
+    /// that filter, or not of the action times the graph holds, once the
+    /// choices reading action time are offered as the unit's measure has any.
+    /// A hidden panel waits until it is shown, and a plotting running replots
+    /// once it lands. The filter is evaluated over every node of the graph, so
+    /// this runs off the UI thread, and the plot drawn stays until the new one
+    /// lands.
     fn replot(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.plotting.is_some() {
             return;
@@ -336,7 +336,7 @@ impl ScatterPanel {
         else {
             return;
         };
-        let filter = model.filter().cloned().unwrap_or_default();
+        let filter = model.filter().filter();
         if self.plot.as_ref().is_some_and(|plot| {
             plot.filter == filter
                 && plot.scope == scope

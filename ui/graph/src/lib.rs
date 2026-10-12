@@ -85,7 +85,7 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
+use model::{FilterChanged, GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
@@ -333,7 +333,7 @@ pub struct GraphPanel {
     boxes: Entity<MultiSelect>,
     /// Carries a toggled boxes-menu row into the panel's rules.
     _box_choices: Subscription,
-    /// The query bar, whose chips scope what the panel draws.
+    /// The query bar, whose chips scope what the document's views draw.
     chips: chips::Chips,
     jump: jump::Finder,
     /// The matcher pool the palette and the query field's completion take
@@ -349,6 +349,10 @@ pub struct GraphPanel {
     _source_replaced: Subscription,
     /// Derives the levels of the panel's restriction as the map lands.
     _map_placed: Subscription,
+    /// Draws the graph through the document's filter as it changes.
+    _filter_changed: Subscription,
+    /// Whether the workspace shows the panel.
+    shown: bool,
     _reveal_requested: Subscription,
     /// The box whose neighborhood a hover marks: the box under the cursor,
     /// or the one the jump palette previews.
@@ -474,7 +478,7 @@ impl GraphPanel {
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
         });
-        let chips = chips::Chips::new(cx);
+        let chips = chips::Chips::new(&model, cx);
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
             parent: parent.clone(),
@@ -510,8 +514,14 @@ impl GraphPanel {
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
         });
+        let filter_changed = cx.subscribe(&model, |view, _, event: &FilterChanged, cx| {
+            derive::filter_changed(view, event.frame, cx);
+            chips::restage(view, cx);
+            cx.notify();
+        });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
+                derive::catch_up(view, cx);
                 match event.reveal {
                     Reveal::Activate => reveal::reveal(view, event.node, cx),
                     Reveal::InPlace => reveal::show_in_place(view, event.node, cx),
@@ -520,8 +530,8 @@ impl GraphPanel {
         });
         let derived = Derived::new();
         let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
-        let (panel, filter) = (cx.entity(), derived.shown().with_rules(&[]));
-        model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
+        let panel = cx.entity();
+        model.update(cx, |model, cx| model.defer_to(&panel, cx));
         let mut view = Self {
             focus_handle,
             model,
@@ -547,6 +557,8 @@ impl GraphPanel {
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
             _map_placed: map_placed,
+            _filter_changed: filter_changed,
+            shown: false,
             _reveal_requested: reveal_requested,
             hovered: None,
             box_card: hover::BoxCard::new(cx),
@@ -1131,9 +1143,13 @@ impl Panel for GraphPanel {
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.shown = active;
         if active {
+            derive::catch_up(self, cx);
             self.focus_handle.focus(window, cx);
-            derive::publish_filter(self, cx);
+            let panel = cx.entity();
+            self.model
+                .update(cx, |model, cx| model.defer_to(&panel, cx));
         } else {
             // The card and the hover belong to a pointer no longer over the
             // drawing.

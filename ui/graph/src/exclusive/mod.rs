@@ -188,9 +188,8 @@ pub struct ExclusivePanel {
     /// Where the cells were last laid out, which a pointer is resolved
     /// against.
     frame: Option<Frame>,
-    /// How the filter the graph's other views draw through takes the nodes of
-    /// the graph read, from the time it is evaluated; absent while no filter
-    /// is drawn through.
+    /// How the document's filter takes the nodes of the graph read, from the
+    /// time it is evaluated.
     fade: Option<Fade>,
     /// Evaluates the filter, absent while none is being evaluated, so that one
     /// evaluation runs at a time.
@@ -476,10 +475,10 @@ impl ExclusivePanel {
             .update(cx, |model, cx| model.want_dominators(&wanted, cx));
     }
 
-    /// Evaluates the filter the graph's other views draw through, where the
-    /// panel is shown and that is not the filter the cells are faded by. The
-    /// filter is evaluated over every node of the graph, so this runs off the
-    /// UI thread, and an evaluation running evaluates again once it lands.
+    /// Evaluates the document's filter, where the panel is shown and that is
+    /// not the filter the cells are faded by. The filter is evaluated over
+    /// every node of the graph, so this runs off the UI thread, and an
+    /// evaluation running evaluates again once it lands.
     fn refade(&mut self, cx: &mut Context<Self>) {
         if !self.shown || self.fading.is_some() {
             return;
@@ -488,16 +487,11 @@ impl ExclusivePanel {
         let Some(loaded) = model.loaded() else {
             return;
         };
-        let wanted = model.filter().cloned();
-        if self.fade.as_ref().map(|fade| &fade.filter) == wanted.as_ref() {
+        let filter = model.filter().filter();
+        if self.fade.as_ref().is_some_and(|fade| fade.filter == filter) {
             return;
         }
         let shared = loaded.shared.clone();
-        let Some(filter) = wanted else {
-            self.fade = None;
-            self.invalidate_canvas(cx);
-            return;
-        };
         self.fading = Some(load_in_background(
             cx,
             move || {

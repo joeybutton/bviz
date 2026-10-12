@@ -2,9 +2,9 @@
 
 use super::GraphPanel;
 use crate::drag::past_slop;
-use bviz_graph_layout::query_lang::{Chip, ChipId};
+use bviz_graph_layout::query_lang::{Chip, ChipId, Stack};
 use bviz_ui_components::{DragEnd, overlay_canvas, track_drag};
-use gpui::{Canvas, Context, Pixels, Point, Subscription, Task, Window, point, px};
+use gpui::{App, Canvas, Context, Pixels, Point, Subscription, Task, Window, point, px};
 use std::time::Duration;
 
 /// How near the row's end a dragged pill scrolls the row, how far one step
@@ -134,19 +134,20 @@ fn carried(view: &GraphPanel) -> Option<&Press> {
 
 /// Whether `chip` shows the drop mark ahead of itself, and behind itself as
 /// the last of its group.
-pub(super) fn marked(view: &GraphPanel, chip: ChipId) -> (bool, bool) {
+pub(super) fn marked(view: &GraphPanel, chip: ChipId, cx: &App) -> (bool, bool) {
     let Some(press) = carried(view) else {
         return (false, false);
     };
     let ahead = press.slot == Some(Slot::Before(chip));
-    let last = group_of(view, press.chip).last().map(Chip::id);
+    let last = group_of(view.model.read(cx).query(), press.chip)
+        .last()
+        .map(Chip::id);
     let behind = press.slot == Some(Slot::End) && last == Some(chip);
     (ahead, behind)
 }
 
 /// The chips of the group `chip` is in, in order.
-fn group_of(view: &GraphPanel, chip: ChipId) -> &[Chip] {
-    let stack = &view.chips.stack;
+fn group_of(stack: &Stack, chip: ChipId) -> &[Chip] {
     match stack.sources().iter().any(|source| source.id() == chip) {
         true => stack.sources(),
         false => stack.refinements(),
@@ -196,16 +197,16 @@ fn moved(view: &mut GraphPanel, at: Point<Pixels>, cx: &mut Context<GraphPanel>)
             press._scrolling = scrolling;
         }
     }
-    aim(view);
+    aim(view, cx);
     cx.notify();
 }
 
 /// Aims the press at the slot under the pointer.
-fn aim(view: &mut GraphPanel) {
+fn aim(view: &mut GraphPanel, cx: &App) {
     let Some(press) = carried(view) else {
         return;
     };
-    let slot = slot_at(view, press.chip, press.at);
+    let slot = slot_at(view, press.chip, press.at, cx);
     if let Gesture::Pressed(press) = &mut view.chips.gesture {
         press.slot = slot;
     }
@@ -228,7 +229,7 @@ fn step_at_edge(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) -> bool {
         return false;
     }
     scroll.set_offset(point(x, offset.y));
-    aim(view);
+    aim(view, cx);
     cx.notify();
     true
 }
@@ -258,9 +259,12 @@ fn ended(view: &mut GraphPanel, end: DragEnd, cx: &mut Context<GraphPanel>) {
             Slot::Before(before) => Some(before),
             Slot::End => None,
         };
-        if view.chips.stack.move_before(press.chip, before) {
-            view.chips.scroll_to(press.chip);
-            super::changed(view, cx);
+        let moved = (view.model).update(cx, |model, cx| {
+            model.edit_query(|stack| stack.move_before(press.chip, before), cx)
+        });
+        if moved {
+            view.chips
+                .scroll_to(view.model.read(cx).query(), press.chip);
         }
     }
     cx.notify();
@@ -269,15 +273,15 @@ fn ended(view: &mut GraphPanel, end: DragEnd, cx: &mut Context<GraphPanel>) {
 /// Where in the group of `chip` a drop at `at` lands it: ahead of the first
 /// other chip of the group whose middle lies past `at`, or at the group's end.
 /// `None` where `at` lies off the row, or the row has not laid the group out.
-fn slot_at(view: &GraphPanel, chip: ChipId, at: Point<Pixels>) -> Option<Slot> {
+fn slot_at(view: &GraphPanel, chip: ChipId, at: Point<Pixels>, cx: &App) -> Option<Slot> {
     let scroll = &view.chips.scroll;
     let row = scroll.bounds();
     if !row.contains(&at) {
         return None;
     }
     let shift = scroll.offset().x;
-    let stack = &view.chips.stack;
-    for other in group_of(view, chip).iter().map(Chip::id) {
+    let stack = view.model.read(cx).query();
+    for other in group_of(stack, chip).iter().map(Chip::id) {
         if other == chip {
             continue;
         }

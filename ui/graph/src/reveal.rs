@@ -184,8 +184,9 @@ fn revisit(view: &mut GraphPanel, stop: Stop, cx: &mut Context<GraphPanel>) {
 
 /// As [`reveal`], bringing a node the drawing leaves out into it: a node off
 /// the dependency paths drawn returns the drawing to the filter, one the
-/// reader's own pin hides loses that pin, and one the rest of the filter hides
-/// is pinned with [`pins::reveal`]. A node that cannot be revealed stays
+/// reader's own pin hides loses that pin, one the panel's own rules hide is
+/// revealed in this panel alone, and one the rest of the filter hides is pinned
+/// with [`pins::reveal`]. A node that cannot be revealed stays
 /// offered, with the reason.
 pub(crate) fn reveal_anyway(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     ask(view, id, Ask::Anyway, cx);
@@ -231,6 +232,7 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
             }
             match by {
                 HiddenBy::Paths => why::clear(view, cx),
+                HiddenBy::Boxes => derive::reveal_in_layout(view, id, cx),
                 _ => pins::reveal(view, id, cx),
             }
         }

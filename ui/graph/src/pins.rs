@@ -7,7 +7,6 @@
 //! leave.
 
 use crate::column::scrolling;
-use crate::filter::DocumentFilter;
 use crate::point::written_name;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::facets::WrittenRepos;
@@ -22,7 +21,7 @@ use gpui::{
     ClickEvent, Context, Div, IntoElement, Pixels, SharedString, Stateful, div, prelude::*, px,
     relative,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What the card does for a gesture in [`GESTURES`].
 #[derive(Clone, Copy)]
@@ -133,69 +132,80 @@ struct Held {
     pin: Pin,
 }
 
-/// The overrides in `pins`, by the name each is listed under.
+/// The overrides in `pins` and the nodes `revealed` in the panel alone, by the
+/// name each is listed under.
 fn held(
     pins: &HashMap<Id, Pin>,
+    revealed: &HashSet<Id>,
     names: &Names,
     facets: &Facets,
     repos: &WrittenRepos,
 ) -> Vec<Held> {
-    let mut held: Vec<Held> = Vec::with_capacity(pins.len());
-    held.extend(pins.iter().map(|(&node, &pin)| {
-        let written = written_name(names, facets, repos, node);
-        Held {
-            node,
-            label: repos.names().show(&written).into_text().into(),
-            written: written.into(),
-            pin,
-        }
-    }));
+    let in_panel = revealed.iter().filter(|node| !pins.contains_key(node));
+    let in_panel = in_panel.map(|&node| (node, Pin::Revealed));
+    let mut held: Vec<Held> = Vec::with_capacity(pins.len() + revealed.len());
+    held.extend(
+        pins.iter()
+            .map(|(&node, &pin)| (node, pin))
+            .chain(in_panel)
+            .map(|(node, pin)| {
+                let written = written_name(names, facets, repos, node);
+                Held {
+                    node,
+                    label: repos.names().show(&written).into_text().into(),
+                    written: written.into(),
+                    pin,
+                }
+            }),
+    );
     held.sort_by(|one, other| (&one.label, one.node.0).cmp(&(&other.label, other.node.0)));
     held
 }
 
 /// Pins `node` to `pin`, or takes that override back off.
 pub(crate) fn set(view: &mut GraphPanel, node: Id, pin: Visibility, cx: &mut Context<GraphPanel>) {
-    let pins = toggle(&view.derived.shown().pins, node, pin);
+    let pins = toggle(view.model.read(cx).filter().pins(), node, pin);
     set_pins(view, pins, cx);
 }
 
 /// Shows `node` whatever the rules say, as [`revealing`] pins it.
 pub(crate) fn reveal(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
-    let pins = revealing(&view.derived.shown().pins, node);
+    let pins = revealing(view.model.read(cx).filter().pins(), node);
     set_pins(view, pins, cx);
 }
 
 /// Drops the pin `node` carries, leaving it to the rules.
 pub(crate) fn unpin(view: &mut GraphPanel, node: Id, cx: &mut Context<GraphPanel>) {
-    let pins = unpinned(&view.derived.shown().pins, node);
+    derive::withdraw_reveals(view, |revealed| revealed == node, cx);
+    let pins = unpinned(view.model.read(cx).filter().pins(), node);
     set_pins(view, pins, cx);
 }
 
 /// Drops every override, leaving each node to the rules again.
 fn clear_all(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    derive::withdraw_reveals(view, |_| true, cx);
     set_pins(view, HashMap::new(), cx);
 }
 
 fn clear_revealed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let pins = unrevealed(&view.derived.shown().pins);
+    derive::withdraw_reveals(view, |_| true, cx);
+    let pins = unrevealed(view.model.read(cx).filter().pins());
     set_pins(view, pins, cx);
 }
 
 fn set_pins(view: &mut GraphPanel, pins: HashMap<Id, Pin>, cx: &mut Context<GraphPanel>) {
-    let shown = DocumentFilter {
-        pins,
-        ..view.derived.shown().clone()
-    };
-    derive::set_shown(view, shown, false, cx);
+    derive::show_filter(view, cx);
+    view.model.update(cx, |model, cx| model.set_pins(pins, cx));
 }
 
 /// The overrides in force, for the caller to place over the drawing; `None`
 /// while there are none.
 pub(crate) fn panel(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel>) -> Option<Div> {
-    let loaded = view.model.read(cx).loaded()?;
+    let model = view.model.read(cx);
+    let loaded = model.loaded()?;
     let held = held(
-        &view.derived.shown().pins,
+        model.filter().pins(),
+        view.derived.revealed(),
         &loaded.shared.names,
         &loaded.shared.facets,
         loaded.shared.labels.repos(),
@@ -487,6 +497,7 @@ mod tests {
 
         let listed: Vec<(String, Pin)> = held(
             &pins,
+            &HashSet::new(),
             &fixture.names,
             &fixture.facets,
             &WrittenRepos::default(),

@@ -4,6 +4,7 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
+use crate::filter::{Applied, DocumentFilter};
 use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -15,8 +16,8 @@ use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
-use bviz_graph_layout::query_lang::Universe;
-use bviz_graph_layout::select::Filter;
+use bviz_graph_layout::query_lang::{Outcome, Prefixes, Stack, Universe};
+use bviz_graph_layout::select;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
@@ -24,7 +25,7 @@ use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
-use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, SharedString, Subscription, Task};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -496,8 +497,7 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
 /// The read has landed, loaded or failed. Carried as an event because what it
-/// calls for turns on the layout mode and filter a view has selected, which the
-/// graph does not hold.
+/// calls for turns on what a view has selected, which the graph does not hold.
 pub(crate) struct SourceReplaced;
 
 /// The loaded graph's map has landed in its [`Placement`].
@@ -524,8 +524,6 @@ pub(crate) enum Reveal {
 /// The graph panel the graph's other views defer to.
 struct Deferred {
     panel: EntityId,
-    /// The filter the panel draws through.
-    filter: Filter,
     /// Forgets the panel once it is released.
     _released: Subscription,
 }
@@ -539,9 +537,18 @@ pub(crate) struct Landed<K, T> {
 pub(crate) type MetricsLanded = Landed<Scope, Measurement>;
 pub(crate) type DominatorsLanded = Landed<TreeKey, Dominators>;
 
-/// The graph's other views may have another [`GraphModel::filter`] to draw
-/// through.
-pub(crate) struct FilterChanged;
+/// The graph's views have another [`GraphModel::filter`] to draw through.
+pub(crate) struct FilterChanged {
+    /// Whether the change named the part of the graph to look at, which a
+    /// view drawing it moves onto.
+    pub(crate) frame: bool,
+}
+
+/// The chips staged in [`GraphModel::query`] changed.
+pub(crate) struct QueryChanged;
+
+/// A query asked to be applied was not, for the reason it carries.
+pub(crate) struct QueryRefused(pub(crate) SharedString);
 
 /// A pass over the whole of a graph, which is only taken once a view drawing
 /// what it yields asks for it.
@@ -631,9 +638,19 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
-    /// The graph panel opened, shown or filtered last, for as long as it is
-    /// open.
+    /// The graph panel opened or shown last, for as long as it is open.
     deferred: Option<Deferred>,
+    /// What every view of the graph shows its share of it through.
+    filter: DocumentFilter,
+    /// The chips the query bars stage, which applying makes the filter's
+    /// scope.
+    query: Stack,
+    /// The values of the query's prefixes over the loaded graph, which only
+    /// that graph's ids index.
+    prefixes: Arc<Prefixes>,
+    /// Applies the query committed last; replacing it gives up an apply still
+    /// under way.
+    _applying: Task<()>,
     joined: Option<Joined>,
     /// The playback clock of the document the graph is opened in, where that
     /// document plays back.
@@ -654,6 +671,8 @@ impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
 impl<K: 'static, T: 'static> EventEmitter<Landed<K, T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
+impl EventEmitter<QueryChanged> for GraphModel {}
+impl EventEmitter<QueryRefused> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -793,42 +812,34 @@ impl GraphModel {
             _work: work,
             _placing: Task::ready(()),
             deferred: None,
+            filter: DocumentFilter::default(),
+            query: Stack::default(),
+            prefixes: Arc::default(),
+            _applying: Task::ready(()),
             joined: None,
             clock: None,
         }
     }
 
-    /// Takes `panel`, drawing through `filter`, as the graph panel the graph's
-    /// other views defer to.
-    pub(crate) fn defer_to(
-        &mut self,
-        panel: &Entity<GraphPanel>,
-        filter: Filter,
-        cx: &mut Context<Self>,
-    ) {
+    /// Takes `panel` as the graph panel the graph's other views defer to.
+    pub(crate) fn defer_to(&mut self, panel: &Entity<GraphPanel>, cx: &mut Context<Self>) {
         let id = panel.entity_id();
-        match &mut self.deferred {
-            Some(deferred) if deferred.panel == id => {
-                if deferred.filter == filter {
-                    return;
-                }
-                deferred.filter = filter;
-            }
-            _ => {
-                let released = cx.observe_release(panel, |model, _, cx| {
-                    model.deferred = None;
-                    cx.emit(FilterChanged);
-                    cx.notify();
-                });
-                self.deferred = Some(Deferred {
-                    panel: id,
-                    filter,
-                    _released: released,
-                });
-                cx.notify();
-            }
+        if self
+            .deferred
+            .as_ref()
+            .is_some_and(|deferred| deferred.panel == id)
+        {
+            return;
         }
-        cx.emit(FilterChanged);
+        let released = cx.observe_release(panel, |model, _, cx| {
+            model.deferred = None;
+            cx.notify();
+        });
+        self.deferred = Some(Deferred {
+            panel: id,
+            _released: released,
+        });
+        cx.notify();
     }
 
     /// Whether a graph panel is open to show a node another view names.
@@ -836,11 +847,88 @@ impl GraphModel {
         self.deferred.is_some()
     }
 
-    /// The filter the graph's other views draw their share of it through: the
-    /// one the graph panel they defer to draws through, absent where no graph
-    /// panel is open.
-    pub(crate) fn filter(&self) -> Option<&Filter> {
-        self.deferred.as_ref().map(|deferred| &deferred.filter)
+    /// What every view of the graph shows its share of it through.
+    pub(crate) fn filter(&self) -> &DocumentFilter {
+        &self.filter
+    }
+
+    /// Pins the nodes `pins` names, and no other.
+    pub(crate) fn set_pins(&mut self, pins: HashMap<Id, select::Pin>, cx: &mut Context<Self>) {
+        if self.filter.set_pins(pins) {
+            cx.emit(FilterChanged { frame: false });
+        }
+    }
+
+    /// The chips staged, which the filter takes up once they are applied.
+    pub(crate) fn query(&self) -> &Stack {
+        &self.query
+    }
+
+    /// Runs `edit` on the chips staged, announcing what it changed.
+    pub(crate) fn edit_query<R>(
+        &mut self,
+        edit: impl FnOnce(&mut Stack) -> R,
+        cx: &mut Context<Self>,
+    ) -> R {
+        let before = self.query.clone();
+        let edited = edit(&mut self.query);
+        if self.query != before {
+            cx.emit(QueryChanged);
+        }
+        edited
+    }
+
+    /// Stages the chips applied last again, taking back every edit made
+    /// since; with none applied, none.
+    pub(crate) fn revert_query(&mut self, cx: &mut Context<Self>) {
+        let applied = self.filter.applied().map(|applied| applied.stack().clone());
+        self.edit_query(|query| *query = applied.unwrap_or_default(), cx);
+    }
+
+    /// The values of the query's prefixes over the loaded graph, shared by
+    /// every evaluation of the query.
+    pub(crate) fn prefixes(&self) -> Arc<Prefixes> {
+        Arc::clone(&self.prefixes)
+    }
+
+    /// Scopes the filter to what the chips staged name, off the UI thread,
+    /// giving up an apply asked for before.
+    pub(crate) fn apply_query(&mut self, cx: &mut Context<Self>) {
+        let stack = self.query.clone();
+        if matches!(stack.compile(), Ok(None)) {
+            self._applying = Task::ready(());
+            self.scope_landed(stack, Ok(None), cx);
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let prefixes = Arc::clone(&self.prefixes);
+        self._applying = load_in_background(
+            cx,
+            move || {
+                let scope = scope_of(&stack, universe.get(), &prefixes);
+                (stack, scope)
+            },
+            |model, (stack, scope), cx| model.scope_landed(stack, scope, cx),
+        );
+    }
+
+    fn scope_landed(
+        &mut self,
+        stack: Stack,
+        scope: Result<Option<select::Scope>, SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        match scope {
+            Ok(scope) => {
+                let applied = scope.map(|scope| Applied::new(stack, scope));
+                if self.filter.set_applied(applied) {
+                    cx.emit(FilterChanged { frame: true });
+                }
+            }
+            Err(why) => cx.emit(QueryRefused(why)),
+        }
     }
 
     /// Has the loaded graph measured off the UI thread in each scope of
@@ -982,6 +1070,33 @@ impl GraphModel {
             _ => None,
         }
     }
+}
+
+/// The scope `stack` names over `universe`, `None` where it names none; or
+/// why it cannot be applied.
+fn scope_of(
+    stack: &Stack,
+    universe: &Universe,
+    prefixes: &Prefixes,
+) -> Result<Option<select::Scope>, SharedString> {
+    let compiled = match stack.compile() {
+        Ok(None) => return Ok(None),
+        Ok(Some(compiled)) => compiled,
+        Err(invalid) => return Err(format!("not applied: {}", invalid.error.message).into()),
+    };
+    let evaluation = stack.evaluate(universe, prefixes);
+    let Some(value) = &evaluation.value else {
+        let failed = evaluation
+            .chips
+            .iter()
+            .find_map(|(_, outcome)| match outcome {
+                Outcome::Failed(error) => Some(error.message.clone()),
+                _ => None,
+            });
+        let why = failed.unwrap_or_else(|| "a chip does not evaluate".to_string());
+        return Err(format!("not applied: {why}").into());
+    };
+    Ok(Some(universe.scope(compiled.expr.to_string(), value)))
 }
 
 #[cfg(test)]
@@ -1236,7 +1351,6 @@ mod tests {
         let panel = EntityId::from(1);
         model.deferred = Some(Deferred {
             panel,
-            filter: Filter::default(),
             _released: Subscription::new(|| {}),
         });
         assert!(model.take_up_from(&session).1.is_none());
