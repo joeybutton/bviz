@@ -14,6 +14,7 @@ mod spawn_fields;
 mod test_log;
 mod wire;
 
+use bviz_invocation::Recorded;
 use bviz_invocation::spawn::{LoggedSpawn, LoggedSpawns};
 pub use bviz_invocation::spawn::{Phase, PhaseTiming};
 pub use read::probe_invocation_id;
@@ -24,8 +25,8 @@ pub enum LoadError {
     /// through one error.
     Io(std::io::Error),
     Decode(prost::DecodeError),
-    /// The log ends inside an entry.
-    Truncated,
+    /// The file decodes to no entry: an execution log opens with one.
+    NotALog,
 }
 
 impl fmt::Display for LoadError {
@@ -33,7 +34,7 @@ impl fmt::Display for LoadError {
         match self {
             LoadError::Io(e) => write!(f, "{e}"),
             LoadError::Decode(e) => write!(f, "malformed log entry: {e}"),
-            LoadError::Truncated => write!(f, "the log ends inside an entry"),
+            LoadError::NotALog => write!(f, "not an execution log"),
         }
     }
 }
@@ -43,7 +44,7 @@ impl std::error::Error for LoadError {
         match self {
             LoadError::Io(e) => Some(e),
             LoadError::Decode(e) => Some(e),
-            LoadError::Truncated => None,
+            LoadError::NotALog => None,
         }
     }
 }
@@ -60,7 +61,8 @@ pub struct ExecLog {
 }
 
 impl ExecLog {
-    pub fn from_path(path: &Path) -> Result<ExecLog, LoadError> {
+    /// The log at `path`, as far as it goes where it is cut off.
+    pub fn from_path(path: &Path) -> Result<Recorded<ExecLog>, LoadError> {
         read::read_path(path)
     }
 

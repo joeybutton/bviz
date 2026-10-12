@@ -452,7 +452,9 @@ pub(super) mod tests {
             {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":9000,"dur":400,"tid":0}
         ]}"#;
         CriticalPath::of(
-            &Profile::from_bytes(json.as_bytes()).expect("parse"),
+            &Profile::from_bytes(json.as_bytes())
+                .expect("parse")
+                .into_inner(),
             None,
             None,
         )
@@ -479,7 +481,9 @@ pub(super) mod tests {
             {"cat":"general information","name":"buildTargets","ph":"X","ts":0,"dur":10000,"tid":1},
             {"cat":"critical path component","name":"action 'Linking a'","ph":"X","ts":9000,"dur":400,"tid":0}
         ]}"#;
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let unrelated = bviz_invocation::spawn::LoggedSpawns::default();
         let path = CriticalPath::of(&profile, Some(&unrelated), None).expect("path");
         assert_eq!(
@@ -504,7 +508,9 @@ pub(super) mod tests {
             {"cat":"action processing","name":"Compiling a.c","ph":"X","ts":1001,"dur":2000,"tid":2,"out":"bazel-out/a.o"},
             {"cat":"action processing","name":"Writing file b","ph":"X","ts":3001,"dur":99,"tid":2}
         ]}"#;
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let mut builder = Builder::with_capacity(1, 1, 0);
         builder.output("bazel-out/a.o");
         builder.push(Logged {
@@ -577,7 +583,9 @@ pub(super) mod tests {
             {"cat":"action processing","name":"Compiling b.c","ph":"X","ts":1000,"dur":1500,"tid":3,"out":"bazel-out/b.o","args":{"mnemonic":"CppCompile","target":"//b"}},
             {"cat":"action processing","name":"Linking a","ph":"X","ts":3600,"dur":400,"tid":2,"out":"bazel-out/a"}
         ]}"#;
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let position = |out: &str| outputs.iter().position(|&kept| kept == out);
         let dependencies = MODELED_DEPENDENCIES
             .iter()

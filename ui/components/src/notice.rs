@@ -1,9 +1,13 @@
 use crate::spinner;
+use bviz_invocation::Recorded;
 use bviz_ui_theme::ThemeColors;
-use gpui::{Div, SharedString, div, prelude::*, px};
+use gpui::{Div, Pixels, SharedString, div, prelude::*, px};
 
 /// How a load in flight is labelled on screen.
 const LOADING: &str = "Loading…";
+
+/// Size of the text a [`note_strip`] is set in.
+const NOTE_TEXT_SIZE: Pixels = px(12.);
 
 /// The load state of the document a view renders.
 pub enum Source<T> {
@@ -33,6 +37,13 @@ impl<T> Source<T> {
             Self::Loaded(document) => loaded(document),
             Self::Failed(_) => absent.into(),
         }
+    }
+}
+
+impl<T> Source<Recorded<T>> {
+    /// Whether the document loaded is of a file that ends early.
+    pub fn is_cut_off(&self) -> bool {
+        matches!(self, Self::Loaded(document) if document.is_cut_off())
     }
 }
 
@@ -72,4 +83,29 @@ pub fn centered_notice(message: impl Into<SharedString>, colors: &ThemeColors) -
                 .text_color(colors.text)
                 .child(message.into()),
         )
+}
+
+/// A strip above the document a view shows, telling the reader something of
+/// the document to bear in mind while reading it.
+pub fn note_strip(note: impl Into<SharedString>, colors: &ThemeColors) -> Div {
+    div()
+        .flex_none()
+        .px_3()
+        .py_1()
+        .bg(colors.surface)
+        .border_b_1()
+        .border_color(colors.border)
+        .font_family(bviz_ui_assets::UI)
+        .text_size(NOTE_TEXT_SIZE)
+        .text_color(colors.text_muted)
+        .child(note.into())
+}
+
+/// Says the `file` a view shows ends early, as an invocation interrupted or
+/// still running leaves it, and the view shows the `records` ahead of the cut.
+pub fn cut_off_note(file: &str, records: &str, colors: &ThemeColors) -> Div {
+    note_strip(
+        format!("This {file} ends early; showing the {records} before the cut."),
+        colors,
+    )
 }

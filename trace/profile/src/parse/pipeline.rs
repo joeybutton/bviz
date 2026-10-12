@@ -6,11 +6,11 @@ use bviz_parallel::worker_count;
 use flate2::read::MultiGzDecoder;
 use serde::de::{DeserializeSeed, IgnoredAny};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::Profile;
 
 use super::build::{Builder, Merge, seal};
-use super::decode::{gzip_isize, latin1_cow, latin1_to_utf8};
+use super::decode::{gzip_size_hint, latin1_cow, latin1_to_utf8};
 use super::scanner::scan_event;
 use super::serde_events::{ArgEntry, RawEventSeed};
 use super::{
@@ -99,7 +99,8 @@ impl Chunk for &str {
 }
 
 /// Parses one chunk into a fresh [`Builder`] on a worker. Returns `None` on a
-/// parse failure.
+/// parse failure, and without parsing once the string pool is exhausted, since
+/// that pool can no longer be sealed.
 ///
 /// Both of the builder's growing buffers are pre-sized: `staging` from the
 /// chunk's byte length (via [`BYTES_PER_SLICE`]), the arg pool from `args_cap`,
@@ -113,6 +114,10 @@ impl Chunk for &str {
 /// returns to the producer's ring without the inflate waiting out the seal's
 /// per-lane sorts.
 fn parse_chunk(chunk: impl Chunk, writer: &mut Writer, args_cap: &mut usize) -> Option<Builder> {
+    if writer.pool_exhausted() {
+        chunk.release();
+        return None;
+    }
     let mut builder = Builder::new();
     builder.args_pool.reserve(*args_cap);
     let ok = {
@@ -248,7 +253,7 @@ fn seal_chunks(
     builders: Vec<Builder>,
     head: &str,
     tail: &str,
-) -> Profile {
+) -> Result<Profile, PoolOverflow> {
     let other_data = merge_other_data(recover_other_data(head), recover_other_data(tail));
     let mut merge = Merge::with_capacity(
         builders.len(),
@@ -262,22 +267,20 @@ fn seal_chunks(
 
 /// Parses the `traceEvents` array of `text` into a profile on `workers`
 /// threads. `min_bytes` is the array size below which it declines; it also
-/// returns `None` for an array it cannot locate or split, and for a chunk that
-/// fails to parse.
+/// returns `None` for an array it cannot locate or split, for a chunk that
+/// fails to parse, and for distinct text the string pool cannot hold.
 pub(crate) fn parse_chunks(text: &str, workers: usize, min_bytes: usize) -> Option<Profile> {
     let EventRegion { head, events, tail } = locate_event_region(text)?;
     if events.len() < min_bytes {
         return None;
     }
     let chunks = cut_chunks(events, workers)?;
-    let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT);
+    let interner = ConcurrentInterner::new(events.len(), events.len() / BYTES_PER_DISTINCT).ok()?;
     let prefault_bytes = intern_prefault_bytes(events.len());
     let builders = timed("  parse chunks", || {
         parse_chunks_on_workers(&chunks, workers, &interner, prefault_bytes)
     })?;
-    Some(timed("  assemble", || {
-        seal_chunks(interner, builders, head, tail)
-    }))
+    timed("  assemble", || seal_chunks(interner, builders, head, tail)).ok()
 }
 
 /// Ceiling on a pipelined chunk buffer, bounding the memory the bounded queue
@@ -291,17 +294,17 @@ const PIPELINE_MAX_CHUNK_BYTES: usize = 32 << 20;
 const PIPELINE_MAX_EVENT_BYTES: usize = 64 << 20;
 
 /// The pipelined decode of a gzipped profile held whole in memory, sized from
-/// that buffer's own ISIZE trailer. Returns `None` — leaving the input to the
-/// whole-buffer path — for a missing or zero trailer, a size
+/// that buffer's own [`gzip_size_hint`]. Returns `None` — leaving the input to
+/// the whole-buffer path — for a missing or zero trailer, a size
 /// [`pipeline_params`] declines, or any decode or parse failure.
 pub(crate) fn parse_gz_pipelined(bytes: &[u8]) -> Option<Profile> {
-    let decoded_size = gzip_isize(bytes)?;
+    let decoded_size = gzip_size_hint(bytes)?;
     let (workers, chunk_bytes) = pipeline_params(decoded_size)?;
     parse_gz_stream_from(bytes, workers, chunk_bytes, decoded_size)
 }
 
-/// The pipelined decode over a streaming reader whose ISIZE trailer was read
-/// ahead of the stream: [`parse_gz_pipelined`] without the whole compressed
+/// The pipelined decode over a streaming reader whose size hint was read ahead
+/// of the stream: [`parse_gz_pipelined`] without the whole compressed
 /// buffer in hand. `None` for the same size gates.
 pub(crate) fn parse_gz_pipelined_reader(
     reader: impl Read + Send,
@@ -604,11 +607,16 @@ fn stream_pieces(
     }
 }
 
-/// Takes the decoded size from the stream's own ISIZE trailer, or zero when it
-/// declares none.
+/// Takes the decoded size from the stream's own [`gzip_size_hint`], or zero
+/// when it gives none.
 #[cfg(test)]
 pub(crate) fn parse_gz_stream(bytes: &[u8], workers: usize, chunk_bytes: usize) -> Option<Profile> {
-    parse_gz_stream_from(bytes, workers, chunk_bytes, gzip_isize(bytes).unwrap_or(0))
+    parse_gz_stream_from(
+        bytes,
+        workers,
+        chunk_bytes,
+        gzip_size_hint(bytes).unwrap_or(0),
+    )
 }
 
 /// One chunk parser, running until the queue closes or the merger is gone.
@@ -723,7 +731,11 @@ fn decode_parse_fold(
 
 /// Recovers `otherData` from the stream's Latin-1 ends and seals the merge
 /// into the finished profile.
-fn seal_stream(interner: ConcurrentInterner, merge: Merge, ends: StreamEnds) -> Profile {
+fn seal_stream(
+    interner: ConcurrentInterner,
+    merge: Merge,
+    ends: StreamEnds,
+) -> Result<Profile, PoolOverflow> {
     let head = latin1_to_utf8(ends.head);
     let tail = latin1_to_utf8(ends.tail);
     let other_data = merge_other_data(recover_other_data(&head), recover_other_data(&tail));
@@ -735,21 +747,34 @@ fn seal_stream(interner: ConcurrentInterner, merge: Merge, ends: StreamEnds) -> 
 /// decode leg, and chunk buffers are reused as pieces finish parsing, so the
 /// whole decoded text never exists in memory at once. `None` if the decode or
 /// any chunk parse fails, if the folded builders do not account for every
-/// piece cut, or if no piece was cut at all — an empty `traceEvents` array.
+/// piece cut, if no piece was cut at all — an empty `traceEvents` array — or if
+/// the distinct text outgrows a string pool sized from `decoded_size`, which
+/// only the stream's trailer vouches for.
 fn parse_gz_stream_from(
     reader: impl Read + Send,
     workers: usize,
     chunk_bytes: usize,
     decoded_size: usize,
 ) -> Option<Profile> {
-    let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT);
+    let interner = ConcurrentInterner::new(decoded_size, decoded_size / BYTES_PER_DISTINCT).ok()?;
+    parse_gz_stream_into(reader, interner, workers, chunk_bytes, decoded_size)
+}
+
+/// [`parse_gz_stream_from`] interning into the given `interner`.
+pub(crate) fn parse_gz_stream_into(
+    reader: impl Read + Send,
+    interner: ConcurrentInterner,
+    workers: usize,
+    chunk_bytes: usize,
+    decoded_size: usize,
+) -> Option<Profile> {
     let (ends, merged) = decode_parse_fold(reader, &interner, workers, chunk_bytes, decoded_size);
     let ends = ends?;
     let (merge, folded) = merged?;
     if folded != ends.pieces || folded == 0 {
         return None;
     }
-    Some(seal_stream(interner, merge, ends))
+    seal_stream(interner, merge, ends).ok()
 }
 
 /// Parses every `{...}` event object in one chunk of the `traceEvents` array

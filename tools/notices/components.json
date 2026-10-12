@@ -55,8 +55,8 @@
   "accepted_texts": {
     "wayland-protocols-plasma": {
       "plasma-wayland-protocols/COPYING.LIB": {
-        "terms": "LGPL-3.0",
-        "reason": "The crate generates its Rust protocol bindings from the KDE Plasma protocol definitions beside this text, sixteen of which are LGPL-2.1-or-later, so the terms do reach what bviz links. bviz accepts them under the terms this entry names, which \"or later\" permits and which Apache-2.0 is compatible with; the obligations that follow for anyone redistributing a bviz binary are discharged in NOTICE."
+        "terms": "LGPL-3.0-only",
+        "reason": "The crate generates its Rust protocol bindings from the KDE Plasma protocol definitions beside this text, seventeen of which are LGPL-2.1-or-later, so the terms do reach what bviz links. bviz accepts them under the terms this entry names, which \"or later\" permits and which Apache-2.0 is compatible with; the obligations that follow for anyone redistributing a bviz binary are discharged in NOTICE."
       }
     }
   }

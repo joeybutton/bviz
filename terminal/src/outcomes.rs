@@ -230,6 +230,7 @@ mod tests {
     fn outcomes(events: &[Vec<u8>]) -> Outcomes {
         crate::parse(&events.concat())
             .expect("parse stream")
+            .into_inner()
             .outcomes
     }
 
@@ -555,11 +556,15 @@ mod tests {
                 }),
             )
         };
-        let succeeded = crate::parse(&executed(true)).expect("parse stream");
+        let succeeded = crate::parse(&executed(true))
+            .expect("parse stream")
+            .into_inner();
         assert_eq!(reported(&succeeded.outcomes), 0);
         assert_eq!(succeeded.anchors.len(), 1);
 
-        let failed = crate::parse(&executed(false)).expect("parse stream");
+        let failed = crate::parse(&executed(false))
+            .expect("parse stream")
+            .into_inner();
         assert_eq!(failed.outcomes.failed_actions().count(), 1);
         assert_eq!(failed.anchors.len(), 1);
     }
@@ -909,7 +914,7 @@ mod tests {
             ),
         ]
         .concat();
-        let output = crate::parse(&stream).expect("parse stream");
+        let output = crate::parse(&stream).expect("parse stream").into_inner();
         assert_eq!(output.anchors.len(), 1);
         assert_eq!(
             output.outcomes.test(at("//tests:flaky", Some(TEST_CONFIG))),

@@ -7,8 +7,8 @@ use std::time::Duration;
 use bazel_spawn_proto::duration_proto::google::protobuf::Duration as ProtoDuration;
 use bazel_spawn_proto::tools::protos::SpawnMetrics;
 use bazel_spawn_proto::tools::protos::exec_log_entry::Invocation;
-use bviz_invocation::InvocationId;
 use bviz_invocation::spawn::{self, Logged, PhaseTiming, REPORTED_PHASES};
+use bviz_invocation::{InvocationId, Recorded};
 use bviz_parallel::worker_count;
 use prost::{DecodeError, Message};
 use rustc_hash::FxHashMap;
@@ -42,7 +42,7 @@ const OUTPUT_BYTES_PER_COMPRESSED_KIB: u64 = 192;
 /// Decoded bytes read from the log at a time.
 const READ_CHUNK_BYTES: usize = 256 << 10;
 
-pub(crate) fn read_path(path: &Path) -> Result<ExecLog, LoadError> {
+pub(crate) fn read_path(path: &Path) -> Result<Recorded<ExecLog>, LoadError> {
     let file = File::open(path).map_err(LoadError::Io)?;
     let compressed = file.metadata().map_err(LoadError::Io)?.len();
     read_compressed(file, compressed)
@@ -52,15 +52,22 @@ pub(crate) fn read_path(path: &Path) -> Result<ExecLog, LoadError> {
 pub(crate) fn read_compressed(
     log: impl Read + Send,
     compressed: u64,
-) -> Result<ExecLog, LoadError> {
+) -> Result<Recorded<ExecLog>, LoadError> {
     let decoder = zstd::stream::read::Decoder::new(log).map_err(LoadError::Io)?;
     let mut builder = Builder::with_capacity(compressed);
-    let add = |entry: &[u8]| Ok(builder.add(entry)?);
-    match worker_count() > 1 {
+    let mut any_entry = false;
+    let add = |entry: &[u8]| {
+        any_entry = true;
+        Ok(builder.add(entry)?)
+    };
+    let read = match worker_count() > 1 {
         true => for_each_message_pipelined(decoder, READ_CHUNK_BYTES, add)?,
         false => for_each_message(decoder, READ_CHUNK_BYTES, add)?,
+    };
+    if !any_entry {
+        return Err(LoadError::NotALog);
     }
-    Ok(builder.finish())
+    Ok(read.map(|()| builder.finish()))
 }
 
 fn estimate(compressed: u64, bytes_per_item: u64) -> usize {
@@ -234,7 +241,7 @@ fn output_path<'a>(paths: &'a Paths, mut output: &'a [u8]) -> Result<Option<&'a 
     while !output.is_empty() {
         match next_field(&mut output)? {
             (exec_log_entry::output::OUTPUT_ID, Value::Varint(id)) => {
-                path = paths.get(id as u32);
+                path = paths.get(entry_id(id)?);
             }
             (exec_log_entry::output::INVALID_OUTPUT_PATH, Value::Bytes(bytes)) => {
                 path = Some(text(bytes)?);
@@ -261,12 +268,18 @@ fn split_entry(mut entry: &[u8]) -> Result<Entry<'_>, DecodeError> {
     let mut payload = None;
     while !entry.is_empty() {
         match next_field(&mut entry)? {
-            (exec_log_entry::ID, Value::Varint(value)) => id = value as u32,
+            (exec_log_entry::ID, Value::Varint(value)) => id = entry_id(value)?,
             (kind, Value::Bytes(bytes)) => payload = Some(Payload { kind, bytes }),
             _ => {}
         }
     }
     Ok(Entry { id, payload })
+}
+
+/// The entry id a varint holds: ids are `uint32` fields, so a varint past
+/// them is no id Bazel writes.
+fn entry_id(value: u64) -> Result<u32, DecodeError> {
+    u32::try_from(value).map_err(|_| DecodeError::new("entry id out of range"))
 }
 
 fn invocation_id(invocation: &[u8]) -> Result<Option<InvocationId>, DecodeError> {
@@ -341,6 +354,7 @@ mod tests {
 
     use super::*;
     use crate::Phase;
+    use crate::spawn_fields::exec_log_entry as fields;
     use crate::test_log::*;
 
     fn ms(millis: u64) -> Duration {
@@ -442,11 +456,108 @@ mod tests {
         assert_eq!(outputs, [Some("far"), Some("near")]);
     }
 
+    /// Spawns enough that their log decompresses in several blocks, of which
+    /// a cut log keeps those ahead of the cut.
+    const SPAWNS_ACROSS_BLOCKS: usize = 4_000;
+
     #[test]
-    fn a_cut_off_log_fails() {
-        let log = encode(&[invocation("abc"), file(1, "a")]);
-        let cut = &log[..log.len() - 1];
-        assert!(read_compressed(cut, cut.len() as u64).is_err());
+    fn a_cut_off_log_keeps_the_spawns_ahead_of_the_cut() {
+        let entries: Vec<_> = (0..SPAWNS_ACROSS_BLOCKS)
+            .map(|i| {
+                let mut logged = spawn("remote", "CppCompile", metrics(1, &[]));
+                logged.target_label = format!("//package/number/{i}:target_{}", i * 7919);
+                entry(0, Type::Spawn(logged))
+            })
+            .collect();
+        let log = encode(&entries);
+        let mut kept = 0;
+        let cuts = [
+            1,
+            log.len() / 4,
+            log.len() / 2,
+            log.len() * 3 / 4,
+            log.len() - 1,
+        ];
+        for cut in cuts {
+            let read = match read_compressed(&log[..cut], cut as u64) {
+                Ok(Recorded::CutOff(read)) => read,
+                // A cut ahead of the first block's end decodes no entry.
+                Err(LoadError::NotALog) if kept == 0 => continue,
+                _ => panic!("a log cut at {cut} of {} is cut off", log.len()),
+            };
+            let labels: Vec<_> = read.spawns().map(|s| s.target_label()).collect();
+            let ahead: Vec<_> = entries[..labels.len()]
+                .iter()
+                .map(|entry| match &entry.r#type {
+                    Some(Type::Spawn(spawn)) => Some(spawn.target_label.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(labels, ahead, "cut at {cut}");
+            assert!(labels.len() >= kept, "cut at {cut}");
+            kept = labels.len();
+        }
+        assert!(kept > 0, "the last cut keeps some spawns");
+        assert!(kept < SPAWNS_ACROSS_BLOCKS);
+    }
+
+    #[test]
+    fn a_file_that_decodes_to_no_entry_is_no_log() {
+        let log = encode(&[entry(
+            0,
+            Type::Spawn(spawn("remote", "CppCompile", metrics(1, &[]))),
+        )]);
+        for file in [&[][..], &log[..1], &encode(&[])[..]] {
+            assert!(
+                matches!(
+                    read_compressed(file, file.len() as u64),
+                    Err(LoadError::NotALog)
+                ),
+                "{file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_that_is_no_zstd_stream_fails() {
+        let text = b"not an execution log at all";
+        assert!(read_compressed(&text[..], text.len() as u64).is_err());
+    }
+
+    /// `fields` as one length-delimited entry of a compressed log.
+    fn raw_log(fields: &[u8]) -> Vec<u8> {
+        let mut decoded = Vec::with_capacity(crate::wire::MAX_VARINT_BYTES + fields.len());
+        prost::encoding::encode_varint(fields.len() as u64, &mut decoded);
+        decoded.extend_from_slice(fields);
+        zstd::encode_all(decoded.as_slice(), 0).expect("compress in memory")
+    }
+
+    /// Field `number` of a message, holding the varint `value`.
+    fn varint_field(number: u32, value: u64) -> Vec<u8> {
+        let mut field = Vec::with_capacity(2 * crate::wire::MAX_VARINT_BYTES);
+        prost::encoding::encode_key(number, prost::encoding::WireType::Varint, &mut field);
+        prost::encoding::encode_varint(value, &mut field);
+        field
+    }
+
+    const PAST_ENTRY_IDS: u64 = u32::MAX as u64 + 1;
+
+    #[test]
+    fn an_entry_id_past_the_ids_bazel_writes_fails_the_read() {
+        let log = raw_log(&varint_field(fields::ID, PAST_ENTRY_IDS));
+        assert!(matches!(
+            read_compressed(log.as_slice(), log.len() as u64),
+            Err(LoadError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn an_output_id_past_the_ids_bazel_writes_fails_the_read() {
+        let output = varint_field(fields::output::OUTPUT_ID, PAST_ENTRY_IDS);
+        let paths = Paths::with_capacity(0, 0);
+        assert!(output_path(&paths, &output).is_err());
+        let within = varint_field(fields::output::OUTPUT_ID, u64::from(u32::MAX));
+        assert!(matches!(output_path(&paths, &within), Ok(None)));
     }
 
     #[test]

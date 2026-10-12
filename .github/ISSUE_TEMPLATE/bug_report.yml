@@ -1,0 +1,50 @@
+name: Bug report
+description: Something bviz shows, reads or does wrong.
+labels: [bug]
+body:
+  - type: input
+    id: build
+    attributes:
+      label: bviz build
+      description: The nightly's date, or the commit you built from.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: >-
+        On Linux, the distribution and the session: Wayland (and which
+        compositor) or X11 with cage. On macOS, its version.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: On Linux, the GPU and its Vulkan driver. On macOS, the chip.
+  - type: input
+    id: bazel
+    attributes:
+      label: Bazel version
+      description: The output of `bazel --version` for the build that wrote the input.
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs
+      description: >-
+        The bviz command line, and the Bazel commands that wrote each file it
+        opened. Attach the files if you can share them.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshot or log
+      description: A screenshot of what is wrong, or bviz's terminal output.

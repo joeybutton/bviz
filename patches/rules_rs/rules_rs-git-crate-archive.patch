@@ -4,6 +4,8 @@ A git crate's repository is cloned with its submodules, which can dwarf the
 crates themselves. A crate annotation may instead name an archive of the
 locked commit, pinned by its SHA-256, to download in place of the clone.
 
+License: Apache-2.0 (rules_rs 0.0.112)
+
 diff --git a/rs/extensions.bzl b/rs/extensions.bzl
 --- a/rs/extensions.bzl
 +++ b/rs/extensions.bzl

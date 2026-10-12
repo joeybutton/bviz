@@ -20,9 +20,8 @@ use bviz_ui_components::Pending;
 use bviz_ui_console_args::{BEP_LONG, ConsoleArgs, ConsoleSource};
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member, ViewSpec, document_label};
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
-use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
+use clap::Parser;
+use gpui::{App, Entity, SharedString, Window, prelude::*};
 use std::path::PathBuf;
 
 /// A build's console output being read and reconstructed.
@@ -90,20 +89,11 @@ impl Cli {
 
 /// Parses the build event streams and opens the console-replay window.
 pub fn run() {
-    let mut loads = Cli::parse().sources().map(Load::from);
-    let Some(first) = loads.next() else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("--{BEP_LONG} or a file argument is required"),
-            )
-            .exit()
-    };
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz console",
-        size(px(1100.), px(720.)),
-        first,
-        loads.collect(),
+        bviz_ui_workspace::TEXT_WINDOW_SIZE,
+        |cli: Cli| cli.sources().map(Load::from),
+        &format!("--{BEP_LONG} or a file argument"),
         |load, window, cx| {
             Document::playing_on(DocumentClock::alone(cx), |clock| {
                 open(load, None, Some(clock.clone()), window, cx).into()
@@ -121,7 +111,9 @@ mod tests {
 
     #[test]
     fn a_source_names_the_invocation_its_stream_was_written_by() {
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let source = |name: &str, stream: Option<&[u8]>| {
             let path = std::path::Path::new(&dir).join(name);
             if let Some(stream) = stream {

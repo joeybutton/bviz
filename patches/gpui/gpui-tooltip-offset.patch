@@ -6,6 +6,8 @@ letters. Give the app a setting for how far past the pointer the tooltip
 goes, flipping before the pointer by the same distance at the window's
 edges; it is one pixel until the app sets it.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/app.rs b/crates/gpui/src/app.rs
 --- a/crates/gpui/src/app.rs
 +++ b/crates/gpui/src/app.rs

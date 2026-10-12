@@ -45,9 +45,10 @@ esac
 # grim. Capture after the app has drawn, then stop it so cage (and this run) exit.
 inner='"$@" & app=$!; sleep '"$delay"'; grim "'"$out"'"; kill "$app" 2>/dev/null; wait "$app" 2>/dev/null || true'
 
+source "$(dirname "${BASH_SOURCE[0]}")/nixpkgs.sh"
 WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
 nix --extra-experimental-features 'nix-command flakes' \
-    shell nixpkgs#cage nixpkgs#grim --command \
+    shell "$nixpkgs#cage" "$nixpkgs#grim" --command \
     cage -- bash -c "$inner" bash "$@"
 
 echo "wrote $out"

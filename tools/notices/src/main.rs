@@ -90,19 +90,25 @@ struct AcceptedText {
 /// an SPDX expression becomes one, so an entry always has terms to state.
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
-struct Terms(String);
+struct Terms {
+    canonical: String,
+    identifiers: Vec<String>,
+}
 
 impl TryFrom<String> for Terms {
     type Error = spdx::ParseError;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
-        expression::parse(&text).map(|parsed| Self(expression::canonical(&parsed)))
+        expression::parse(&text).map(|parsed| Self {
+            canonical: expression::canonical(&parsed),
+            identifiers: expression::identifiers(parsed.requirements().map(|r| &r.req)),
+        })
     }
 }
 
 impl Terms {
     fn as_str(&self) -> &str {
-        &self.0
+        &self.canonical
     }
 }
 
@@ -381,8 +387,10 @@ impl Catalogue<'_> {
 
         let accepted = self.table.accepted_texts.get(&name);
         let mut accepted_terms: Vec<String> = Vec::new();
+        let mut accepted_ids: Vec<&str> = Vec::new();
         let mut errors = Vec::new();
         let mut covered: BTreeSet<String> = BTreeSet::new();
+        let mut carried: BTreeSet<&str> = BTreeSet::new();
         let mut own_wording = false;
         let mut kept = Vec::with_capacity(texts.len() + elected_ids.len());
         for (path, body) in texts {
@@ -411,6 +419,11 @@ impl Catalogue<'_> {
                         if !accepted_terms.iter().any(|t| t == terms) {
                             accepted_terms.push(terms.to_owned());
                         }
+                        for id in &entry.terms.identifiers {
+                            if !accepted_ids.contains(&id.as_str()) {
+                                accepted_ids.push(id);
+                            }
+                        }
                     }
                     None => errors.push(format!(
                         "{title} ships {path}, which carries the {denied} text that {elected} does not cover; \
@@ -430,6 +443,7 @@ impl Catalogue<'_> {
             }
             own_wording |= ids.is_empty();
             covered.extend(covers.into_iter().map(str::to_owned));
+            carried.extend(ids);
             kept.push(Text {
                 body,
                 standard: false,
@@ -442,19 +456,23 @@ impl Catalogue<'_> {
         // License List's standard text. Where no shipped text covers a term and
         // one is identified as no licence at all, that text is taken to be the
         // component's own wording of its terms rather than evidence that one
-        // is missing.
-        if !own_wording || !covered.is_empty() {
-            for id in &elected_ids {
-                if covered.contains(id) {
-                    continue;
-                }
-                match self.corpus.standard_text(id) {
-                    Ok(text) => kept.push(Text {
-                        body: text.to_owned(),
-                        standard: true,
-                    }),
-                    Err(e) => errors.push(format!("{title} ships no text for {id}, and {e}")),
-                }
+        // is missing. Accepted terms are bviz's own choice, which no wording
+        // of the component's can state.
+        let elected_missing = elected_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| (!own_wording || !covered.is_empty()) && !covered.contains(*id));
+        let accepted_missing = accepted_ids.iter().copied().filter(|id| {
+            (!carried.contains(id) || self.corpus.carries_another(id))
+                && !elected_ids.iter().any(|e| e == id)
+        });
+        for id in elected_missing.chain(accepted_missing) {
+            match self.corpus.standard_text(id) {
+                Ok(text) => kept.push(Text {
+                    body: text.to_owned(),
+                    standard: true,
+                }),
+                Err(e) => errors.push(format!("{title} ships no text for {id}, and {e}")),
             }
         }
 
@@ -789,8 +807,8 @@ mod tests {
     #[test]
     fn an_entry_names_the_terms_of_an_accepted_text() {
         let mut vendoring = component("vendoring", &[]);
-        vendoring.accepted = vec!["LGPL-3.0".into()];
-        assert!(render(&[vendoring]).contains("    Also under:  LGPL-3.0\n"));
+        vendoring.accepted = vec!["LGPL-3.0-only".into()];
+        assert!(render(&[vendoring]).contains("    Also under:  LGPL-3.0-only\n"));
     }
 
     /// A text long enough to identify.
@@ -1013,6 +1031,84 @@ mod tests {
             "{errors:?}"
         );
         assert!(build_with(table, "BSD-3-Clause OR MIT", texts()).is_err());
+    }
+
+    /// A table accepting an LGPL-2.1 text at COPYING.LIB under the given terms.
+    fn accepting(terms: &str) -> String {
+        format!(
+            r#"{{
+                "declared_licences": {{}},
+                "copyright_holders": {{}},
+                "accepted_texts": {{
+                    "c": {{"COPYING.LIB": {{"terms": "{terms}", "reason": "why"}}}}
+                }}
+            }}"#
+        )
+    }
+
+    fn mit_and_lgpl() -> Vec<(&'static str, String)> {
+        vec![
+            ("LICENSE", text(&["MIT"])),
+            ("COPYING.LIB", text(&["LGPL-2.1-only"])),
+        ]
+    }
+
+    #[test]
+    fn accepted_terms_no_text_carries_get_their_standard_text() {
+        let component = build_with(&accepting("LGPL-3.0-only"), "MIT", mit_and_lgpl()).unwrap();
+        assert_eq!(component.accepted, ["LGPL-3.0-only"]);
+        let standard: Vec<&str> = component
+            .texts
+            .iter()
+            .filter(|t| t.standard)
+            .map(|t| t.body.as_str())
+            .collect();
+        assert_eq!(standard, [spdx().standard_text("LGPL-3.0-only").unwrap()]);
+    }
+
+    #[test]
+    fn accepted_terms_the_accepted_text_carries_need_no_standard_text() {
+        let table = accepting("LGPL-2.1-or-later");
+        let component = build_with(&table, "MIT", mit_and_lgpl()).unwrap();
+        assert!(component.texts.iter().all(|t| !t.standard));
+    }
+
+    #[test]
+    fn accepted_terms_whose_text_carries_another_get_their_standard_text() {
+        let texts = vec![
+            ("LICENSE", text(&["MIT"])),
+            ("COPYING.LIB", text(&["GPL-3.0-only"])),
+        ];
+        let component = build_with(&accepting("LGPL-3.0-only"), "MIT", texts).unwrap();
+        let standard: Vec<&str> = component
+            .texts
+            .iter()
+            .filter(|t| t.standard)
+            .map(|t| t.body.as_str())
+            .collect();
+        assert_eq!(standard, [spdx().standard_text("LGPL-3.0-only").unwrap()]);
+    }
+
+    #[test]
+    fn accepted_terms_without_a_standard_text_fail() {
+        let errors = build_with(&accepting("LicenseRef-Unlisted"), "MIT", mit_and_lgpl())
+            .err()
+            .unwrap();
+        assert!(
+            errors[0].contains("ships no text for LicenseRef-Unlisted"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_denied_text_no_entry_accepts_still_fails() {
+        assert!(build("MIT", mit_and_lgpl()).is_err());
+        let mut texts = mit_and_lgpl();
+        texts.push(("COPYING", text(&["GPL-3.0-only"])));
+        let errors = build_with(&accepting("LGPL-3.0-only"), "MIT", texts)
+            .err()
+            .unwrap();
+        assert!(errors[0].contains("ships COPYING,"), "{errors:?}");
     }
 
     #[test]

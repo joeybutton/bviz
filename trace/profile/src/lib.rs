@@ -10,4 +10,4 @@ pub use model::{
     TIME_RESOLUTION_US, ThreadTrack, TimeSpan, Workload, encloses, fetch_side, lane_class,
     occupied_span, parks_thread, span_role, track_family,
 };
-pub use parse::{LoadError, gzip_isize, pipeline_chunk_bytes, probe_invocation_id};
+pub use parse::{LoadError, gzip_size_hint, pipeline_chunk_bytes, probe_invocation_id};

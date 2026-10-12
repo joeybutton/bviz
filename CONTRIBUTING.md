@@ -43,6 +43,21 @@ Each viewer also builds as a binary of its own, taking the same flags as
 | `//ui/graph:graph` | the build and dependency graph |
 | `//ui/trace:trace` | the action timeline: thread lanes, counters, flame graph, stats |
 | `//ui/console:console` | the console output, replayed against its clock |
+| `//ui/execlog:execlog` | the spawn time by phase, from the execution log |
+
+### Measuring performance
+
+Set these environment variables when running bviz or a viewer binary to measure
+it; each reports on stderr. The values the `BVIZ_PAN_BENCH*` variables take are
+documented in [`ui/graph/src/pan_bench.rs`](ui/graph/src/pan_bench.rs).
+
+| Variable | Purpose |
+| --- | --- |
+| `BVIZ_PAN_BENCH` | runs a self-driving graph pan benchmark and reports its frame times |
+| `BVIZ_PAN_BENCH_FRAMES` | how many frames the benchmark records |
+| `BVIZ_PAN_BENCH_MOTION` | how the benchmark moves the view |
+| `BVIZ_PAN_BENCH_PRESS` | where the benchmark's motion starts |
+| `BVIZ_TRACE_TIMING` | times each stage of loading a profile and of laying out its lanes |
 
 ## Before you open a pull request
 
@@ -86,8 +101,9 @@ pull request discussion: that is where the history gets read from later.
 
 Pin new dependencies in `MODULE.bazel` or `Cargo.lock`, and commit the updated
 lockfiles. The build checks the licence of every third-party work linked into
-the binaries; a dependency with no declared licence, or with copyleft terms,
-fails that check and needs a maintainer's decision before it can go in.
+the binaries; a dependency with no declared licence, or under a GPL, LGPL or
+AGPL licence, fails that check and needs a maintainer's decision before it can
+go in.
 
 ## Licensing
 
@@ -101,4 +117,4 @@ to add.
 [CLAUDE.md](CLAUDE.md) spells out the project's conventions in more detail —
 code comments, commit granularity, hermeticity, licence declarations, Bazel
 style — and can be a useful reference if you want to match the existing code
-closely.
+closely. Its Workflow section is written for AI coding agents; you can skip it.

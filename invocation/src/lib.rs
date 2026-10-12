@@ -9,6 +9,7 @@ mod actions;
 mod attempts;
 mod critical;
 mod outcomes;
+mod recorded;
 mod runner;
 pub mod spawn;
 mod timings;
@@ -19,6 +20,7 @@ pub use critical::CriticalStep;
 pub use outcomes::{
     BuildOutcome, Cause, ConfiguredTarget, FailedAction, Outcomes, TestOutcome, TestStatus,
 };
+pub use recorded::Recorded;
 pub use runner::{Runner, Spawns};
 pub use timings::{Profiled, Share, Spent, Timing, Timings};
 

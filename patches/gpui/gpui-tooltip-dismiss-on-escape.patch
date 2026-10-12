@@ -6,6 +6,8 @@ again. Have Escape, pressed without modifiers, put away a tooltip that
 is showing or waiting out its delay, as a press on its element does,
 until the pointer leaves the element.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
 --- a/crates/gpui/src/elements/div.rs
 +++ b/crates/gpui/src/elements/div.rs

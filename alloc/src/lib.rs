@@ -26,12 +26,17 @@ pub struct MiMalloc;
 /// words from a page start aligned wider still.
 const BLOCK_ALIGN: usize = std::mem::size_of::<usize>();
 
+// SAFETY: every block is mimalloc's: a plain call serves only a layout whose
+// alignment `BLOCK_ALIGN` meets, and `mimalloc::MiMalloc`, whose contract is
+// this trait's, serves the rest.
 unsafe impl GlobalAlloc for MiMalloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if layout.align() <= BLOCK_ALIGN {
+            // SAFETY: mi_malloc takes any size.
             unsafe { mi_malloc(layout.size()).cast() }
         } else {
+            // SAFETY: the caller upholds `alloc`'s contract.
             unsafe { mimalloc::MiMalloc.alloc(layout) }
         }
     }
@@ -39,22 +44,29 @@ unsafe impl GlobalAlloc for MiMalloc {
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if layout.align() <= BLOCK_ALIGN {
+            // SAFETY: mi_zalloc takes any size.
             unsafe { mi_zalloc(layout.size()).cast() }
         } else {
+            // SAFETY: the caller upholds `alloc_zeroed`'s contract.
             unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) }
         }
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` is a live mimalloc block, which mimalloc frees whatever
+        // call allocated it.
         unsafe { mimalloc::MiMalloc.dealloc(ptr, layout) }
     }
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if layout.align() <= BLOCK_ALIGN {
+            // SAFETY: `ptr` is a live mimalloc block, and the block mi_realloc
+            // returns has the alignment every block has.
             unsafe { mi_realloc(ptr.cast(), new_size).cast() }
         } else {
+            // SAFETY: the caller upholds `realloc`'s contract.
             unsafe { mimalloc::MiMalloc.realloc(ptr, layout, new_size) }
         }
     }
@@ -73,8 +85,38 @@ unsafe extern "C" {
 /// reuses its transient buffers (worker pools, decode buffers) instead of
 /// paying the purge-and-refault round-trip mid-load, while still releasing
 /// idle memory eventually.
-pub fn retain_freed_memory_across_load() {
+///
+/// # Safety
+///
+/// No other thread may be running: mimalloc writes the option
+/// unsynchronized, and every thread allocating reads it.
+pub unsafe fn retain_freed_memory_across_load() {
     // Comfortably past a large profile's load time.
     const PURGE_DELAY_MS: std::os::raw::c_long = 30_000;
+    // SAFETY: mi_option_set takes any option and value, and the caller
+    // guarantees no other thread reads the option it writes.
     unsafe { mi_option_set(MI_OPTION_PURGE_DELAY, PURGE_DELAY_MS) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MI_OPTION_PURGE_DELAY;
+    use std::os::raw::c_long;
+
+    unsafe extern "C" {
+        fn mi_option_get(option: i32) -> c_long;
+    }
+
+    /// mimalloc reads each option's `MIMALLOC_<name>` environment variable, so
+    /// the value the test target gives `MIMALLOC_PURGE_DELAY` reads back only
+    /// through the purge delay's own index.
+    #[test]
+    fn the_purge_delay_index_names_the_purge_delay() {
+        let set: c_long = std::env::var("MIMALLOC_PURGE_DELAY")
+            .expect("the test target sets MIMALLOC_PURGE_DELAY")
+            .parse()
+            .expect("a number of milliseconds");
+        // SAFETY: mi_option_get takes any option.
+        assert_eq!(unsafe { mi_option_get(MI_OPTION_PURGE_DELAY) }, set);
+    }
 }

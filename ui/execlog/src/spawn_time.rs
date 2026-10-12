@@ -8,7 +8,7 @@ use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
     Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
     SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, Toolbar, TruncatingLabel,
-    legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
+    cut_off_note, legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -147,7 +147,7 @@ impl SpawnTimePanel {
         let Source::Loaded(summary) = self.model.read(cx).source() else {
             return;
         };
-        let mut summary = summary.clone();
+        let mut summary = summary.get().clone();
         let sort = DEFAULT_SORT;
         for runner in &mut summary.runners {
             apply(sort, &mut runner.mnemonics);
@@ -652,7 +652,7 @@ impl Panel for SpawnTimePanel {
             .read(cx)
             .source()
             .status("No execution log", |summary| {
-                format!("{} spawns", summary.spawns)
+                format!("{} spawns", summary.get().spawns)
             });
         Some(status.into())
     }
@@ -684,6 +684,12 @@ impl Render for SpawnTimePanel {
             .text_sm();
         match &self.shown {
             Some(shown) => panel
+                .children(
+                    self.model
+                        .read(cx)
+                        .cut_off()
+                        .then(|| cut_off_note("execution log", "spawns", &palette.colors)),
+                )
                 .child(header(&shown.summary, &self.legend, &palette))
                 .child(self.body(shown, &palette, cx)),
             None => panel.children(self.model.read(cx).source().placeholder(&palette.colors)),

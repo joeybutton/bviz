@@ -1,5 +1,7 @@
 Clear hover when the pointer leaves the window
 
+License: Apache-2.0 (Zed v1.6.3)
+
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs
 @@ -1810,6 +1810,17 @@

@@ -211,6 +211,26 @@ pub(crate) enum Destination<P = Entity<Pane>> {
     NewWindow,
 }
 
+/// A [`Destination`] within the window: any but a window of its own.
+enum Landing {
+    Tab { pane: Entity<Pane>, index: usize },
+    Beside { pane: Entity<Pane>, side: Side },
+    WindowEdge(Side),
+}
+
+impl Destination {
+    /// Where in the window `self` lays a panel out, `None` for a window of its
+    /// own.
+    fn in_window(self) -> Option<Landing> {
+        match self {
+            Destination::Tab { pane, index } => Some(Landing::Tab { pane, index }),
+            Destination::Beside { pane, side } => Some(Landing::Beside { pane, side }),
+            Destination::WindowEdge(side) => Some(Landing::WindowEdge(side)),
+            Destination::NewWindow => None,
+        }
+    }
+}
+
 /// The menu of rearrangements a panel offers, while it stands over the window.
 struct PanelMenu {
     menu: Entity<Menu>,
@@ -573,10 +593,49 @@ impl Workspace {
         if !self.re_homes(&to, Some(&from), cx) {
             return;
         }
+        let Some(to) = to.in_window() else {
+            self.detach(panel, &from, at, window, cx);
+            return;
+        };
         let Some(panel) = self.vacate(&from, panel, window, cx) else {
             return;
         };
         self.land(panel, to, Some((from, at)), window, cx);
+    }
+
+    /// Moves `panel` out of tab `at` of `from` into a window of its own, and
+    /// leaves it there where the platform opens no window for it.
+    fn detach(
+        &mut self,
+        panel: EntityId,
+        from: &Entity<Pane>,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handover) = from.update(cx, |pane, cx| pane.remove(panel, window, cx)) else {
+            return;
+        };
+        let (Handover::Kept(taken) | Handover::Emptied(taken)) = &handover;
+        let opened = self.open_window_for(taken.clone(), window, cx);
+        match (handover, opened) {
+            (Handover::Kept(_), Ok(())) => {}
+            // A window the move leaves framing no pane is taken away only once
+            // this update unwinds, by which time the window opened here stands
+            // in its place, so moving the last panel out of the last window
+            // does not quit the application.
+            (Handover::Emptied(_), Ok(())) => self.close_pane(from, window, cx),
+            (Handover::Kept(taken), Err(error)) => {
+                no_window_opened(&error);
+                from.update(cx, |pane, cx| pane.insert(at, taken, window, cx));
+                self.activate_pane(from.clone(), window, cx);
+            }
+            (Handover::Emptied(_), Err(error)) => {
+                no_window_opened(&error);
+                from.update(cx, |pane, cx| pane.take_back(window, cx));
+                self.activate_pane(from.clone(), window, cx);
+            }
+        }
     }
 
     /// Lays `panel` out at `to` and makes the pane it lands in the active one.
@@ -585,39 +644,45 @@ impl Workspace {
     fn land(
         &mut self,
         panel: AnyPanel,
-        to: Destination,
+        to: Landing,
         taken: Option<(Entity<Pane>, usize)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let landed = match to {
-            Destination::Tab { pane, index } => {
+            Landing::Tab { pane, index } => {
                 let taken = taken.and_then(|(from, at)| (from == pane).then_some(at));
                 let index = landing_index(index, taken);
                 pane.update(cx, |pane, cx| pane.insert(index, panel, window, cx));
                 pane
             }
-            Destination::Beside { pane, side } => {
+            Landing::Beside { pane, side } => {
                 let landed = self.pane_for(panel, window, cx);
                 self.rearrange(cx)
                     .insert_beside(&pane, side, landed.clone());
                 landed
             }
-            Destination::WindowEdge(side) => {
+            Landing::WindowEdge(side) => {
                 let landed = self.pane_for(panel, window, cx);
                 self.rearrange(cx).insert_at_edge(side, landed.clone());
                 landed
             }
-            // A window the move leaves framing no pane is taken away only once
-            // this update unwinds, by which time the window opened here stands
-            // in its place, so moving the last panel out of the last window
-            // does not quit the application.
-            Destination::NewWindow => {
-                self.open_window_for(panel, window, cx);
-                return;
-            }
         };
         self.activate_pane(landed, window, cx);
+    }
+
+    /// Opens a window of its own for `panel`, which another window has given
+    /// up, and keeps it in this one where no window opens.
+    fn adopt_into_new_window(
+        &mut self,
+        panel: AnyPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.open_window_for(panel.clone(), window, cx) {
+            no_window_opened(&error);
+            self.add_panel(panel, window, cx);
+        }
     }
 
     /// [`re_homes`] for a pane this workspace frames, read for how many panels
@@ -657,14 +722,19 @@ impl Workspace {
         pane
     }
 
-    fn open_window_for(&mut self, panel: AnyPanel, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_window_for(
+        &mut self,
+        panel: AnyPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Result<()> {
         let app_name = self.app_name.clone();
         let size = window.viewport_size();
         bviz_ui_shell::open_window(&self.app_name, size, cx, move |window, cx| {
             let regions = Regions::new(panel.role(), panel);
             cx.new(|cx| Self::new(app_name, regions, window, cx))
         })
-        .expect("a window opens for the panel moved out of this one");
+        .map(drop)
     }
 
     /// Puts up the menu of rearrangements `panel` offers, opening at `at` in
@@ -1098,7 +1168,10 @@ impl Workspace {
             let Some(taken) = documents::take_panel_from(open, panel, here, cx) else {
                 return;
             };
-            self.land(taken, to, None, window, cx);
+            match to.in_window() {
+                Some(to) => self.land(taken, to, None, window, cx),
+                None => self.adopt_into_new_window(taken, window, cx),
+            }
         }
         // The panel was carried to this window, so this window comes forward
         // with it rather than leaving it behind the one it came from.
@@ -1777,6 +1850,11 @@ pub(crate) fn re_homes<P: Clone + PartialEq>(
         }
         Destination::NewWindow => true,
     }
+}
+
+/// Tells the user why a panel moved toward a window of its own stays put.
+fn no_window_opened(error: &impl std::fmt::Display) {
+    eprintln!("error: no window opened for the panel: {error:#}");
 }
 
 /// The pane a drop at `to` would put the panel among the tabs of. Nothing where

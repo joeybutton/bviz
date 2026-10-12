@@ -6,6 +6,8 @@ a toolbar shows each one only after a pause. Show a tooltip at once
 while the window shows another, and for a short time after the last
 one hid in any window.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/app.rs b/crates/gpui/src/app.rs
 --- a/crates/gpui/src/app.rs
 +++ b/crates/gpui/src/app.rs

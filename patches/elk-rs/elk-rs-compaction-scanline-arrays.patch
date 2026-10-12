@@ -3,6 +3,8 @@ Keep the compaction scanline's crossed nodes in flat arrays
 The post-compaction scanline finds each node it crosses by comparing
 reference pointers and recomputing centers through RefCell borrows.
 
+License: EPL-2.0 (elk-rs v0.11.0+rs.2)
+
 diff --git a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs
 index e9c75b6..411aaa7 100644
 --- a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/intermediate/horizontal_graph_compactor.rs

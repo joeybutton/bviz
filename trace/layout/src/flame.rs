@@ -261,7 +261,7 @@ pub(crate) fn run_sharded<S: Default + Send>(
 /// Sort `(text, handle)` pairs into byte-wise text order. The texts are
 /// distinct, so the result is the one total order. Small inputs sort serially —
 /// the parallel split only pays off at scale.
-fn sort_pairs_by_text(pairs: &mut [(&str, Str)]) {
+fn sort_pairs_by_text<H: Send>(pairs: &mut [(&str, H)]) {
     /// Input size below which the serial sort wins over the parallel split.
     const PARALLEL_MIN: usize = 1 << 13;
     if pairs.len() < PARALLEL_MIN {
@@ -349,10 +349,9 @@ pub struct FlameGraph {
 }
 
 /// The synthetic root's name. Its label ("All") is the one frame name not in the
-/// profile, so it is encoded as the offset-0 handle: the profile's interner
-/// reserves text offset 0 (the `OptStr` absence encoding), so no profile string
-/// ever carries it and the sentinel cannot collide with a real name.
-const ROOT_LABEL: Str = Str::new(0, 0);
+/// profile, so it takes the reserved handle, which cannot collide with a real
+/// name.
+const ROOT_LABEL: Str = Str::RESERVED;
 
 impl FlameGraph {
     /// Assemble node `id`'s [`FlameNode`] at `depth`, leaving `children` for the
@@ -2619,10 +2618,10 @@ mod tests {
         let texts: Vec<String> = (0..20_000)
             .map(|i| format!("prefix/{}/x{:05}", ["a", "A", "é", ""][i % 4], i))
             .collect();
-        let pairs: Vec<(&str, Str)> = texts
+        let pairs: Vec<(&str, usize)> = texts
             .iter()
             .enumerate()
-            .map(|(i, t)| (t.as_str(), Str::new(i as u32 + 1, t.len() as u32)))
+            .map(|(i, t)| (t.as_str(), i))
             .collect();
         let serial = {
             let mut p = pairs.clone();

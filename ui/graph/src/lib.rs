@@ -19,13 +19,12 @@ use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     NavigationDirection, PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString,
-    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*, px, size,
+    StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*,
 };
 use std::time::{Duration, Instant};
 
@@ -1488,19 +1487,11 @@ struct Cli {
 
 /// Parses the query inputs and opens the graph-viewer window.
 pub fn run() {
-    let source = Cli::parse().graph.source().unwrap_or_else(|| {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("one of --{AQUERY_LONG}, --{CQUERY_LONG} or --{QUERY_LONG} is required"),
-            )
-            .exit()
-    });
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz graph",
-        size(px(1280.), px(820.)),
-        Load::from(source),
-        Vec::new(),
+        bviz_ui_workspace::WINDOW_SIZE,
+        |cli: Cli| cli.graph.source().map(Load::from),
+        &format!("one of --{AQUERY_LONG}, --{CQUERY_LONG} or --{QUERY_LONG}"),
         |load: Load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );
@@ -1512,12 +1503,12 @@ mod tests {
     use crate::camera::{
         Rect, clamp_pan, ease_out_cubic, fit_view, fit_zoom, settle_view, to_screen,
     };
-    use crate::paint::lane_polyline;
+    use crate::paint::connector::lane_polyline;
     use bviz_graph_layout::Box;
     use bviz_graph_layout::Kind;
     use bviz_ui_components::gesture::ZOOM_PER_NOTCH;
     use bviz_ui_components::keymap_probe::{self, is};
-    use gpui::{Bounds, Size, point};
+    use gpui::{Bounds, Size, point, px, size};
 
     fn lbox(id: u32, x: f64, y: f64, w: f64, h: f64) -> Box {
         Box {

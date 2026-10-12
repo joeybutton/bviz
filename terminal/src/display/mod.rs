@@ -37,6 +37,7 @@ impl Url {
     }
 }
 
+use crate::columns::Columns;
 use crate::output::BuildOutput;
 use crate::screen::Screen;
 use crate::{build_term, snapshot_rows};
@@ -61,7 +62,7 @@ impl DisplaySource {
 
     /// The display source for a prefix of a build's output, at the width Bazel
     /// used: one playback frame's reconstructed screen.
-    pub(crate) fn from_bytes(bytes: &[u8], columns: u16) -> DisplaySource {
+    pub(crate) fn from_bytes(bytes: &[u8], columns: Columns) -> DisplaySource {
         DisplaySource {
             ansi: Screen::from_bytes(bytes, columns).to_ansi(),
         }
@@ -129,10 +130,10 @@ impl Terminal {
     }
 
     /// Replay an already-reconstructed [`DisplaySource`] into a display terminal
-    /// of `columns` by `rows`, which wraps it to that width. The viewport starts
-    /// at the first line of the build.
+    /// of `columns` by `rows`, which wraps it to that width, or to the nearest
+    /// the emulator runs at. The viewport starts at the first line of the build.
     pub fn from_display(source: &DisplaySource, columns: usize, rows: usize) -> Terminal {
-        let columns = columns.max(1);
+        let columns = Columns::fitting(columns).get();
         let rows = rows.max(1);
         let mut term = build_term(&Size { columns, rows }, &source.ansi);
         // Reflow can leave content the cursor scrolled past in history; show the
@@ -151,7 +152,7 @@ impl Terminal {
     /// Resize the terminal, re-wrapping its content to the new width while keeping
     /// the current scroll position (alacritty clamps it to the new history).
     pub fn resize(&mut self, columns: usize, rows: usize) {
-        let columns = columns.max(1);
+        let columns = Columns::fitting(columns).get();
         let rows = rows.max(1);
         if columns == self.columns && rows == self.rows {
             return;
@@ -258,6 +259,15 @@ mod tests {
         let output = BuildOutput::from_bytes(40, b"abcdefghijkl\n".to_vec());
         let terminal = Terminal::new(&output, 6, 10);
         assert_eq!(viewport_text(&terminal), "abcdef\nghijkl");
+    }
+
+    #[test]
+    fn fits_a_window_narrower_than_the_emulator_runs_at() {
+        let output = BuildOutput::from_bytes(40, b"ab\n".to_vec());
+        let mut terminal = Terminal::new(&output, 1, 10);
+        assert_eq!(viewport_text(&terminal), "ab");
+        terminal.resize(0, 10);
+        assert_eq!(terminal.columns(), terminal.term.columns());
     }
 
     #[test]

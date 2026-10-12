@@ -1,28 +1,34 @@
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
+use bviz_invocation::Recorded;
 use flate2::read::MultiGzDecoder;
 
 use super::{GZIP_MAGIC, LoadError, timed};
 
-pub(crate) fn decode(bytes: &[u8]) -> Result<String, LoadError> {
+/// A profile's text, cut off where a gzip stream ends before its end: then no
+/// complete profile, only whole events for [`super::recover`] to take.
+pub(crate) fn decode(bytes: &[u8]) -> Result<Recorded<String>, LoadError> {
     let raw = if bytes.starts_with(&GZIP_MAGIC) {
         timed("  decompress", || gunzip(bytes))?
     } else {
-        bytes.to_vec()
+        Recorded::Complete(bytes.to_vec())
     };
-    Ok(timed("  latin1->utf8", || latin1_to_utf8(raw)))
+    Ok(timed("  latin1->utf8", || raw.map(latin1_to_utf8)))
 }
 
-/// Inflates a gzip stream into one buffer, reserved from the ISIZE trailer so
+/// Inflates a gzip stream into one buffer, reserved from [`gzip_size_hint`] so
 /// the common single-member case decodes without growth reallocations (a
-/// multi-member stream merely grows past the reservation).
-fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
-    let mut out = Vec::with_capacity(gzip_isize(bytes).unwrap_or(0));
-    MultiGzDecoder::new(bytes)
-        .read_to_end(&mut out)
-        .map_err(LoadError::Decompress)?;
-    Ok(out)
+/// stream the hint understates merely grows past the reservation).
+fn gunzip(bytes: &[u8]) -> Result<Recorded<Vec<u8>>, LoadError> {
+    let mut out = Vec::with_capacity(gzip_size_hint(bytes).unwrap_or(0));
+    match MultiGzDecoder::new(bytes).read_to_end(&mut out) {
+        Ok(_) => Ok(Recorded::Complete(out)),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof && !out.is_empty() => {
+            Ok(Recorded::CutOff(out))
+        }
+        Err(e) => Err(LoadError::Decompress(e)),
+    }
 }
 
 /// The gzip framing alone: a 10-byte header plus an 8-byte trailer, with no
@@ -33,37 +39,52 @@ const GZIP_FRAMING_MIN: usize = 18;
 /// Width of the gzip ISIZE trailer field (RFC 1952).
 const GZIP_ISIZE_BYTES: usize = 4;
 
-/// The uncompressed length declared by a gzip stream's little-endian ISIZE
-/// trailer (the length mod 2^32, exact under 4 GiB). `None` for a zero
+/// Ceiling on the ratio of decoded to compressed bytes a gzipped profile is
+/// taken to reach, bounding its ISIZE trailer as a sizing hint. Bazel profiles
+/// typically compress well under 20:1, which this clears severalfold; a profile
+/// past it still loads, at worst through the whole-buffer path.
+pub(crate) const MAX_PLAUSIBLE_GZIP_RATIO: usize = 64;
+
+/// The sizing hint a little-endian ISIZE `trailer` gives for a gzip stream of
+/// `compressed_len` bytes: the declared length, bounded by
+/// [`MAX_PLAUSIBLE_GZIP_RATIO`] times the compressed one. `None` for a zero
 /// trailer.
-fn isize_from_trailer(trailer: &[u8; GZIP_ISIZE_BYTES]) -> Option<usize> {
+fn size_hint_from_trailer(trailer: &[u8; GZIP_ISIZE_BYTES], compressed_len: u64) -> Option<usize> {
+    let ceiling = usize::try_from(compressed_len)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(MAX_PLAUSIBLE_GZIP_RATIO);
     match u32::from_le_bytes(*trailer) as usize {
         0 => None,
-        n => Some(n),
+        n => Some(n.min(ceiling)),
     }
 }
 
-/// The uncompressed length a gzip stream declares in its ISIZE trailer (the
-/// length mod 2^32, exact under 4 GiB). `None` for input that is not gzip, is
-/// too short to frame, or carries a zero trailer.
-pub fn gzip_isize(bytes: &[u8]) -> Option<usize> {
+/// A hint at the uncompressed length of a gzip stream, from its ISIZE trailer.
+/// Only a hint: the trailer covers the last member alone, holds the length mod
+/// 2^32, and is arbitrary bytes in a truncated stream, so it is bounded by
+/// [`MAX_PLAUSIBLE_GZIP_RATIO`] and never trusted as a capacity. `None` for
+/// input that is not gzip, is too short to frame, or carries a zero trailer.
+pub fn gzip_size_hint(bytes: &[u8]) -> Option<usize> {
     if !bytes.starts_with(&GZIP_MAGIC) || bytes.len() < GZIP_FRAMING_MIN {
         return None;
     }
-    isize_from_trailer(&bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().ok()?)
+    size_hint_from_trailer(
+        &bytes[bytes.len() - GZIP_ISIZE_BYTES..].try_into().ok()?,
+        bytes.len() as u64,
+    )
 }
 
-/// Reads a gzip stream's ISIZE trailer directly from an open file without
-/// pulling the whole stream into memory: verifies the leading [`GZIP_MAGIC`],
-/// then seeks to the ISIZE field. `Ok(None)` if the file isn't gzip, is shorter
-/// than a full frame, or the trailer is zero. The file cursor is left wherever
-/// the reads and seeks land; the caller re-seeks before use.
-pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
+/// [`gzip_size_hint`] read directly from an open file without pulling the whole
+/// stream into memory: verifies the leading [`GZIP_MAGIC`], then seeks to the
+/// ISIZE field. The file cursor is left wherever the reads and seeks land; the
+/// caller re-seeks before use.
+pub(crate) fn gzip_size_hint_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
     let mut magic = [0u8; 2];
     if file.read_exact(&mut magic).is_err() || magic != GZIP_MAGIC {
         return Ok(None);
     }
-    if file.metadata().map_or(0, |m| m.len()) < GZIP_FRAMING_MIN as u64 {
+    let compressed_len = file.metadata().map_or(0, |m| m.len());
+    if compressed_len < GZIP_FRAMING_MIN as u64 {
         return Ok(None);
     }
     if file
@@ -76,7 +97,7 @@ pub(crate) fn gzip_isize_from_file(file: &mut std::fs::File) -> std::io::Result<
     if file.read_exact(&mut trailer).is_err() {
         return Ok(None);
     }
-    Ok(isize_from_trailer(&trailer))
+    Ok(size_hint_from_trailer(&trailer, compressed_len))
 }
 
 /// Transcodes an ISO-8859-1 (Latin-1) byte buffer — how Bazel writes profile

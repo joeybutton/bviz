@@ -385,6 +385,12 @@ impl Pane {
         Some(Handover::Emptied(only))
     }
 
+    /// Shows again the panel a [`Handover::Emptied`] handed over, for a
+    /// caller that found nowhere to re-home it.
+    pub(crate) fn take_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_active(window, cx);
+    }
+
     pub(crate) fn on_panel_event(
         &mut self,
         panel: EntityId,

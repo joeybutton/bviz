@@ -10,7 +10,8 @@ use bviz_ui_components::gesture::{
     self, Clicks, Entry, GestureRow, Gestures, Held, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
-    Button, KeyScope, Nesting, Scrollbar, TextInput, declare_scopes, find_key_bindings,
+    Button, KeyScope, Nesting, Scrollbar, TextInput, cut_off_note, declare_scopes,
+    find_key_bindings,
 };
 use bviz_ui_playback::{Clock, unaligned_note};
 use bviz_ui_theme::ThemeColors;
@@ -712,6 +713,11 @@ impl Render for ConsolePanel {
                     .read(cx)
                     .unaligned()
                     .then(|| unaligned_note("build event stream", colors));
+                let cut_off = self
+                    .model
+                    .read(cx)
+                    .cut_off()
+                    .then(|| cut_off_note("build event stream", "events", colors));
                 // Unfocused, the accent takes the canvas it is drawn against, so
                 // the grid keeps the same width either way.
                 let terminal_accent = if terminal_focused {
@@ -719,7 +725,7 @@ impl Render for ConsolePanel {
                 } else {
                     colors.background
                 };
-                chrome.children(unaligned).child(
+                chrome.children(cut_off).children(unaligned).child(
                     div()
                         .key_context(GRID_KEY_CONTEXT)
                         .track_focus(&self.body_focus)

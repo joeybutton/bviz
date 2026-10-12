@@ -1,3 +1,5 @@
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui_macos/Cargo.toml b/crates/gpui_macos/Cargo.toml
 index 2c94464..1561336 100644
 --- a/crates/gpui_macos/Cargo.toml

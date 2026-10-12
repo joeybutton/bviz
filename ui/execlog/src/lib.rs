@@ -16,9 +16,8 @@ use bviz_invocation::{InvocationId, Session};
 use bviz_ui_components::{Pending, declare_scopes, legend_key_bindings};
 use bviz_ui_execlog_args::{EXEC_LOG_LONG, ExecLogArgs, ExecLogSource};
 use bviz_ui_workspace::{Member, ViewSpec, document_label};
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
-use gpui::{App, Entity, SharedString, Window, prelude::*, px, size};
+use clap::Parser;
+use gpui::{App, Entity, SharedString, Window, prelude::*};
 use model::{ExecLogModel, Read};
 use summary::Summary;
 
@@ -46,8 +45,8 @@ impl From<ExecLogSource> for Load {
             log: Pending::start(move || {
                 ExecLog::from_path(&source.path)
                     .map(|log| Read {
-                        summary: Summary::of(&log),
-                        spawns: log.into_spawns(),
+                        summary: log.as_ref().map(Summary::of),
+                        spawns: log.into_inner().into_spawns(),
                     })
                     .map_err(|e| format!("cannot read {}: {e}", source.path.display()))
             }),
@@ -82,20 +81,11 @@ struct Cli {
 
 /// Reads the execution logs and opens the spawn-time window.
 pub fn run() {
-    let mut loads = Cli::parse().exec_log.sources().map(Load::from);
-    let Some(first) = loads.next() else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("--{EXEC_LOG_LONG} is required"),
-            )
-            .exit()
-    };
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz execlog",
-        size(px(1100.), px(720.)),
-        first,
-        loads.collect(),
+        bviz_ui_workspace::TEXT_WINDOW_SIZE,
+        |cli: Cli| cli.exec_log.sources().map(Load::from),
+        &format!("--{EXEC_LOG_LONG}"),
         |load, window, cx| open(load, None, window, cx).into(),
         &[register_keys],
     );

@@ -1,5 +1,7 @@
 Reserve a path batch's vertex staging buffer up front
 
+License: Apache-2.0 (Zed v1.6.3)
+
 --- a/crates/gpui_wgpu/src/wgpu_renderer.rs
 +++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
 @@ -1575,7 +1575,8 @@

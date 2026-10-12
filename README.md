@@ -27,7 +27,7 @@ bviz reads these Bazel outputs, alone or together:
 ## Install
 
 Download the latest build of `main` for arm64 or x86_64 Linux or macOS from the
-[nightly release](../../releases/tag/nightly).
+[nightly release](https://github.com/yume-ag/bviz/releases/tag/nightly).
 
 | | Linux | macOS |
 | --- | --- | --- |
@@ -43,6 +43,8 @@ The arm64 Linux and the macOS binaries are cross-compiled on x86_64 Linux and ar
 not tested in CI. The macOS binaries are not signed, and macOS blocks an unsigned
 download until you clear its quarantine flag:
 `xattr -d com.apple.quarantine bviz`.
+
+bviz reads the outputs of Bazel 8.0 or newer.
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -67,9 +69,22 @@ echo 'try-import %workspace%/.bviz/bazelrc' >> .bazelrc
 
 Then follow the instructions at the top of `.bviz/bazelrc`.
 
+Each input flag takes the file one Bazel invocation writes. The bazelrc adds
+further flags that give the views more to show.
+
+| bviz flag | Written by |
+| --- | --- |
+| `--profile FILE` | `bazel build --profile=FILE` |
+| `--bep FILE` | `bazel build --build_event_binary_file=FILE` |
+| `--exec_log FILE` | `bazel build --execution_log_compact_file=FILE` |
+| `--query FILE` | `bazel query --output=streamed_proto ... > FILE` |
+| `--cquery FILE` | `bazel cquery --output=streamed_proto --transitions=lite ... > FILE` |
+| `--aquery FILE` | `bazel aquery --output=streamed_proto ... > FILE` |
+
 ## Getting help
 
-Report bugs and ask questions in the [issue tracker](../../issues).
+Report bugs and ask questions in the
+[issue tracker](https://github.com/yume-ag/bviz/issues).
 
 ## Contributing
 
@@ -87,3 +102,6 @@ Layout Kernel.
 bviz is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The
 third-party works it bundles or derives from, and their terms, are listed in
 [NOTICE](NOTICE).
+
+Bazel is a trademark of Google LLC. bviz is not affiliated with or endorsed by
+Google.

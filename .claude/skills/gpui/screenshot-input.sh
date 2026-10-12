@@ -27,7 +27,8 @@ steps=${1:?$usage}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 if [ -z "${SCREENSHOT_INPUT_SHELL:-}" ]; then
-    tools='let pkgs = (builtins.getFlake "nixpkgs").legacyPackages.${builtins.currentSystem}; in {
+    source "$here/nixpkgs.sh"
+    tools='let pkgs = (builtins.getFlake "'"$nixpkgs"'").legacyPackages.${builtins.currentSystem}; in {
         inherit (pkgs) sway grim wtype wlr-protocols;
         python = pkgs.python3.withPackages (p: [ p.pywayland ]);
     }'

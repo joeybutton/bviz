@@ -3,6 +3,7 @@
 use bazel_spawn_proto::duration_proto::google::protobuf::Duration as ProtoDuration;
 use bazel_spawn_proto::tools::protos::exec_log_entry::{self, Output, Type, output};
 use bazel_spawn_proto::tools::protos::{ExecLogEntry, SpawnMetrics};
+use bviz_invocation::Recorded;
 use prost::Message;
 
 use crate::{ExecLog, Phase};
@@ -100,5 +101,8 @@ pub(crate) fn encode(entries: &[ExecLogEntry]) -> Vec<u8> {
 
 pub(crate) fn load(entries: &[ExecLogEntry]) -> ExecLog {
     let log = encode(entries);
-    crate::read::read_compressed(log.as_slice(), log.len() as u64).expect("read the log")
+    match crate::read::read_compressed(log.as_slice(), log.len() as u64) {
+        Ok(Recorded::Complete(log)) => log,
+        _ => panic!("the log reads whole"),
+    }
 }

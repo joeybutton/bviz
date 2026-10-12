@@ -11,7 +11,11 @@ pub struct Str {
 }
 
 impl Str {
-    pub const fn new(off: u32, len: u32) -> Str {
+    /// The handle at offset 0, which every pool reserves, so it names no text
+    /// a profile holds.
+    pub const RESERVED: Str = Str { off: 0, len: 0 };
+
+    pub(crate) const fn new(off: u32, len: u32) -> Str {
         Str { off, len }
     }
 
@@ -1581,7 +1585,9 @@ mod tests {
             format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
         });
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let kind = |name| {
             let slices = p.slices(&p.threads()[0]);
             let slice = slices.iter().find(|s| p.str(s.name) == name).expect(name);
@@ -1622,7 +1628,9 @@ mod tests {
             format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
         });
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let instances: Vec<(&str, Option<&str>)> = p
             .slices(&p.threads()[0])
             .iter()
@@ -1843,7 +1851,7 @@ mod tests {
     /// Builds a profile from phase markers and a span end via the parser's flat
     /// pools, so tests inspect the real public model rather than a hand-rolled one.
     fn profile_with(markers: Vec<(&str, i64)>, span_end: i64) -> Profile {
-        let interner = ConcurrentInterner::new(1024, 16);
+        let interner = ConcurrentInterner::new(1024, 16).expect("a small pool");
         let phase_markers = {
             let mut writer = interner.writer();
             markers
@@ -1908,7 +1916,7 @@ mod tests {
         let p = profile_with(vec![], 0);
         assert!(
             !build_for_test(
-                ConcurrentInterner::new(1024, 16),
+                ConcurrentInterner::new(1024, 16).expect("a small pool"),
                 Vec::new(),
                 p.span(),
                 vec![track(5, LaneClass::Execution)],
@@ -1917,7 +1925,7 @@ mod tests {
         );
         assert!(
             build_for_test(
-                ConcurrentInterner::new(1024, 16),
+                ConcurrentInterner::new(1024, 16).expect("a small pool"),
                 Vec::new(),
                 p.span(),
                 vec![

@@ -18,6 +18,7 @@ rust_library(
         "//ui/playback",
         "//ui/shell",
         "//ui/theme",
+        "@crates//:clap",
         "@crates//:gpui",
     ],
 )

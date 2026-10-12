@@ -9,6 +9,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
+use crate::columns::Columns;
 use crate::output::BuildOutput;
 use crate::{build_term, snapshot_rows};
 
@@ -55,8 +56,8 @@ impl Screen {
     /// Replay a prefix of a build's captured output through a terminal emulator and
     /// snapshot the resulting grid: the terminal as it stood after those bytes. A
     /// playback frame is such a prefix.
-    pub(crate) fn from_bytes(bytes: &[u8], columns: u16) -> Screen {
-        let columns = columns as usize;
+    pub(crate) fn from_bytes(bytes: &[u8], columns: Columns) -> Screen {
+        let columns = columns.get();
         let term = build_term(&Size { columns }, &lf_to_crlf(bytes));
 
         let grid = term.grid();
@@ -235,7 +236,7 @@ mod tests {
 
     #[test]
     fn renders_final_build_output() {
-        let output = parse(SAMPLE).expect("parse sample stream");
+        let output = parse(SAMPLE).expect("parse sample stream").into_inner();
         let screen = Screen::from_output(&output);
         // The emulator was sized to the width the stream reported, so every
         // retained row spans it.

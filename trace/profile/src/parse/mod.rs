@@ -2,12 +2,12 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use bviz_invocation::InvocationId;
+use bviz_invocation::{InvocationId, Recorded};
 use flate2::bufread::MultiGzDecoder;
 use serde::de::DeserializeSeed;
 use serde_json::{Map, Value};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::Profile;
 
 mod build;
@@ -17,7 +17,7 @@ mod scanner;
 mod serde_events;
 
 use build::{Builder, Merge, seal};
-use decode::{decode, gzip_isize_from_file, latin1_cow};
+use decode::{decode, gzip_size_hint_from_file, latin1_cow};
 use pipeline::{
     TraceEventsArray, find_trace_events_array, find_trace_events_key, parse_gz_pipelined,
     parse_gz_pipelined_reader, parse_parallel,
@@ -25,7 +25,7 @@ use pipeline::{
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
 
-pub use decode::gzip_isize;
+pub use decode::gzip_size_hint;
 pub use pipeline::pipeline_chunk_bytes;
 
 /// Estimated distinct-string density of a Bazel profile — about one interned
@@ -77,6 +77,20 @@ pub enum LoadError {
     Decompress(std::io::Error),
     Json(serde_json::Error),
     Corrupted(String),
+    /// A string pool sized for the profile would reach past the offsets its
+    /// `u32` handles index.
+    TooLarge,
+    /// The profile's distinct text outgrew the string pool sized for it.
+    PoolExhausted,
+}
+
+impl From<PoolOverflow> for LoadError {
+    fn from(overflow: PoolOverflow) -> LoadError {
+        match overflow {
+            PoolOverflow::TooLarge => LoadError::TooLarge,
+            PoolOverflow::Exhausted => LoadError::PoolExhausted,
+        }
+    }
 }
 
 impl fmt::Display for LoadError {
@@ -86,6 +100,10 @@ impl fmt::Display for LoadError {
             LoadError::Decompress(e) => write!(f, "decompression error: {e}"),
             LoadError::Json(e) => write!(f, "json error: {e}"),
             LoadError::Corrupted(m) => write!(f, "corrupted profile: {m}"),
+            LoadError::TooLarge => write!(f, "profile too large for a 4 GiB string pool"),
+            LoadError::PoolExhausted => {
+                write!(f, "the profile's distinct text outgrew its string pool")
+            }
         }
     }
 }
@@ -95,7 +113,7 @@ impl std::error::Error for LoadError {
         match self {
             LoadError::Io(e) | LoadError::Decompress(e) => Some(e),
             LoadError::Json(e) => Some(e),
-            LoadError::Corrupted(_) => None,
+            LoadError::Corrupted(_) | LoadError::TooLarge | LoadError::PoolExhausted => None,
         }
     }
 }
@@ -132,14 +150,14 @@ fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
 impl Profile {
     /// Loads a profile from a file, streaming the pipelined gzip decode directly
     /// from disk so the file read overlaps decompression and parsing (see
-    /// [`parse_gz_pipelined`]). The uncompressed size the pipeline needs is read
-    /// from the gzip ISIZE trailer without pulling the whole file in. Anything
+    /// [`parse_gz_pipelined`]). The pipeline is sized from [`gzip_size_hint`],
+    /// read from the file's trailer without pulling the whole file in. Anything
     /// the pipeline declines — plain JSON, a small or oddly shaped stream, a
     /// decode or parse failure — reads the whole file and goes through
-    /// [`from_bytes`], which owns the whole-buffer fallback chain.
-    pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
+    /// [`from_whole_buffer`].
+    pub fn from_path(path: &Path) -> Result<Recorded<Profile>, LoadError> {
         if let Ok(mut file) = std::fs::File::open(path)
-            && let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file)
+            && let Ok(Some(decoded_size)) = gzip_size_hint_from_file(&mut file)
             && file.seek(SeekFrom::Start(0)).is_ok()
             && let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
                 parse_gz_pipelined_reader(
@@ -148,41 +166,68 @@ impl Profile {
                 )
             })
         {
-            return Ok(profile);
+            return Ok(Recorded::Complete(profile));
         }
         let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
-        Profile::from_bytes(&bytes)
+        from_whole_buffer(&bytes)
     }
 
     /// Parses a profile, preferring the pipelined gzip path (see
     /// [`parse_gz_pipelined`]) that overlaps decompression with the parallel
     /// parse. Anything the pipeline declines — plain JSON, a small or oddly
-    /// shaped stream, a decode or parse failure — decodes whole into memory and
-    /// parses that text: the parser works over a slice (`SliceRead`), far faster
-    /// than the byte-at-a-time `from_reader` (`IoRead`) on a trace of millions of
-    /// events, and a profile compresses small enough that the decoded text fits
-    /// comfortably. A parse failure — most often a profile truncated by an
-    /// interrupted Bazel — falls back to the best-effort [`recover`].
-    pub fn from_bytes(bytes: &[u8]) -> Result<Profile, LoadError> {
+    /// shaped stream, a decode or parse failure — goes through
+    /// [`from_whole_buffer`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Recorded<Profile>, LoadError> {
         if bytes.starts_with(&GZIP_MAGIC)
             && let Some(profile) = timed("decode+parse (pipelined)", || parse_gz_pipelined(bytes))
         {
-            return Ok(profile);
+            return Ok(Recorded::Complete(profile));
         }
-        let decoded = timed("decode (decompress+transcode)", || decode(bytes))?;
-        if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
-            return Ok(profile);
-        }
-        match timed("parse+build (serial)", || parse_streaming(&decoded)) {
-            Ok(profile) => Ok(profile),
-            Err(_) => recover(&decoded),
-        }
+        from_whole_buffer(bytes)
     }
+}
+
+/// Decodes a profile whole into memory and parses that text: the parser works
+/// over a slice (`SliceRead`), far faster than the byte-at-a-time
+/// `from_reader` (`IoRead`) on a trace of millions of events, and a profile
+/// compresses small enough that the decoded text fits comfortably. A parse
+/// failure — most often a profile truncated by an interrupted Bazel — falls
+/// back to the best-effort [`recover`], as does a gzip stream cut off before
+/// its end, without the parses its text cannot pass. Whole text whose
+/// traceEvents array closes was not cut off, so it fails with where the parse
+/// stopped, as does text that recovers nothing. A recovered profile is cut
+/// off.
+fn from_whole_buffer(bytes: &[u8]) -> Result<Recorded<Profile>, LoadError> {
+    let decoded = match timed("decode (decompress+transcode)", || decode(bytes))? {
+        Recorded::Complete(text) => text,
+        Recorded::CutOff(text) => {
+            return timed("recover", || recover(&text))
+                .map(|(profile, _)| Recorded::CutOff(profile));
+        }
+    };
+    if let Some(profile) = timed("parse+build (parallel)", || parse_parallel(&decoded)) {
+        return Ok(Recorded::Complete(profile));
+    }
+    match timed("parse+build (serial)", || parse_streaming(&decoded)) {
+        Ok(profile) => Ok(Recorded::Complete(profile)),
+        Err(json) => match recover(&decoded) {
+            Ok((profile, ArrayEnd::CutOff)) => Ok(Recorded::CutOff(profile)),
+            Ok((_, ArrayEnd::Closed)) | Err(_) => Err(LoadError::Json(json)),
+        },
+    }
+}
+
+/// Where [`recover_events`] stopped reading the traceEvents array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayEnd {
+    Closed,
+    /// The text ends inside the array.
+    CutOff,
 }
 
 /// Best-effort parse of a truncated profile: read otherData if present and pull
 /// whole events out of the traceEvents array until the first incomplete one.
-fn recover(text: &str) -> Result<Profile, LoadError> {
+fn recover(text: &str) -> Result<(Profile, ArrayEnd), LoadError> {
     let (events_at, array_start) = match find_trace_events_array(text.as_bytes()) {
         TraceEventsArray::Found {
             key_at,
@@ -196,11 +241,11 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let other_data = recover_other_data(&text[..events_at]);
 
-    let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT);
+    let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT)?;
     let mut builder = Builder::new();
-    let recovered = {
+    let (recovered, end) = {
         let mut writer = interner.writer();
-        recover_events(text, array_start, &mut builder, &mut writer)
+        recover_events(text, array_start, &mut builder, &mut writer)?
     };
 
     if !recovered {
@@ -209,49 +254,56 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
     builder.seal_slices();
     let mut merge = Merge::new();
     merge.fold(builder);
-    Ok(seal(interner, merge, other_data))
+    let profile = seal(interner, merge, other_data)?;
+    Ok((profile, end))
 }
 
 /// Folds whole event objects from the traceEvents array into `builder`, starting
-/// at `array_start`, until the array closes or an object is cut off mid-way.
-/// Returns whether any complete event was recovered.
+/// at `array_start`, until the array closes or the text ends. Returns whether
+/// any event was recovered, and where the scan stopped. A whole object that is
+/// no event, or anything but a separator between objects, fails: it is no
+/// part of a cut.
 fn recover_events(
     text: &str,
     array_start: usize,
     builder: &mut Builder,
     writer: &mut Writer,
-) -> bool {
+) -> Result<(bool, ArrayEnd), LoadError> {
     let mut recovered = false;
     let mut scratch: Vec<ArgEntry> = Vec::new();
     let bytes = text.as_bytes();
     let mut i = array_start;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i] != b'{' {
-            if bytes[i] == b']' {
-                i = bytes.len();
-                break;
+    loop {
+        match bytes.get(i) {
+            None => return Ok((recovered, ArrayEnd::CutOff)),
+            Some(b']') => return Ok((recovered, ArrayEnd::Closed)),
+            Some(b',') => i += 1,
+            Some(b) if b.is_ascii_whitespace() => i += 1,
+            Some(b'{') => {
+                let start = i;
+                let Some(end) = object_end(bytes, start) else {
+                    return Ok((recovered, ArrayEnd::CutOff));
+                };
+                let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
+                let ev = RawEventSeed(&mut scratch)
+                    .deserialize(&mut de)
+                    .and_then(|ev| de.end().map(|()| ev))
+                    .map_err(|e| {
+                        LoadError::Corrupted(format!(
+                            "the event at byte {start} does not parse: {e}"
+                        ))
+                    })?;
+                builder.event(writer, ev, &scratch);
+                recovered = true;
+                i = end + 1;
             }
-            i += 1;
+            Some(_) => {
+                return Err(LoadError::Corrupted(format!(
+                    "byte {i} of the traceEvents array is no event"
+                )));
+            }
         }
-        if i >= bytes.len() {
-            break;
-        }
-        // A missing close means the array was cut mid-object: stop.
-        let start = i;
-        let Some(end) = object_end(bytes, start) else {
-            break;
-        };
-        let mut de = serde_json::Deserializer::from_str(&text[start..=end]);
-        if let Ok(ev) = RawEventSeed(&mut scratch)
-            .deserialize(&mut de)
-            .and_then(|ev| de.end().map(|()| ev))
-        {
-            builder.event(writer, ev, &scratch);
-            recovered = true;
-        }
-        i = end + 1;
     }
-    recovered
 }
 
 /// The first `otherData` object in `prefix`, or `None` when it holds none or
@@ -339,7 +391,7 @@ pub(crate) fn build_for_test(
 ) -> Profile {
     let distinct_strings = interner.distinct();
     Profile::from_parts(ProfileParts {
-        text: interner.into_text(),
+        text: interner.into_text().expect("a test pool holds its text"),
         slice_pool: Vec::new(),
         detail_pool: Vec::new(),
         end_max_pool: Vec::new(),
@@ -358,16 +410,25 @@ pub(crate) fn build_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::decode::latin1_to_utf8;
-    use super::pipeline::{parse_chunks, parse_gz_stream};
+    use super::decode::{MAX_PLAUSIBLE_GZIP_RATIO, latin1_to_utf8};
+    use super::pipeline::{parse_chunks, parse_gz_stream, parse_gz_stream_into};
     use super::scanner::{find_special, scan_event};
     use super::serde_events::{arg_i64, arg_str};
     use super::*;
     use bviz_invocation::EpochMicros;
     use std::io::Write;
 
+    fn test_dir() -> std::path::PathBuf {
+        std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn parse(json: &str) -> Profile {
-        Profile::from_bytes(json.as_bytes()).expect("parse")
+        let Ok(Recorded::Complete(profile)) = Profile::from_bytes(json.as_bytes()) else {
+            panic!("the profile parses whole");
+        };
+        profile
     }
 
     #[test]
@@ -658,7 +719,9 @@ mod tests {
 
         // Read whole, the profile parses intact — events and the
         // bracket-bearing metadata alike.
-        let p = Profile::from_bytes(json.as_bytes()).expect("serial");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("serial")
+            .into_inner();
         let names: Vec<_> = p
             .slices(&p.threads()[0])
             .iter()
@@ -951,7 +1014,7 @@ mod tests {
         let json = r#"{"otherData":{"build_id":"abc"},"traceEvents":[]}"#;
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(json.as_bytes()).unwrap();
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("probe.profile.gz");
         std::fs::write(&path, enc.finish().unwrap()).unwrap();
         assert_eq!(probe_invocation_id(&path), InvocationId::new("abc"));
@@ -1235,11 +1298,15 @@ mod tests {
                 {"cat":"c","name":"a","ph":"X","ts":0,"dur":1,"pid":1,"tid":1}
             ]
         }"#;
-        let plain = Profile::from_bytes(json.as_bytes()).expect("plain");
+        let Ok(Recorded::Complete(plain)) = Profile::from_bytes(json.as_bytes()) else {
+            panic!("the profile reads whole");
+        };
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(json.as_bytes()).unwrap();
         let gz = enc.finish().unwrap();
-        let from_gz = Profile::from_bytes(&gz).expect("gz");
+        let Ok(Recorded::Complete(from_gz)) = Profile::from_bytes(&gz) else {
+            panic!("the gzipped profile reads whole");
+        };
         assert_eq!(plain, from_gz);
     }
 
@@ -1252,7 +1319,9 @@ mod tests {
                 {"cat":"c","name":"a","ph":"X","ts":0,"dur":1,"pid":1,"tid":1},
                 {"cat":"c","name":"b","ph":"X","ts":2,"dur":1,"pid":1,"tid":1},
                 {"cat":"c","name":"trunca"#;
-        let p = Profile::from_bytes(json.as_bytes()).expect("recover");
+        let Ok(Recorded::CutOff(p)) = Profile::from_bytes(json.as_bytes()) else {
+            panic!("the profile is cut off");
+        };
         assert_eq!(p.opt_str(p.metadata().bazel_version), Some("7.0.0"));
         let names: Vec<_> = p
             .slices(&p.threads()[0])
@@ -1260,6 +1329,54 @@ mod tests {
             .map(|s| p.str(s.name))
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_whole_profile_with_an_event_that_does_not_parse_fails_where_it_stops() {
+        let json = "{\n  \"traceEvents\": [\n    {\"name\":\"a\",\"ph\":\"X\",\"ts\":0,\"dur\":1,\"tid\":1},\n    {\"name\":\"b\",\"ph\":\"X\",\"ts\":\"late\",\"dur\":1,\"tid\":1}\n  ]\n}";
+        let Err(LoadError::Json(e)) = Profile::from_bytes(json.as_bytes()) else {
+            panic!("a whole profile with a malformed event does not load");
+        };
+        assert_eq!(e.line(), 4);
+    }
+
+    #[test]
+    fn a_profile_whose_events_array_closes_is_not_cut_off() {
+        let json = r#"{"traceEvents":[{"name":"a","ph":"X","ts":0,"dur":1,"tid":1}]} trailing"#;
+        let Err(LoadError::Json(e)) = Profile::from_bytes(json.as_bytes()) else {
+            panic!("a profile with trailing text does not load");
+        };
+        assert_eq!(e.column(), 64);
+    }
+
+    #[test]
+    fn a_cut_off_profile_with_an_event_that_does_not_parse_fails() {
+        let json = r#"{"traceEvents":[
+            {"name":"a","ph":"X","ts":0,"dur":1,"tid":1},
+            {"name":"b","ph":"X","ts":"late","dur":1,"tid":1},
+            {"name":"c","ph":"X","ts":2,"dur":1,"tid":1},
+            {"name":"trunca"#;
+        assert!(matches!(
+            Profile::from_bytes(json.as_bytes()),
+            Err(LoadError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn text_that_recovers_nothing_fails_where_it_stops_parsing() {
+        for (text, line, column) in [
+            ("<html>", 1, 1),
+            (
+                "{\n  \"traceEvents\": [\n    {\"name\": oops}\n  ]\n}",
+                3,
+                14,
+            ),
+        ] {
+            let Err(LoadError::Json(e)) = Profile::from_bytes(text.as_bytes()) else {
+                panic!("{text:?} is no profile");
+            };
+            assert_eq!((e.line(), e.column()), (line, column), "{text:?}");
+        }
     }
 
     #[test]
@@ -1286,12 +1403,14 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(json.as_bytes()).unwrap();
         let gz = enc.finish().unwrap();
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("from_path_streams.profile.gz");
         std::fs::write(&path, &gz).unwrap();
         assert_eq!(
-            Profile::from_path(&path).expect("stream"),
-            Profile::from_bytes(json.as_bytes()).expect("bytes"),
+            Profile::from_path(&path).expect("stream").into_inner(),
+            Profile::from_bytes(json.as_bytes())
+                .expect("bytes")
+                .into_inner(),
         );
     }
 
@@ -1302,9 +1421,84 @@ mod tests {
         // ISIZE. from_path must not size the streamed parse from that trailer; it
         // falls back to the whole-buffer path and reports a clean error rather
         // than over-allocating or panicking.
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("sub_frame.profile.gz");
         std::fs::write(&path, [0x1f, 0x8b, 0xff, 0xff, 0xff, 0xff]).unwrap();
         assert!(Profile::from_path(&path).is_err());
+    }
+
+    fn gzip(json: &str) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// `gz` with its ISIZE trailer replaced by `isize`.
+    fn with_trailer(mut gz: Vec<u8>, isize: u32) -> Vec<u8> {
+        let at = gz.len() - 4;
+        gz[at..].copy_from_slice(&isize.to_le_bytes());
+        gz
+    }
+
+    #[test]
+    fn a_garbage_trailer_fails_cleanly() {
+        let gz = with_trailer(gzip(&chunkable_profile_json()), u32::MAX);
+        assert!(matches!(
+            Profile::from_bytes(&gz),
+            Err(LoadError::Decompress(_))
+        ));
+    }
+
+    #[test]
+    fn a_size_hint_is_bounded_by_the_compressed_length() {
+        let gz = with_trailer(gzip(&chunkable_profile_json()), u32::MAX);
+        let hint = gzip_size_hint(&gz).expect("a gzip stream");
+        assert!(hint < u32::MAX as usize);
+        assert!(hint <= gz.len() * MAX_PLAUSIBLE_GZIP_RATIO);
+    }
+
+    #[test]
+    fn a_stream_its_trailer_understates_loads_through_the_fallback() {
+        const PAGE: usize = 16;
+        let json = chunkable_profile_json();
+        let serial = semantic(&parse_streaming(&json).expect("serial"));
+        // Two members, so the trailer declares only the short last one.
+        let last_member_at = json.len() - 2;
+        let mut gz = gzip(&json[..last_member_at]);
+        gz.extend(gzip(&json[last_member_at..]));
+        assert_eq!(gzip_size_hint(&gz), Some(json.len() - last_member_at));
+        // A pool as short as that hint runs out mid-parse.
+        let pool = ConcurrentInterner::with_exact_pool(4 * PAGE, PAGE);
+        assert!(parse_gz_stream_into(&gz[..], pool, 2, 64, 0).is_none());
+        let loaded = Profile::from_bytes(&gz)
+            .expect("the fallback loads it")
+            .into_inner();
+        assert_eq!(semantic(&loaded), serial);
+    }
+
+    #[test]
+    fn a_truncated_gzip_loads_by_recovery() {
+        let json = chunkable_profile_json();
+        let gz = gzip(&json);
+        let truncated = &gz[..gz.len() * 3 / 4];
+        let Ok(Recorded::CutOff(p)) = Profile::from_bytes(truncated) else {
+            panic!("the profile is cut off");
+        };
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+        assert!(!p.threads().is_empty());
+    }
+
+    #[test]
+    fn a_truncated_gzip_file_loads_by_recovery() {
+        let json = chunkable_profile_json();
+        let gz = gzip(&json);
+        let dir = test_dir();
+        let path = std::path::Path::new(&dir).join("truncated.profile.gz");
+        std::fs::write(&path, &gz[..gz.len() * 3 / 4]).unwrap();
+        let Ok(Recorded::CutOff(p)) = Profile::from_path(&path) else {
+            panic!("the profile is cut off");
+        };
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+        assert!(!p.threads().is_empty());
     }
 }

@@ -5,6 +5,8 @@ one global mutex, and every read of an unset property does so; with
 frames laid out in parallel the layout threads spend most of their time
 contending for it.
 
+License: EPL-2.0 (elk-rs v0.11.0+rs.2)
+
 diff --git a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs
 index 1dedb7d..6ce6da7 100644
 --- a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/util/mod.rs

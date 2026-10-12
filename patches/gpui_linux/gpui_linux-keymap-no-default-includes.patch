@@ -5,6 +5,8 @@ paths exist, which the xkbcommon crate's Context::new does not check, so a
 host without xkb data crashes on the first keymap. The compositor sends
 the keymap fully compiled, so compiling it needs no include paths.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs
 @@ -1655,7 +1655,7 @@

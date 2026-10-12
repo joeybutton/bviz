@@ -39,7 +39,58 @@ pub use workspace::Workspace;
 
 use workspace::register_keys;
 
-use gpui::{App, AppContext, Pixels, Size, Window};
+use clap::Parser;
+use clap::error::ErrorKind;
+use gpui::{App, AppContext, Pixels, Size, Window, px};
+
+/// Opening size of a window, roomy enough for a graph or a timeline to be
+/// worth looking at before it is resized.
+pub const WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1280.),
+    height: px(820.),
+};
+
+/// Opening size of a window of a viewer that shows lines of text or rows of a
+/// table, which read well in less room.
+pub const TEXT_WINDOW_SIZE: Size<Pixels> = Size {
+    width: px(1100.),
+    height: px(720.),
+};
+
+/// Runs a standalone viewer, as [`run_panels`] does, for the documents
+/// `documents` reads from its command line `C`. Where they come to none, it
+/// exits with the usage error naming what is `required`.
+pub fn run_viewer<C, I, T, F>(
+    app_id: &str,
+    window_size: Size<Pixels>,
+    documents: impl FnOnce(C) -> I,
+    required: &str,
+    open: F,
+    panel_keys: &'static [fn(&mut App)],
+) where
+    C: Parser,
+    I: IntoIterator<Item = T>,
+    T: 'static,
+    F: 'static + Fn(T, &mut Window, &mut App) -> Document,
+{
+    let mut documents = documents(C::parse()).into_iter();
+    let Some(first) = documents.next() else {
+        C::command()
+            .error(
+                ErrorKind::MissingRequiredArgument,
+                format!("{required} is required"),
+            )
+            .exit()
+    };
+    run_panels(
+        app_id,
+        window_size,
+        first,
+        documents.collect(),
+        open,
+        panel_keys,
+    );
+}
 
 /// Runs an app whose one window frames the [`Document`]s `open` builds from
 /// `first` and then `rest`, their views laid out by [`Role`]. Each of

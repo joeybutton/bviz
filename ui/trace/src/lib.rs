@@ -21,7 +21,7 @@ mod track_label;
 mod track_order;
 mod tracks_menu;
 
-use chart::{fit_px_per_us, format_duration, format_time, nice_step, span_seconds};
+use chart::{format_duration, format_time, nice_step, span_seconds};
 
 pub use critical_path::CriticalPathPanel;
 pub use flame_panel::FlamePanel;
@@ -30,11 +30,11 @@ use model::{SourceReplaced, TraceModel};
 use regions::{CountersStrip, DividerGrab, LaneBand, LaneHeights, Regions, clamp_gutter_width};
 pub use stats_panel::StatsPanel;
 use theme::Palette;
-use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline};
+use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline, zoom_floor};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
-use bviz_invocation::{InvocationId, Session};
+use bviz_invocation::{InvocationId, Recorded, Session};
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::gesture::{
@@ -42,16 +42,15 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, find_key_bindings, legend_key_bindings,
-    overlay_canvas, text_input, track_drag, zoom_key_bindings,
+    SCROLLBAR_THICKNESS, Scrollbar, cut_off_note, declare_scopes, find_key_bindings,
+    legend_key_bindings, overlay_canvas, text_input, track_drag, zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
@@ -296,7 +295,7 @@ const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
-pub(crate) type Source = bviz_ui_components::Source<model::LoadedProfile>;
+pub(crate) type Source = bviz_ui_components::Source<Recorded<model::LoadedProfile>>;
 
 /// The trace document's timeline: the flame chart with its gutter, ruler and
 /// counters strip, the divider that resizes the strip, and the tracks menu over
@@ -591,7 +590,7 @@ pub(crate) fn profile_status(model: &Entity<TraceModel>, cx: &App) -> SharedStri
         .read(cx)
         .source()
         .status("No profile", |loaded| {
-            let p = loaded.profile();
+            let p = loaded.get().profile();
             let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
             format!(
                 "{} threads · {} slices · {:.3}s",
@@ -667,11 +666,17 @@ impl Render for TracePanel {
                     .read(cx)
                     .unaligned()
                     .then(|| unaligned_note("profile", &theme.colors));
+                let cut_off = self
+                    .model
+                    .read(cx)
+                    .cut_off()
+                    .then(|| cut_off_note("profile", "events", &theme.colors));
                 chrome
                     .on_action(cx.listener(|view, _: &FilterTracks, window, cx| {
                         view.tracks_menu
                             .update(cx, |menu, cx| menu.open_filtering(window, cx));
                     }))
+                    .children(cut_off)
                     .children(unaligned)
                     .child(self.trace_body(palette, cx))
             }
@@ -1219,7 +1224,7 @@ fn scrollbar_geom(
     // bottom edge, ending left of the reserved vertical-bar column. Rounding the
     // extents to microseconds can leave a view sitting on the zoom floor a hair
     // wider than its own span, so the bar is gated on the floor itself.
-    let time = match tv.px_per_us > fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX) {
+    let time = match tv.px_per_us > zoom_floor(span, regions.time_w) {
         true => Scrollbar::new(
             Axis::Horizontal,
             Bounds::new(
@@ -1711,7 +1716,7 @@ fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<Strin
 
 /// A profile being decoded and parsed.
 pub struct Load {
-    profile: Pending<Profile>,
+    profile: Pending<Recorded<Profile>>,
     title: SharedString,
 }
 
@@ -1776,21 +1781,11 @@ struct Cli {
 
 /// Parses `--profile` and opens the trace-viewer window.
 pub fn run() {
-    bviz_alloc::retain_freed_memory_across_load();
-    let mut loads = Cli::parse().trace.sources().map(Load::from);
-    let Some(first) = loads.next() else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("--{PROFILE_LONG} is required"),
-            )
-            .exit()
-    };
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz trace",
-        size(px(1280.), px(820.)),
-        first,
-        loads.collect(),
+        bviz_ui_workspace::WINDOW_SIZE,
+        |cli: Cli| cli.trace.sources().map(Load::from),
+        &format!("--{PROFILE_LONG}"),
         |load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );
@@ -1864,7 +1859,9 @@ mod tests {
 
     #[test]
     fn a_source_names_the_invocation_its_profile_was_written_by() {
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let source = |name: &str, json: Option<&str>| {
             let path = std::path::Path::new(&dir).join(name);
             if let Some(json) = json {
@@ -1970,7 +1967,7 @@ mod tests {
         // Zoomed well past the width the span fits, so there is time to pan to.
         let tv = TimeView {
             start_us: 0.0,
-            px_per_us: 2.0 * fit_px_per_us(span, regions.time_w, EDGE_MARGIN_PX),
+            px_per_us: 2.0 * zoom_floor(span, regions.time_w),
         };
         let track = scrollbar_geom(span, tv, 0.0, regions, 0.0, 0.0)
             .time

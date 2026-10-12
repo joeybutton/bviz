@@ -7,6 +7,8 @@ element until the pointer leaves the element. The press itself then
 keeps the tooltip from showing while the button is held, which the
 hover checks no longer need to.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
 --- a/crates/gpui/src/elements/div.rs
 +++ b/crates/gpui/src/elements/div.rs

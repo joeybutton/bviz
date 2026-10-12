@@ -126,6 +126,17 @@ impl Corpus {
         a.len() == b.len() && differing * WORDS_PER_DIFFERENCE <= a.len()
     }
 
+    /// Whether the List's text of an identifier also carries another licence's
+    /// text, as LGPL-3.0's carries the GPL-3.0 it supplements. A text that
+    /// identifies as such an identifier may hold only the other licence.
+    pub fn carries_another(&self, id: &str) -> bool {
+        self.texts.get(id).is_some_and(|text| {
+            self.identify(text)
+                .into_iter()
+                .any(|other| !self.same_text(id, other))
+        })
+    }
+
     /// The identifiers whose standard text the given text carries. Empty for a
     /// text the List does not hold, such as a library's own terms.
     pub fn identify(&self, text: &str) -> Vec<&str> {

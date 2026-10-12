@@ -3,6 +3,8 @@ Find a Brandes-Koepf layer neighbor by its number
 Brandes-Koepf compaction looks up a node's neighbor within its layer by
 copying the whole layer.
 
+License: EPL-2.0 (elk-rs v0.11.0+rs.2)
+
 diff --git a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs b/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs
 index d2c4f2d..68f50bd 100644
 --- a/plugins/org.eclipse.elk.alg.layered/src/org/eclipse/elk/alg/layered/p4nodes/bk/aligned_layout.rs

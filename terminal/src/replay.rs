@@ -12,6 +12,7 @@ use std::cmp::Reverse;
 
 use bviz_invocation::EpochMicros;
 
+use crate::columns::Columns;
 use crate::display::DisplaySource;
 use crate::output::{Anchor, BuildOutput};
 
@@ -25,7 +26,7 @@ struct Frame {
 /// A build's output laid out as a timed sequence of frames.
 pub struct Replay {
     bytes: Vec<u8>,
-    columns: u16,
+    columns: Columns,
     frames: Vec<Frame>,
     real_time: bool,
     epoch_origin: Option<EpochMicros>,
@@ -447,7 +448,7 @@ mod tests {
     fn frame_at_finds_the_frame_for_a_time() {
         let replay = Replay {
             bytes: Vec::new(),
-            columns: 80,
+            columns: Columns::DEFAULT,
             frames: vec![
                 Frame { end: 0, time: 0.0 },
                 Frame { end: 0, time: 2.0 },
@@ -490,7 +491,7 @@ mod tests {
     fn sample_without_markers_falls_back_to_event_anchors() {
         // The committed sample was captured without --show_timestamps, so the
         // timeline is interpolated from build events, spanning a real duration.
-        let output = crate::parse(SAMPLE).expect("parse sample");
+        let output = crate::parse(SAMPLE).expect("parse sample").into_inner();
         let replay = Replay::from_output(output);
         assert!(!replay.real_time());
         assert!(replay.frame_count() > 1);

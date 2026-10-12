@@ -1,32 +1,31 @@
-use bviz_invocation::{Configurations, EpochMicros, Outcomes, Session};
+use bviz_invocation::{Configurations, EpochMicros, Outcomes, Recorded, Session};
 use bviz_terminal::Replay;
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
 use gpui::{App, Context, Entity, Task};
 
-pub(crate) type Source = bviz_ui_components::Source<Replay>;
+pub(crate) type Source = bviz_ui_components::Source<Recorded<Replay>>;
 
 /// What a build event stream is read into.
 pub(crate) struct Stream {
-    replay: Replay,
+    replay: Recorded<Replay>,
     configurations: Configurations,
     outcomes: Outcomes,
 }
 
 impl Stream {
     pub(crate) fn parse(stream: &[u8]) -> Result<Self, String> {
-        let mut output = bviz_terminal::parse(stream)
-            .map_err(|e| format!("cannot parse build event stream: {e}"))?;
-        let configurations = std::mem::take(&mut output.configurations);
-        let outcomes = std::mem::take(&mut output.outcomes);
+        let mut output = bviz_terminal::parse(stream).map_err(|e| e.to_string())?;
+        let configurations = std::mem::take(&mut output.get_mut().configurations);
+        let outcomes = std::mem::take(&mut output.get_mut().outcomes);
         Ok(Self {
-            replay: Replay::from_output(output),
+            replay: output.map(Replay::from_output),
             configurations,
             outcomes,
         })
     }
 
-    fn replay_telling(self, session: &mut Session) -> Replay {
+    fn replay_telling(self, session: &mut Session) -> Recorded<Replay> {
         session.add_configurations(self.configurations);
         session.report_outcomes(self.outcomes);
         self.replay
@@ -92,6 +91,7 @@ impl ConsoleModel {
         };
         let played = match &self.source {
             Source::Loaded(replay) => {
+                let replay = replay.get();
                 origin(replay, on_clock.document_clock()).and_then(|at| clock_source(replay, at))
             }
             _ => None,
@@ -139,9 +139,13 @@ impl ConsoleModel {
     /// which a view draws [`Source::placeholder`] in its stead.
     pub(crate) fn replay(&self) -> Option<&Replay> {
         match &self.source {
-            Source::Loaded(replay) => Some(replay),
+            Source::Loaded(replay) => Some(replay.get()),
             _ => None,
         }
+    }
+
+    pub(crate) fn cut_off(&self) -> bool {
+        self.source.is_cut_off()
     }
 }
 
@@ -303,7 +307,7 @@ mod tests {
         let stream = Stream::parse(&stream).expect("the stream parses");
         let mut session = Session::default();
         let replay = stream.replay_telling(&mut session);
-        assert_eq!(replay.frame_count(), 1);
+        assert_eq!(replay.get().frame_count(), 1);
         assert_eq!(
             session.configurations().name(CONFIGURATION).as_deref(),
             Some("k8-fastbuild")
@@ -384,7 +388,33 @@ mod tests {
     #[test]
     fn a_replay_of_one_instant_gives_a_clock_nothing_to_play() {
         let stream = Stream::parse(&progress_event("Loading: \n")).expect("the stream parses");
-        assert!(clock_source(&stream.replay, UNRECORDED_ORIGIN).is_none());
+        assert!(clock_source(stream.replay.get(), UNRECORDED_ORIGIN).is_none());
+    }
+
+    /// The event Bazel ends a stream with, marked its last.
+    fn last_event() -> Vec<u8> {
+        use bviz_terminal::bep::build_event_stream::BuildEvent;
+        use prost::Message;
+
+        BuildEvent {
+            last_message: true,
+            ..Default::default()
+        }
+        .encode_length_delimited_to_vec()
+    }
+
+    /// A stream that ends before the event Bazel marks its last is played as
+    /// far as it goes, and said to be cut off.
+    #[test]
+    fn a_stream_ending_early_is_played_up_to_the_cut() {
+        let whole = [progress_event("Loading: \n"), last_event()].concat();
+        let cut = &whole[..whole.len() - 1];
+        for (stream, cut_off) in [(&whole[..], false), (cut, true)] {
+            let mut model = reading();
+            model.source = Source::Loaded(Stream::parse(stream).expect("the stream parses").replay);
+            assert_eq!(model.cut_off(), cut_off);
+            assert_eq!(model.replay().expect("a replay").frame_count(), 1);
+        }
     }
 
     /// Every progress event of the stream read is a frame the reader can seek to.

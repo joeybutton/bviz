@@ -177,7 +177,9 @@ pub fn profile_with_counters(tracks: Vec<TestTrack>, counters: &[TestCounter]) -
         }
     }
     let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-    Profile::from_bytes(json.as_bytes()).expect("parse test profile")
+    let parsed = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+    assert!(!parsed.is_cut_off(), "the test profile parses whole");
+    parsed.into_inner()
 }
 
 /// A small random profile: lanes of any class with at most one critical path,

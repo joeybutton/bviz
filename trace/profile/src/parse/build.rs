@@ -6,7 +6,7 @@ use bviz_parallel::worker_count;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::{
     Category, CategoryId, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker,
     Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses,
@@ -351,7 +351,7 @@ pub(crate) fn seal(
     interner: ConcurrentInterner,
     merge: Merge,
     other_data: Option<Map<String, Value>>,
-) -> Profile {
+) -> Result<Profile, PoolOverflow> {
     let mut parts = {
         let mut pool = WriterPool {
             writer: interner.writer(),
@@ -360,8 +360,8 @@ pub(crate) fn seal(
         finish_merge(merge, &mut pool, other_data)
     };
     parts.distinct_strings = interner.distinct();
-    parts.text = interner.into_text();
-    Profile::from_parts(parts)
+    parts.text = interner.into_text()?;
+    Ok(Profile::from_parts(parts))
 }
 
 /// Writes every folded slice exactly once, straight into its final
@@ -393,6 +393,11 @@ fn finish_merge(
         &categories,
     );
     merge_lanes(&mut tasks);
+    debug_assert_eq!(
+        tasks.iter().map(|t| t.emitted).sum::<usize>(),
+        slice_total,
+        "the merges filled every carved slot"
+    );
     let results: Vec<(u32, i64, i64)> = tasks
         .into_iter()
         .map(|t| (t.max_depth, t.min_start_us, t.max_occupied_us))
@@ -491,6 +496,8 @@ struct TidTask<'a> {
     /// [`occupied_span`], which is the lane's contribution to
     /// [`compute_span`].
     max_occupied_us: i64,
+    /// Slots the merge has written, each one slot of every destination.
+    emitted: usize,
 }
 
 /// The runs feeding each thread's merge, in fold order within a thread.
@@ -542,6 +549,7 @@ fn carve_segments<'a>(
             max_depth: 0,
             min_start_us: i64::MAX,
             max_occupied_us: i64::MIN,
+            emitted: 0,
         });
     }
     debug_assert_eq!(off as usize, slice_total);
@@ -591,6 +599,7 @@ fn merge_lane(task: &mut TidTask) {
         max_depth,
         min_start_us,
         max_occupied_us,
+        emitted,
     } = task;
     let mut slots = dest.iter_mut();
     let mut detail_slots = dest_detail.iter_mut();
@@ -638,6 +647,7 @@ fn merge_lane(task: &mut TidTask) {
             .next()
             .expect("segment sized to the runs' total")
             .write(end_max_us);
+        *emitted += 1;
     };
     if let [run] = &runs[..] {
         for &idx in run.order {

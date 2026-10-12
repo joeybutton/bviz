@@ -8,18 +8,11 @@ use bviz_invocation::Session;
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member};
 use clap::Parser;
-use gpui::{App, AppContext, Entity, Pixels, Size, Window, px};
+use gpui::{App, AppContext, Entity, Window};
 use group::{File, Given, Kind, Opening};
 
 #[global_allocator]
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
-
-/// Opening size of the window, roomy enough for a graph or a timeline to be
-/// worth looking at before it is resized.
-const WINDOW_SIZE: Size<Pixels> = Size {
-    width: px(1280.),
-    height: px(820.),
-};
 
 /// A document being read, whichever viewer shows it.
 enum Load {
@@ -121,7 +114,8 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
 }
 
 fn main() {
-    bviz_alloc::retain_freed_memory_across_load();
+    // SAFETY: the first statement of main, before any other thread starts.
+    unsafe { bviz_alloc::retain_freed_memory_across_load() };
     match Cli::parse().request().unwrap_or_else(|e| e.exit()) {
         Request::Bazelrc(args) => args.print(),
         Request::Open(sources) => open_window(sources),
@@ -132,7 +126,7 @@ fn open_window(sources: Sources) {
     let (first, rest) = group::by_invocation(Load::start_all(sources));
     bviz_ui_workspace::run_panels(
         "bviz",
-        WINDOW_SIZE,
+        bviz_ui_workspace::WINDOW_SIZE,
         first,
         rest,
         open,

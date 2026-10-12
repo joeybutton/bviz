@@ -9,6 +9,8 @@ bounded by a short timeout, seeds the appearance the first frame uses; an
 absent or slow portal leaves the Light default, and the asynchronous
 subscription still follows later changes.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs

@@ -29,6 +29,7 @@ rust_library(
         "//ui/workspace:__pkg__",
     ],
     deps = [
+        "//invocation",
         "//ui/assets",
         "//ui/theme",
         "@crates//:gpui",

@@ -3,6 +3,7 @@ name = "bviz_ui_workspace"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
+publish.workspace = true
 repository.workspace = true
 
 [lib]
@@ -10,6 +11,7 @@ name = "bviz_ui_workspace"
 path = "src/lib.rs"
 
 [dependencies]
+clap = { workspace = true }
 gpui = { workspace = true }
 bviz_ui_assets = { path = "../assets" }
 bviz_ui_components = { path = "../components" }

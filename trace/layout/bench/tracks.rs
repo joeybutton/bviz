@@ -59,7 +59,8 @@ fn evicting(sel: &TimeSelection) -> TimeSelection {
 }
 
 fn main() {
-    bviz_alloc::retain_freed_memory_across_load();
+    // SAFETY: the first statement of main, before any other thread starts.
+    unsafe { bviz_alloc::retain_freed_memory_across_load() };
     let path = std::env::args()
         .nth(1)
         .expect("usage: bench_tracks <profile>");
@@ -68,7 +69,11 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    let profile = Arc::new(Profile::from_path(std::path::Path::new(&path)).expect("load profile"));
+    let profile = Arc::new(
+        Profile::from_path(std::path::Path::new(&path))
+            .expect("load profile")
+            .into_inner(),
+    );
     let threads = profile.threads();
 
     // The largest non-critical-path lane by slice count — a single-track
