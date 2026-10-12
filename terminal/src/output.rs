@@ -568,7 +568,9 @@ mod tests {
 
     #[test]
     fn probe_reads_a_stream_from_disk() {
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let path = Path::new(&dir).join("probe.bep");
         std::fs::write(&path, SAMPLE).unwrap();
         assert_eq!(

@@ -418,6 +418,12 @@ mod tests {
     use bviz_invocation::EpochMicros;
     use std::io::Write;
 
+    fn test_dir() -> std::path::PathBuf {
+        std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn parse(json: &str) -> Profile {
         let Ok(Recorded::Complete(profile)) = Profile::from_bytes(json.as_bytes()) else {
             panic!("the profile parses whole");
@@ -1008,7 +1014,7 @@ mod tests {
         let json = r#"{"otherData":{"build_id":"abc"},"traceEvents":[]}"#;
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(json.as_bytes()).unwrap();
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("probe.profile.gz");
         std::fs::write(&path, enc.finish().unwrap()).unwrap();
         assert_eq!(probe_invocation_id(&path), InvocationId::new("abc"));
@@ -1397,7 +1403,7 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(json.as_bytes()).unwrap();
         let gz = enc.finish().unwrap();
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("from_path_streams.profile.gz");
         std::fs::write(&path, &gz).unwrap();
         assert_eq!(
@@ -1415,7 +1421,7 @@ mod tests {
         // ISIZE. from_path must not size the streamed parse from that trailer; it
         // falls back to the whole-buffer path and reports a clean error rather
         // than over-allocating or panicking.
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("sub_frame.profile.gz");
         std::fs::write(&path, [0x1f, 0x8b, 0xff, 0xff, 0xff, 0xff]).unwrap();
         assert!(Profile::from_path(&path).is_err());
@@ -1486,7 +1492,7 @@ mod tests {
     fn a_truncated_gzip_file_loads_by_recovery() {
         let json = chunkable_profile_json();
         let gz = gzip(&json);
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = test_dir();
         let path = std::path::Path::new(&dir).join("truncated.profile.gz");
         std::fs::write(&path, &gz[..gz.len() * 3 / 4]).unwrap();
         let Ok(Recorded::CutOff(p)) = Profile::from_path(&path) else {

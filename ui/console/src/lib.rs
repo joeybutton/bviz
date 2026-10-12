@@ -121,7 +121,9 @@ mod tests {
 
     #[test]
     fn a_source_names_the_invocation_its_stream_was_written_by() {
-        let dir = std::env::var("TEST_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = std::env::var_os("TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let source = |name: &str, stream: Option<&[u8]>| {
             let path = std::path::Path::new(&dir).join(name);
             if let Some(stream) = stream {
