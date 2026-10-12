@@ -137,6 +137,17 @@ pub fn scrubber<V: 'static>(
         )
 }
 
+const TRACK_HEIGHT: f32 = 4.0;
+const KNOB_SIZE: f32 = 12.0;
+
+/// The knob's left edge for a track `width` wide from `left`, played `played_w`
+/// along it: centred on the played end, kept within the track, and against its
+/// start when the track is narrower than the knob.
+fn knob_left(left: f32, width: f32, played_w: f32) -> f32 {
+    let last = (left + width - KNOB_SIZE).max(left);
+    (left + played_w - KNOB_SIZE / 2.0).clamp(left, last)
+}
+
 /// Paint the scrubber into its bounds: a dim full-width track, a brighter played
 /// portion up to `fraction`, and a knob marking the current position.
 fn paint_scrubber(
@@ -150,16 +161,14 @@ fn paint_scrubber(
     let left = f32::from(bounds.left());
     let width = f32::from(bounds.size.width);
     let mid = f32::from(bounds.top()) + f32::from(bounds.size.height) / 2.0;
-    let track_h = 4.0;
-    let knob_size = 12.0;
     let played_w = width * fraction.clamp(0.0, 1.0);
-    let knob_x = (left + played_w - knob_size / 2.0).clamp(left, left + width - knob_size);
+    let knob_x = knob_left(left, width, played_w);
 
     let bar = |x: f32, w: f32, color: Rgba| {
         fill(
             Bounds::new(
-                point(px(x), px(mid - track_h / 2.0)),
-                size(px(w), px(track_h)),
+                point(px(x), px(mid - TRACK_HEIGHT / 2.0)),
+                size(px(w), px(TRACK_HEIGHT)),
             ),
             color,
         )
@@ -168,9 +177,32 @@ fn paint_scrubber(
     window.paint_quad(bar(left, played_w, played));
     window.paint_quad(fill(
         Bounds::new(
-            point(px(knob_x), px(mid - knob_size / 2.0)),
-            size(px(knob_size), px(knob_size)),
+            point(px(knob_x), px(mid - KNOB_SIZE / 2.0)),
+            size(px(KNOB_SIZE), px(KNOB_SIZE)),
         ),
         knob,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_knob_stays_on_its_track() {
+        let width = 200.0;
+        assert_eq!(knob_left(10.0, width, 0.0), 10.0);
+        assert_eq!(
+            knob_left(10.0, width, width / 2.0),
+            10.0 + width / 2.0 - KNOB_SIZE / 2.0
+        );
+        assert_eq!(knob_left(10.0, width, width), 10.0 + width - KNOB_SIZE);
+    }
+
+    #[test]
+    fn a_track_narrower_than_the_knob_holds_it_at_the_start() {
+        let width = KNOB_SIZE / 2.0;
+        assert_eq!(knob_left(10.0, width, width), 10.0);
+        assert_eq!(knob_left(10.0, 0.0, 0.0), 10.0);
+    }
 }
