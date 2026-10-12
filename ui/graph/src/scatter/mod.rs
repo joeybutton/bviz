@@ -22,8 +22,8 @@ use crate::holder::Holder;
 use crate::hue::Hue;
 use crate::jump::{self, JumpEvent, JumpPalette, Stands};
 use crate::model::{
-    ExclusionNamed, FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced,
-    VerdictsLanded,
+    ExclusionNamed, FilterChanged, GraphModel, Loaded, MetricsLanded, SelectionChanged,
+    SourceReplaced, VerdictsLanded,
 };
 use crate::paint::UNMARKED_FADE;
 use crate::point::{
@@ -95,8 +95,10 @@ gpui::actions!(
         AimUp,
         /// Aim at next point
         AimDown,
+        /// Select point
+        SelectAimed,
         /// Show point in graph
-        RevealAimed,
+        ShowSelectedPoint,
         /// Close pick list
         ClosePickList,
         /// Cycle across axis
@@ -143,8 +145,6 @@ pub struct ScatterPanel {
     /// The part of each axis shown as the palette opened, which closing it
     /// unpicked returns to.
     opened_zoom: Option<OpenedZoom>,
-    /// The node the plot marks the points of, which a jump lands on.
-    selected: Option<Id>,
     /// When the last jump landed, which the marked points pulse from.
     pulsed: Option<Instant>,
     offering: Offering,
@@ -160,9 +160,9 @@ pub struct ScatterPanel {
     card: HoverCard<Id>,
     /// How far the list of the points under a click has scrolled.
     pick_scroll: ListScroll,
-    /// Whether the last click revealed a row of the list of points, whose
+    /// Whether the last click selected a row of the list of points, whose
     /// double click's second press then lands on the plot the list stood over.
-    row_revealed: bool,
+    row_selected: bool,
     /// Closes the list of the points under a click as focus leaves the panel;
     /// made the first time the panel is shown, where the window is in hand.
     closes_on_blur: Option<Subscription>,
@@ -176,6 +176,9 @@ pub struct ScatterPanel {
     _filter_changed: Subscription,
     _verdicts_landed: Subscription,
     _exclusion_named: Subscription,
+    /// Marks the points of a node another view selects, leaving the axes as
+    /// they are.
+    _selection_changed: Subscription,
     /// Lands what the palette picks.
     _jumped: Subscription,
 }
@@ -208,7 +211,6 @@ impl ScatterPanel {
         });
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.plot = None;
-            view.selected = None;
             view.pulsed = None;
             view.opened_zoom = None;
             view.offering.clear();
@@ -233,6 +235,12 @@ impl ScatterPanel {
         let verdicts_landed =
             cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.replot(cx));
         let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let selection_changed = cx.subscribe(&model, |view, _, event: &SelectionChanged, cx| {
+            if event.by != cx.entity_id() {
+                view.pulsed = None;
+                view.remark(cx);
+            }
+        });
         let parent = cx.entity().downgrade();
         let focus = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus.clone(), cx));
@@ -249,7 +257,6 @@ impl ScatterPanel {
             chips,
             jump,
             opened_zoom: None,
-            selected: None,
             pulsed: None,
             offering: Offering::new(model.clone()),
             jumps: Jumps::default(),
@@ -263,7 +270,7 @@ impl ScatterPanel {
             press: None,
             card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             pick_scroll: ListScroll::new(),
-            row_revealed: false,
+            row_selected: false,
             closes_on_blur: None,
             plotting: None,
             _changed: changed,
@@ -272,6 +279,7 @@ impl ScatterPanel {
             _filter_changed: filter_changed,
             _verdicts_landed: verdicts_landed,
             _exclusion_named: exclusion_named,
+            _selection_changed: selection_changed,
             _jumped: jumped,
         }
     }
@@ -347,11 +355,12 @@ impl ScatterPanel {
         match event {
             JumpEvent::Preview(_) => {}
             JumpEvent::Go(id) => {
-                let origin = match self.selected {
+                let origin = match self.selected(cx) {
                     Some(selected) => Stop::Node(selected),
                     None => Stop::View(self.zoom),
                 };
                 self.jumps.visit(id, Some(origin));
+                self.select(Some(id), cx);
                 self.land(id, cx);
             }
             JumpEvent::AskWhy(id) => self.model.update(cx, |model, cx| model.ask_why(id, cx)),
@@ -401,7 +410,7 @@ impl ScatterPanel {
         cx.notify();
     }
 
-    /// Selects the points `id` stands for, brings them into view and pulses
+    /// Marks the points `id` stands for, brings them into view and pulses
     /// them, listing them where there are several. Where none is drawn, the
     /// card says why and offers to show the node another way; with no plot
     /// drawn yet, the jump waits for one.
@@ -413,7 +422,6 @@ impl ScatterPanel {
         };
         let unshown = match landing {
             Landing::Marks(marks) => {
-                self.selected = Some(id);
                 self.zoom_onto(&marks, None, cx);
                 self.pulsed = Some(Instant::now());
                 let spot = (self.area().zip(self.plot.as_ref()))
@@ -421,9 +429,6 @@ impl ScatterPanel {
                 let several = (marks.len() > 1)
                     .then(|| Picked::of(marks.clone()))
                     .flatten();
-                if let Some(plot) = &mut self.plot {
-                    plot.selected = marks;
-                }
                 if let Some((spot, picked)) = spot.zip(several) {
                     self.open_pick(spot, picked, cx);
                 }
@@ -438,17 +443,43 @@ impl ScatterPanel {
         cx.notify();
     }
 
+    /// The node every view of the graph marks as the one selected.
+    fn selected(&self, cx: &App) -> Option<Id> {
+        self.model.read(cx).selected()
+    }
+
+    /// Selects `node`, or nothing for `None`, for every view of the graph,
+    /// and marks its points.
+    fn select(&mut self, node: Option<Id>, cx: &mut Context<Self>) {
+        self.pulsed = None;
+        let by = cx.entity_id();
+        self.model
+            .update(cx, |model, cx| model.select(node, by, cx));
+        self.remark(cx);
+    }
+
+    /// Marks the points of the node selected in the plot drawn, resolving
+    /// them once for each node selected in each plot.
+    fn remark(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected(cx);
+        let Some(plot) = &self.plot else {
+            return;
+        };
+        if plot.selection.as_ref().map(|(id, _)| *id) == selected {
+            return;
+        }
+        let selection = selected.and_then(|id| Some((id, self.landing(id, cx)?)));
+        if let Some(plot) = &mut self.plot {
+            plot.selection = selection;
+        }
+        self.invalidate_canvas(cx);
+    }
+
     /// Takes up a plot drawn afresh: marks the points of the node selected,
     /// moves the card to where its node now lands, and lands the jump waiting
     /// for the plot.
     fn replotted(&mut self, cx: &mut Context<Self>) {
-        let marks = match self.selected.and_then(|id| self.landing(id, cx)) {
-            Some(Landing::Marks(marks)) => marks,
-            _ => Vec::new(),
-        };
-        if let Some(plot) = &mut self.plot {
-            plot.selected = marks;
-        }
+        self.remark(cx);
         let offer = self.offering.offer();
         let now = offer
             .and_then(|offer| self.landing(offer.node, cx))
@@ -477,13 +508,13 @@ impl ScatterPanel {
     /// Lands on `stop` again, leaving the jumps as they stand.
     fn revisit(&mut self, stop: Stop<Zoom>, cx: &mut Context<Self>) {
         match stop {
-            Stop::Node(id) => self.land(id, cx),
+            Stop::Node(id) => {
+                self.select(Some(id), cx);
+                self.land(id, cx);
+            }
             Stop::View(zoom) => {
                 self.offering.clear();
-                self.selected = None;
-                if let Some(plot) = &mut self.plot {
-                    plot.selected.clear();
-                }
+                self.select(None, cx);
                 self.show_zoom(zoom, cx);
             }
         }
@@ -502,10 +533,7 @@ impl ScatterPanel {
     /// Puts away the card, or with none the selection.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         if !self.offering.dismiss() {
-            self.selected = None;
-            if let Some(plot) = &mut self.plot {
-                plot.selected.clear();
-            }
+            self.select(None, cx);
         }
         cx.notify();
     }
@@ -723,7 +751,7 @@ impl ScatterPanel {
                     scope,
                     colour,
                     timed,
-                    selected: Vec::new(),
+                    selection: None,
                     previewed: Vec::new(),
                 });
                 view.replotted(cx);
@@ -824,16 +852,17 @@ impl ScatterPanel {
     }
 
     /// Acts on a press as [`GESTURES`] has it. A double click shows the whole
-    /// of each axis only clear of every mark: a first click on a mark shows it
-    /// in the graph, which the second click then lands on. A press beside an
-    /// open list of points closes it and goes on as a press on the plot. The
-    /// second press of a double click whose first put the list up or revealed
-    /// one of its rows goes no further.
+    /// of each axis only clear of every mark: on a mark it shows in the graph
+    /// the point its first click selected. A press beside an open list of
+    /// points closes it and goes on as a press on the plot. The second press
+    /// of a double click whose first put the list up or selected one of its
+    /// rows goes no further.
     fn on_mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
-        let row_revealed = std::mem::take(&mut self.row_revealed);
-        if e.click_count >= DOUBLE_CLICK && (row_revealed || self.picking()) {
+        let row_selected = std::mem::take(&mut self.row_selected);
+        if e.click_count >= DOUBLE_CLICK && (row_selected || self.picking()) {
             return;
         }
+        let closed_list = self.picking();
         self.close_pick(cx);
         GESTURES.dispatch(gesture::Pointer::press(e), |intent| match intent {
             ScatterIntent::ShowWholePlot if self.pick(e.position).is_none() => {
@@ -847,6 +876,7 @@ impl ScatterPanel {
                     last: e.position,
                     dragged: false,
                     click: gesture::Pointer::completing(e),
+                    closed_list,
                 });
                 // The frame this asks for installs the handlers carrying the
                 // drag.
@@ -940,34 +970,63 @@ impl ScatterPanel {
             return;
         }
         GESTURES.dispatch(press.click, |intent| match intent {
-            ScatterIntent::Reveal => {
-                self.reveal_at(at, cx);
+            ScatterIntent::Select => self.select_at(at, cx),
+            ScatterIntent::Deselect => {
+                if !press.closed_list {
+                    self.select(None, cx);
+                }
                 true
             }
+            ScatterIntent::Reveal => self.reveal_at(at, cx),
             _ => false,
         });
     }
 
-    /// Shows the graph's drawing of the point under `at`, or lists the points
-    /// there where it lands on several.
-    fn reveal_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// Selects the point under `at`, or lists the points there where it lands
+    /// on several; reports whether a point is there.
+    fn select_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         let (Some(picked), Some(area)) = (self.pick(at), self.area()) else {
-            return;
+            return false;
         };
         match picked.covered() {
-            &[mark] => self.reveal(mark, cx),
+            &[mark] => self.select_mark(mark, cx),
             _ => self.open_pick(area.spot(at), picked, cx),
+        }
+        true
+    }
+
+    /// Selects the point the plotted mark `mark` stands for, whichever was
+    /// selected before, so the first click of a double click that goes on to
+    /// show it in the graph leaves it selected.
+    fn select_mark(&mut self, mark: usize, cx: &mut Context<Self>) {
+        let point = self.point_of(mark);
+        if point.is_some() {
+            self.select(point, cx);
         }
     }
 
-    /// Shows the graph's drawing of the point the plotted mark `mark` stands
-    /// for.
-    fn reveal(&mut self, mark: usize, cx: &mut Context<Self>) {
-        let Some(plot) = &self.plot else {
-            return;
+    /// Selects the point under `at`, where only one is, and shows the
+    /// graph's drawing of it; reports whether it did, which it can only with
+    /// a graph panel open.
+    fn reveal_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let point = match self.pick(at).as_ref().map(Picked::covered) {
+            Some(&[mark]) => self.point_of(mark),
+            _ => None,
         };
-        let id = plot.plotted.marks[mark].target.id;
-        self.model.update(cx, |model, cx| model.reveal(id, cx));
+        let Some(point) = point.filter(|_| self.model.read(cx).reveals()) else {
+            return false;
+        };
+        self.select(Some(point), cx);
+        self.model.update(cx, |model, cx| model.reveal(point, cx));
+        true
+    }
+
+    /// Shows the graph's drawing of the node selected, where a graph panel is
+    /// open.
+    fn show_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected(cx) {
+            self.model.update(cx, |model, cx| model.reveal(id, cx));
+        }
     }
 
     /// Drops the card, which names the mark under a pointer that has left.
@@ -1090,9 +1149,8 @@ impl ScatterPanel {
         }
     }
 
-    /// Shows the graph's drawing of the point on the list's row `row`, and
-    /// takes the list down.
-    fn reveal_row(&mut self, row: usize, cx: &mut Context<Self>) {
+    /// Selects the point on the list's row `row`, and takes the list down.
+    fn select_row(&mut self, row: usize, cx: &mut Context<Self>) {
         let Some(Pointer::Picking(pick)) = self.plot.as_ref().map(|plot| &plot.pointer) else {
             return;
         };
@@ -1100,17 +1158,17 @@ impl ScatterPanel {
             return;
         };
         self.close_pick(cx);
-        self.reveal(mark, cx);
-        self.row_revealed = true;
+        self.select_mark(mark, cx);
+        self.row_selected = true;
     }
 
-    /// Shows the graph's drawing of the point on the row aimed at.
-    fn reveal_aimed(&mut self, cx: &mut Context<Self>) {
+    /// Selects the point on the row aimed at.
+    fn select_aimed(&mut self, cx: &mut Context<Self>) {
         let Some(Pointer::Picking(pick)) = self.plot.as_ref().map(|plot| &plot.pointer) else {
             return;
         };
         if let Some(row) = pick.aim {
-            self.reveal_row(row, cx);
+            self.select_row(row, cx);
         }
     }
 }
@@ -1355,10 +1413,20 @@ struct Plot {
     colour: ColourBy,
     /// Which of its session's timings `plotted` was drawn with.
     timed: Revision,
-    /// The marks standing for the node selected.
-    selected: Vec<usize>,
+    /// What the node selected lands on in this plot, and that node.
+    selection: Option<(Id, Landing)>,
     /// The marks standing for the node the palette's keys are on.
     previewed: Vec<usize>,
+}
+
+impl Plot {
+    /// The marks standing for the node selected.
+    fn selected(&self) -> &[usize] {
+        match &self.selection {
+            Some((_, Landing::Marks(marks))) => marks,
+            _ => &[],
+        }
+    }
 }
 
 /// What the panel does for a gesture in [`GESTURES`].
@@ -1366,8 +1434,10 @@ struct Plot {
 enum ScatterIntent {
     ShowWholePlot,
     Pan,
+    Select,
+    Deselect,
     Reveal,
-    RevealListed,
+    SelectListed,
     Zoom,
     PanAcross,
     Scroll,
@@ -1394,16 +1464,28 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         ScatterIntent::Pan,
     ),
     Entry::new(
-        gesture::Input::click(gesture::Button::Left),
+        gesture::Input::new(Motion::Click(gesture::Button::Left, Clicks::Single)),
         POINT,
-        "Show in graph or list points",
+        "Select point or list points",
+        ScatterIntent::Select,
+    ),
+    Entry::new(
+        gesture::Input::new(Motion::Click(gesture::Button::Left, Clicks::Single)),
+        Place::Empty,
+        "Clear selection",
+        ScatterIntent::Deselect,
+    ),
+    Entry::new(
+        gesture::Input::new(Motion::Click(gesture::Button::Left, Clicks::Double)),
+        POINT,
+        "Show point in graph",
         ScatterIntent::Reveal,
     ),
     Entry::new(
         gesture::Input::click(gesture::Button::Left),
         Place::On("a listed point"),
-        "Show point in graph",
-        ScatterIntent::RevealListed,
+        "Select point",
+        ScatterIntent::SelectListed,
     ),
     Entry::new(
         gesture::Input::SCROLL.holding(Held::SECONDARY),
@@ -1458,6 +1540,9 @@ struct Press {
     dragged: bool,
     /// The click a release short of [`CLICK_SLOP`] makes of the press.
     click: gesture::Pointer,
+    /// Whether the press took down a list of points, which is all a click
+    /// clear of every mark then does.
+    closed_list: bool,
 }
 
 /// What among a plot's marks the pointer is on.
@@ -1652,7 +1737,8 @@ impl Render for ScatterPanel {
             }))
             .on_action(cx.listener(|view, _: &AimUp, _, cx| view.step_aim(-1, cx)))
             .on_action(cx.listener(|view, _: &AimDown, _, cx| view.step_aim(1, cx)))
-            .on_action(cx.listener(|view, _: &RevealAimed, _, cx| view.reveal_aimed(cx)))
+            .on_action(cx.listener(|view, _: &SelectAimed, _, cx| view.select_aimed(cx)))
+            .on_action(cx.listener(|view, _: &ShowSelectedPoint, _, cx| view.show_selected(cx)))
             .on_action(cx.listener(|view, _: &ClosePickList, _, cx| view.close_pick(cx)))
             .on_action(
                 cx.listener(|view, _: &jump::Open, window, cx| view.open_palette(window, cx)),
@@ -1721,7 +1807,6 @@ impl Render for ScatterPanel {
         let dropped = scope.zip(capabilities);
         let dropped = dropped.and_then(|(scope, capabilities)| dropped_edges(scope, capabilities));
         let root = root.children(dropped.map(|dropped| notice(dropped, &palette)));
-        let reveals = model.reveals();
         let row = menu_chrome::row_height(window);
         let extents = match self
             .plot
@@ -1755,7 +1840,6 @@ impl Render for ScatterPanel {
                 let style = PickRowStyle {
                     row,
                     line: window.line_height(),
-                    reveals,
                 };
                 let list = pick_list(plot, pick, &self.pick_scroll, style, palette, cx);
                 let at = PickAt {
@@ -1783,7 +1867,7 @@ impl Render for ScatterPanel {
                 .flex_1()
                 .min_h(px(0.))
                 .child(cached_layer(self.canvas.clone()))
-                .when(hovering && reveals, |plot| plot.cursor_pointer())
+                .when(hovering, |plot| plot.cursor_pointer())
                 .child(hover_layer(cx.entity(), palette))
                 .children(list)
                 .children(card)
@@ -1865,7 +1949,7 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
         let marked = panel.plot.as_ref().map(|plot| {
             (
                 Arc::clone(&plot.plotted),
-                plot.selected.clone(),
+                plot.selected().to_vec(),
                 plot.previewed.clone(),
             )
         });
@@ -1996,13 +2080,11 @@ fn pick_width(rows: &[PickRow], unit: Unit, axes: Axes, window: &mut Window) -> 
     widest + ROW_INSET * 2. + px(SCROLLBAR_THICKNESS) + SHEET_BORDER * 2.
 }
 
-/// How tall each row of a list of points and a line of its text stand, and
-/// whether a click on a row can reveal it.
+/// How tall each row of a list of points and a line of its text stand.
 #[derive(Clone, Copy)]
 struct PickRowStyle {
     row: Pixels,
     line: Pixels,
-    reveals: bool,
 }
 
 /// The list of the points under a click, `pick`, filling the rect it is given,
@@ -2106,7 +2188,7 @@ fn pick_row(
         a: SWATCH_ALPHA * fade,
         ..mark.hue.color(palette)
     };
-    let (aim, reveal) = (view.clone(), view.clone());
+    let (aim, select) = (view.clone(), view.clone());
     menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
         ("scatter-pick", index).into(),
         colors,
@@ -2115,13 +2197,12 @@ fn pick_row(
     .w_full()
     .h(style.row)
     .gap(PICK_GAP)
-    .when(!style.reveals, |row| row.cursor_default())
     .on_mouse_move(move |_, _, cx| aim.update(cx, |view, cx| view.aim_at(index, cx)))
     .on_click(move |e, _, cx| {
-        reveal.update(cx, |view, cx| {
+        select.update(cx, |view, cx| {
             GESTURES.dispatch(gesture::Pointer::click(e), |intent| match intent {
-                ScatterIntent::RevealListed => {
-                    view.reveal_row(index, cx);
+                ScatterIntent::SelectListed => {
+                    view.select_row(index, cx);
                     true
                 }
                 _ => false,

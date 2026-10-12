@@ -249,12 +249,13 @@ fn bindings() -> Vec<KeyBinding> {
             Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
         KeyBinding::new("escape", scatter::DismissCard, scatter_unpicked),
+        KeyBinding::new("g", scatter::ShowSelectedPoint, scatter_unpicked),
         KeyBinding::new("alt-left", JumpBack, scatter_canvas),
         KeyBinding::new("alt-right", JumpForward, scatter_canvas),
         KeyBinding::new("enter", reveal::Accept, scatter_offering),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
-        KeyBinding::new("enter", scatter::RevealAimed, picking),
+        KeyBinding::new("enter", scatter::SelectAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
     bindings.extend(chips::bindings());
@@ -1807,7 +1808,8 @@ mod tests {
         assert!(is(dispatched("escape", IN_SCATTER), scatter::DismissCard));
         assert!(dispatched("enter", IN_SCATTER).is_none());
         assert!(is(dispatched("enter", OFFERING), reveal::Accept));
-        assert!(is(dispatched("enter", PICKING_TOO), scatter::RevealAimed));
+        assert!(is(dispatched("enter", PICKING_TOO), scatter::SelectAimed));
+        assert!(is(dispatched("g", IN_SCATTER), scatter::ShowSelectedPoint));
         assert!(is(
             dispatched("escape", PICKING_TOO),
             scatter::ClosePickList
@@ -2022,7 +2024,7 @@ mod tests {
         assert!(is(dispatched("down", listing), scatter::AimDown));
         let in_bar = &[picking_context.as_str(), chips::KEY_CONTEXT.id()];
         assert!(!is(dispatched("down", in_bar), scatter::AimDown));
-        assert!(!is(dispatched("enter", in_bar), scatter::RevealAimed));
+        assert!(!is(dispatched("enter", in_bar), scatter::SelectAimed));
     }
 
     /// Every view holding the query bar reaches it by the same keys, from
