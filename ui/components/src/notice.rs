@@ -1,9 +1,12 @@
 use crate::spinner;
 use bviz_ui_theme::ThemeColors;
-use gpui::{Div, SharedString, div, prelude::*, px};
+use gpui::{Div, Pixels, SharedString, div, prelude::*, px};
 
 /// How a load in flight is labelled on screen.
 const LOADING: &str = "Loading…";
+
+/// Size of the text a [`note_strip`] is set in.
+const NOTE_TEXT_SIZE: Pixels = px(12.);
 
 /// The load state of the document a view renders.
 pub enum Source<T> {
@@ -72,4 +75,20 @@ pub fn centered_notice(message: impl Into<SharedString>, colors: &ThemeColors) -
                 .text_color(colors.text)
                 .child(message.into()),
         )
+}
+
+/// A strip above the document a view shows, telling the reader something of
+/// the document to bear in mind while reading it.
+pub fn note_strip(note: impl Into<SharedString>, colors: &ThemeColors) -> Div {
+    div()
+        .flex_none()
+        .px_3()
+        .py_1()
+        .bg(colors.surface)
+        .border_b_1()
+        .border_color(colors.border)
+        .font_family(bviz_ui_assets::UI)
+        .text_size(NOTE_TEXT_SIZE)
+        .text_color(colors.text_muted)
+        .child(note.into())
 }

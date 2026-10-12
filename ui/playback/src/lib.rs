@@ -36,5 +36,5 @@ actions!(
 /// so the playback keys reach a clock that is there to drive.
 pub const KEY_CONTEXT: KeyScope = KeyScope::new("Playback", "Playback");
 
-/// Size of the text the playback controls and notes are set in.
+/// Size of the text the playback controls are set in.
 const TEXT_SIZE: Pixels = px(12.);
