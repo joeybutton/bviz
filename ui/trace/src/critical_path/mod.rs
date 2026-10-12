@@ -765,7 +765,7 @@ fn levers(path: &CriticalPath, palette: &Palette) -> Div {
             div()
                 .id(("critical-path-lever", i))
                 .tooltip(TextTooltip::builder(
-                    words::lever_account(lever, bound).into(),
+                    words::lever_tip(lever).into(),
                     palette.colors.tooltip(),
                 ))
                 .child(words::lever(lever, time, bound))
@@ -1006,7 +1006,7 @@ fn step_row(
     let total = step.gap() + step.own();
     let parts: Vec<(Part, Duration)> = step.parts().collect();
     let segments = parts.iter().map(|&(part, time)| {
-        let tip = words::part_tip(part, time, total, "the step's wait and own time");
+        let tip = words::part_tip(part, time, total, "step time");
         part_segment(part, time, tip.into(), fills)
     });
     let width = relative(words::fraction(total, longest) as f32);
@@ -1111,7 +1111,7 @@ fn spawn_strip(
     fills: &Fills,
 ) -> Stateful<Div> {
     let action = spawned.time();
-    let of = "the action's time on the path";
+    let of = "action time";
     let drawn_width = |time| BAR_COLUMN_WIDTH * words::fraction(time, longest) as f32;
     let (wide, narrow): (Vec<_>, Vec<_>) = Phase::ALL
         .into_iter()
