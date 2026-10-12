@@ -1,6 +1,5 @@
 //! Where the wall time of the profile's build went along its critical path.
 
-mod by_height;
 mod fills;
 mod order;
 mod whole;
@@ -23,12 +22,11 @@ use bviz_label::names::RepoNames;
 use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
-    KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip, ToggleGroup,
-    ToggleSegment, centered_notice, centered_spinner, list_scrollbar, sort_gesture, sort_header,
-    sort_hint,
+    ByRoom, KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip,
+    ToggleGroup, ToggleSegment, centered_notice, centered_spinner, list_scrollbar, sort_gesture,
+    sort_header, sort_hint,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
-use by_height::ByHeight;
 use fills::{Fills, outside};
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
@@ -371,7 +369,7 @@ impl CriticalPathPanel {
         palette: &Palette,
         fills: &Fills,
         cx: &Context<Self>,
-    ) -> ByHeight {
+    ) -> ByRoom {
         let modeled = path.modeled();
         let listing = shown_listing(self.listing, path);
         let body = |legends: bool| {
@@ -422,7 +420,7 @@ impl CriticalPathPanel {
             }
             .into_any_element()
         };
-        ByHeight::new(LEGENDS_MIN_HEIGHT, body(true), body(false))
+        ByRoom::height(LEGENDS_MIN_HEIGHT, body(true), body(false))
     }
 
     /// The choice of what the table lists, in place of its first column's
