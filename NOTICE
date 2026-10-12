@@ -128,17 +128,17 @@ gpui's Wayland backend binds KDE's org_kde_kwin_blur protocol, so the Linux
 binaries link Rust bindings that wayland-protocols-plasma generates from KDE
 Plasma's protocol definitions. Seventeen of those definitions are
 LGPL-2.1-or-later, and the crate ships their text at
-plasma-wayland-protocols/COPYING.LIB. bviz takes them under LGPL-3.0, which "or
-later" permits and which Apache-2.0 is compatible with.
+plasma-wayland-protocols/COPYING.LIB. bviz takes them under LGPL-3.0-only,
+which "or later" permits and which Apache-2.0 is compatible with.
 
-wayland-protocols-plasma 0.3.12 — GNU Lesser General Public License 3.0
+wayland-protocols-plasma 0.3.12 — GNU Lesser General Public License v3.0 only
     https://crates.io/crates/wayland-protocols-plasma/0.3.12
 
 Whoever redistributes a Linux binary owes what LGPL-3.0 section 4 asks of a
-work that links the library, and both are already in hand: the library's
-complete source is the release above, and the binary can be relinked against a
-modified version of it by rebuilding bviz from source with that version in
-place.
+work that links the library. Of the two things section 4(d)(0) asks for, the
+library's complete source is the release above, and the binary can be relinked
+against a modified version of it by rebuilding bviz from its source at
+https://github.com/yume-ag/bviz with that version in place.
 
 ## Linked under the MPL
 
