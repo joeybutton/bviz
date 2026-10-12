@@ -45,6 +45,20 @@ Each viewer also builds as a binary of its own, taking the same flags as
 | `//ui/console:console` | the console output, replayed against its clock |
 | `//ui/execlog:execlog` | the spawn time by phase, from the execution log |
 
+### Measuring performance
+
+Set these environment variables when running bviz or a viewer binary to measure
+it; each reports on stderr. The values the `BVIZ_PAN_BENCH*` variables take are
+documented in [`ui/graph/src/pan_bench.rs`](ui/graph/src/pan_bench.rs).
+
+| Variable | Purpose |
+| --- | --- |
+| `BVIZ_PAN_BENCH` | runs a self-driving graph pan benchmark and reports its frame times |
+| `BVIZ_PAN_BENCH_FRAMES` | how many frames the benchmark records |
+| `BVIZ_PAN_BENCH_MOTION` | how the benchmark moves the view |
+| `BVIZ_PAN_BENCH_PRESS` | where the benchmark's motion starts |
+| `BVIZ_TRACE_TIMING` | times each stage of loading a profile and of laying out its lanes |
+
 ## Before you open a pull request
 
 CI runs the full check: the build, the tests (Starlark style among them), and
