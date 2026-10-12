@@ -686,6 +686,7 @@ pub(super) fn list(
                     completion: &completion,
                     row,
                     names: offered.completions.shared().labels.repos().names(),
+                    matching: &offered.matching,
                     index,
                     kind,
                     note,
@@ -731,6 +732,8 @@ struct Listed<'a> {
     row: &'a Row,
     /// The names the graph shows repositories by.
     names: &'a RepoNames,
+    /// What matched the word against the row.
+    matching: &'a Matching,
     index: usize,
     kind: &'static str,
     /// The row's tooltip.
@@ -748,6 +751,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         completion,
         row,
         names,
+        matching,
         index,
         kind,
         note,
@@ -782,7 +786,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
                 .into_any_element()
         }
         None => {
-            let line = pattern_line(completion, row, names, palette);
+            let line = pattern_line(completion, row, names, matching, palette);
             line.hinted("text", completion.text.to_owned())
                 .into_any_element()
         }
@@ -827,15 +831,16 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
 }
 
 /// The pattern `completion` offers as `names` shows it, parted where it leads
-/// up to what it names, the chars `row` matched picked out.
+/// up to what it names, the chars `matching` matched of `row` picked out.
 fn pattern_line(
     completion: &Completion,
     row: &Row,
     names: &RepoNames,
+    matching: &Matching,
     palette: &Palette,
 ) -> LabelLine {
     let shown = names.show(completion.text);
-    let matched = fuzzy::shown_matches(&shown, &row.matched);
+    let matched = matching.picked(&shown, row);
     let text = shown.text();
     let led = || {
         let start = shown.at(completion.path.start)?;

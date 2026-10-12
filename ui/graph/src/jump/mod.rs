@@ -30,9 +30,9 @@ use gpui::{
     Subscription, TextStyleRefinement, Window, actions, div, prelude::*, px, relative, rems,
     uniform_list,
 };
+use index::Scope;
 #[cfg(test)]
 pub(crate) use index::tests::shared as fixture;
-use index::{Candidate, Scope};
 pub(crate) use index::{Candidates, container, labelled, node_text, package_of, shown};
 use rustc_hash::FxHashSet;
 
@@ -564,15 +564,13 @@ fn rows(
         else {
             return Vec::new();
         };
-        let candidates = jump.candidates.get();
         range
             .filter_map(|index| {
                 let row = jump.matching.rows().get(index)?;
-                let candidate = candidates.get(row.candidate);
                 Some(listed(
                     view,
                     &loaded.shared,
-                    candidate,
+                    jump,
                     row,
                     index,
                     &listing,
@@ -700,23 +698,21 @@ const KEY_HINTS: [&[Hint]; 2] = [
     ],
 ];
 
-/// One row: the node's text with the characters the query matched picked
-/// out, what holds it where the text leaves that out, and its badges.
+/// One row of the open palette `jump`, at `index`: the node's text with the
+/// characters the query matched picked out, what holds it where the text
+/// leaves that out, and its badges.
 fn listed(
     view: &GraphPanel,
     shared: &Shared,
-    candidate: &Candidate,
+    jump: &Jump,
     row: &Row,
     index: usize,
     palette: &Palette,
     entity: &Entity<GraphPanel>,
 ) -> Stateful<Div> {
     let colors = &palette.colors;
-    let aimed = view
-        .jump
-        .open
-        .as_ref()
-        .is_some_and(|jump| jump.aimed == index);
+    let candidate = jump.candidates.get().get(row.candidate);
+    let aimed = jump.aimed == index;
     let hidden = hidden_by(view, candidate.id);
     let tip = colors.tooltip();
     let id = candidate.id;
@@ -737,7 +733,7 @@ fn listed(
     })
     .child(div().flex_grow_1().min_w_0().child({
         let (shown, parts) = index::reading(shared, candidate);
-        let matched = fuzzy::shown_matches(&shown, &row.matched);
+        let matched = jump.matching.picked(&shown, row);
         let picked = fuzzy::matched_style(palette.highlight.into());
         LabelLine::parted(shown.into_text(), parts, colors.text_muted)
             .picked(matched, picked)
