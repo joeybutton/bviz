@@ -97,3 +97,26 @@ pub unsafe fn retain_freed_memory_across_load() {
     // guarantees no other thread reads the option it writes.
     unsafe { mi_option_set(MI_OPTION_PURGE_DELAY, PURGE_DELAY_MS) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MI_OPTION_PURGE_DELAY;
+    use std::os::raw::c_long;
+
+    unsafe extern "C" {
+        fn mi_option_get(option: i32) -> c_long;
+    }
+
+    /// mimalloc reads each option's `MIMALLOC_<name>` environment variable, so
+    /// the value the test target gives `MIMALLOC_PURGE_DELAY` reads back only
+    /// through the purge delay's own index.
+    #[test]
+    fn the_purge_delay_index_names_the_purge_delay() {
+        let set: c_long = std::env::var("MIMALLOC_PURGE_DELAY")
+            .expect("the test target sets MIMALLOC_PURGE_DELAY")
+            .parse()
+            .expect("a number of milliseconds");
+        // SAFETY: mi_option_get takes any option.
+        assert_eq!(unsafe { mi_option_get(MI_OPTION_PURGE_DELAY) }, set);
+    }
+}

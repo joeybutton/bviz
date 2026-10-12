@@ -1,4 +1,5 @@
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
 rust_library(
     name = "alloc",
@@ -16,4 +17,11 @@ rust_library(
         "@crates//:libmimalloc-sys",
         "@crates//:mimalloc",
     ],
+)
+
+rust_test(
+    name = "alloc_test",
+    size = "small",
+    crate = ":alloc",
+    env = {"MIMALLOC_PURGE_DELAY": "4321"},
 )
