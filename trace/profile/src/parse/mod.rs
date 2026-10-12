@@ -193,7 +193,8 @@ impl Profile {
 /// compresses small enough that the decoded text fits comfortably. A parse
 /// failure — most often a profile truncated by an interrupted Bazel — falls
 /// back to the best-effort [`recover`], as does a gzip stream cut off before
-/// its end, without the parses its text cannot pass.
+/// its end, without the parses its text cannot pass. Text that recovers
+/// nothing either fails with where the parse stopped.
 fn from_whole_buffer(bytes: &[u8]) -> Result<Profile, LoadError> {
     let decoded = match timed("decode (decompress+transcode)", || decode(bytes))? {
         Decoded::Complete(text) => text,
@@ -204,7 +205,7 @@ fn from_whole_buffer(bytes: &[u8]) -> Result<Profile, LoadError> {
     }
     match timed("parse+build (serial)", || parse_streaming(&decoded)) {
         Ok(profile) => Ok(profile),
-        Err(_) => recover(&decoded),
+        Err(json) => recover(&decoded).map_err(|_| LoadError::Json(json)),
     }
 }
 
@@ -1288,6 +1289,23 @@ mod tests {
             .map(|s| p.str(s.name))
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn text_that_recovers_nothing_fails_where_it_stops_parsing() {
+        for (text, line, column) in [
+            ("<html>", 1, 1),
+            (
+                "{\n  \"traceEvents\": [\n    {\"name\": oops}\n  ]\n}",
+                3,
+                14,
+            ),
+        ] {
+            let Err(LoadError::Json(e)) = Profile::from_bytes(text.as_bytes()) else {
+                panic!("{text:?} is no profile");
+            };
+            assert_eq!((e.line(), e.column()), (line, column), "{text:?}");
+        }
     }
 
     #[test]
