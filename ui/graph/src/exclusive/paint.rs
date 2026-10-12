@@ -451,15 +451,9 @@ pub(crate) fn paint_ring(rect: Bounds<Pixels>, palette: &Palette, window: &mut W
     ));
 }
 
-/// Whether the filter fading the cells of `scene` draws the node `id` as no
-/// part of what it selects.
+/// Whether the filter fading the cells of `scene` fades the node `id`.
 fn faded(scene: &Scene, id: Id) -> bool {
-    (scene.verdicts.as_ref()).is_some_and(|verdicts| fades(verdicts.get(id)))
-}
-
-/// Whether a cell the filter reaches `verdict` on is faded.
-pub(super) fn fades(verdict: Verdict) -> bool {
-    matches!(verdict, Verdict::Hidden | Verdict::Faded)
+    (scene.verdicts.as_ref()).is_some_and(|verdicts| verdicts.get(id) == Verdict::Faded)
 }
 
 fn fill(scene: &Scene, holds: Holds) -> Rgba {
