@@ -148,13 +148,33 @@ crate.from_cargo(
     platform_triples = PLATFORM_TRIPLES,
 )
 
-# elk-rs carries the Java ELK sources and models it was ported from as git
-# submodules, which none of its crates build from.
+# Every git source in Cargo.lock is fetched as an archive of its locked commit,
+# which needs no host git and leaves out submodules no crate builds from. The
+# archive, named on any one crate's annotation, serves every crate of that
+# repository.
 crate.annotation(
     crate = "org-eclipse-elk-core",
     git_archive_sha256 = "a1cb2c23824aea36fab919d39284dfe2eb48e5aeb4bcca5c76e777e0b00330ae",
     git_archive_strip_prefix = "elk-rs-{commit}",
     git_archive_url = "https://github.com/openedges/elk-rs/archive/{commit}.tar.gz",
+)
+crate.annotation(
+    crate = "wgpu",
+    git_archive_sha256 = "bf81d80523511b4503d4097f081a496e1161fddbebaea2339c70fd6b38dcf3fb",
+    git_archive_strip_prefix = "wgpu-{commit}",
+    git_archive_url = "https://github.com/zed-industries/wgpu/archive/{commit}.tar.gz",
+)
+crate.annotation(
+    crate = "zed-font-kit",
+    git_archive_sha256 = "902a9466b39fdcaa4a428b487474c4107028cbc92a8d2eee281193879f25f7a0",
+    git_archive_strip_prefix = "font-kit-{commit}",
+    git_archive_url = "https://github.com/zed-industries/font-kit/archive/{commit}.tar.gz",
+)
+crate.annotation(
+    crate = "zed-scap",
+    git_archive_sha256 = "48f60b164435404d1389a090f7a2d06e43acc87c1abba3799109d20f171e7e1d",
+    git_archive_strip_prefix = "scap-{commit}",
+    git_archive_url = "https://github.com/zed-industries/scap/archive/{commit}.tar.gz",
 )
 crate.annotation(
     crate = "org-eclipse-elk-alg-layered",
@@ -247,6 +267,9 @@ filegroup(
         "gpui_scene_src": "scene_src",
         "gpui_shader_type_srcs": "shader_type_srcs",
     },
+    git_archive_sha256 = "7a6027d133ff601228410e96459c4a02924c9ea93fa8f143a2dcb73825e37aba",
+    git_archive_strip_prefix = "zed-{commit}",
+    git_archive_url = "https://github.com/zed-industries/zed/archive/{commit}.tar.gz",
     patch_args = ["-p1"],
     patches = [
         "//patches/gpui:gpui-platform-drag.patch",
