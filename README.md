@@ -27,7 +27,7 @@ bviz reads these Bazel outputs, alone or together:
 ## Install
 
 Download the latest build of `main` for arm64 or x86_64 Linux or macOS from the
-[nightly release](../../releases/tag/nightly).
+[nightly release](https://github.com/yume-ag/bviz/releases/tag/nightly).
 
 | | Linux | macOS |
 | --- | --- | --- |
@@ -83,7 +83,8 @@ further flags that give the views more to show.
 
 ## Getting help
 
-Report bugs and ask questions in the [issue tracker](../../issues).
+Report bugs and ask questions in the
+[issue tracker](https://github.com/yume-ag/bviz/issues).
 
 ## Contributing
 
