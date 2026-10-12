@@ -166,6 +166,23 @@ mod tests {
         assert_eq!(unfit, []);
     }
 
+    /// gpui registers every action by name as the application starts, and
+    /// panics there on a name registered twice.
+    #[test]
+    fn no_two_actions_share_a_name() {
+        let mut named: HashMap<&str, usize> = HashMap::new();
+        for action in gpui::generate_list_of_all_registered_actions() {
+            *named.entry(action.name).or_default() += 1;
+        }
+        let mut shared: Vec<&str> = named
+            .into_iter()
+            .filter(|&(_, count)| count > 1)
+            .map(|(name, _)| name)
+            .collect();
+        shared.sort_unstable();
+        assert_eq!(shared, Vec::<&str>::new());
+    }
+
     fn view_kind<T: Panel>() -> (&'static str, ViewKind) {
         (std::any::type_name::<T>(), T::kind().view)
     }
