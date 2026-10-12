@@ -114,7 +114,8 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
 }
 
 fn main() {
-    bviz_alloc::retain_freed_memory_across_load();
+    // SAFETY: the first statement of main, before any other thread starts.
+    unsafe { bviz_alloc::retain_freed_memory_across_load() };
     match Cli::parse().request().unwrap_or_else(|e| e.exit()) {
         Request::Bazelrc(args) => args.print(),
         Request::Open(sources) => open_window(sources),

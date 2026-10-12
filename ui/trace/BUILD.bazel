@@ -11,7 +11,6 @@ rust_library(
     crate_name = "bviz_ui_trace",
     visibility = ["//bviz:__pkg__"],
     deps = [
-        "//alloc",
         "//critical_path",
         "//invocation",
         "//trace/layout",

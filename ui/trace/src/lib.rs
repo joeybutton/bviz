@@ -1781,7 +1781,6 @@ struct Cli {
 
 /// Parses `--profile` and opens the trace-viewer window.
 pub fn run() {
-    bviz_alloc::retain_freed_memory_across_load();
     bviz_ui_workspace::run_viewer(
         "bviz trace",
         bviz_ui_workspace::WINDOW_SIZE,

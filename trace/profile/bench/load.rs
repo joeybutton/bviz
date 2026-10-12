@@ -6,7 +6,8 @@
 static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
 
 fn main() {
-    bviz_alloc::retain_freed_memory_across_load();
+    // SAFETY: the first statement of main, before any other thread starts.
+    unsafe { bviz_alloc::retain_freed_memory_across_load() };
     let path = std::env::args()
         .nth(1)
         .expect("usage: bench_load <profile>");
