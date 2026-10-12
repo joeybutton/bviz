@@ -8,7 +8,7 @@ use crate::status::Statuses;
 use crate::timecard::part_of;
 use crate::timing::{Ran, Slowest, Timed};
 use bviz_graph_layout::{Id, Kind};
-use bviz_ui_components::{CardAnchor, HoverCard, overlay_canvas, paint_hover_card};
+use bviz_ui_components::{CardAnchor, HoverCard, ShownCard, hover_card_canvas};
 use gpui::{
     App, Context, Entity, IntoElement, Pixels, Point, Render, WeakEntity, Window, prelude::*,
 };
@@ -165,14 +165,11 @@ impl Render for CardLayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let parent = self.parent.clone();
         let colors = bviz_ui_theme::theme(window, cx).colors.tooltip();
-        overlay_canvas(move |bounds, window, cx| {
-            let Some(view) = parent.upgrade() else {
-                return;
-            };
-            let Some((lines, at)) = view.update(cx, |view, cx| view.card_lines(cx)) else {
-                return;
-            };
-            paint_hover_card(&lines, CardAnchor::Pointer(at), bounds, colors, window, cx);
+        hover_card_canvas(colors, move |_, _, cx| {
+            let view = parent.upgrade()?;
+            let (lines, at) = view.update(cx, |view, cx| view.card_lines(cx))?;
+            let anchor = CardAnchor::Pointer(at);
+            Some(ShownCard { lines, anchor })
         })
     }
 }

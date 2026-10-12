@@ -9,16 +9,16 @@ use gpui::{
 /// Where a placed element goes within the bounds of the layer.
 type Place = Box<dyn Fn(Bounds<Pixels>) -> Bounds<Pixels>>;
 
-/// What is painted over a placed element, given where it went and the layer's
-/// bounds.
-type Over = Box<dyn FnOnce(Bounds<Pixels>, Bounds<Pixels>, &mut Window, &mut App)>;
+/// What a placed element shows beside itself once it is prepainted, given
+/// where it went and the layer's bounds.
+type Beside = Box<dyn FnOnce(Bounds<Pixels>, Bounds<Pixels>, &mut Window, &mut App)>;
 
 /// `child` covering the layer it overlays at the rect `place` gives for the
-/// layer's bounds, with `over` painted on top of it.
+/// layer's bounds, with what `beside` shows beside it.
 pub(super) struct Placed {
     child: AnyElement,
     place: Place,
-    over: Option<Over>,
+    beside: Option<Beside>,
 }
 
 impl Placed {
@@ -29,15 +29,15 @@ impl Placed {
         Self {
             child: child.into_any_element(),
             place: Box::new(place),
-            over: None,
+            beside: None,
         }
     }
 
-    pub(super) fn over(
+    pub(super) fn beside(
         mut self,
-        paint: impl FnOnce(Bounds<Pixels>, Bounds<Pixels>, &mut Window, &mut App) + 'static,
+        show: impl FnOnce(Bounds<Pixels>, Bounds<Pixels>, &mut Window, &mut App) + 'static,
     ) -> Self {
-        self.over = Some(Box::new(paint));
+        self.beside = Some(Box::new(show));
         self
     }
 }
@@ -52,7 +52,7 @@ impl IntoElement for Placed {
 
 impl Element for Placed {
     type RequestLayoutState = ();
-    type PrepaintState = Bounds<Pixels>;
+    type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -86,29 +86,28 @@ impl Element for Placed {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> Bounds<Pixels> {
+    ) {
         let rect = (self.place)(bounds);
         let space = size(
             AvailableSpace::Definite(rect.size.width),
             AvailableSpace::Definite(rect.size.height),
         );
         self.child.prepaint_as_root(rect.origin, space, window, cx);
-        rect
+        if let Some(beside) = self.beside.take() {
+            beside(rect, bounds, window, cx);
+        }
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _: Bounds<Pixels>,
         _: &mut (),
-        rect: &mut Bounds<Pixels>,
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
         self.child.paint(window, cx);
-        if let Some(over) = self.over.take() {
-            over(*rect, bounds, window, cx);
-        }
     }
 }

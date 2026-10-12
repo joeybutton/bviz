@@ -1,9 +1,11 @@
 use bviz_ui_theme::TooltipColors;
 use gpui::{
-    AnyView, App, AppContext, BorderStyle, Bounds, Context, Hsla, IntoElement, ParentElement,
-    Pixels, Point, Render, ShapedLine, SharedString, Size, Styled, TextAlign, Window, div, font,
-    point, px, quad, size,
+    AnyView, App, AppContext, AvailableSpace, BorderStyle, Bounds, Context, Decorations, Element,
+    ElementId, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement,
+    Pixels, Point, Render, ShapedLine, SharedString, Size, Style, Styled, TextAlign, Window, div,
+    font, point, px, quad, size,
 };
+use std::rc::Rc;
 
 const TOOLTIP_TEXT_SIZE: f32 = 12.0;
 /// Inset of the text block from the panel's edges.
@@ -23,18 +25,50 @@ const TOOLTIP_RADIUS: f32 = 4.0;
 /// Width of the panel's border.
 const TOOLTIP_BORDER: f32 = 1.0;
 
-/// Where a box `extent` long starts along one axis spanning `start..end` for an
-/// anchor at `at`, as [`beside_anchor`] places it.
-fn beside(at: f32, extent: f32, start: f32, end: f32) -> f32 {
+/// Where a box `extent` long starts along one axis for an anchor at `at`:
+/// past the anchor by [`TOOLTIP_OFFSET`], or as far before it where that runs
+/// past the end of `inner`; failing both, likewise within `outer`, which holds
+/// `inner`; slid inside `outer` where neither side holds it there either.
+fn beside(at: f32, extent: f32, inner: (f32, f32), outer: (f32, f32)) -> f32 {
     let after = at + TOOLTIP_OFFSET;
     let before = at - TOOLTIP_OFFSET - extent;
-    if after + extent <= end {
-        after
-    } else if before >= start {
-        before
-    } else {
-        (end - extent).max(start)
+    for (start, end) in [inner, outer] {
+        if after + extent <= end {
+            return after;
+        }
+        if before >= start {
+            return before;
+        }
     }
+    let (start, end) = outer;
+    (end - extent).max(start)
+}
+
+/// The span of `bounds` along the axis `along` reads.
+fn span(bounds: Bounds<Pixels>, along: fn(Point<Pixels>) -> Pixels) -> (f32, f32) {
+    (
+        f32::from(along(bounds.origin)),
+        f32::from(along(bounds.bottom_right())),
+    )
+}
+
+/// Where a box of `extent` beside an anchor at `at` goes: as
+/// [`beside_anchor`] places it inside `inner`, and inside `outer`, which
+/// holds `inner`, along an axis where `inner` holds it on neither side.
+fn beside_within(
+    at: Point<Pixels>,
+    extent: Size<Pixels>,
+    inner: Bounds<Pixels>,
+    outer: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let along = |at: Pixels, extent: Pixels, axis: fn(Point<Pixels>) -> Pixels| {
+        let (inner, outer) = (span(inner, axis), span(outer, axis));
+        px(beside(f32::from(at), f32::from(extent), inner, outer))
+    };
+    point(
+        along(at.x, extent.width, |p| p.x),
+        along(at.y, extent.height, |p| p.y),
+    )
 }
 
 /// Where a box of `extent` beside an anchor at `at` goes inside `bounds`: on
@@ -46,33 +80,50 @@ pub fn beside_anchor(
     extent: Size<Pixels>,
     bounds: Bounds<Pixels>,
 ) -> Point<Pixels> {
-    let along = |at: Pixels, extent: Pixels, start: Pixels, end: Pixels| {
-        px(beside(
-            f32::from(at),
-            f32::from(extent),
-            f32::from(start),
-            f32::from(end),
-        ))
-    };
-    point(
-        along(at.x, extent.width, bounds.left(), bounds.right()),
-        along(at.y, extent.height, bounds.top(), bounds.bottom()),
-    )
+    beside_within(at, extent, bounds, bounds)
 }
 
-/// Where a box of `extent` describing the item at `rect` goes inside `bounds`:
-/// beside the middle of the item's bottom edge, or of its top edge where there
-/// is no room below, so that it covers none of the item.
-pub fn beside_item(
+/// Where a box of `extent` describing the item at `rect` goes: beside the
+/// middle of the item's bottom edge, or of its top edge where it would cover
+/// the item there, placed as [`beside_within`] places it.
+fn beside_item(
     rect: Bounds<Pixels>,
     extent: Size<Pixels>,
-    bounds: Bounds<Pixels>,
+    inner: Bounds<Pixels>,
+    outer: Bounds<Pixels>,
 ) -> Point<Pixels> {
     let x = rect.center().x;
-    let below = beside_anchor(point(x, rect.bottom()), extent, bounds);
+    let below = beside_within(point(x, rect.bottom()), extent, inner, outer);
     match below.y >= rect.bottom() {
         true => below,
-        false => beside_anchor(point(x, rect.top()), extent, bounds),
+        false => beside_within(point(x, rect.top()), extent, inner, outer),
+    }
+}
+
+/// What a tooltip panel stands beside.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CardAnchor {
+    /// The pointer, which the panel follows within the item it describes.
+    Pointer(Point<Pixels>),
+    /// The item the panel describes, which the panel stands clear of wherever
+    /// the pointer is.
+    Item(Bounds<Pixels>),
+}
+
+impl CardAnchor {
+    /// Where a panel of `extent` goes beside the anchor: inside `panel` where
+    /// that holds it clear of the anchor, and otherwise inside `frame`, which
+    /// holds `panel`.
+    pub(crate) fn place(
+        self,
+        extent: Size<Pixels>,
+        panel: Bounds<Pixels>,
+        frame: Bounds<Pixels>,
+    ) -> Point<Pixels> {
+        match self {
+            CardAnchor::Pointer(at) => beside_within(at, extent, panel, frame),
+            CardAnchor::Item(rect) => beside_item(rect, extent, panel, frame),
+        }
     }
 }
 
@@ -88,24 +139,55 @@ pub fn room_beside(at: Point<Pixels>, bounds: Bounds<Pixels>) -> Size<Pixels> {
     )
 }
 
+/// The part of the window its content is drawn in: inside the room a
+/// client-decorated window keeps for its shadow on each edge not tiled
+/// against the screen.
+fn window_frame(window: &Window) -> Bounds<Pixels> {
+    let whole = Bounds::new(Point::default(), window.viewport_size());
+    let (Decorations::Client { tiling }, Some(inset)) =
+        (window.window_decorations(), window.client_inset())
+    else {
+        return whole;
+    };
+    let edge = |tiled: bool| if tiled { px(0.) } else { inset };
+    let (top, left) = (edge(tiling.top), edge(tiling.left));
+    let (bottom, right) = (edge(tiling.bottom), edge(tiling.right));
+    Bounds::from_corners(
+        whole.origin + point(left, top),
+        whole.bottom_right() - point(right, bottom),
+    )
+}
+
+/// The widest a tooltip panel's text runs inside `frame`: no wider than
+/// [`TOOLTIP_MAX_WIDTH`], nor than the frame holds with the panel's padding.
+fn text_room(frame: Bounds<Pixels>) -> Pixels {
+    let held = frame.size.width - px(2.0 * (TOOLTIP_PAD + TOOLTIP_BORDER));
+    held.min(px(TOOLTIP_MAX_WIDTH)).max(px(TOOLTIP_TEXT_SIZE))
+}
+
 /// The rows of `text` as a tooltip panel reads them: in the UI face whatever
-/// the face of the panel it is painted over, wrapped at [`TOOLTIP_MAX_WIDTH`].
-fn shape_rows(text: &str, color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
+/// the face of the panel it is painted over, wrapped at `width`.
+fn shape_rows(text: &str, color: Hsla, width: Pixels, window: &mut Window) -> Vec<ShapedLine> {
     bviz_ui_assets::shape_wrapped(
         window,
         text,
         font(bviz_ui_assets::UI),
         px(TOOLTIP_TEXT_SIZE),
         color,
-        px(TOOLTIP_MAX_WIDTH),
+        width,
     )
 }
 
 /// Each of `lines` shaped as [`shape_rows`] shapes it.
-fn shape_lines(lines: &[String], color: Hsla, window: &mut Window) -> Vec<ShapedLine> {
+fn shape_lines(
+    lines: &[String],
+    color: Hsla,
+    width: Pixels,
+    window: &mut Window,
+) -> Vec<ShapedLine> {
     lines
         .iter()
-        .flat_map(|line| shape_rows(line, color, window))
+        .flat_map(|line| shape_rows(line, color, width, window))
         .collect()
 }
 
@@ -118,27 +200,137 @@ fn panel_extent(rows: &[ShapedLine]) -> Size<Pixels> {
     )
 }
 
-/// The extent of the panel [`paint_tooltip`] paints reading `lines`.
+/// The extent of a panel reading `lines` wrapped at [`TOOLTIP_MAX_WIDTH`].
 pub fn tooltip_extent(lines: &[String], window: &mut Window) -> Size<Pixels> {
     let color = window.text_style().color;
-    panel_extent(&shape_lines(lines, color, window))
+    panel_extent(&shape_lines(lines, color, px(TOOLTIP_MAX_WIDTH), window))
 }
 
-/// Measures `lines`, sizes a padded panel around them, and paints it with its
-/// top-left corner where `place` puts a panel of that extent.
-pub fn paint_tooltip(
-    lines: &[String],
-    place: impl FnOnce(Size<Pixels>) -> Point<Pixels>,
+/// Where a panel of the extent given goes inside the window frame given.
+type Place = Box<dyn FnOnce(Size<Pixels>, Bounds<Pixels>) -> Point<Pixels>>;
+
+/// The layer of deferred draws tooltip panels are painted in: over every
+/// panel, beneath the menus.
+const TOOLTIP_LAYER: usize = 0;
+
+/// Shows `lines` in a tooltip panel painted over every panel of the window,
+/// where `place` puts a panel of its extent inside the window's frame, and
+/// held inside that frame. Called as the element showing it prepaints.
+pub fn defer_tooltip(
+    lines: impl Into<Rc<[String]>>,
+    place: impl FnOnce(Size<Pixels>, Bounds<Pixels>) -> Point<Pixels> + 'static,
     colors: TooltipColors,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let shaped = shape_lines(lines, colors.label.into(), window);
-    let extent = panel_extent(&shaped);
-    let origin = place(extent);
+    let floating = Floating {
+        lines: lines.into(),
+        place: Some(Box::new(place)),
+        colors,
+    };
+    let mut element = floating.into_any_element();
+    element.layout_as_root(AvailableSpace::min_size(), window, cx);
+    window.defer_draw(element, Point::default(), TOOLTIP_LAYER, None);
+}
 
+/// The panel [`defer_tooltip`] shows, which takes no room of its own and
+/// paints wherever it is placed.
+struct Floating {
+    lines: Rc<[String]>,
+    place: Option<Place>,
+    colors: TooltipColors,
+}
+
+impl IntoElement for Floating {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Floating {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (window.request_layout(Style::default(), [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(place) = self.place.take() else {
+            return;
+        };
+        let frame = window_frame(window);
+        let width = text_room(frame);
+        let shaped = shape_lines(&self.lines, self.colors.label.into(), width, window);
+        let extent = panel_extent(&shaped);
+        let origin = held_in(place(extent, frame), extent, frame);
+        paint_panel(
+            &shaped,
+            Bounds::new(origin, extent),
+            self.colors,
+            window,
+            cx,
+        );
+    }
+}
+
+/// `origin`, moved as little as holds a box of `extent` standing there inside
+/// `frame`, or at the frame's top left corner where the frame is smaller.
+fn held_in(origin: Point<Pixels>, extent: Size<Pixels>, frame: Bounds<Pixels>) -> Point<Pixels> {
+    let along =
+        |at: Pixels, extent: Pixels, start: Pixels, end: Pixels| at.min(end - extent).max(start);
+    point(
+        along(origin.x, extent.width, frame.left(), frame.right()),
+        along(origin.y, extent.height, frame.top(), frame.bottom()),
+    )
+}
+
+/// Paints the panel at `bounds` around the shaped `rows`.
+fn paint_panel(
+    rows: &[ShapedLine],
+    bounds: Bounds<Pixels>,
+    colors: TooltipColors,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.paint_quad(quad(
-        Bounds::new(origin, extent),
+        bounds,
         px(TOOLTIP_RADIUS),
         colors.panel,
         px(TOOLTIP_BORDER),
@@ -146,8 +338,8 @@ pub fn paint_tooltip(
         BorderStyle::Solid,
     ));
     let line_height = px(TOOLTIP_LINE_HEIGHT);
-    let mut top = origin + point(px(TOOLTIP_PAD), px(TOOLTIP_PAD));
-    for row in shaped {
+    let mut top = bounds.origin + point(px(TOOLTIP_PAD), px(TOOLTIP_PAD));
+    for row in rows {
         let _ = row.paint(top, line_height, TextAlign::Left, None, window, cx);
         top.y += line_height;
     }
@@ -159,7 +351,7 @@ pub fn place_tooltips(cx: &mut App) {
     cx.set_tooltip_offset(px(TOOLTIP_OFFSET));
 }
 
-/// Text in the panel [`paint_tooltip`] paints, as a view an element's own
+/// Text in the panel [`defer_tooltip`] shows, as a view an element's own
 /// tooltip can show. Each `\n` in it starts a line.
 pub struct TextTooltip {
     text: SharedString,
@@ -190,7 +382,12 @@ impl TextTooltip {
 
 impl Render for TextTooltip {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let rows = shape_rows(&self.text, self.colors.label.into(), window);
+        let rows = shape_rows(
+            &self.text,
+            self.colors.label.into(),
+            px(TOOLTIP_MAX_WIDTH),
+            window,
+        );
         // A tooltip view is drawn outside the element tree that sets the UI
         // face, so it inherits none.
         div()
@@ -226,14 +423,41 @@ mod tests {
 
     #[test]
     fn a_tooltip_flips_before_its_anchor_where_it_would_run_past_the_end() {
-        assert_eq!(beside(10.0, 50.0, 0.0, 100.0), 10.0 + TOOLTIP_OFFSET);
-        assert_eq!(beside(90.0, 50.0, 0.0, 100.0), 90.0 - TOOLTIP_OFFSET - 50.0);
+        let span = (0.0, 100.0);
+        assert_eq!(beside(10.0, 50.0, span, span), 10.0 + TOOLTIP_OFFSET);
+        assert_eq!(beside(90.0, 50.0, span, span), 90.0 - TOOLTIP_OFFSET - 50.0);
     }
 
     #[test]
     fn a_tooltip_neither_side_holds_is_slid_inside_the_span() {
-        assert_eq!(beside(50.0, 80.0, 0.0, 100.0), 20.0);
-        assert_eq!(beside(50.0, 120.0, 0.0, 100.0), 0.0);
+        let span = (0.0, 100.0);
+        assert_eq!(beside(50.0, 80.0, span, span), 20.0);
+        assert_eq!(beside(50.0, 120.0, span, span), 0.0);
+    }
+
+    #[test]
+    fn a_tooltip_leaves_the_inner_span_only_where_it_holds_it_on_neither_side() {
+        let (inner, outer) = ((100.0, 200.0), (0.0, 400.0));
+        assert_eq!(beside(120.0, 50.0, inner, outer), 120.0 + TOOLTIP_OFFSET);
+        assert_eq!(
+            beside(190.0, 50.0, inner, outer),
+            190.0 - TOOLTIP_OFFSET - 50.0
+        );
+        assert_eq!(beside(150.0, 90.0, inner, outer), 150.0 + TOOLTIP_OFFSET);
+        assert_eq!(beside(190.0, 90.0, inner, outer), 190.0 + TOOLTIP_OFFSET);
+        assert_eq!(beside(200.0, 390.0, inner, outer), 10.0);
+    }
+
+    #[test]
+    fn a_panel_is_held_inside_the_frame() {
+        let frame = Bounds::new(point(px(10.), px(10.)), size(px(200.), px(100.)));
+        let extent = size(px(80.), px(40.));
+        let held = |x: f32, y: f32| held_in(point(px(x), px(y)), extent, frame);
+        assert_eq!(held(50., 20.), point(px(50.), px(20.)));
+        assert_eq!(held(180., 90.), point(px(130.), px(70.)));
+        assert_eq!(held(-5., 0.), point(px(10.), px(10.)));
+        let wide = size(px(300.), px(40.));
+        assert_eq!(held_in(point(px(50.), px(20.)), wide, frame).x, px(10.));
     }
 
     #[test]
@@ -241,9 +465,9 @@ mod tests {
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
         let extent = size(px(120.), px(60.));
         let high = Bounds::new(point(px(100.), px(20.)), size(px(80.), px(20.)));
-        assert!(beside_item(high, extent, bounds).y >= high.bottom());
+        assert!(beside_item(high, extent, bounds, bounds).y >= high.bottom());
         let low = Bounds::new(point(px(100.), px(270.)), size(px(80.), px(20.)));
-        let placed = beside_item(low, extent, bounds);
+        let placed = beside_item(low, extent, bounds, bounds);
         assert!(placed.y + extent.height <= low.top(), "{placed:?}");
     }
 

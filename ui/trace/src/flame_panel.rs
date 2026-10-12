@@ -15,8 +15,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
-    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
-    cached_layer, centered_spinner, legend_gestures, overlay_canvas, paint_hover_card,
+    SCROLLBAR_THICKNESS, Scrollbar, ShowLegend, ShownCard, Toolbar, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
+    cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
     paint_labeled_box, spinner, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -412,20 +412,6 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
             ]
         }
     }
-}
-
-/// Paints `hovered`'s card beside the pointer at `at`.
-fn paint_flame_tooltip(
-    hovered: &HoveredBox,
-    at: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    palette: &Palette,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let lines = flame_tooltip_lines(hovered);
-    let anchor = CardAnchor::Pointer(at);
-    paint_hover_card(&lines, anchor, bounds, palette.colors.tooltip(), window, cx);
 }
 
 /// The aggregated flame-graph panel: time-free work-class-colored boxes filling
@@ -990,15 +976,18 @@ impl FlamePanel {
         }
         let entity = cx.entity();
         let boxes = cached_layer(self.canvas.clone());
-        let overlay = overlay_canvas(move |bounds, window, cx| {
-            let (hovered, dragging) = {
-                let this = entity.read(cx);
-                (this.hovered_box(cx), !matches!(this.drag, FlameDrag::None))
-            };
-            if let Some((at, drawn)) = hovered {
-                paint_flame_tooltip(&drawn, at, bounds, &palette, window, cx);
+        let card = hover_card_canvas(palette.colors.tooltip(), {
+            let entity = entity.clone();
+            move |_, _, cx| {
+                let (at, hovered) = entity.read(cx).hovered_box(cx)?;
+                Some(ShownCard {
+                    lines: flame_tooltip_lines(&hovered).into(),
+                    anchor: CardAnchor::Pointer(at),
+                })
             }
-            if dragging {
+        });
+        let overlay = overlay_canvas(move |_, window, cx| {
+            if !matches!(entity.read(cx).drag, FlameDrag::None) {
                 track_drag(window, &entity, flame_on_drag, flame_end_drag);
             }
         });
@@ -1041,6 +1030,7 @@ impl FlamePanel {
                 .overflow_hidden()
                 .child(boxes)
                 .child(overlay)
+                .child(card)
                 .children(spinner),
             cx,
         )

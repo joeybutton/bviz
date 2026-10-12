@@ -220,6 +220,22 @@ pub(super) fn flank(
     point(x, level)
 }
 
+/// Where a tooltip of `extent` for the row aimed at goes, as [`flank`] places
+/// it in a plot filling `bounds` where the plot holds it, and as it places it
+/// in the window's `frame` where the plot is too small for it.
+pub(super) fn flank_within(
+    at: Point<Pixels>,
+    list: Bounds<Pixels>,
+    extent: Size<Pixels>,
+    level: Pixels,
+    bounds: Bounds<Pixels>,
+    frame: Bounds<Pixels>,
+) -> Point<Pixels> {
+    let fits = extent.width <= bounds.size.width && extent.height <= bounds.size.height;
+    let within = if fits { bounds } else { frame };
+    flank(at, list, extent, level, within)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

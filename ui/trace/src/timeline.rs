@@ -24,8 +24,8 @@ use bviz_ui_components::gesture::{
     scroll_pixels, wheel_zoom_factor,
 };
 use bviz_ui_components::{
-    CardAnchor, DragEnd, HoverCard, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, overlay_canvas,
-    paint_hover_card, track_drag,
+    CardAnchor, DragEnd, HoverCard, ShownCard, ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer,
+    hover_card_canvas, overlay_canvas, track_drag,
 };
 use bviz_ui_playback::Clock;
 use gpui::{
@@ -1377,14 +1377,29 @@ impl Render for Timeline {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
         let entity = cx.entity();
         let slices = cached_layer(self.canvas.clone());
-        let overlay = overlay_canvas(overlay_paint(profile, lanes, entity, palette));
+        let overlay = overlay_canvas(overlay_paint(profile, lanes, entity.clone(), palette));
+        let card = hover_card_canvas(palette.colors.tooltip(), move |_, _, cx| {
+            let timeline = entity.read(cx);
+            let at = timeline.card.pointer()?;
+            let hovered = timeline.slice_at(at, cx)?;
+            if !timeline.card.shows(hovered.slice()) {
+                return None;
+            }
+            let model = timeline.model.read(cx);
+            let session = model.session().map(|session| session.read(cx));
+            Some(ShownCard {
+                lines: slice_tooltip(&hovered, session).into(),
+                anchor: CardAnchor::Pointer(at),
+            })
+        });
         let root = div()
             .id("trace-content")
             .relative()
             .size_full()
             .overflow_hidden()
             .child(slices)
-            .child(overlay);
+            .child(overlay)
+            .child(card);
         self.content_handlers(root, cx).into_any_element()
     }
 }
@@ -2220,7 +2235,6 @@ fn overlay_paint(
             selection,
             playhead,
             crosshair,
-            hovered,
             dragging,
         ) = {
             let timeline = parent.read(cx);
@@ -2229,12 +2243,6 @@ fn overlay_paint(
             let counter_scroll = timeline.counter_scroll(cx);
             let (counters, gutter_width) = timeline.shell_layout(cx);
             let model = timeline.model.read(cx);
-            let hovered = timeline.card.pointer().and_then(|at| {
-                let hovered = timeline.slice_at(at, cx)?;
-                let session = model.session().map(|session| session.read(cx));
-                let shows = timeline.card.shows(hovered.slice());
-                shows.then(|| (at, slice_tooltip(&hovered, session)))
-            });
             let selection = timeline.drag.preview(model.time_selection());
             (
                 tv,
@@ -2245,7 +2253,6 @@ fn overlay_paint(
                 selection,
                 model.playhead_us(cx),
                 timeline.crosshair,
-                hovered,
                 !matches!(timeline.drag, TimelineDrag::None),
             )
         };
@@ -2279,10 +2286,6 @@ fn overlay_paint(
                 window,
                 cx,
             );
-        }
-        if let Some((at, lines)) = hovered {
-            let colors = palette.colors.tooltip();
-            paint_hover_card(&lines, CardAnchor::Pointer(at), bounds, colors, window, cx);
         }
         if dragging {
             track_drag(window, &parent, timeline_on_drag, timeline_end_drag);

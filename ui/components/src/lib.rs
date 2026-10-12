@@ -40,7 +40,7 @@ pub use drag::{DragEnd, track_drag};
 pub use dropdown::{Dropdown, DropdownEvent};
 pub use find_keys::find_key_bindings;
 pub use hint::Hint;
-pub use hover_card::{CardAnchor, HoverCard, paint_hover_card};
+pub use hover_card::{HoverCard, ShownCard, defer_hover_card, hover_card_canvas};
 pub use key_scope::{KeyScope, Nesting, UNSCOPED_LABEL, declare_scopes, declared_scopes};
 pub use keys::{
     KeyStyle, action_label, binding_text, binding_within, key_text, key_text_in, key_text_within,
@@ -67,7 +67,8 @@ pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toolbar::{OneRow, Toolbar};
 pub use tooltip::{
-    TextTooltip, beside_anchor, paint_tooltip, place_tooltips, room_beside, tooltip_extent,
+    CardAnchor, TextTooltip, beside_anchor, defer_tooltip, place_tooltips, room_beside,
+    tooltip_extent,
 };
 pub use truncating_label::TruncatingLabel;
 pub use zoom_keys::{ZOOM_KEY_STEP, ZoomIn, ZoomOut, zoom_key_bindings};

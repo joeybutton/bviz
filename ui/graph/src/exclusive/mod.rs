@@ -32,7 +32,7 @@ use bviz_ui_components::gesture::{
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
     QueryField, QueryFieldEvent, ShowLegend, Swatch, Toolbar, TruncatingLabel, cached_layer,
-    centered_notice, centered_spinner, legend_gestures, load_in_background, paint_hover_card,
+    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
@@ -213,6 +213,27 @@ pub struct ExclusivePanel {
 }
 
 impl ExclusivePanel {
+    /// The selection of a tree at rest, which the hover layer rings.
+    fn at_rest_selection(&self) -> Option<&Selection> {
+        let drawn = self.drawn.as_ref()?;
+        let at_rest = drawn.transition.is_none();
+        drawn.selection.as_ref().filter(|_| at_rest)
+    }
+
+    /// What the card describing the selected cell reads and stands beside,
+    /// while it is shown.
+    fn card(&self) -> Option<(Vec<String>, CardAnchor)> {
+        let Selection { cell, by, lines } = self.at_rest_selection()?;
+        let anchor = match (by, self.card.pointer()) {
+            // The menu stands in for the cell's description.
+            (Picked::Menu, _) => return None,
+            _ if !self.card.shows(&cell.holds) => return None,
+            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
+            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
+        };
+        Some((lines.clone(), anchor))
+    }
+
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
@@ -2054,29 +2075,16 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                     drawn.selection = moved;
                 }
             });
+            if let Some((lines, anchor)) = view.read(cx).card() {
+                let tooltip = palette.colors.tooltip();
+                defer_hover_card(lines, anchor, bounds, tooltip, window, cx);
+            }
         }
     };
-    let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
-        let panel = view.read(cx);
-        let Some(Selection { cell, by, lines }) = panel
-            .drawn
-            .as_ref()
-            .filter(|drawn| drawn.transition.is_none())
-            .and_then(|drawn| drawn.selection.as_ref())
-        else {
-            return;
-        };
-        paint::paint_ring(cell, &palette, window);
-        let anchor = match (by, panel.card.pointer()) {
-            // The menu stands in for the cell's description.
-            (Picked::Menu, _) => return,
-            _ if !panel.card.shows(&cell.holds) => return,
-            (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
-            (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(cell.rect),
-        };
-        let lines = lines.clone();
-        let tooltip = palette.colors.tooltip();
-        paint_hover_card(&lines, anchor, bounds, tooltip, window, cx);
+    let paint = move |_: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
+        if let Some(Selection { cell, .. }) = view.read(cx).at_rest_selection() {
+            paint::paint_ring(cell, &palette, window);
+        }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
 }

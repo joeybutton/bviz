@@ -1,31 +1,49 @@
-use crate::tooltip::{beside_anchor, beside_item, paint_tooltip};
+use crate::tooltip::{CardAnchor, defer_tooltip};
 use bviz_ui_theme::TooltipColors;
-use gpui::{App, Bounds, Context, Pixels, Point, Subscription, Window};
+use gpui::{App, Bounds, Canvas, Context, Pixels, Point, Styled, Subscription, Window, canvas};
+use std::rc::Rc;
 
-/// What a hover card stands beside.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum CardAnchor {
-    /// The pointer, which the card follows within the item it describes.
-    Pointer(Point<Pixels>),
-    /// The item the card describes, which the card stands clear of wherever
-    /// the pointer is.
-    Item(Bounds<Pixels>),
-}
-
-/// Paints `lines` in a hover card beside `anchor` inside `bounds`.
-pub fn paint_hover_card(
-    lines: &[String],
+/// Shows `lines` in a hover card beside `anchor` over the panel at `panel`:
+/// beside the anchor inside the panel where it holds the card, and only where
+/// it does not past the panel's edges, inside the window. Called as the
+/// element showing it prepaints.
+pub fn defer_hover_card(
+    lines: impl Into<Rc<[String]>>,
     anchor: CardAnchor,
-    bounds: Bounds<Pixels>,
+    panel: Bounds<Pixels>,
     colors: TooltipColors,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let place = |extent| match anchor {
-        CardAnchor::Pointer(at) => beside_anchor(at, extent, bounds),
-        CardAnchor::Item(rect) => beside_item(rect, extent, bounds),
+    let place = move |extent, frame| anchor.place(extent, panel, frame);
+    defer_tooltip(lines, place, colors, window, cx);
+}
+
+/// A canvas filling its parent from the parent's origin, showing the hover
+/// card `card` names for the panel the canvas fills, where it names one. It
+/// takes no press, so what it covers goes on hit-testing as it would without
+/// it.
+pub fn hover_card_canvas(
+    colors: TooltipColors,
+    card: impl 'static + FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> Option<ShownCard>,
+) -> Canvas<()> {
+    let prepaint = move |bounds, window: &mut Window, cx: &mut App| {
+        if let Some(ShownCard { lines, anchor }) = card(bounds, window, cx) {
+            defer_hover_card(lines, anchor, bounds, colors, window, cx);
+        }
     };
-    paint_tooltip(lines, place, colors, window, cx);
+    canvas(prepaint, |_, (), _, _| {})
+        .absolute()
+        .left_0()
+        .top_0()
+        .size_full()
+}
+
+/// A hover card [`hover_card_canvas`] shows: what it reads, and what it
+/// stands beside.
+pub struct ShownCard {
+    pub lines: Rc<[String]>,
+    pub anchor: CardAnchor,
 }
 
 /// When the card describing a canvas item, an item of type `K`, is shown: at

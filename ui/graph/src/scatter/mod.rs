@@ -32,8 +32,8 @@ use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Hel
 use bviz_ui_components::{
     Button, CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
     LegendState, ListScroll, Nesting, SCROLLBAR_THICKNESS, ShowLegend, Swatch, Toolbar,
-    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, legend_gestures,
-    list_scrollbar, load_in_background, menu_chrome, paint_hover_card, paint_tooltip,
+    ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, defer_hover_card,
+    defer_tooltip, legend_gestures, list_scrollbar, load_in_background, menu_chrome,
     tooltip_extent, track_drag,
 };
 use bviz_ui_components::{KeyStyle, key_text_within};
@@ -125,6 +125,23 @@ pub struct ScatterPanel {
 }
 
 impl ScatterPanel {
+    /// The mark the hover layer rings, hovered or aimed at on a list of
+    /// points, in the plot it is drawn in, and what the card describing it
+    /// reads while that is shown.
+    fn ringed(&self) -> Option<(Arc<Plotted>, usize, Option<Vec<String>>)> {
+        let plot = self.plot.as_ref()?;
+        let (mark, lines) = match &plot.pointer {
+            Pointer::Away => return None,
+            Pointer::Hover(hover) => {
+                let point = plot.plotted.marks[hover.mark].target.id;
+                let lines = self.card.shows(&point).then(|| hover.lines.clone());
+                (hover.mark, lines)
+            }
+            Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
+        };
+        Some((Arc::clone(&plot.plotted), mark, lines))
+    }
+
     pub(crate) fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let changed = cx.observe(&model, |view, _, cx| {
             if let Some(choice) = &view.choice {
@@ -1319,25 +1336,24 @@ impl Render for ScatterPanel {
 fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
-        move |bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App| {
+        move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             view.update(cx, |view, _| view.bounds = Some(bounds));
+            let panel = view.read(cx);
+            let Some((plotted, mark, Some(lines))) = panel.ringed() else {
+                return;
+            };
+            let Some(area) = paint::data_area(&plotted, panel.zoom, bounds) else {
+                return;
+            };
+            let ring = paint::ring_bounds(&plotted.marks[mark], &area);
+            let tooltip = palette.colors.tooltip();
+            defer_hover_card(lines, CardAnchor::Item(ring), bounds, tooltip, window, cx);
         }
     };
     let paint = move |bounds: Bounds<Pixels>, (), window: &mut Window, cx: &mut App| {
         let panel = view.read(cx);
         let (zoom, pressed) = (panel.zoom, panel.press.is_some());
-        let described = panel.plot.as_ref().and_then(|plot| {
-            let (mark, lines) = match &plot.pointer {
-                Pointer::Away => return None,
-                Pointer::Hover(hover) => {
-                    let point = plot.plotted.marks[hover.mark].target.id;
-                    let lines = panel.card.shows(&point).then(|| hover.lines.clone());
-                    (hover.mark, lines)
-                }
-                Pointer::Picking(pick) => (pick.rows[pick.aim?].mark, None),
-            };
-            Some((Arc::clone(&plot.plotted), mark, lines))
-        });
+        let ringed = panel.ringed();
         if pressed {
             track_drag(
                 window,
@@ -1346,16 +1362,11 @@ fn hover_layer(view: Entity<ScatterPanel>, palette: Palette) -> impl IntoElement
                 |view, at, end, _, cx| view.end_press(at, end, cx),
             );
         }
-        let Some((plotted, mark, lines)) = described else {
+        let Some((plotted, mark, _)) = ringed else {
             return;
         };
-        let Some(area) = paint::data_area(&plotted, zoom, bounds) else {
-            return;
-        };
-        let ring = paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
-        if let Some(lines) = lines {
-            let tooltip = palette.colors.tooltip();
-            paint_hover_card(&lines, CardAnchor::Item(ring), bounds, tooltip, window, cx);
+        if let Some(area) = paint::data_area(&plotted, zoom, bounds) {
+            paint::paint_ring(&plotted.marks[mark], &area, &palette, window);
         }
     };
     canvas(prepaint, paint).absolute().inset_0().size_full()
@@ -1402,12 +1413,12 @@ fn pick_layer(
     };
     let lines = pick.rows[aimed].tooltip.clone();
     let scroll = scroll.handle().clone();
-    placed.over(move |list, bounds, window, cx| {
+    placed.beside(move |list, bounds, window, cx| {
         let level = pick::row_top(scroll.bounds(), scroll.offset().y, row, aimed);
         let at = at.within(bounds);
-        let place = |extent| pick::flank(at, list, extent, level, bounds);
+        let place = move |extent, frame| pick::flank_within(at, list, extent, level, bounds, frame);
         let tooltip = palette.colors.tooltip();
-        paint_tooltip(&lines, place, tooltip, window, cx);
+        defer_tooltip(lines, place, tooltip, window, cx);
     })
 }
 
