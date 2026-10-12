@@ -1843,7 +1843,7 @@ mod tests {
     /// Builds a profile from phase markers and a span end via the parser's flat
     /// pools, so tests inspect the real public model rather than a hand-rolled one.
     fn profile_with(markers: Vec<(&str, i64)>, span_end: i64) -> Profile {
-        let interner = ConcurrentInterner::new(1024, 16);
+        let interner = ConcurrentInterner::new(1024, 16).expect("a small pool");
         let phase_markers = {
             let mut writer = interner.writer();
             markers
@@ -1908,7 +1908,7 @@ mod tests {
         let p = profile_with(vec![], 0);
         assert!(
             !build_for_test(
-                ConcurrentInterner::new(1024, 16),
+                ConcurrentInterner::new(1024, 16).expect("a small pool"),
                 Vec::new(),
                 p.span(),
                 vec![track(5, LaneClass::Execution)],
@@ -1917,7 +1917,7 @@ mod tests {
         );
         assert!(
             build_for_test(
-                ConcurrentInterner::new(1024, 16),
+                ConcurrentInterner::new(1024, 16).expect("a small pool"),
                 Vec::new(),
                 p.span(),
                 vec![

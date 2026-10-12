@@ -6,7 +6,7 @@
 
 use std::cell::UnsafeCell;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bviz_parallel::worker_count;
 use crossbeam_utils::CachePadded;
@@ -73,6 +73,21 @@ const MAX_SHARDS: usize = 256;
 /// cache at all.
 const CACHE_SLOTS: usize = 1024;
 
+/// The handle of the empty string, which needs no bytes. Offset 1 keeps it off
+/// the placeholder at offset 0 (the `OptStr` absence encoding), and its range is
+/// empty, so it resolves to "" before any page is grabbed.
+const EMPTY: Str = Str::new(1, 0);
+
+/// Why a [`ConcurrentInterner`]'s pool cannot hold the distinct text given it.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PoolOverflow {
+    /// A pool sized for the text would reach past the offsets a `u32` handle
+    /// indexes.
+    TooLarge,
+    /// The distinct text outgrew the pool it was sized for.
+    Exhausted,
+}
+
 /// The one contiguous, zero-initialized text buffer, written concurrently by
 /// the [`Writer`]s into disjoint page ranges. Byte 0 is the pool placeholder
 /// (it is never in any page), so no live handle has offset 0 and `OptStr`
@@ -87,6 +102,9 @@ struct Arena {
     /// placeholder, hence initialized — so its value at seal is exactly the used
     /// pool length.
     page_cursor: AtomicUsize,
+    /// Set once a reservation finds no room, after which the pool is missing
+    /// text its handles name and cannot be sealed.
+    exhausted: AtomicBool,
 }
 
 impl Arena {
@@ -95,26 +113,26 @@ impl Arena {
     /// was granted. Page granularity is an optimization over the pool's text
     /// budget rather than a claim on it, so a writer the pool cannot give a
     /// whole page takes only the bytes it needs and the pool runs out only when
-    /// the distinct text it is sized for does.
-    fn reserve(&self, want: usize, least: usize) -> (usize, usize) {
+    /// the distinct text it is sized for does. `None`, marking the pool
+    /// exhausted, when not even `least` fits.
+    fn reserve(&self, want: usize, least: usize) -> Option<(usize, usize)> {
         let mut start = self.page_cursor.load(Ordering::Relaxed);
         loop {
             let take = if start + want <= self.cap {
                 want
-            } else {
+            } else if start + least <= self.cap {
                 least
+            } else {
+                self.exhausted.store(true, Ordering::Relaxed);
+                return None;
             };
-            assert!(
-                start + take <= self.cap,
-                "concurrent interner arena overflow"
-            );
             match self.page_cursor.compare_exchange_weak(
                 start,
                 start + take,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return (start, take),
+                Ok(_) => return Some((start, take)),
                 Err(current) => start = current,
             }
         }
@@ -172,10 +190,30 @@ impl ConcurrentInterner {
     /// whose index is sized for `distinct` strings. `text_bytes` is the caller's
     /// bound on the total distinct bytes; the buffer adds slack over it so that
     /// writers keep taking whole pages, which [`Arena::reserve`] gives up on
-    /// rather than exceeding the pool.
-    pub(crate) fn new(text_bytes: usize, distinct: usize) -> ConcurrentInterner {
-        // The parallel parse's writer count: shard fan-out and final-page
-        // headroom track the threads that actually intern, i.e. physical cores.
+    /// rather than exceeding the pool. [`PoolOverflow::TooLarge`] when that
+    /// buffer would outgrow `u32` handles.
+    pub(crate) fn new(
+        text_bytes: usize,
+        distinct: usize,
+    ) -> Result<ConcurrentInterner, PoolOverflow> {
+        // One byte for the placeholder, the bound itself, a small fraction for
+        // within-page slack, and a page per worker the host can run, which is
+        // what a parse sized to the host spends on final-page tails.
+        let cap = 1 + text_bytes + text_bytes / 16 + (worker_count() + 2) * PAGE_SIZE;
+        // The sealed pool indexes handles with u32, so every reserved offset
+        // must fit u32; refusing a larger pool here means `off as u32` in
+        // `alloc` can never silently truncate a handle.
+        if cap > u32::MAX as usize {
+            return Err(PoolOverflow::TooLarge);
+        }
+        Ok(Self::with_pool(cap, distinct))
+    }
+
+    /// An interner over a `cap`-byte buffer, whose index is sized for
+    /// `distinct` strings.
+    fn with_pool(cap: usize, distinct: usize) -> ConcurrentInterner {
+        // The parallel parse's writer count: shard fan-out tracks the threads
+        // that actually intern, i.e. physical cores.
         let par = worker_count();
         let shard_count = (4 * par).next_power_of_two().clamp(MIN_SHARDS, MAX_SHARDS);
         let shard_shift = u64::BITS - shard_count.trailing_zeros();
@@ -187,14 +225,6 @@ impl ConcurrentInterner {
             })
             .collect();
 
-        // One byte for the placeholder, the bound itself, a small fraction for
-        // within-page slack, and a page per worker the host can run, which is
-        // what a parse sized to the host spends on final-page tails.
-        let cap = 1 + text_bytes + text_bytes / 16 + (par + 2) * PAGE_SIZE;
-        // The sealed pool indexes handles with u32, so every reserved offset
-        // must fit u32; guard once here so `off as u32` in `alloc` can never
-        // silently truncate a handle.
-        assert!(cap <= u32::MAX as usize, "interner pool must index in u32");
         let buf: Box<[u8]> = vec![0u8; cap].into_boxed_slice();
         advise_no_thp(buf.as_ptr() as *mut std::os::raw::c_void, cap);
         // SAFETY: `UnsafeCell<u8>` is `repr(transparent)` over `u8` — identical
@@ -212,6 +242,7 @@ impl ConcurrentInterner {
                 cap,
                 page_size: PAGE_SIZE,
                 page_cursor: AtomicUsize::new(1),
+                exhausted: AtomicBool::new(false),
             },
         }
     }
@@ -308,11 +339,19 @@ impl ConcurrentInterner {
         self.shards.iter().map(|s| s.read().unwrap().len()).sum()
     }
 
+    /// Whether a string has found the pool full, so that sealing will fail.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.arena.exhausted.load(Ordering::Relaxed)
+    }
+
     /// Consumes the interner and returns its text pool, dropping the shard
     /// index. Every byte below the page cursor is written or placeholder/slack
     /// NUL, all valid UTF-8, so the pool resolves the handles this interner
-    /// produced.
-    pub(crate) fn into_text(self) -> String {
+    /// produced. [`PoolOverflow::Exhausted`] when some string found no room.
+    pub(crate) fn into_text(self) -> Result<String, PoolOverflow> {
+        if self.exhausted() {
+            return Err(PoolOverflow::Exhausted);
+        }
         let ConcurrentInterner { arena, .. } = self;
         let len = arena.page_cursor.load(Ordering::Relaxed);
         let Arena { buf, cap, .. } = arena;
@@ -322,7 +361,7 @@ impl ConcurrentInterner {
         let vec = unsafe { Vec::from_raw_parts(raw, len, cap) };
         // SAFETY: those bytes are the placeholder, copied UTF-8 tokens, and NUL
         // slack — all valid UTF-8.
-        unsafe { String::from_utf8_unchecked(vec) }
+        Ok(unsafe { String::from_utf8_unchecked(vec) })
     }
 }
 
@@ -345,7 +384,9 @@ impl Writer<'_> {
     /// Interns `s`, returning the one handle every worker shares for it. A
     /// worker-local cache resolves a repeat with no lock at all — the common
     /// case, since a profile repeats most strings. On a cache miss it falls to
-    /// the shared shard index and records the handle for next time.
+    /// the shared shard index and records the handle for next time. A string
+    /// the exhausted pool has no room for gets the empty string's handle, and
+    /// the pool then refuses to seal.
     pub(crate) fn intern(&mut self, s: &str) -> Str {
         let hash = intern_hash(s);
         let arena = &self.interner.arena;
@@ -384,9 +425,17 @@ impl Writer<'_> {
         if let Some(&handle) = table.find(hash, |&h| arena.str(h) == s) {
             return handle;
         }
-        let handle = self.alloc(s);
+        let Some(handle) = self.alloc(s) else {
+            return EMPTY;
+        };
         table.insert_unique(hash, handle, |&h| intern_hash(arena.str(h)));
         handle
+    }
+
+    /// Whether the pool this writer interns into is exhausted; see
+    /// [`ConcurrentInterner::exhausted`].
+    pub(crate) fn pool_exhausted(&self) -> bool {
+        self.interner.exhausted()
     }
 
     /// Reserves `s`'s bytes from the cursor and copies them in, returning the
@@ -394,21 +443,18 @@ impl Writer<'_> {
     /// needs a fresh page adopts whatever [`Arena::reserve`] grants; one
     /// larger than a page takes a dedicated exact-size chunk without disturbing
     /// the writer's current page, so subsequent small strings keep filling it.
-    fn alloc(&mut self, s: &str) -> Str {
+    /// `None` when the pool has no room left for `s`.
+    fn alloc(&mut self, s: &str) -> Option<Str> {
         let arena = &self.interner.arena;
         let n = s.len();
-        // The empty string needs no bytes; hand it a fixed non-zero handle so it
-        // never lands at offset 0 (the placeholder, and the `OptStr` absence
-        // encoding). Its range is empty, so offset 1 resolves to "" even before
-        // any page is grabbed.
         if n == 0 {
-            return Str::new(1, 0);
+            return Some(EMPTY);
         }
         let off = if n > arena.page_size {
-            arena.reserve(n, n).0
+            arena.reserve(n, n)?.0
         } else {
             if self.page_pos + n > self.page_end {
-                let (start, granted) = arena.reserve(arena.page_size, n);
+                let (start, granted) = arena.reserve(arena.page_size, n)?;
                 self.page_pos = start;
                 self.page_end = start + granted;
             }
@@ -421,7 +467,7 @@ impl Writer<'_> {
         // other allocation and within `cap` by the checked reservation.
         unsafe { arena.write(off, s.as_bytes()) };
         debug_assert!(off != 0, "offset 0 is the pool placeholder");
-        Str::new(off as u32, n as u32)
+        Some(Str::new(off as u32, n as u32))
     }
 }
 
@@ -430,7 +476,15 @@ impl ConcurrentInterner {
     /// A `new` interner overriding the page size, so a test can straddle page
     /// boundaries and exceed a page cheaply.
     fn with_page_size(text_bytes: usize, distinct: usize, page_bytes: usize) -> ConcurrentInterner {
-        let mut interner = ConcurrentInterner::new(text_bytes, distinct);
+        let mut interner = ConcurrentInterner::new(text_bytes, distinct).expect("a small pool");
+        interner.arena.page_size = page_bytes;
+        interner
+    }
+
+    /// An interner over exactly `cap` bytes in pages of `page_bytes`, so a test
+    /// can run the pool out.
+    pub(crate) fn with_exact_pool(cap: usize, page_bytes: usize) -> ConcurrentInterner {
+        let mut interner = ConcurrentInterner::with_pool(cap, 0);
         interner.arena.page_size = page_bytes;
         interner
     }
@@ -453,12 +507,12 @@ mod tests {
             "Javac",
             "CppCompile",
         ];
-        let interner = ConcurrentInterner::new(256, 8);
+        let interner = ConcurrentInterner::new(256, 8).expect("a small pool");
         let handles: Vec<Str> = {
             let mut w = interner.writer();
             seq.iter().map(|s| w.intern(s)).collect()
         };
-        let text = interner.into_text();
+        let text = interner.into_text().expect("the pool holds its text");
 
         assert_eq!(text.as_bytes()[0], 0, "offset 0 is the placeholder");
         let resolved: Vec<&str> = handles.iter().map(|&h| &text[h.range()]).collect();
@@ -494,7 +548,7 @@ mod tests {
                 format!("//pkg{}/lib{}:target{}", i % 97, i % 13, i)
             }
         };
-        let interner = ConcurrentInterner::new(DISTINCT * 64, DISTINCT);
+        let interner = ConcurrentInterner::new(DISTINCT * 64, DISTINCT).expect("a small pool");
         let produced: Vec<Vec<(String, Str)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|t| {
@@ -515,7 +569,7 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        let text = interner.into_text();
+        let text = interner.into_text().expect("the pool holds its text");
 
         let mut by_text: HashMap<String, Str> = HashMap::new();
         let mut by_handle: HashMap<Str, String> = HashMap::new();
@@ -539,7 +593,7 @@ mod tests {
         // A fresh writer's first intern of "" must not land at offset 0 — that
         // is the placeholder and the OptStr absence encoding — and repeats of it
         // dedup to one handle that resolves to "".
-        let interner = ConcurrentInterner::new(256, 4);
+        let interner = ConcurrentInterner::new(256, 4).expect("a small pool");
         let (empty, empty2, non_empty) = {
             let mut w = interner.writer();
             (w.intern(""), w.intern("x"), w.intern(""))
@@ -547,7 +601,7 @@ mod tests {
         assert_eq!(empty, non_empty, "\"\" dedups to one handle");
         assert_ne!(empty2, empty);
         assert_ne!(empty.range().start, 0, "\"\" avoids the placeholder offset");
-        let text = interner.into_text();
+        let text = interner.into_text().expect("the pool holds its text");
         assert_eq!(&text[empty.range()], "");
         assert_eq!(&text[empty2.range()], "x");
     }
@@ -571,7 +625,7 @@ mod tests {
             let mut w = interner.writer();
             seq.iter().map(|s| w.intern(s)).collect()
         };
-        let text = interner.into_text();
+        let text = interner.into_text().expect("the pool holds its text");
         for (s, &h) in seq.iter().zip(&handles) {
             assert_eq!(&text[h.range()], s);
         }
@@ -597,7 +651,7 @@ mod tests {
             let mut w = interner.writer();
             seq.iter().map(|s| w.intern(s)).collect()
         };
-        let text = interner.into_text();
+        let text = interner.into_text().expect("the pool holds its text");
         for (s, &h) in seq.iter().zip(&handles) {
             assert_eq!(&text[h.range()], s);
         }
@@ -605,6 +659,28 @@ mod tests {
         assert_ne!(
             handles[0], handles[2],
             "small strings around it stay distinct"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_pool_refuses_to_seal() {
+        const PAGE: usize = 16;
+        let interner = ConcurrentInterner::with_exact_pool(3 * PAGE, PAGE);
+        {
+            let mut w = interner.writer();
+            for i in 0..64 {
+                w.intern(&format!("string number {i}"));
+            }
+        }
+        assert!(interner.exhausted());
+        assert_eq!(interner.into_text(), Err(PoolOverflow::Exhausted));
+    }
+
+    #[test]
+    fn a_pool_past_u32_offsets_is_refused() {
+        assert_eq!(
+            ConcurrentInterner::new(u32::MAX as usize, 0).err(),
+            Some(PoolOverflow::TooLarge)
         );
     }
 }

@@ -7,7 +7,7 @@ use flate2::bufread::MultiGzDecoder;
 use serde::de::DeserializeSeed;
 use serde_json::{Map, Value};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::Profile;
 
 mod build;
@@ -17,7 +17,7 @@ mod scanner;
 mod serde_events;
 
 use build::{Builder, Merge, seal};
-use decode::{decode, gzip_isize_from_file, latin1_cow};
+use decode::{decode, gzip_size_hint_from_file, latin1_cow};
 use pipeline::{
     TraceEventsArray, find_trace_events_array, find_trace_events_key, parse_gz_pipelined,
     parse_gz_pipelined_reader, parse_parallel,
@@ -25,7 +25,7 @@ use pipeline::{
 use scanner::object_end;
 use serde_events::{ArgEntry, ProfileVisitor, RawEventSeed};
 
-pub use decode::gzip_isize;
+pub use decode::gzip_size_hint;
 pub use pipeline::pipeline_chunk_bytes;
 
 /// Estimated distinct-string density of a Bazel profile — about one interned
@@ -77,6 +77,20 @@ pub enum LoadError {
     Decompress(std::io::Error),
     Json(serde_json::Error),
     Corrupted(String),
+    /// A string pool sized for the profile would reach past the offsets its
+    /// `u32` handles index.
+    TooLarge,
+    /// The profile's distinct text outgrew the string pool sized for it.
+    PoolExhausted,
+}
+
+impl From<PoolOverflow> for LoadError {
+    fn from(overflow: PoolOverflow) -> LoadError {
+        match overflow {
+            PoolOverflow::TooLarge => LoadError::TooLarge,
+            PoolOverflow::Exhausted => LoadError::PoolExhausted,
+        }
+    }
 }
 
 impl fmt::Display for LoadError {
@@ -86,6 +100,10 @@ impl fmt::Display for LoadError {
             LoadError::Decompress(e) => write!(f, "decompression error: {e}"),
             LoadError::Json(e) => write!(f, "json error: {e}"),
             LoadError::Corrupted(m) => write!(f, "corrupted profile: {m}"),
+            LoadError::TooLarge => write!(f, "profile too large for a 4 GiB string pool"),
+            LoadError::PoolExhausted => {
+                write!(f, "the profile's distinct text outgrew its string pool")
+            }
         }
     }
 }
@@ -95,7 +113,7 @@ impl std::error::Error for LoadError {
         match self {
             LoadError::Io(e) | LoadError::Decompress(e) => Some(e),
             LoadError::Json(e) => Some(e),
-            LoadError::Corrupted(_) => None,
+            LoadError::Corrupted(_) | LoadError::TooLarge | LoadError::PoolExhausted => None,
         }
     }
 }
@@ -132,14 +150,14 @@ fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
 impl Profile {
     /// Loads a profile from a file, streaming the pipelined gzip decode directly
     /// from disk so the file read overlaps decompression and parsing (see
-    /// [`parse_gz_pipelined`]). The uncompressed size the pipeline needs is read
-    /// from the gzip ISIZE trailer without pulling the whole file in. Anything
+    /// [`parse_gz_pipelined`]). The pipeline is sized from [`gzip_size_hint`],
+    /// read from the file's trailer without pulling the whole file in. Anything
     /// the pipeline declines — plain JSON, a small or oddly shaped stream, a
     /// decode or parse failure — reads the whole file and goes through
     /// [`from_bytes`], which owns the whole-buffer fallback chain.
     pub fn from_path(path: &Path) -> Result<Profile, LoadError> {
         if let Ok(mut file) = std::fs::File::open(path)
-            && let Ok(Some(decoded_size)) = gzip_isize_from_file(&mut file)
+            && let Ok(Some(decoded_size)) = gzip_size_hint_from_file(&mut file)
             && file.seek(SeekFrom::Start(0)).is_ok()
             && let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
                 parse_gz_pipelined_reader(
@@ -196,7 +214,7 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
 
     let other_data = recover_other_data(&text[..events_at]);
 
-    let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT);
+    let interner = ConcurrentInterner::new(text.len(), text.len() / BYTES_PER_DISTINCT)?;
     let mut builder = Builder::new();
     let recovered = {
         let mut writer = interner.writer();
@@ -209,7 +227,7 @@ fn recover(text: &str) -> Result<Profile, LoadError> {
     builder.seal_slices();
     let mut merge = Merge::new();
     merge.fold(builder);
-    Ok(seal(interner, merge, other_data))
+    seal(interner, merge, other_data).map_err(LoadError::from)
 }
 
 /// Folds whole event objects from the traceEvents array into `builder`, starting
@@ -339,7 +357,7 @@ pub(crate) fn build_for_test(
 ) -> Profile {
     let distinct_strings = interner.distinct();
     Profile::from_parts(ProfileParts {
-        text: interner.into_text(),
+        text: interner.into_text().expect("a test pool holds its text"),
         slice_pool: Vec::new(),
         detail_pool: Vec::new(),
         end_max_pool: Vec::new(),
@@ -358,8 +376,8 @@ pub(crate) fn build_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::decode::latin1_to_utf8;
-    use super::pipeline::{parse_chunks, parse_gz_stream};
+    use super::decode::{MAX_PLAUSIBLE_GZIP_RATIO, latin1_to_utf8};
+    use super::pipeline::{parse_chunks, parse_gz_stream, parse_gz_stream_into};
     use super::scanner::{find_special, scan_event};
     use super::serde_events::{arg_i64, arg_str};
     use super::*;
@@ -1306,5 +1324,52 @@ mod tests {
         let path = std::path::Path::new(&dir).join("sub_frame.profile.gz");
         std::fs::write(&path, [0x1f, 0x8b, 0xff, 0xff, 0xff, 0xff]).unwrap();
         assert!(Profile::from_path(&path).is_err());
+    }
+
+    fn gzip(json: &str) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(json.as_bytes()).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// `gz` with its ISIZE trailer replaced by `isize`.
+    fn with_trailer(mut gz: Vec<u8>, isize: u32) -> Vec<u8> {
+        let at = gz.len() - 4;
+        gz[at..].copy_from_slice(&isize.to_le_bytes());
+        gz
+    }
+
+    #[test]
+    fn a_garbage_trailer_fails_cleanly() {
+        let gz = with_trailer(gzip(&chunkable_profile_json()), u32::MAX);
+        assert!(matches!(
+            Profile::from_bytes(&gz),
+            Err(LoadError::Decompress(_))
+        ));
+    }
+
+    #[test]
+    fn a_size_hint_is_bounded_by_the_compressed_length() {
+        let gz = with_trailer(gzip(&chunkable_profile_json()), u32::MAX);
+        let hint = gzip_size_hint(&gz).expect("a gzip stream");
+        assert!(hint < u32::MAX as usize);
+        assert!(hint <= gz.len() * MAX_PLAUSIBLE_GZIP_RATIO);
+    }
+
+    #[test]
+    fn a_stream_its_trailer_understates_loads_through_the_fallback() {
+        const PAGE: usize = 16;
+        let json = chunkable_profile_json();
+        let serial = semantic(&parse_streaming(&json).expect("serial"));
+        // Two members, so the trailer declares only the short last one.
+        let last_member_at = json.len() - 2;
+        let mut gz = gzip(&json[..last_member_at]);
+        gz.extend(gzip(&json[last_member_at..]));
+        assert_eq!(gzip_size_hint(&gz), Some(json.len() - last_member_at));
+        // A pool as short as that hint runs out mid-parse.
+        let pool = ConcurrentInterner::with_exact_pool(4 * PAGE, PAGE);
+        assert!(parse_gz_stream_into(&gz[..], pool, 2, 64, 0).is_none());
+        let loaded = Profile::from_bytes(&gz).expect("the fallback loads it");
+        assert_eq!(semantic(&loaded), serial);
     }
 }

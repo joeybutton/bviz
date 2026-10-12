@@ -6,7 +6,7 @@ use bviz_parallel::worker_count;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::{
     Category, CategoryId, CounterLane, CounterPoint, CounterSeries, Metadata, OptStr, PhaseMarker,
     Profile, ProfileParts, Slice, SliceDetail, Span32, Str, ThreadTrack, TimeSpan, encloses,
@@ -351,7 +351,7 @@ pub(crate) fn seal(
     interner: ConcurrentInterner,
     merge: Merge,
     other_data: Option<Map<String, Value>>,
-) -> Profile {
+) -> Result<Profile, PoolOverflow> {
     let mut parts = {
         let mut pool = WriterPool {
             writer: interner.writer(),
@@ -360,8 +360,8 @@ pub(crate) fn seal(
         finish_merge(merge, &mut pool, other_data)
     };
     parts.distinct_strings = interner.distinct();
-    parts.text = interner.into_text();
-    Profile::from_parts(parts)
+    parts.text = interner.into_text()?;
+    Ok(Profile::from_parts(parts))
 }
 
 /// Writes every folded slice exactly once, straight into its final

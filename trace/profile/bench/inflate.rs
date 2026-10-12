@@ -27,7 +27,7 @@ fn main() {
         .nth(1)
         .expect("usage: bench_inflate <profile.gz>");
     let bytes = std::fs::read(&path).expect("read input");
-    let decoded = bviz_trace_profile::gzip_isize(&bytes)
+    let decoded = bviz_trace_profile::gzip_size_hint(&bytes)
         .expect("input is not a gzip stream declaring its uncompressed size");
     let chunk_bytes = bviz_trace_profile::pipeline_chunk_bytes(decoded);
     eprintln!("streaming buffer: {chunk_bytes} bytes");

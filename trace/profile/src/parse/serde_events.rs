@@ -2,11 +2,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 
-use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-use crate::concurrent_interner::{ConcurrentInterner, Writer};
+use crate::concurrent_interner::{ConcurrentInterner, PoolOverflow, Writer};
 use crate::model::Profile;
 
 use super::build::{Builder, Merge, seal};
@@ -26,7 +26,8 @@ impl<'de> Visitor<'de> for ProfileVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Profile, A::Error> {
-        let interner = ConcurrentInterner::new(self.text_len, self.text_len / BYTES_PER_DISTINCT);
+        let interner = ConcurrentInterner::new(self.text_len, self.text_len / BYTES_PER_DISTINCT)
+            .map_err(pool_error)?;
         let mut builder = Builder::new();
         let mut other_data = None;
         {
@@ -47,8 +48,12 @@ impl<'de> Visitor<'de> for ProfileVisitor {
         builder.seal_slices();
         let mut merge = Merge::new();
         merge.fold(builder);
-        Ok(seal(interner, merge, other_data))
+        seal(interner, merge, other_data).map_err(pool_error)
     }
+}
+
+fn pool_error<E: Error>(_: PoolOverflow) -> E {
+    E::custom("the profile's text overflows the string pool")
 }
 
 /// Deserializes the `traceEvents` array element by element into the borrowed
