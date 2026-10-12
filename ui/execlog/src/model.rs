@@ -1,14 +1,14 @@
 use crate::summary::Summary;
-use bviz_invocation::Session;
 use bviz_invocation::spawn::LoggedSpawns;
+use bviz_invocation::{Recorded, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use gpui::{Context, Task, WeakEntity};
 
-pub(crate) type Source = bviz_ui_components::Source<Summary>;
+pub(crate) type Source = bviz_ui_components::Source<Recorded<Summary>>;
 
 /// What reading an execution log yields.
 pub(crate) struct Read {
-    pub(crate) summary: Summary,
+    pub(crate) summary: Recorded<Summary>,
     pub(crate) spawns: LoggedSpawns,
 }
 
@@ -55,5 +55,10 @@ impl ExecLogModel {
 
     pub(crate) fn source(&self) -> &Source {
         &self.source
+    }
+
+    /// Whether the summary is of a log that ends early.
+    pub(crate) fn cut_off(&self) -> bool {
+        matches!(&self.source, Source::Loaded(summary) if summary.is_cut_off())
     }
 }

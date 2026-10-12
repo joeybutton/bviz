@@ -46,8 +46,8 @@ impl From<ExecLogSource> for Load {
             log: Pending::start(move || {
                 ExecLog::from_path(&source.path)
                     .map(|log| Read {
-                        summary: Summary::of(&log),
-                        spawns: log.into_spawns(),
+                        summary: log.as_ref().map(Summary::of),
+                        spawns: log.into_inner().into_spawns(),
                     })
                     .map_err(|e| format!("cannot read {}: {e}", source.path.display()))
             }),

@@ -1,8 +1,10 @@
 //! Splitting a stream of length-delimited messages, each a varint byte count
 //! followed by that many bytes, into its messages.
 
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::sync::mpsc;
+
+use bviz_invocation::Recorded;
 
 use crate::LoadError;
 use crate::wire::{MAX_VARINT_BYTES, VARINT_CONTINUES, varint};
@@ -93,44 +95,71 @@ impl Framer {
         Ok(())
     }
 
-    fn finish(self) -> Result<(), LoadError> {
-        match self.carry.is_empty() {
-            true => Ok(()),
-            false => Err(LoadError::Truncated),
+    /// Whether the stream fed ended whole. A stream whose source ended
+    /// whole must not end inside a message: that is no cut but a corrupt log.
+    fn finish(self, end: SourceEnd) -> Result<Recorded<()>, LoadError> {
+        match (end, self.carry.is_empty()) {
+            (SourceEnd::Cut, _) => Ok(Recorded::CutOff(())),
+            (SourceEnd::Whole, true) => Ok(Recorded::Complete(())),
+            (SourceEnd::Whole, false) => {
+                Err(prost::DecodeError::new("the log ends inside an entry").into())
+            }
         }
     }
 }
 
-/// Reads `stream` into `buf` until it is full or the stream ends, returning
-/// the bytes read.
-fn fill(stream: &mut impl Read, buf: &mut [u8]) -> Result<usize, LoadError> {
+/// How the source a stream decodes from ended.
+#[derive(Clone, Copy)]
+enum SourceEnd {
+    Whole,
+    /// A decompressor's input ended inside a frame.
+    Cut,
+}
+
+/// How far [`fill`] filled a buffer.
+#[derive(Clone, Copy)]
+enum Filled {
+    /// The bytes read, short of the buffer only where the stream ended.
+    Bytes(usize),
+    /// The bytes read before the stream ended at a cut: a decompressor's input
+    /// ending inside a frame.
+    CutOff(usize),
+}
+
+/// Reads `stream` into `buf` until it is full or the stream ends.
+fn fill(stream: &mut impl Read, buf: &mut [u8]) -> Result<Filled, LoadError> {
     let mut filled = 0;
     while filled < buf.len() {
         match stream.read(&mut buf[filled..]) {
             Ok(0) => break,
             Ok(read) => filled += read,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(Filled::CutOff(filled)),
             Err(e) => return Err(LoadError::Io(e)),
         }
     }
-    Ok(filled)
+    Ok(Filled::Bytes(filled))
 }
 
 /// Calls `visit` on each message of `stream`, in order, reading it
-/// `chunk_bytes` at a time.
+/// `chunk_bytes` at a time: whole messages ahead of where a stream cut off
+/// ends.
 pub(crate) fn for_each_message(
     mut stream: impl Read,
     chunk_bytes: usize,
     mut visit: impl FnMut(&[u8]) -> Result<(), LoadError>,
-) -> Result<(), LoadError> {
+) -> Result<Recorded<()>, LoadError> {
     let mut framer = Framer::default();
     let mut buf = vec![0; chunk_bytes];
     loop {
-        let filled = fill(&mut stream, &mut buf)?;
-        if filled == 0 {
-            return framer.finish();
+        match fill(&mut stream, &mut buf)? {
+            Filled::Bytes(0) => return framer.finish(SourceEnd::Whole),
+            Filled::Bytes(filled) => framer.feed(&buf[..filled], &mut visit)?,
+            Filled::CutOff(filled) => {
+                framer.feed(&buf[..filled], &mut visit)?;
+                return framer.finish(SourceEnd::Cut);
+            }
         }
-        framer.feed(&buf[..filled], &mut visit)?;
     }
 }
 
@@ -144,8 +173,8 @@ pub(crate) fn for_each_message_pipelined(
     mut stream: impl Read + Send,
     chunk_bytes: usize,
     mut visit: impl FnMut(&[u8]) -> Result<(), LoadError>,
-) -> Result<(), LoadError> {
-    type Chunk = Result<(Vec<u8>, usize), LoadError>;
+) -> Result<Recorded<()>, LoadError> {
+    type Chunk = Result<(Vec<u8>, Filled), LoadError>;
     let (filled_tx, filled_rx) = mpsc::sync_channel::<Chunk>(CHUNKS_IN_FLIGHT);
     let (empty_tx, empty_rx) = mpsc::sync_channel::<Vec<u8>>(CHUNKS_IN_FLIGHT);
     // Owning the ring's ends, the visiting side drops them on returning, which
@@ -165,7 +194,7 @@ pub(crate) fn for_each_message_pipelined(
                     }
                 };
                 let read = fill(&mut stream, &mut buf);
-                let last = !matches!(read, Ok(filled) if filled > 0);
+                let last = !matches!(read, Ok(Filled::Bytes(filled)) if filled > 0);
                 if filled_tx.send(read.map(|filled| (buf, filled))).is_err() || last {
                     break;
                 }
@@ -174,14 +203,18 @@ pub(crate) fn for_each_message_pipelined(
         let mut framer = Framer::default();
         for read in filled_rx {
             let (buf, filled) = read?;
-            if filled == 0 {
-                break;
+            match filled {
+                Filled::Bytes(0) => break,
+                Filled::Bytes(filled) => framer.feed(&buf[..filled], &mut visit)?,
+                Filled::CutOff(filled) => {
+                    framer.feed(&buf[..filled], &mut visit)?;
+                    return framer.finish(SourceEnd::Cut);
+                }
             }
-            framer.feed(&buf[..filled], &mut visit)?;
             // Fails only once the reader has stopped, when no buffer is wanted.
             let _ = empty_tx.send(buf);
         }
-        framer.finish()
+        framer.finish(SourceEnd::Whole)
     })
 }
 
@@ -200,19 +233,22 @@ mod tests {
 
     /// The messages of `stream` read `chunk_bytes` at a time, serially and
     /// pipelined.
-    fn collect(stream: &[u8], chunk_bytes: usize) -> [Result<Vec<Vec<u8>>, LoadError>; 2] {
+    fn collect(
+        stream: &[u8],
+        chunk_bytes: usize,
+    ) -> [Result<Recorded<Vec<Vec<u8>>>, LoadError>; 2] {
         let mut serial = Vec::new();
         let serial = for_each_message(stream, chunk_bytes, |message| {
             serial.push(message.to_vec());
             Ok(())
         })
-        .map(|()| serial);
+        .map(|read| read.map(|()| serial));
         let mut pipelined = Vec::new();
         let pipelined = for_each_message_pipelined(stream, chunk_bytes, |message| {
             pipelined.push(message.to_vec());
             Ok(())
         })
-        .map(|()| pipelined);
+        .map(|read| read.map(|()| pipelined));
         [serial, pipelined]
     }
 
@@ -223,19 +259,82 @@ mod tests {
         let stream = delimited(&messages);
         for chunk_bytes in 1..=stream.len() {
             for read in collect(&stream, chunk_bytes) {
-                assert_eq!(read.unwrap(), messages, "chunk of {chunk_bytes}");
+                assert_eq!(
+                    read.unwrap(),
+                    Recorded::Complete(messages.map(<[u8]>::to_vec).to_vec()),
+                    "chunk of {chunk_bytes}"
+                );
+            }
+        }
+    }
+
+    /// Yields `bytes`, then fails as a decompressor whose input ends inside a
+    /// frame does.
+    struct CutAfter<'a>(&'a [u8]);
+
+    impl Read for CutAfter<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.read(buf)? {
+                0 => Err(ErrorKind::UnexpectedEof.into()),
+                read => Ok(read),
             }
         }
     }
 
     #[test]
-    fn a_stream_ending_inside_a_message_is_truncated() {
+    fn a_decoder_cut_off_inside_a_message_keeps_those_ahead() {
+        let stream = delimited(&[b"whole", b"cut off"]);
+        let cut = &stream[..stream.len() - 1];
+        for chunk_bytes in [1, 4, cut.len()] {
+            let mut serial = Vec::new();
+            let read = for_each_message(CutAfter(cut), chunk_bytes, |message| {
+                serial.push(message.to_vec());
+                Ok(())
+            });
+            assert!(matches!(read, Ok(Recorded::CutOff(()))));
+            let mut pipelined = Vec::new();
+            let read = for_each_message_pipelined(CutAfter(cut), chunk_bytes, |message| {
+                pipelined.push(message.to_vec());
+                Ok(())
+            });
+            assert!(matches!(read, Ok(Recorded::CutOff(()))));
+            assert_eq!(
+                [serial, pipelined],
+                [[b"whole".to_vec()], [b"whole".to_vec()]]
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_source_ending_inside_a_message_fails() {
         let stream = delimited(&[b"whole", b"cut off"]);
         let cut = &stream[..stream.len() - 1];
         for chunk_bytes in [1, 4, cut.len()] {
             for read in collect(cut, chunk_bytes) {
-                assert!(matches!(read, Err(LoadError::Truncated)));
+                assert!(read.is_err(), "chunk of {chunk_bytes}");
             }
+        }
+    }
+
+    #[test]
+    fn a_decoder_cut_off_between_messages_keeps_those_ahead() {
+        let stream = delimited(&[b"one", b"two"]);
+        for chunk_bytes in [1, 4, stream.len(), stream.len() + 1] {
+            let read = for_each_message(CutAfter(&stream), chunk_bytes, |_| Ok(()));
+            assert!(
+                matches!(read, Ok(Recorded::CutOff(()))),
+                "chunk of {chunk_bytes}"
+            );
+            let mut seen = 0;
+            let read = for_each_message_pipelined(CutAfter(&stream), chunk_bytes, |_| {
+                seen += 1;
+                Ok(())
+            });
+            assert!(
+                matches!(read, Ok(Recorded::CutOff(()))),
+                "chunk of {chunk_bytes}"
+            );
+            assert_eq!(seen, 2, "chunk of {chunk_bytes}");
         }
     }
 
@@ -245,7 +344,7 @@ mod tests {
         let mut visits = 0;
         let result = for_each_message_pipelined(stream.as_slice(), 1, |_| {
             visits += 1;
-            Err(LoadError::Truncated)
+            Err(prost::DecodeError::new("refused").into())
         });
         assert!(result.is_err());
         assert_eq!(visits, 1);
