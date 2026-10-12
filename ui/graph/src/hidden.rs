@@ -2,6 +2,9 @@
 //! to offer it shown another way.
 
 use crate::Palette;
+use crate::model::GraphModel;
+use bviz_graph_layout::Id;
+use bviz_graph_layout::query_lang::{Exclusion, Stack};
 use bviz_graph_layout::select::Hiding;
 use bviz_ui_components::{Button, LabelLine, TruncatingLabel};
 use gpui::{Div, SharedString, div, prelude::*};
@@ -49,6 +52,32 @@ impl HiddenBy {
     }
 }
 
+/// What a card says keeps `node` out of a view, hidden `by` that: for a node
+/// outside the query, the chip leaving it out once `model` has named it.
+pub(crate) fn reason(by: HiddenBy, node: Id, model: &GraphModel) -> SharedString {
+    let named = (by == HiddenBy::Query)
+        .then(|| model.exclusion(node))
+        .flatten();
+    let Some((exclusion, stack)) = named else {
+        return by.describe().into();
+    };
+    excluded(exclusion, stack).map_or_else(|| by.describe().into(), SharedString::from)
+}
+
+/// What a card says of a node `exclusion` leaves out of what `stack` names.
+fn excluded(exclusion: Exclusion, stack: &Stack) -> Option<String> {
+    match exclusion {
+        Exclusion::Chip(chip) => Some(format!("left out by chip ‹{}›", stack.chip(chip)?.text())),
+        Exclusion::Sources => {
+            let mut enabled = stack.sources().iter().filter(|chip| chip.enabled());
+            Some(match (enabled.next(), enabled.next()) {
+                (Some(only), None) => format!("not named by chip ‹{}›", only.text()),
+                _ => "named by no source chip".to_owned(),
+            })
+        }
+    }
+}
+
 /// The card offering to show the node `name` names, written `written`, which
 /// `reason` says the view leaves out, by the `offers` it stands.
 pub(crate) fn card(
@@ -77,6 +106,31 @@ pub(crate) fn card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source leaving a node out is named only where it is the one
+    /// enabled; a refinement is named as the chip taking the node out.
+    #[test]
+    fn the_card_names_the_chip_leaving_a_node_out() {
+        let mut stack = Stack::default();
+        let first = stack.push("//a/...");
+        let second = stack.push("//b/...");
+        let refinement = stack.push("- //a:x");
+        let excluded = |exclusion, stack: &Stack| super::excluded(exclusion, stack).unwrap();
+        assert_eq!(
+            excluded(Exclusion::Chip(refinement), &stack),
+            "left out by chip ‹- //a:x›"
+        );
+        assert_eq!(
+            excluded(Exclusion::Sources, &stack),
+            "named by no source chip"
+        );
+        stack.toggle_enabled(second);
+        assert_eq!(
+            excluded(Exclusion::Sources, &stack),
+            "not named by chip ‹//a/...›"
+        );
+        assert!(stack.chip(first).is_some());
+    }
 
     /// A filter's rules are the boxes menu's, so the reader is told to turn
     /// that back.

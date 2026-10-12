@@ -193,7 +193,17 @@ fn ask(view: &mut GraphPanel, id: Id, asked: Ask, cx: &mut Context<GraphPanel>) 
                 _ => pins::reveal(view, id, cx),
             }
         }
-        (Some(by), _) => view.reveal = Reveal::Offered(id, by),
+        (Some(by), _) => offer(view, id, by, cx),
+    }
+}
+
+/// Offers to reveal `id`, which `by` hides, having the chip that leaves it
+/// out named where that is the query.
+fn offer(view: &mut GraphPanel, id: Id, by: HiddenBy, cx: &mut Context<GraphPanel>) {
+    view.reveal = Reveal::Offered(id, by);
+    if by == HiddenBy::Query {
+        view.model
+            .update(cx, |model, cx| model.name_exclusion(id, cx));
     }
 }
 
@@ -223,12 +233,10 @@ pub(crate) fn landed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     }
     match view.reveal {
         Reveal::Waiting(id, asked) => ask(view, id, asked, cx),
-        Reveal::Offered(id, _) => {
-            view.reveal = match hidden_by(view, id) {
-                Some(by) => Reveal::Offered(id, by),
-                None => Reveal::Idle,
-            }
-        }
+        Reveal::Offered(id, _) => match hidden_by(view, id) {
+            Some(by) => offer(view, id, by, cx),
+            None => view.reveal = Reveal::Idle,
+        },
         Reveal::Idle => {}
     }
 }
@@ -263,10 +271,12 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
     let Reveal::Offered(node, by) = view.reveal else {
         return None;
     };
-    let loaded = view.model.read(cx).loaded()?;
+    let model = view.model.read(cx);
+    let loaded = model.loaded()?;
     let shared = &loaded.shared;
     let name = point_label(node, shared);
     let written = written_name(&shared.names, &shared.facets, shared.labels.repos(), node);
+    let reason = hidden::reason(by, node, model);
     let reveal = by.revealable().then(|| {
         let reveal = Button::new(
             "reveal-anyway",
@@ -291,7 +301,7 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
     .keys_for(&crate::Dismiss, &view.focus_handle)
     .compact();
     let offers = reveal.into_iter().chain([close]);
-    Some(hidden::card(name, written, by.describe(), offers, palette))
+    Some(hidden::card(name, written, reason, offers, palette))
 }
 
 #[cfg(test)]

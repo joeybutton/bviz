@@ -17,7 +17,7 @@ use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
-use bviz_graph_layout::query_lang::{Evaluation, Outcome, Prefixes, Stack, Universe};
+use bviz_graph_layout::query_lang::{Evaluation, Exclusion, Outcome, Prefixes, Stack, Universe};
 use bviz_graph_layout::select;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
@@ -548,6 +548,10 @@ pub(crate) struct FilterChanged {
 /// The verdicts [`GraphModel::verdicts`] was asked for have landed.
 pub(crate) struct VerdictsLanded;
 
+/// What leaves a node out of the applied query has been named, as
+/// [`GraphModel::exclusion`] reads.
+pub(crate) struct ExclusionNamed;
+
 /// The chips staged in [`GraphModel::query`] changed.
 pub(crate) struct QueryChanged;
 
@@ -681,6 +685,10 @@ pub(crate) struct GraphModel {
     /// Counts the chips staged, and the stack being counted; absent while
     /// none is.
     counting: Option<(Stack, Task<()>)>,
+    /// What leaves each of the nodes last asked about out of the applied
+    /// query, named or being named; at most [`NAMED_EXCLUSIONS`] of them,
+    /// the oldest first.
+    exclusions: Vec<ExclusionNaming>,
     /// The matcher pool the lists over the graph — each panel's palette and
     /// each query bar's completion — take up in turn.
     matchers: fuzzy::Pool,
@@ -688,6 +696,20 @@ pub(crate) struct GraphModel {
     /// The playback clock of the document the graph is opened in, where that
     /// document plays back.
     clock: Option<DocumentClock>,
+}
+
+/// How many nodes the document keeps named what leaves them out of the
+/// applied query: one for each view's card, with room for a few more asked
+/// about since.
+const NAMED_EXCLUSIONS: usize = 8;
+
+/// What leaves `node` out of the scope `stack` names, being named off the
+/// UI thread until `named` lands.
+struct ExclusionNaming {
+    node: Id,
+    stack: Stack,
+    named: Option<Option<Exclusion>>,
+    _work: Task<()>,
 }
 
 /// The invocation a graph is opened as part of.
@@ -706,6 +728,7 @@ impl<K: 'static, T: 'static> EventEmitter<Landed<K, T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
 impl EventEmitter<VerdictsLanded> for GraphModel {}
 impl EventEmitter<QueryChanged> for GraphModel {}
+impl EventEmitter<ExclusionNamed> for GraphModel {}
 impl EventEmitter<QueryRefused> for GraphModel {}
 impl EventEmitter<QueryApplied> for GraphModel {}
 impl EventEmitter<QueryCounted> for GraphModel {}
@@ -762,6 +785,7 @@ impl GraphModel {
                 model.judge();
                 model.counted = None;
                 model.counting = None;
+                model.exclusions.clear();
                 cx.emit(SourceReplaced);
             },
         );
@@ -859,6 +883,7 @@ impl GraphModel {
             _applying: Task::ready(()),
             counted: None,
             counting: None,
+            exclusions: Vec::with_capacity(NAMED_EXCLUSIONS),
             matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
@@ -1029,6 +1054,53 @@ impl GraphModel {
     /// where the count of the stack as it stands has yet to land.
     pub(crate) fn counted(&self) -> Option<&Evaluation> {
         self.counted.as_ref().map(|(_, evaluation)| &**evaluation)
+    }
+
+    /// Names off the UI thread what leaves `node` out of the applied query,
+    /// emitting [`ExclusionNamed`] once it is named; does nothing where it is
+    /// named or being named, or where no query is applied.
+    pub(crate) fn name_exclusion(&mut self, node: Id, cx: &mut Context<Self>) {
+        let Some(applied) = self.filter.applied() else {
+            return;
+        };
+        let stack = applied.stack();
+        self.exclusions.retain(|held| held.stack == *stack);
+        if self.exclusions.iter().any(|held| held.node == node) {
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let (prefixes, named) = (self.prefixes(), stack.clone());
+        let work = cx.spawn(async move |model, cx| {
+            let naming = async move { named.excluded_by(universe.get(), &prefixes, node) };
+            let exclusion = cx.background_executor().spawn(naming).await;
+            let _ = model.update(cx, |model, cx| {
+                let named = model.exclusions.iter_mut().find(|held| held.node == node);
+                if let Some(held) = named {
+                    held.named = Some(exclusion);
+                    cx.emit(ExclusionNamed);
+                }
+            });
+        });
+        if self.exclusions.len() == NAMED_EXCLUSIONS {
+            self.exclusions.remove(0);
+        }
+        self.exclusions.push(ExclusionNaming {
+            node,
+            stack: stack.clone(),
+            named: None,
+            _work: work,
+        });
+    }
+
+    /// What leaves `node` out of the applied query, with the applied stack
+    /// naming it, where [`Self::name_exclusion`] has named it.
+    pub(crate) fn exclusion(&self, node: Id) -> Option<(Exclusion, &Stack)> {
+        let stack = self.filter.applied()?.stack();
+        let held = self.exclusions.iter().find(|held| held.node == node)?;
+        let named = held.named.flatten()?;
+        (held.stack == *stack).then_some((named, stack))
     }
 
     /// A matching with no query, on the graph's matcher pool where no list

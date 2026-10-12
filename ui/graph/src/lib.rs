@@ -88,8 +88,8 @@ use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
 use model::{
-    FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested, SourceReplaced,
-    VerdictsLanded,
+    ExclusionNamed, FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested,
+    SourceReplaced, VerdictsLanded,
 };
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
@@ -364,6 +364,8 @@ pub struct GraphPanel {
     /// Counts what the document's filter shows for the query bar's status
     /// line as its verdicts land.
     _verdicts_landed: Subscription,
+    /// Names on the hidden card the chip leaving its node out.
+    _exclusion_named: Subscription,
     /// Whether the workspace shows the panel.
     shown: bool,
     _reveal_requested: Subscription,
@@ -584,6 +586,7 @@ impl GraphPanel {
         let verdicts_landed = cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| {
             view.restate_shown(cx)
         });
+        let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
                 derive::catch_up(view, cx);
@@ -626,6 +629,7 @@ impl GraphPanel {
             _map_placed: map_placed,
             _filter_changed: filter_changed,
             _verdicts_landed: verdicts_landed,
+            _exclusion_named: exclusion_named,
             shown: false,
             _reveal_requested: reveal_requested,
             hovered: None,
