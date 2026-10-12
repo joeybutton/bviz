@@ -229,6 +229,7 @@ fn paint_cells(
 ) {
     let cells: Vec<Cell> = placed.iter().map(|placed| placed.cell).collect();
     let hints = hints_among(&scene.tree, &scene.shared, trail, &cells);
+    let hints = noting_spliced(hints, &scene.shown.tree, scene.top.node());
     for &Placed { cell, on_top } in placed {
         let live = over(fill(scene, cell.holds), scene.palette.background);
         let above = ((top - cell.rect.top()) / row).clamp(0., 1.);
@@ -244,6 +245,7 @@ fn paint_above(scene: &Scene, above: &[Spot], trail: &[u32], window: &mut Window
     let palette = &scene.palette;
     let named: Vec<u32> = trail.iter().copied().chain(scene.top.node()).collect();
     let hints = hints_among(&scene.tree, &scene.shared, &named, &[]);
+    let hints = noting_spliced(hints, &scene.shown.tree, trail.iter().copied());
     for &spot in above {
         match spot {
             Spot::Cell(cell) => {
@@ -253,6 +255,28 @@ fn paint_above(scene: &Scene, above: &[Spot], trail: &[u32], window: &mut Window
             Spot::Hidden { rect, count } => paint_hidden(rect, count, palette, window, cx),
         }
     }
+}
+
+/// `hints` with what each of `nodes` passes over to stand where `shown`
+/// draws it, the hidden dominators spliced out above it, added to its hint,
+/// so that the rows over the focus and the cell on top read what the filter
+/// leaves out between them.
+fn noting_spliced(
+    mut hints: HashMap<u32, String>,
+    shown: &ShownTree,
+    nodes: impl IntoIterator<Item = u32>,
+) -> HashMap<u32, String> {
+    for node in nodes {
+        let placing = shown.placing(node);
+        let Some(note) = placing.and_then(|placing| super::via_hidden(placing.spliced)) else {
+            continue;
+        };
+        hints
+            .entry(node)
+            .and_modify(|hint| *hint = format!("{hint}{PART_SEPARATOR}{note}"))
+            .or_insert(note);
+    }
+    hints
 }
 
 /// How far a row over the focus is carried from the hue of the cell it stands
@@ -381,14 +405,14 @@ fn paint_hidden(
         .ok();
 }
 
-/// The icon closing the name of the row of hidden ancestors, which opens the
+/// The icon closing the name of the row of more ancestors, which opens the
 /// list of them.
 const CARET: &str = "caret-down";
 
-/// Room between the name of the row of hidden ancestors and its caret.
+/// Room between the name of the row of more ancestors and its caret.
 const CARET_GAP: f32 = 2.0;
 
-/// What the row gathering `count` hidden ancestors reads, ahead of its caret.
+/// What the row gathering `count` more ancestors reads, ahead of its caret.
 pub(crate) fn hidden_name(count: u32) -> String {
     format!("{ELLIPSIS} {}", more(count))
 }
@@ -483,6 +507,13 @@ fn cell_name(
 ) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
+        Holds::Build if super::hides_any(tree, shown) => {
+            format!(
+                "whole build · {} of {} {many} shown",
+                shown.total(),
+                tree.total()
+            )
+        }
         Holds::Build => format!("whole build · {} {many}", tree.total()),
         Holds::Shared => {
             let (name, count) = (shared_name(tree, by), shown.shared_tops().len());

@@ -459,6 +459,7 @@ impl GraphPanel {
                         shown: counted.shown,
                         of: counted.of,
                         many: point::unit_names(unit).many,
+                        note: None,
                     })
                 })
             }

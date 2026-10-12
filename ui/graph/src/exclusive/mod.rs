@@ -26,7 +26,7 @@ use crate::unit_picker::{CyclePoints, UnitPicker};
 use ancestry::{Spot, Stands};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::dominators::{
-    Chosen, Dominators, Elsewhere, Roots, ShownTree, Standing, Targets,
+    Above, Chosen, Dominators, Elsewhere, Roots, ShownTree, Standing, Targets,
 };
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
 use bviz_graph_layout::select::Verdicts;
@@ -96,8 +96,8 @@ const FOCUS_ANCESTOR: Entry<ExclusiveIntent> = Entry::new(
 
 const LIST_HIDDEN: Entry<ExclusiveIntent> = Entry::new(
     Input::new(Motion::Press(Button::Left, Clicks::Single)),
-    Place::On("the hidden ancestors row"),
-    "List hidden ancestors",
+    Place::On("the more ancestors row"),
+    "List more ancestors",
     ExclusiveIntent::ListHidden,
 );
 
@@ -535,6 +535,7 @@ impl ExclusivePanel {
                     shown: drawn.shown.tree.total() as usize,
                     of: tree.total() as usize,
                     many: unit_names(tree.scope().unit()).many,
+                    note: hides_any(tree, &drawn.shown.tree).then_some(WIDTHS_COUNT_SHOWN),
                 }
             })
         });
@@ -848,7 +849,7 @@ impl ExclusivePanel {
                 let focus = drawn.focused();
                 let lines = match spot {
                     Spot::Cell(cell) => describe(drawn, as_targets.as_deref(), cell.holds, focus),
-                    Spot::Hidden { count, .. } => describe_hidden(&drawn.coloured, count, focus),
+                    Spot::Hidden { count, .. } => describe_hidden(drawn, count, focus),
                 };
                 drawn.selection = Some(Selection { spot, by, lines });
             }
@@ -1003,7 +1004,7 @@ impl ExclusivePanel {
         }
     }
 
-    /// Selects the row of hidden ancestors `spot` and puts up the menu
+    /// Selects the row of more ancestors `spot` and puts up the menu
     /// listing them at `at`, choosing one focusing it.
     fn list_hidden(
         &mut self,
@@ -1624,9 +1625,18 @@ fn describe(
     let shown = &drawn.shown.tree;
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let exclusive = |weight: u32| exclusive(weight, &names);
+    let filtered = hides_any(tree, shown);
+    // How many points of what a cell holds are shown, and of the build.
+    let exclusive = |weight: u32, in_build: u32| match filtered {
+        false => exclusive(weight, &names),
+        true => exclusive_shown(weight, in_build, &names),
+    };
+    let of_build = match filtered {
+        false => "of build",
+        true => "of shown",
+    };
     let shares = |weight: u32, within: Option<Focused>| {
-        let of_build = format!("{} of build", share(weight, shown.total()));
+        let of_build = format!("{} {of_build}", share(weight, shown.total()));
         match within {
             Some(within) => {
                 let name = match within {
@@ -1646,27 +1656,37 @@ fn describe(
     let under = focus.filter(|focus| ancestry::ancestors(shown, holds).contains(&focus.holds()));
     let mut lines = Vec::new();
     match holds {
-        Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
+        Holds::Build => {
+            let counted = match filtered {
+                false => names.counted(tree.total()),
+                true => counted_shown(shown.total(), tree.total(), &names),
+            };
+            lines.extend([WHOLE_BUILD.to_owned(), counted]);
+        }
         Holds::Shared => {
             let (count, weight) = (shown.shared_tops().len() as u32, shown.shared_weight());
             lines.push(shared_name(tree, by));
             lines.push(gathered_as_shared(count, by.word(), &names));
-            lines.push(exclusive(weight));
+            lines.push(exclusive(weight, tree.shared_weight()));
             lines.push(shares(weight, under));
         }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
             let weight = shown.weight(node);
-            lines.push(exclusive(weight));
+            lines.push(exclusive(weight, tree.weight(node)));
             if let Some(targets) = &coloured.targets {
                 let held = targets.held(node);
                 lines.extend(targets_held(held.targets(), held.only_here()));
             }
             lines.push(shares(weight, under));
             match tree.parent(node) {
-                Some(parent) => lines.push(dominated_by(tree, parent, shared)),
-                None => standing(tree, node, by, shared, &mut lines),
+                Some(parent) => {
+                    let dominator = dominated_by(tree, parent, shared);
+                    lines.push(marked_hidden(dominator, shown.shows(parent)));
+                }
+                None => standing(tree, shown, node, by, shared, &mut lines),
             }
+            lines.extend(drawn_via(drawn, node));
             let id = tree.id(node);
             lines.extend(as_targets.and_then(|targets| as_target(targets, id, by, shared)));
         }
@@ -1676,7 +1696,9 @@ fn describe(
                 true => run_name(tree, shared, by, run),
                 false => format!("{} · too narrow", names.counted(count)),
             });
-            lines.push(exclusive(weight));
+            let siblings = run.siblings(shown).unwrap_or_default();
+            let in_build = siblings.iter().map(|&node| tree.weight(node));
+            lines.push(exclusive(weight, in_build.sum()));
             lines.push(shares(weight, under));
         }
     }
@@ -1684,15 +1706,84 @@ fn describe(
 }
 
 /// What the tooltip over the row gathering the `count` ancestors of `focus`
-/// left out in the tree of `coloured` reads.
-fn describe_hidden(coloured: &Coloured, count: u32, focus: Option<Focused>) -> Vec<String> {
+/// left out of the rows over `drawn` reads, with the hidden dominators
+/// spliced out above them.
+fn describe_hidden(drawn: &Drawn, count: u32, focus: Option<Focused>) -> Vec<String> {
+    let coloured = &drawn.coloured;
     let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
     let ancestors = if count == 1 { "ancestor" } else { "ancestors" };
-    let hidden = format!("{count} hidden {ancestors}");
-    vec![match focus {
-        Some(focus) => format!("{hidden} of {}", focus.name(tree, shared, by)),
-        None => hidden,
-    }]
+    let more = format!("{count} more {ancestors}");
+    let named = match focus {
+        Some(focus) => format!("{more} of {}", focus.name(tree, shared, by)),
+        None => more,
+    };
+    let shown = &drawn.shown.tree;
+    let gathered = ancestry::hidden(shown, drawn.top()).into_iter();
+    let placings = gathered.filter_map(|holds| shown.placing(holds.node()?));
+    let spliced = placings.map(|placing| placing.spliced).sum();
+    [Some(named), via_hidden(spliced)]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// `named`, naming a point of the tree, marked where the filter hides that
+/// point, it being `shown` otherwise.
+fn marked_hidden(named: String, shown: bool) -> String {
+    match shown {
+        true => named,
+        false => format!("{named} · hidden"),
+    }
+}
+
+/// Whether `shown` leaves out any point of `tree`, which it is drawn from.
+fn hides_any(tree: &Dominators, shown: &ShownTree) -> bool {
+    shown.total() < tree.total()
+}
+
+/// What the status says of how the cells' widths are taken while the filter
+/// hides some of the points.
+const WIDTHS_COUNT_SHOWN: &str = "widths count shown";
+
+/// What a tooltip says of where `node` of `drawn` stands where hidden
+/// dominators were spliced out above it: what it is drawn under, and past how
+/// many; absent where none were.
+fn drawn_via(drawn: &Drawn, node: u32) -> Option<String> {
+    let placing = drawn.shown.tree.placing(node)?;
+    let hidden = via_hidden(placing.spliced)?;
+    let (tree, shared, by) = (
+        &drawn.coloured.tree,
+        &drawn.coloured.shared,
+        drawn.coloured.by(),
+    );
+    let under = match placing.above {
+        Above::Node(above) => point_name(tree.id(above), tree.scope().unit(), shared),
+        Above::Roots => WHOLE_BUILD.to_owned(),
+        Above::Shared => shared_name(tree, by),
+    };
+    Some(format!("drawn under {under} · {hidden}"))
+}
+
+/// How a reader counts the `spliced` hidden dominators between a point and
+/// what it is drawn under; absent where there are none.
+fn via_hidden(spliced: u32) -> Option<String> {
+    (spliced > 0).then(|| format!("via {spliced} hidden"))
+}
+
+/// How a tooltip counts the `shown` points, which `names` names, that exist
+/// only because of what it describes and that the filter shows, of the
+/// `in_build` points in the build.
+fn exclusive_shown(shown: u32, in_build: u32, names: &KindNames) -> String {
+    format!(
+        "{} exclusive shown · {in_build} in build",
+        names.counted(shown)
+    )
+}
+
+/// How a reader counts the `shown` points, which `names` names, of the
+/// `in_build` the build holds.
+fn counted_shown(shown: u32, in_build: u32, names: &KindNames) -> String {
+    format!("{} shown · {in_build} in build", names.counted(shown))
 }
 
 /// What a tooltip says of the `targets` distinct targets a configured
@@ -1740,10 +1831,18 @@ fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
     format!("dominator {dominator}")
 }
 
-/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree` whose
-/// roots were chosen `by`: that it is a root, and how many roots reach it or
-/// share it, listing the first few.
-fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: &mut Vec<String>) {
+/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`, drawn
+/// as `shown`, whose roots were chosen `by`: that it is a root, and how many
+/// roots reach it or share it, listing the first few and marking those the
+/// filter hides.
+fn standing(
+    tree: &Dominators,
+    shown: &ShownTree,
+    node: u32,
+    by: RootedBy,
+    shared: &Shared,
+    lines: &mut Vec<String>,
+) {
     let unit = tree.scope().unit();
     let word = by.word();
     let elsewhere = tree
@@ -1766,9 +1865,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     let colon = if named.is_empty() { "" } else { ":" };
     let named_as = unit_names(unit).of(count.value());
     lines.push(format!("{}{colon}", said(count, word, named_as)));
-    let listed = named
-        .iter()
-        .map(|&above| point_name(tree.id(above), unit, shared));
+    let listed = named.iter().map(|&above| {
+        let name = point_name(tree.id(above), unit, shared);
+        marked_hidden(name, shown.shows(above))
+    });
     lines.extend(listed.map(|name| format!("{LISTED}{name}")));
     let more = count.less(named.len() as u32);
     if !named.is_empty() && more.value() > 0 {
@@ -2389,6 +2489,22 @@ mod tests {
     #[test]
     fn every_gesture_fits_the_keys_help() {
         assert_eq!(GESTURES.overlong(), []);
+    }
+
+    /// A filter hiding points leaves a tooltip counting both what it shows
+    /// and what the build holds, and the hidden dominators passed over.
+    #[test]
+    fn a_tooltip_counts_the_shown_points_beside_the_build_s() {
+        let names = unit_names(Unit::Target);
+        assert_eq!(
+            exclusive_shown(312, 4870, &names),
+            "312 targets exclusive shown · 4870 in build"
+        );
+        assert_eq!(counted_shown(1, 9, &names), "1 target shown · 9 in build");
+        assert_eq!(via_hidden(0), None);
+        assert_eq!(via_hidden(3).as_deref(), Some("via 3 hidden"));
+        assert_eq!(marked_hidden("//:a".into(), true), "//:a");
+        assert_eq!(marked_hidden("//:a".into(), false), "//:a · hidden");
     }
 
     #[test]

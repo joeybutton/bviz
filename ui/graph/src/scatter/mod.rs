@@ -412,6 +412,7 @@ impl ScatterPanel {
             shown: plot.plotted.marks.len(),
             of: plot.plotted.plotted,
             many: unit_names(plot.scope.unit()).many,
+            note: None,
         });
         self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
     }

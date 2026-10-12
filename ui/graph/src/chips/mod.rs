@@ -265,6 +265,8 @@ pub(crate) struct Shown {
     pub(crate) of: usize,
     /// What the view calls its points, in the plural.
     pub(crate) many: &'static str,
+    /// What the view says of how it draws what is shown.
+    pub(crate) note: Option<&'static str>,
 }
 
 /// A chip the field holds the text of, as that text stood when the edit
@@ -1227,8 +1229,17 @@ fn status(filter: &DocumentFilter, shown: Option<Shown>) -> Option<String> {
     });
     let pins = filter.narrowing_pins();
     let pins = (pins > 0).then(|| counted(pins, "pin", "pins"));
-    let shown = shown.map(|Shown { shown, of, many }| format!("{shown} of {of} {many} shown"));
-    let parts: Vec<String> = [chips, pins, shown].into_iter().flatten().collect();
+    let (shown, note) = match shown {
+        Some(Shown {
+            shown,
+            of,
+            many,
+            note,
+        }) => (Some(format!("{shown} of {of} {many} shown")), note),
+        None => (None, None),
+    };
+    let parts = [chips, pins, shown, note.map(str::to_owned)];
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
     Some(parts.join(STATUS_SEPARATOR))
 }
 
@@ -1360,6 +1371,7 @@ mod tests {
             shown: 12,
             of: 400,
             many: "targets",
+            note: None,
         };
         assert_eq!(status(&filter, Some(shown)), None);
         filter.set_pins([(Id(3), Pin::Set(Visibility::Hidden))].into());
@@ -1367,6 +1379,14 @@ mod tests {
         assert_eq!(
             status(&filter, Some(shown)).as_deref(),
             Some("1 pin · 12 of 400 targets shown")
+        );
+        let noted = Shown {
+            note: Some("widths count shown"),
+            ..shown
+        };
+        assert_eq!(
+            status(&filter, Some(noted)).as_deref(),
+            Some("1 pin · 12 of 400 targets shown · widths count shown")
         );
     }
 }
