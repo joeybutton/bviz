@@ -11,12 +11,13 @@ mod reorder;
 
 pub(crate) use complete::Completions;
 
+use crate::filter::DocumentFilter;
 use crate::{GraphPanel, Palette, derive};
 use bviz_graph_layout::Input;
 use bviz_graph_layout::query_lang::{
     ChipId, Command, Evaluation, Outcome, Prefixes, Stack, Universe,
 };
-use bviz_graph_layout::select::{Filter, Scope};
+use bviz_graph_layout::select::Scope;
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
     Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
@@ -442,11 +443,11 @@ fn scope_landed(
         .as_ref()
         .map(|scope| (stack, Arc::from(scope.query())));
     view.chips.restage(cx);
-    let filter = Filter {
+    let shown = DocumentFilter {
         scope,
-        ..view.derived.filter().clone()
+        ..view.derived.shown().clone()
     };
-    derive::set_filter_framed(view, filter, cx);
+    derive::set_shown(view, shown, true, cx);
     cx.notify();
 }
 

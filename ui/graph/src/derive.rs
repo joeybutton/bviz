@@ -11,6 +11,7 @@
 //! carry across a filter change.
 
 use crate::build::{self, TooDense};
+use crate::filter::DocumentFilter;
 use crate::framing::Frame;
 use crate::mode::LayoutMode;
 use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
@@ -18,7 +19,7 @@ use crate::{GraphPanel, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::paths::Paths;
-use bviz_graph_layout::select::{Filter, Hiding, Verdict, Verdicts};
+use bviz_graph_layout::select::{Filter, Hiding, Rule, Verdict, Verdicts};
 use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
@@ -485,8 +486,11 @@ struct PathView {
 /// What a panel draws the document's graph as, and how far the derivation of it
 /// has got.
 pub(crate) struct Derived {
-    filter: Filter,
-    /// Drawn in place of what `filter` leaves, with every edge: a reduction
+    shown: DocumentFilter,
+    /// The panel's own rules, which shape its layout alone: the filter it
+    /// hands the graph's other views holds none of them.
+    rules: Vec<Rule>,
+    /// Drawn in place of what the filter leaves, with every edge: a reduction
     /// drops an edge a longer path implies, which is itself a path.
     paths: Option<PathView>,
     /// Container and group ids expanded in the layered layout last requested;
@@ -526,7 +530,8 @@ impl Derived {
     /// A panel's view of a graph that has not been read yet.
     pub(crate) fn new() -> Self {
         Derived {
-            filter: Filter::default(),
+            shown: DocumentFilter::default(),
+            rules: Vec::new(),
             paths: None,
             expanded: HashSet::new(),
             reduced: OPENS_REDUCED,
@@ -549,7 +554,8 @@ impl Derived {
     /// carry to the graph that takes its place. Every drawing of the graph left
     /// behind goes with it, and so does the derivation that was producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
-        self.filter = Filter::default();
+        self.shown = DocumentFilter::default();
+        self.rules = Vec::new();
         self.paths = None;
         self.expanded = loaded.opening.expanded.clone();
         self.revealing = None;
@@ -626,7 +632,7 @@ impl Derived {
     fn lens(&self) -> Lens {
         match &self.paths {
             Some(view) => Lens::Paths(Arc::clone(&view.paths)),
-            None => Lens::Filter(self.filter.clone()),
+            None => Lens::Filter(self.filter()),
         }
     }
 
@@ -634,7 +640,7 @@ impl Derived {
     fn draws_through(&self, lens: &Through) -> bool {
         match (lens, &self.paths) {
             (Through::Paths { paths, .. }, Some(view)) => Arc::ptr_eq(paths, &view.paths),
-            (Through::Filter { filter, .. }, None) => *filter == self.filter,
+            (Through::Filter { filter, .. }, None) => *filter == self.filter(),
             _ => false,
         }
     }
@@ -661,10 +667,19 @@ impl Derived {
         self.revealing = Some(id);
     }
 
-    /// The filter this panel draws its share of the document's graph through,
-    /// which is where the toolbar's controls read their state from.
-    pub(crate) fn filter(&self) -> &Filter {
-        &self.filter
+    /// The filter this panel draws its share of the document's graph through.
+    fn filter(&self) -> Filter {
+        self.shown.with_rules(&self.rules)
+    }
+
+    /// What the reader filtered the graph to, which the pins card lists.
+    pub(crate) fn shown(&self) -> &DocumentFilter {
+        &self.shown
+    }
+
+    /// The rules the boxes menu reads its checkmarks from.
+    pub(crate) fn rules(&self) -> &[Rule] {
+        &self.rules
     }
 
     /// The boxes the filter draws as no part of what it selects.
@@ -975,27 +990,32 @@ pub(crate) fn set_reduced(view: &mut GraphPanel, reduced: bool, cx: &mut Context
     }
 }
 
-/// Draws the graph through `filter` from here on.
+/// Draws the graph through `shown` from here on, the camera moving onto what
+/// that leaves drawn where `frame` is set, for a gesture that named the part of
+/// the graph to look at. What survives stays where the document places it, so
+/// on a graph whose extent the rest of it still spans the named part need not
+/// be anywhere near the view.
 ///
 /// The view keeps what it can of where the reader had it: the expansion as far
 /// as the surviving nodes and the budget allow, the camera — save where
 /// what survives leaves nothing under it ([`crate::framing::Frame::Escaping`]) —
 /// the edge set and, the panel's own to keep, the selection. The drawing on
 /// screen stays until the one this asks for lands.
-pub(crate) fn set_filter(view: &mut GraphPanel, filter: Filter, cx: &mut Context<GraphPanel>) {
-    apply_filter(view, filter, false, cx);
-}
-
-/// Draws the graph through `filter` from here on and moves the camera onto what
-/// that leaves drawn, for a gesture that named the part of the graph to look at.
-/// What survives stays where the document places it, so on a graph whose extent
-/// the rest of it still spans the named part need not be anywhere near the view.
-pub(crate) fn set_filter_framed(
+pub(crate) fn set_shown(
     view: &mut GraphPanel,
-    filter: Filter,
+    shown: DocumentFilter,
+    frame: bool,
     cx: &mut Context<GraphPanel>,
 ) {
-    apply_filter(view, filter, true, cx);
+    let rules = view.derived.rules.clone();
+    apply_filter(view, shown, rules, frame, cx);
+}
+
+/// Lays the graph out through `rules` from here on, as [`set_shown`] draws it
+/// through what is shown.
+pub(crate) fn set_rules(view: &mut GraphPanel, rules: Vec<Rule>, cx: &mut Context<GraphPanel>) {
+    let shown = view.derived.shown.clone();
+    apply_filter(view, shown, rules, false, cx);
 }
 
 /// Draws `paths` in place of what the filter leaves, or the filter again where
@@ -1011,25 +1031,32 @@ pub(crate) fn set_paths(
     }
 }
 
-fn apply_filter(view: &mut GraphPanel, filter: Filter, frame: bool, cx: &mut Context<GraphPanel>) {
-    if view.derived.filter == filter {
+fn apply_filter(
+    view: &mut GraphPanel,
+    shown: DocumentFilter,
+    rules: Vec<Rule>,
+    frame: bool,
+    cx: &mut Context<GraphPanel>,
+) {
+    if view.derived.shown == shown && view.derived.rules == rules {
         return;
     }
     // A reader changing the filter means to see what it draws, which the
     // dependency paths drawn in its place would hide.
     crate::why::put_away(view, cx);
     view.derived.show_paths(None);
-    view.derived.filter = filter;
+    view.derived.shown = shown;
+    view.derived.rules = rules;
     crate::boxes::restate(view, cx);
     publish_filter(view, cx);
     view.derived.frame_on_landing = frame;
     request(view, cx);
 }
 
-/// Hands the filter the panel draws through to the document's graph, making
-/// the panel the one the graph's other views defer to.
+/// Hands what the panel shows of the document's graph to that graph, making the
+/// panel the one the graph's other views defer to.
 pub(crate) fn publish_filter(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let (panel, filter) = (cx.entity(), view.derived.filter.clone());
+    let (panel, filter) = (cx.entity(), view.derived.shown.with_rules(&[]));
     view.model
         .update(cx, |model, cx| model.defer_to(&panel, filter, cx));
 }
@@ -1641,9 +1668,10 @@ mod tests {
     fn a_framed_filter_landing_before_the_map_frames_the_map_once_placed() {
         let (loaded, land) = document_placing();
         let mut derived = opened(&loaded);
-        derived.filter = hiding(Kind::Action);
+        derived.rules = hiding(Kind::Action).rules;
         derived.frame_on_landing = true;
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        let (slice, restricted) =
+            restrict(&loaded.shared, &derived.filter(), &HashSet::new(), true);
 
         let adopted = derived.adopt(Landed {
             slice,
@@ -1675,8 +1703,9 @@ mod tests {
         let mut derived = opened(&loaded);
         assert!(derived.restricted_map_drawn().is_none(), "the whole graph");
 
-        derived.filter = hiding(Kind::Action);
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        derived.rules = hiding(Kind::Action).rules;
+        let (slice, restricted) =
+            restrict(&loaded.shared, &derived.filter(), &HashSet::new(), true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),
@@ -1689,7 +1718,7 @@ mod tests {
             .expect("the restriction the panel draws");
         assert!(drawn.placed().is_some());
 
-        derived.filter = hiding(Kind::Target);
+        derived.rules = hiding(Kind::Target).rules;
         assert!(derived.restricted_map_drawn().is_none());
     }
 
@@ -1699,12 +1728,12 @@ mod tests {
         let mut derived = opened(&loaded);
         assert!(!derived.restricting());
 
-        derived.filter = hiding(Kind::Action);
+        derived.rules = hiding(Kind::Action).rules;
         assert!(derived.restricting());
 
         let (slice, restricted) = restrict(
             &loaded.shared,
-            &derived.filter,
+            &derived.filter(),
             &derived.expanded,
             derived.reduced,
         );
@@ -1726,12 +1755,12 @@ mod tests {
     fn a_document_opened_into_a_panel_is_drawn_through_no_filter() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        derived.filter = hiding(Kind::Action);
+        derived.rules = hiding(Kind::Action).rules;
         derived.layered = Some(layered(&loaded, 10.0));
 
         derived.opened_on(&document());
 
-        assert_eq!(derived.filter(), &Filter::default());
+        assert_eq!(derived.filter(), Filter::default());
         assert!(
             !derived.restricting(),
             "the drawing was derived from another filter than the controls read"
@@ -1797,11 +1826,11 @@ mod tests {
     fn clearing_paths_returns_to_the_filter_and_its_expansion() {
         let loaded = document();
         let mut derived = opened(&loaded);
-        derived.filter = hiding(Kind::Source);
+        derived.rules = hiding(Kind::Source).rules;
         let expanded: HashSet<Id> = [id(&loaded, "//a:t")].into_iter().collect();
         derived.expanded = expanded.clone();
         let (slice, restricted) =
-            restrict(&loaded.shared, &derived.filter, &derived.expanded, true);
+            restrict(&loaded.shared, &derived.filter(), &derived.expanded, true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),
@@ -1835,7 +1864,7 @@ mod tests {
 
         assert!(derived.show_paths(None));
         assert!(!derived.show_paths(None), "nothing left to clear");
-        assert_eq!(derived.filter(), &hiding(Kind::Source));
+        assert_eq!(derived.filter(), hiding(Kind::Source));
         assert_eq!(derived.expanded, expanded);
         assert_eq!(derived.reduced(), Some(derived.reduced));
         assert!(derived.restricting());
@@ -1963,8 +1992,9 @@ mod tests {
         let target = id(&loaded, "//a:t");
         assert!(derived.hidden(action).is_none());
 
-        derived.filter = hiding(Kind::Action);
-        let (slice, restricted) = restrict(&loaded.shared, &derived.filter, &HashSet::new(), true);
+        derived.rules = hiding(Kind::Action).rules;
+        let (slice, restricted) =
+            restrict(&loaded.shared, &derived.filter(), &HashSet::new(), true);
         derived.adopt(Landed {
             slice,
             expanded: restricted.expanded.clone(),

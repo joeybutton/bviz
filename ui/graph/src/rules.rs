@@ -1,12 +1,12 @@
 //! The filter rule the boxes menu reads its checkmarks from and writes.
 //!
 //! The control keeps no record of what it has hidden: its checkmarks are read
-//! out of the filter's rule list and a toggle rewrites that list, so the control
+//! out of the panel's rule list and a toggle rewrites that list, so the control
 //! and the drawing cannot come to disagree about what is shown. Everything it
 //! hides is held in one rule naming box classes and nothing else.
 
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::select::{Filter, Predicate, Rule, Values, Visibility};
+use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
 use std::collections::BTreeSet;
 
 /// A kind of node the drawing puts a box round what the node holds. Hiding
@@ -45,20 +45,19 @@ impl BoxClass {
     }
 }
 
-/// The box classes `filter` hides through the rule the control writes.
-pub(crate) fn hidden(filter: &Filter) -> BTreeSet<BoxClass> {
-    filter.rules.iter().filter_map(written).flatten().collect()
+/// The box classes `rules` hide through the rule the control writes.
+pub(crate) fn hidden(rules: &[Rule]) -> BTreeSet<BoxClass> {
+    rules.iter().filter_map(written).flatten().collect()
 }
 
-/// `filter` with `class` hidden, or shown where `hidden` is false.
-pub(crate) fn set_hidden(filter: &Filter, class: BoxClass, hidden: bool) -> Filter {
-    let mut classes = self::hidden(filter);
+/// `rules` with `class` hidden, or shown where `hidden` is false.
+pub(crate) fn set_hidden(rules: &[Rule], class: BoxClass, hidden: bool) -> Vec<Rule> {
+    let mut classes = self::hidden(rules);
     match hidden {
         true => classes.insert(class),
         false => classes.remove(&class),
     };
-    let mut rules: Vec<Rule> = filter
-        .rules
+    let mut rules: Vec<Rule> = rules
         .iter()
         .filter(|rule| !by_control(rule))
         .cloned()
@@ -72,10 +71,7 @@ pub(crate) fn set_hidden(filter: &Filter, class: BoxClass, hidden: bool) -> Filt
             visibility: Visibility::Hidden,
         });
     }
-    Filter {
-        rules,
-        ..filter.clone()
-    }
+    rules
 }
 
 /// Whether the boxes menu wrote `rule`.
@@ -108,13 +104,13 @@ mod tests {
     use super::*;
 
     /// Unchecking a class writes the rule hiding it, and checking it again takes
-    /// that rule back out, so a filter that hides nothing holds no rules at all.
+    /// that rule back out, so rules that hide nothing are no rules at all.
     #[test]
-    fn a_class_hidden_and_shown_again_leaves_the_filter_as_it_was() {
-        let hiding = set_hidden(&Filter::default(), BoxClass::Target, true);
+    fn a_class_hidden_and_shown_again_leaves_the_rules_as_they_were() {
+        let hiding = set_hidden(&[], BoxClass::Target, true);
 
         assert_eq!(
-            hiding.rules,
+            hiding,
             vec![Rule {
                 predicate: Predicate {
                     kinds: Values::new([Kind::Target]),
@@ -124,24 +120,21 @@ mod tests {
             }]
         );
         assert_eq!(hidden(&hiding), BTreeSet::from([BoxClass::Target]));
-        assert_eq!(
-            set_hidden(&hiding, BoxClass::Target, false),
-            Filter::default()
-        );
+        assert_eq!(set_hidden(&hiding, BoxClass::Target, false), []);
     }
 
     /// One rule carries every class hidden, so hiding a second widens that rule
     /// rather than laying another beside it.
     #[test]
     fn classes_hidden_gather_into_one_rule() {
-        let mut filter = Filter::default();
+        let mut rules = Vec::new();
         for class in [BoxClass::Package, BoxClass::Target] {
-            filter = set_hidden(&filter, class, true);
+            rules = set_hidden(&rules, class, true);
         }
 
-        assert_eq!(filter.rules.len(), 1);
+        assert_eq!(rules.len(), 1);
         assert_eq!(
-            hidden(&filter),
+            hidden(&rules),
             BTreeSet::from([BoxClass::Package, BoxClass::Target])
         );
     }
@@ -182,14 +175,9 @@ mod tests {
                 visibility: Visibility::Faded,
             },
         ];
-        let filter = Filter {
-            rules: untouched.clone(),
-            ..Filter::default()
-        };
-
-        assert!(hidden(&filter).is_empty());
-        let hiding = set_hidden(&filter, BoxClass::Target, true);
-        assert_eq!(hiding.rules[..untouched.len()], untouched[..]);
-        assert_eq!(hiding.rules.len(), untouched.len() + 1);
+        assert!(hidden(&untouched).is_empty());
+        let hiding = set_hidden(&untouched, BoxClass::Target, true);
+        assert_eq!(hiding[..untouched.len()], untouched[..]);
+        assert_eq!(hiding.len(), untouched.len() + 1);
     }
 }

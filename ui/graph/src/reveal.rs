@@ -373,7 +373,10 @@ mod tests {
     /// which control to turn back.
     #[test]
     fn a_rule_is_named_by_the_control_that_wrote_it() {
-        let boxes = rules::set_hidden(&Filter::default(), BoxClass::Target, true);
+        let boxes = Filter {
+            rules: rules::set_hidden(&[], BoxClass::Target, true),
+            ..Filter::default()
+        };
 
         assert_eq!(filtered(&boxes, Hiding::Rule(0)), HiddenBy::Boxes);
     }

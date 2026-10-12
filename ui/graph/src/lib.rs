@@ -42,6 +42,7 @@ mod drag;
 mod duration;
 mod emphasis;
 mod exclusive;
+mod filter;
 mod framing;
 mod fuzzy;
 mod hints;
@@ -330,7 +331,7 @@ pub struct GraphPanel {
     /// rows stand.
     box_classes: Vec<BoxClass>,
     boxes: Entity<MultiSelect>,
-    /// Carries a toggled boxes-menu row into the panel's filter.
+    /// Carries a toggled boxes-menu row into the panel's rules.
     _box_choices: Subscription,
     /// The query bar, whose chips scope what the panel draws.
     chips: chips::Chips,
@@ -519,7 +520,7 @@ impl GraphPanel {
         });
         let derived = Derived::new();
         let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
-        let (panel, filter) = (cx.entity(), derived.filter().clone());
+        let (panel, filter) = (cx.entity(), derived.shown().with_rules(&[]));
         model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
         let mut view = Self {
             focus_handle,
@@ -682,7 +683,7 @@ impl GraphPanel {
                     .child(bviz_ui_components::centered_notice(notice, &palette.colors))
             }))
             .children(
-                boxes::every_class_hidden(self.derived.filter(), &self.box_classes)
+                boxes::every_class_hidden(self.derived.rules(), &self.box_classes)
                     .filter(|_| zoom.is_some_and(|zoom| drawn.withholds_most(zoom)))
                     .map(|notice| {
                         div()

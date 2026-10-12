@@ -2,7 +2,7 @@
 //! options the control draws for them.
 //!
 //! What the menu holds is what the graph carries, in the order its rows
-//! stand. Every checkmark is derived from the panel's filter each time the
+//! stand. Every checkmark is derived from the panel's rules each time the
 //! options are stated, so nothing here records what is drawn — see
 //! [`crate::rules`].
 
@@ -10,7 +10,7 @@ use crate::rules::{self, BoxClass};
 use crate::{GraphPanel, derive};
 use bviz_graph_layout::Kind;
 use bviz_graph_layout::graph::{Graph, id_span};
-use bviz_graph_layout::select::Filter;
+use bviz_graph_layout::select::Rule;
 use bviz_ui_components::{MultiOption, MultiSelectEvent};
 use gpui::Context;
 
@@ -45,9 +45,9 @@ fn box_label(class: BoxClass) -> &'static str {
     }
 }
 
-/// The options the boxes menu draws for `classes` under `filter`.
-pub(crate) fn box_options(filter: &Filter, classes: &[BoxClass]) -> Vec<MultiOption> {
-    let hidden = rules::hidden(filter);
+/// The options the boxes menu draws for `classes` under `rules`.
+pub(crate) fn box_options(rules: &[Rule], classes: &[BoxClass]) -> Vec<MultiOption> {
+    let hidden = rules::hidden(rules);
     classes
         .iter()
         .map(|&class| MultiOption::new(box_label(class), !hidden.contains(&class)))
@@ -55,10 +55,10 @@ pub(crate) fn box_options(filter: &Filter, classes: &[BoxClass]) -> Vec<MultiOpt
 }
 
 /// What a map level leaving out most of what it would draw says, where
-/// `filter` hides every box class of `classes`. Showing the outermost class
+/// `rules` hide every box class of `classes`. Showing the outermost class
 /// gives the coarsest levels their boxes back.
-pub(crate) fn every_class_hidden(filter: &Filter, classes: &[BoxClass]) -> Option<String> {
-    let hidden = rules::hidden(filter);
+pub(crate) fn every_class_hidden(rules: &[Rule], classes: &[BoxClass]) -> Option<String> {
+    let hidden = rules::hidden(rules);
     let outermost = *classes.first()?;
     let all = classes.iter().all(|class| hidden.contains(class));
     all.then(|| {
@@ -80,19 +80,19 @@ pub(crate) fn adopt(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     restate(view, cx);
 }
 
-/// States the menu's rows afresh from the filter the panel draws through.
+/// States the menu's rows afresh from the rules the panel lays out through.
 pub(crate) fn restate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let options = box_options(view.derived.filter(), &view.box_classes);
+    let options = box_options(view.derived.rules(), &view.box_classes);
     view.boxes
         .update(cx, |control, cx| control.set_options(options, cx));
 }
 
-/// Whether `filter` unwraps any of the box classes.
-pub(crate) fn any_hidden(filter: &Filter) -> bool {
-    !rules::hidden(filter).is_empty()
+/// Whether `rules` unwrap any of the box classes.
+pub(crate) fn any_hidden(rules: &[Rule]) -> bool {
+    !rules::hidden(rules).is_empty()
 }
 
-/// `filter` with the box classes the boxes menu's `event` names drawn, or
+/// `rules` with the box classes the boxes menu's `event` names drawn, or
 /// unwrapped.
 ///
 /// A click over a range writes every row it covers as a single click on that
@@ -100,18 +100,18 @@ pub(crate) fn any_hidden(filter: &Filter) -> bool {
 /// including the rules the control did not write, which each of those writes
 /// carries through untouched.
 pub(crate) fn boxes_chosen(
-    filter: &Filter,
+    rules: &[Rule],
     classes: &[BoxClass],
     event: &MultiSelectEvent,
-) -> Filter {
+) -> Vec<Rule> {
     let (rows, checked) = match event {
         MultiSelectEvent::Toggled { index, checked } => (std::slice::from_ref(index), *checked),
         MultiSelectEvent::SetAll { rows, checked } => (rows.as_slice(), *checked),
     };
     rows.iter()
         .filter_map(|&index| classes.get(index))
-        .fold(filter.clone(), |filter, &class| {
-            rules::set_hidden(&filter, class, !checked)
+        .fold(rules.to_vec(), |rules, &class| {
+            rules::set_hidden(&rules, class, !checked)
         })
 }
 
@@ -121,8 +121,8 @@ pub(crate) fn choose_boxes(
     event: &MultiSelectEvent,
     cx: &mut Context<GraphPanel>,
 ) {
-    let filter = boxes_chosen(view.derived.filter(), &view.box_classes, event);
-    derive::set_filter(view, filter, cx);
+    let rules = boxes_chosen(view.derived.rules(), &view.box_classes, event);
+    derive::set_rules(view, rules, cx);
 }
 
 #[cfg(test)]
@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::intern::Id;
-    use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
+    use bviz_graph_layout::select::{Predicate, Values, Visibility};
 
     /// A graph of one package holding a target, a labeled output, a package
     /// group and a source file, the target and the output each holding a
@@ -190,7 +190,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(&box_options(&Filter::default(), &classes)),
+            labels(&box_options(&[], &classes)),
             [
                 "packages",
                 "targets",
@@ -212,17 +212,14 @@ mod tests {
         assert_eq!(carried_boxes(&graph), [BoxClass::Package]);
     }
 
-    /// The checkmarks are read out of the rules, so a filter built without the
-    /// control renders exactly as that filter says.
+    /// The checkmarks are read out of the rules, so rules written without the
+    /// control render exactly as they say.
     #[test]
     fn a_row_is_checked_by_the_rules_alone() {
         let classes = carried_boxes(&graph());
-        let hiding = rules::set_hidden(&Filter::default(), BoxClass::Target, true);
+        let hiding = rules::set_hidden(&[], BoxClass::Target, true);
 
-        assert_eq!(
-            checked(&box_options(&Filter::default(), &classes)),
-            [true; 4]
-        );
+        assert_eq!(checked(&box_options(&[], &classes)), [true; 4]);
         assert_eq!(
             checked(&box_options(&hiding, &classes)),
             [true, false, true, true]
@@ -230,13 +227,13 @@ mod tests {
     }
 
     /// Each row's click reads back as its own checkmark and nothing else's, and
-    /// checking it again returns to the filter it started from.
+    /// checking it again returns to the rules it started from.
     #[test]
     fn each_row_round_trips_through_the_rule_it_writes() {
         let classes = carried_boxes(&graph());
         for (index, class) in classes.iter().enumerate() {
             let toggle = |checked| MultiSelectEvent::Toggled { index, checked };
-            let unwrapped = boxes_chosen(&Filter::default(), &classes, &toggle(false));
+            let unwrapped = boxes_chosen(&[], &classes, &toggle(false));
 
             let expected: Vec<bool> = (0..classes.len()).map(|row| row != index).collect();
             assert_eq!(
@@ -246,7 +243,7 @@ mod tests {
             );
             assert_eq!(
                 boxes_chosen(&unwrapped, &classes, &toggle(true)),
-                Filter::default(),
+                [],
                 "{class:?}"
             );
         }
@@ -257,11 +254,7 @@ mod tests {
     #[test]
     fn only_hiding_every_class_explains_an_empty_level() {
         let classes = carried_boxes(&graph());
-        let hiding_all = boxes_chosen(
-            &Filter::default(),
-            &classes,
-            &set_all(0..classes.len(), false),
-        );
+        let hiding_all = boxes_chosen(&[], &classes, &set_all(0..classes.len(), false));
         let notice = every_class_hidden(&hiding_all, &classes).expect("every class is hidden");
         assert!(
             notice.contains("Show packages in the boxes menu"),
@@ -270,13 +263,13 @@ mod tests {
 
         let showing_one = rules::set_hidden(&hiding_all, BoxClass::ConfiguredTarget, false);
         assert_eq!(every_class_hidden(&showing_one, &classes), None);
-        assert_eq!(every_class_hidden(&Filter::default(), &classes), None);
+        assert_eq!(every_class_hidden(&[], &classes), None);
         assert_eq!(every_class_hidden(&hiding_all, &[]), None);
     }
 
     /// A rule the control did not write is none of its business, so a click
     /// over every row carries it through exactly as one row's click does, and
-    /// clearing and checking every row again returns to the filter it started
+    /// clearing and checking every row again returns to the rules it started
     /// from.
     #[test]
     fn checking_and_clearing_every_row_leaves_a_rule_the_control_did_not_write_standing() {
@@ -287,17 +280,14 @@ mod tests {
             },
             visibility: Visibility::Hidden,
         };
-        let filter = Filter {
-            rules: vec![untouched.clone()],
-            ..Filter::default()
-        };
+        let rules = vec![untouched.clone()];
         let classes = carried_boxes(&graph());
 
-        let cleared = boxes_chosen(&filter, &classes, &set_all(0..classes.len(), false));
-        assert!(cleared.rules.contains(&untouched));
+        let cleared = boxes_chosen(&rules, &classes, &set_all(0..classes.len(), false));
+        assert!(cleared.contains(&untouched));
         assert_eq!(checked(&box_options(&cleared, &classes)), [false; 4]);
 
         let restored = boxes_chosen(&cleared, &classes, &set_all(0..classes.len(), true));
-        assert_eq!(restored, filter);
+        assert_eq!(restored, rules);
     }
 }
