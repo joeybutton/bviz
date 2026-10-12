@@ -3,6 +3,8 @@ Share a property map between clones until one changes it
 The layered algorithm copies the properties of every node into each
 arena it builds, most of them never read or changed there.
 
+License: EPL-2.0 (elk-rs v0.11.0+rs.2)
+
 diff --git a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs b/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs
 index 5d0ac34..e952942 100644
 --- a/plugins/org.eclipse.elk.graph/src/org/eclipse/elk/graph/properties/mod.rs

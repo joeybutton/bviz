@@ -8,6 +8,8 @@ nudge of the pointer. Add optional_tooltip, whose builder may return no
 view, as InteractiveText's does, and refresh the window after building
 a tooltip only where one was built.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
 --- a/crates/gpui/src/elements/div.rs
 +++ b/crates/gpui/src/elements/div.rs

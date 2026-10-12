@@ -6,6 +6,8 @@ can point at it.
 The patch adds two lines to the module's BUILD file and carries the six
 around them, too little of the file to attribute.
 
+License: Apache-2.0 (Bazel Central Registry overlay of zstd 1.5.7.bcr.1)
+
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -4,6 +4,8 @@

@@ -1,3 +1,5 @@
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/media/src/bindings.rs b/crates/media/src/bindings.rs
 index a1c78c1..552508a 100644
 --- a/crates/media/src/bindings.rs

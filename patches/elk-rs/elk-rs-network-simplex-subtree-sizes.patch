@@ -3,6 +3,8 @@ Split a network simplex tree by subtree size
 A pivot finds the smaller side of the leaving edge by exploring both
 sides in turns. Which side is searched never changes the edges picked.
 
+License: EPL-2.0 (elk-rs v0.11.0+rs.2)
+
 diff --git a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs b/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs
 index 8ca7b28..8244e70 100644
 --- a/plugins/org.eclipse.elk.alg.common/src/org/eclipse/elk/alg/common/networksimplex/network_simplex.rs

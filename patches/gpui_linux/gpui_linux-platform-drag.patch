@@ -24,6 +24,8 @@ session a release over the desktop reaches the application as
 PlatformDragEnd::Cancelled and tearing a panel out of its window does
 nothing.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui_linux/src/linux/wayland/client.rs b/crates/gpui_linux/src/linux/wayland/client.rs
 --- a/crates/gpui_linux/src/linux/wayland/client.rs
 +++ b/crates/gpui_linux/src/linux/wayland/client.rs

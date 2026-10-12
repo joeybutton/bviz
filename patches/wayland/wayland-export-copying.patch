@@ -6,6 +6,8 @@ can point at it.
 The patch adds two lines to the module's BUILD file and carries the
 seven around them, too little of the file to attribute.
 
+License: Apache-2.0 (Bazel Central Registry overlay of wayland 1.24.0.bcr.1)
+
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
 @@ -1,7 +1,9 @@

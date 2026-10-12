@@ -10,6 +10,8 @@ so. Rasterizing a glyph goes with them: what a window system draws for a
 drag is an image, and gpui's text system is where the application's own
 faces are loaded.
 
+License: Apache-2.0 (Zed v1.6.3)
+
 diff --git a/crates/gpui/src/interactive.rs b/crates/gpui/src/interactive.rs
 --- a/crates/gpui/src/interactive.rs
 +++ b/crates/gpui/src/interactive.rs
