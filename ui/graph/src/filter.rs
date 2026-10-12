@@ -127,6 +127,7 @@ mod tests {
     use bviz_graph_layout::Kind;
     use bviz_graph_layout::graph::Node;
     use bviz_graph_layout::select::{Verdict, Visibility};
+    use std::collections::BTreeSet;
 
     /// A package holding a target holding an action.
     fn graph() -> Graph {
@@ -143,9 +144,9 @@ mod tests {
     fn a_panels_layout_rule_leaves_the_documents_filter_alone() {
         let graph = graph();
         let document = DocumentFilter::default();
-        let unwrapping = rules::set_hidden(&[], BoxClass::Target, true);
+        let unwrapping = rules::unwrapping(&BTreeSet::from([BoxClass::Target]));
 
-        let panel = document.with_rules(&unwrapping).evaluate(&graph);
+        let panel = document.with_rules(unwrapping.as_slice()).evaluate(&graph);
         assert_eq!(panel.get(Id(1)), Verdict::Hidden);
 
         let shared = document.filter().evaluate(&graph);
@@ -160,9 +161,9 @@ mod tests {
         let mut document = DocumentFilter::default();
         assert!(document.set_pins([(Id(1), Pin::Set(Visibility::Faded))].into()));
         assert!(!document.set_pins([(Id(1), Pin::Set(Visibility::Faded))].into()));
-        let unwrapping = rules::set_hidden(&[], BoxClass::Target, true);
+        let unwrapping = rules::unwrapping(&BTreeSet::from([BoxClass::Target]));
 
-        let panel = document.with_rules(&unwrapping).evaluate(&graph);
+        let panel = document.with_rules(unwrapping.as_slice()).evaluate(&graph);
         assert_eq!(panel.get(Id(1)), Verdict::Faded);
     }
 

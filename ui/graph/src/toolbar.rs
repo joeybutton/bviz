@@ -75,7 +75,7 @@ pub(crate) fn toolbar(
         .when(!view.box_classes.is_empty(), |query| {
             query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
                 MenuItem::submenu(boxes::NAME, MultiSelect::submenu(&view.boxes, cx)),
-                boxes::any_hidden(view.derived.rules()),
+                !view.derived.unwrapped().is_empty(),
             ))
         })
         .filling(|| chips::bar(view, palette, window, cx));

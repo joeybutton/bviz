@@ -15,17 +15,18 @@ use crate::filter::{DocumentFilter, Judgement};
 use crate::framing::Frame;
 use crate::mode::LayoutMode;
 use crate::model::{Loaded, OPENS_REDUCED, Placement, Shared, Source};
+use crate::rules::{self, BoxClass};
 use crate::{GraphPanel, MARGIN};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::paths::Paths;
-use bviz_graph_layout::select::{Filter, Hiding, Pin, Rule, Verdict, Verdicts};
+use bviz_graph_layout::select::{Filter, Hiding, Pin, Verdict, Verdicts};
 use bviz_graph_layout::transition::Transitions;
 use bviz_graph_layout::{Id, LaidOut, MapLayout, Names};
 use bviz_ui_components::load_in_background;
 use gpui::{Context, Task};
 use rustc_hash::FxHashSet;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -243,12 +244,12 @@ enum Through {
 }
 
 /// What keeps a node of the document's graph out of what a panel draws.
-pub(crate) enum Hidden<'a> {
+pub(crate) enum Hidden {
     /// Dependency paths are drawn in the filter's place, and none passes
     /// through the node.
     OffPaths,
-    /// The filter hides the node, by `hiding` among its rules and pins.
-    Filtered { filter: &'a Filter, hiding: Hiding },
+    /// The filter hides the node, by `hiding`.
+    Filtered(Hiding),
 }
 
 /// The graph one lens leaves of the document's, with everything derived from
@@ -486,11 +487,12 @@ struct PathView {
 /// What a panel draws the document's graph as, and how far the derivation of it
 /// has got.
 pub(crate) struct Derived {
-    /// The document's filter with `rules` as its rules and `revealed` pinned,
+    /// The document's filter with the boxes `unwrapped` and `revealed` pinned,
     /// as last taken up.
     filter: Filter,
-    /// The panel's own rules, which shape its layout alone.
-    rules: Vec<Rule>,
+    /// The box classes the panel's layout unwraps, which no other view's
+    /// does.
+    unwrapped: BTreeSet<BoxClass>,
     /// The nodes revealed in this panel against its own rules, each standing
     /// until it is withdrawn from the pins card.
     revealed: HashSet<Id>,
@@ -539,7 +541,7 @@ impl Derived {
     pub(crate) fn new() -> Self {
         Derived {
             filter: Filter::default(),
-            rules: Vec::new(),
+            unwrapped: BTreeSet::new(),
             revealed: HashSet::new(),
             unfollowed: None,
             paths: None,
@@ -565,7 +567,7 @@ impl Derived {
     /// behind goes with it, and so does the derivation that was producing one.
     fn opened_on(&mut self, loaded: &Loaded) {
         self.filter = Filter::default();
-        self.rules = Vec::new();
+        self.unwrapped = BTreeSet::new();
         self.revealed = HashSet::new();
         self.paths = None;
         self.expanded = loaded.opening.expanded.clone();
@@ -659,12 +661,10 @@ impl Derived {
     /// What keeps the node `id` out of the drawing the panel holds, read from
     /// the lens that drawing was derived through; `None` where it holds the
     /// node, and before the graph is read.
-    pub(crate) fn hidden(&self, id: Id) -> Option<Hidden<'_>> {
+    pub(crate) fn hidden(&self, id: Id) -> Option<Hidden> {
         let slice = self.slice.as_ref()?;
         match &slice.lens {
-            Through::Filter { filter, verdicts } => verdicts
-                .hiding(id)
-                .map(|hiding| Hidden::Filtered { filter, hiding }),
+            Through::Filter { verdicts, .. } => verdicts.hiding(id).map(Hidden::Filtered),
             Through::Paths { held, .. } => {
                 let held = held.get(id.0 as usize).copied().unwrap_or(false);
                 (!held).then_some(Hidden::OffPaths)
@@ -678,9 +678,8 @@ impl Derived {
         self.revealing = Some(id);
     }
 
-    /// The rules the boxes menu reads its checkmarks from.
-    pub(crate) fn rules(&self) -> &[Rule] {
-        &self.rules
+    pub(crate) fn unwrapped(&self) -> &BTreeSet<BoxClass> {
+        &self.unwrapped
     }
 
     pub(crate) fn revealed(&self) -> &HashSet<Id> {
@@ -689,7 +688,7 @@ impl Derived {
 
     /// The filter the panel draws `document`'s graph through.
     fn filter_over(&self, document: &DocumentFilter) -> Filter {
-        let mut filter = document.with_rules(&self.rules);
+        let mut filter = document.with_rules(rules::unwrapping(&self.unwrapped).as_slice());
         for &id in &self.revealed {
             filter.pins.entry(id).or_insert(Pin::Revealed);
         }
@@ -1064,14 +1063,19 @@ pub(crate) fn show_filter(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     }
 }
 
-/// Lays the graph out through `rules` from here on, as [`follow`] draws it.
-pub(crate) fn set_rules(view: &mut GraphPanel, rules: Vec<Rule>, cx: &mut Context<GraphPanel>) {
+/// Lays the graph out with the boxes of the classes `unwrapped` unwrapped
+/// from here on, as [`follow`] draws it.
+pub(crate) fn set_unwrapped(
+    view: &mut GraphPanel,
+    unwrapped: BTreeSet<BoxClass>,
+    cx: &mut Context<GraphPanel>,
+) {
     show_filter(view, cx);
-    view.derived.rules = rules;
+    view.derived.unwrapped = unwrapped;
     follow(view, false, cx);
 }
 
-/// Shows `id` in this panel whatever its own rules say.
+/// Shows `id` in this panel however its layout unwraps boxes.
 pub(crate) fn reveal_in_layout(view: &mut GraphPanel, id: Id, cx: &mut Context<GraphPanel>) {
     show_filter(view, cx);
     view.derived.revealed.insert(id);
@@ -2078,10 +2082,7 @@ mod tests {
         });
         assert!(matches!(
             derived.hidden(action),
-            Some(Hidden::Filtered {
-                hiding: Hiding::Rule(0),
-                ..
-            })
+            Some(Hidden::Filtered(Hiding::Rule(0)))
         ));
         assert!(derived.hidden(target).is_none());
 

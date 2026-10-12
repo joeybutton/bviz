@@ -331,7 +331,7 @@ pub struct GraphPanel {
     /// rows stand.
     box_classes: Vec<BoxClass>,
     boxes: Entity<MultiSelect>,
-    /// Carries a toggled boxes-menu row into the panel's rules.
+    /// Carries a toggled boxes-menu row into the box classes the panel unwraps.
     _box_choices: Subscription,
     /// The query bar, whose chips scope what the document's views draw.
     chips: chips::Chips,
@@ -695,7 +695,7 @@ impl GraphPanel {
                     .child(bviz_ui_components::centered_notice(notice, &palette.colors))
             }))
             .children(
-                boxes::every_class_hidden(self.derived.rules(), &self.box_classes)
+                boxes::every_class_hidden(self.derived.unwrapped(), &self.box_classes)
                     .filter(|_| zoom.is_some_and(|zoom| drawn.withholds_most(zoom)))
                     .map(|notice| {
                         div()

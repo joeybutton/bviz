@@ -6,7 +6,6 @@ use crate::framing::{Frame, Held};
 use crate::history::History;
 use crate::mode::LayoutMode;
 use crate::point::{point_label, written_name};
-use crate::rules;
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
 use bviz_graph_layout::select::Hiding;
@@ -30,10 +29,8 @@ pub(crate) enum HiddenBy {
     Pin,
     /// The query the filter is scoped to, which does not name the node.
     Query,
-    /// The rule the boxes menu writes.
+    /// The panel's boxes menu, which unwraps the node.
     Boxes,
-    /// A rule no control wrote, at its index among the filter's rules.
-    Rule(u32),
     /// The node frames others and none of them is drawn.
     NothingToFrame,
 }
@@ -50,7 +47,6 @@ impl HiddenBy {
             HiddenBy::Pin => "hidden by its pin",
             HiddenBy::Query => "outside the query",
             HiddenBy::Boxes => "unwrapped by the boxes menu",
-            HiddenBy::Rule(_) => "hidden by a filter rule",
             HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
         }
     }
@@ -87,16 +83,13 @@ pub(crate) fn hidden_by(view: &GraphPanel, id: Id) -> Option<HiddenBy> {
 }
 
 /// What `hidden` names, as a reader names it.
-fn named(hidden: Hidden<'_>) -> HiddenBy {
+fn named(hidden: Hidden) -> HiddenBy {
     match hidden {
         Hidden::OffPaths => HiddenBy::Paths,
-        Hidden::Filtered { filter, hiding } => match hiding {
+        Hidden::Filtered(hiding) => match hiding {
             Hiding::Pin => HiddenBy::Pin,
             Hiding::Scope => HiddenBy::Query,
-            Hiding::Rule(index) => match rules::by_control(&filter.rules[index as usize]) {
-                true => HiddenBy::Boxes,
-                false => HiddenBy::Rule(index),
-            },
+            Hiding::Rule(_) => HiddenBy::Boxes,
             Hiding::NothingToFrame => HiddenBy::NothingToFrame,
         },
     }
@@ -363,47 +356,23 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::BoxClass;
-    use bviz_graph_layout::Kind;
-    use bviz_graph_layout::select::{Filter, Predicate, Rule, Visibility};
 
-    fn filtered(filter: &Filter, hiding: Hiding) -> HiddenBy {
-        named(Hidden::Filtered { filter, hiding })
+    fn filtered(hiding: Hiding) -> HiddenBy {
+        named(Hidden::Filtered(hiding))
     }
 
-    /// A rule is named by the control that wrote it, so the reader is told
-    /// which control to turn back.
+    /// The panel's own rules are the boxes menu's, so the reader is told to
+    /// turn that back.
     #[test]
-    fn a_rule_is_named_by_the_control_that_wrote_it() {
-        let boxes = Filter {
-            rules: rules::set_hidden(&[], BoxClass::Target, true),
-            ..Filter::default()
-        };
-
-        assert_eq!(filtered(&boxes, Hiding::Rule(0)), HiddenBy::Boxes);
-    }
-
-    #[test]
-    fn a_rule_no_control_wrote_is_named_by_its_index() {
-        let filter = Filter {
-            rules: vec![Rule {
-                predicate: Predicate {
-                    kinds: bviz_graph_layout::select::Values::new([Kind::Action]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Hidden,
-            }],
-            ..Filter::default()
-        };
-
-        assert_eq!(filtered(&filter, Hiding::Rule(0)), HiddenBy::Rule(0));
+    fn a_rule_is_named_as_the_boxes_menu() {
+        assert_eq!(filtered(Hiding::Rule(0)), HiddenBy::Boxes);
     }
 
     /// A pin outranks the scope, so revealing a node the query leaves out
     /// draws it.
     #[test]
     fn a_node_outside_the_query_is_hidden_by_it_and_revealable() {
-        let by = filtered(&Filter::default(), Hiding::Scope);
+        let by = filtered(Hiding::Scope);
         assert_eq!(by, HiddenBy::Query);
         assert!(by.revealable());
     }
@@ -447,11 +416,11 @@ mod tests {
 
     #[test]
     fn only_a_frame_with_nothing_drawn_inside_cannot_be_revealed() {
-        assert!(!filtered(&Filter::default(), Hiding::NothingToFrame).revealable());
+        assert!(!filtered(Hiding::NothingToFrame).revealable());
         for revealable in [
             HiddenBy::Paths,
-            filtered(&Filter::default(), Hiding::Pin),
-            filtered(&Filter::default(), Hiding::Scope),
+            filtered(Hiding::Pin),
+            filtered(Hiding::Scope),
         ] {
             assert!(revealable.revealable());
         }
