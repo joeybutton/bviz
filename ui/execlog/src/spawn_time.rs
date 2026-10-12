@@ -265,8 +265,7 @@ impl SpawnTimePanel {
 /// What the log holds in sum, explaining on hover how to read a sum of spawn
 /// time, and the legend naming which colour is which phase.
 fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) -> OneRow {
-    let caveats = "Spawns overlap, so summed spawn time is not wall time.\n\
-                   Spawns answered from the action cache are not logged.";
+    let caveats = "spawns overlap · not wall time\naction-cache hits not logged";
     let totals = div()
         .id("spawn-time-summary")
         .min_w_0()
@@ -579,7 +578,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
     let segments = spent_in(timing).map(|phase| {
         let time = timing.phase(phase);
         let mut tip = format!(
-            "{}: {} ({} of {})",
+            "{} · {} · {} of {}",
             phase_name(phase),
             exact_duration(time),
             share(time, total),
@@ -587,7 +586,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
         );
         if summed > total {
             tip.push_str(&format!(
-                "\nThe reported phases overlap, summing to {}.",
+                "\nphases overlap · sum {}",
                 exact_duration(summed)
             ));
         }
@@ -597,7 +596,7 @@ fn phase_bar(timing: &PhaseTiming, longest: Duration, palette: &Palette) -> Div 
             .min_w(MIN_SEGMENT_WIDTH)
             .w(relative(fraction(time, span)));
         let segment = if execution_only && phase == Phase::Execute {
-            tip.push_str("\nThis runner reports no other phase.");
+            tip.push_str("\nonly phase reported");
             segment
                 .bg(palette.unbroken)
                 .border_2()
