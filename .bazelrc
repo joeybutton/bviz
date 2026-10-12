@@ -48,6 +48,9 @@ build:clippy --output_groups=clippy_checks
 build:check --aspects=@rules_rs_rules_rust//rust:defs.bzl%rustfmt_aspect,@rules_rs_rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:check --output_groups=+rustfmt_checks,+clippy_checks
 
+# Builds that are published, so their archives name the commit they come from.
+build:release --workspace_status_command=tools/source_commit.sh
+
 build:perf_profile -c opt
 build:perf_profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=2
 build:perf_profile --@rules_rs_rules_rust//rust/settings:extra_rustc_flag=-Cforce-frame-pointers=yes

@@ -1,5 +1,6 @@
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@tar.bzl", "tar")
+load(":source.bzl", "source_file")
 
 # Fixed entry timestamp, so an archive's bytes depend only on its contents.
 MTIME = 1672560000
@@ -25,6 +26,12 @@ TARGET_PLATFORMS = {
     }.items()
 ]
 
+source_file(
+    name = "SOURCE",
+    repository = "https://github.com/yume-ag/bviz",
+    tags = ["manual"],
+)
+
 # Only the sources carry the platform transition: these rules stay in the
 # baseline configuration, so each archive lands at a fixed bazel-bin/dist path
 # that the nightly workflow can name.
@@ -34,6 +41,7 @@ TARGET_PLATFORMS = {
         srcs = [
             ":bviz_{}".format(suffix),
             ":notices_{}".format(suffix),
+            ":SOURCE",
             "//:LICENSE",
             "//:NOTICE",
         ],
@@ -42,6 +50,7 @@ TARGET_PLATFORMS = {
             "bviz uid=0 gid=0 time={} mode=0755 type=file content=$(execpath :bviz_{})".format(MTIME, suffix),
             "LICENSE uid=0 gid=0 time={} mode=0644 type=file content=$(execpath //:LICENSE)".format(MTIME),
             "NOTICE uid=0 gid=0 time={} mode=0644 type=file content=$(execpath //:NOTICE)".format(MTIME),
+            "SOURCE uid=0 gid=0 time={} mode=0644 type=file content=$(execpath :SOURCE)".format(MTIME),
             "THIRD_PARTY_NOTICES uid=0 gid=0 time={} mode=0644 type=file content=$(execpath :notices_{})".format(MTIME, suffix),
         ],
         tags = ["manual"],

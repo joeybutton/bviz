@@ -138,7 +138,8 @@ Whoever redistributes a Linux binary owes what LGPL-3.0 section 4 asks of a
 work that links the library. Of the two things section 4(d)(0) asks for, the
 library's complete source is the release above, and the binary can be relinked
 against a modified version of it by rebuilding bviz from its source at
-https://github.com/yume-ag/bviz with that version in place.
+https://github.com/yume-ag/bviz, at the commit named in the SOURCE file of the
+release archive, with that version in place.
 
 ## Linked under the MPL
 

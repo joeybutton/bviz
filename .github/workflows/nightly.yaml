@@ -30,7 +30,7 @@ jobs:
           api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
 
       # --keep_going so one platform's failure still yields the others' tarballs.
-      - run: bazel build -c opt --keep_going //dist
+      - run: bazel build -c opt --config=release --keep_going //dist
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
 
