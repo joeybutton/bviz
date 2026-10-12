@@ -1581,7 +1581,9 @@ mod tests {
             format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
         });
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let kind = |name| {
             let slices = p.slices(&p.threads()[0]);
             let slice = slices.iter().find(|s| p.str(s.name) == name).expect(name);
@@ -1622,7 +1624,9 @@ mod tests {
             format!(r#"{{"cat":"{category}","name":"{name}","ph":"X","ts":0,"dur":1,"tid":1}}"#)
         });
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         let instances: Vec<(&str, Option<&str>)> = p
             .slices(&p.threads()[0])
             .iter()

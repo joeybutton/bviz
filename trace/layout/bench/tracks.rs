@@ -68,7 +68,11 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    let profile = Arc::new(Profile::from_path(std::path::Path::new(&path)).expect("load profile"));
+    let profile = Arc::new(
+        Profile::from_path(std::path::Path::new(&path))
+            .expect("load profile")
+            .into_inner(),
+    );
     let threads = profile.threads();
 
     // The largest non-critical-path lane by slice count — a single-track

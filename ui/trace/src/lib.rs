@@ -34,7 +34,7 @@ use timeline::{HoveredSlice, TIMELINE_GESTURES, Timeline, zoom_floor};
 use track_label::{pool_member_label, track_label};
 use tracks_menu::TracksMenu;
 
-use bviz_invocation::{InvocationId, Session};
+use bviz_invocation::{InvocationId, Recorded, Session};
 use bviz_trace_layout::{LaneLayout, LaneMetrics, TimeSelection, TimeView};
 use bviz_trace_profile::{Profile, Slice, TimeSpan};
 use bviz_ui_components::gesture::{
@@ -42,8 +42,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, Nesting, Pending,
-    SCROLLBAR_THICKNESS, Scrollbar, declare_scopes, find_key_bindings, legend_key_bindings,
-    overlay_canvas, text_input, track_drag, zoom_key_bindings,
+    SCROLLBAR_THICKNESS, Scrollbar, cut_off_note, declare_scopes, find_key_bindings,
+    legend_key_bindings, overlay_canvas, text_input, track_drag, zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
 use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
@@ -296,7 +296,7 @@ const HEADER_COUNT_GAP: f32 = 6.0;
 /// Lanes shown per group before the rest fold behind the band's show-all toggle.
 const TOP_N_PER_GROUP: usize = 12;
 
-pub(crate) type Source = bviz_ui_components::Source<model::LoadedProfile>;
+pub(crate) type Source = bviz_ui_components::Source<Recorded<model::LoadedProfile>>;
 
 /// The trace document's timeline: the flame chart with its gutter, ruler and
 /// counters strip, the divider that resizes the strip, and the tracks menu over
@@ -591,7 +591,7 @@ pub(crate) fn profile_status(model: &Entity<TraceModel>, cx: &App) -> SharedStri
         .read(cx)
         .source()
         .status("No profile", |loaded| {
-            let p = loaded.profile();
+            let p = loaded.get().profile();
             let slices: usize = p.threads().iter().map(|t| t.slices.len()).sum();
             format!(
                 "{} threads · {} slices · {:.3}s",
@@ -667,11 +667,17 @@ impl Render for TracePanel {
                     .read(cx)
                     .unaligned()
                     .then(|| unaligned_note("profile", &theme.colors));
+                let cut_off = self
+                    .model
+                    .read(cx)
+                    .cut_off()
+                    .then(|| cut_off_note("profile", "events", &theme.colors));
                 chrome
                     .on_action(cx.listener(|view, _: &FilterTracks, window, cx| {
                         view.tracks_menu
                             .update(cx, |menu, cx| menu.open_filtering(window, cx));
                     }))
+                    .children(cut_off)
                     .children(unaligned)
                     .child(self.trace_body(palette, cx))
             }
@@ -1711,7 +1717,7 @@ fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<Strin
 
 /// A profile being decoded and parsed.
 pub struct Load {
-    profile: Pending<Profile>,
+    profile: Pending<Recorded<Profile>>,
     title: SharedString,
 }
 

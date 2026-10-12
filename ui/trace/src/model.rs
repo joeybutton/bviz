@@ -8,7 +8,9 @@ use crate::track_order::TrackSort;
 use crate::{METRICS, Source};
 use bviz_critical_path::{CriticalPath, NearlyCritical, Step, Work};
 use bviz_invocation::spawn::LoggedSpawns;
-use bviz_invocation::{ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Revision, Session};
+use bviz_invocation::{
+    ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Recorded, Revision, Session,
+};
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
@@ -519,7 +521,7 @@ impl TraceModel {
     /// The document `profile` is being read into, loaded and playing on `clock`
     /// once the read finishes and failed where it does not.
     pub(crate) fn reading(
-        profile: Pending<Profile>,
+        profile: Pending<Recorded<Profile>>,
         session: Option<Entity<Session>>,
         clock: Option<DocumentClock>,
         cx: &mut Context<Self>,
@@ -534,7 +536,10 @@ impl TraceModel {
                 let source = match result {
                     Ok(profile) => {
                         let session = model.session.clone();
-                        Source::Loaded(LoadedProfile::new(profile, session.as_ref(), cx))
+                        Source::Loaded(
+                            profile
+                                .map(|profile| LoadedProfile::new(profile, session.as_ref(), cx)),
+                        )
                     }
                     Err(err) => Source::Failed(err),
                 };
@@ -552,7 +557,7 @@ impl TraceModel {
     /// holds other spawns or another action graph than it was traced with.
     fn rejoin(&mut self, cx: &mut Context<Self>) {
         let (to, joined) = joined_to(self.session.as_ref(), cx);
-        let Source::Loaded(loaded) = &mut self.source else {
+        let Some(loaded) = self.loaded_mut() else {
             return;
         };
         if loaded.critical_path.asked() == joined {
@@ -632,38 +637,49 @@ impl TraceModel {
                 .is_some_and(|profile| profile.metadata().epoch_origin.is_none())
     }
 
-    pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
+    fn loaded(&self) -> Option<&LoadedProfile> {
         match &self.source {
-            Source::Loaded(loaded) => Some(loaded.profile()),
+            Source::Loaded(loaded) => Some(loaded.get()),
             _ => None,
         }
     }
 
+    fn loaded_mut(&mut self) -> Option<&mut LoadedProfile> {
+        match &mut self.source {
+            Source::Loaded(loaded) => Some(loaded.get_mut()),
+            _ => None,
+        }
+    }
+
+    /// Whether the loaded profile is of a file that ends early.
+    pub(crate) fn cut_off(&self) -> bool {
+        matches!(&self.source, Source::Loaded(loaded) if loaded.is_cut_off())
+    }
+
+    pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
+        self.loaded().map(LoadedProfile::profile)
+    }
+
     /// The loaded profile's working lanes, once derived.
     pub(crate) fn working_lanes(&self) -> Option<&WorkingLanes> {
-        match &self.source {
-            Source::Loaded(LoadedProfile {
+        match self.loaded()? {
+            LoadedProfile {
                 working_lanes: Derived::Derived(lanes),
                 ..
-            }) => Some(lanes),
+            } => Some(lanes),
             _ => None,
         }
     }
 
     fn adopt_working_lanes(&mut self, flamer: &Arc<TrackFlamer>, lanes: WorkingLanes) -> bool {
-        match &mut self.source {
-            Source::Loaded(loaded) => loaded.adopt_working_lanes(flamer, lanes),
-            _ => false,
-        }
+        self.loaded_mut()
+            .is_some_and(|loaded| loaded.adopt_working_lanes(flamer, lanes))
     }
 
     /// The loaded profile's critical path, as far as it is traced; `None`
     /// until a profile is loaded.
     pub(crate) fn critical_path(&self) -> Option<&TracedPath> {
-        match &self.source {
-            Source::Loaded(loaded) => Some(&loaded.critical_path),
-            _ => None,
-        }
+        self.loaded().map(|loaded| &loaded.critical_path)
     }
 
     fn adopt_critical_path(
@@ -672,10 +688,8 @@ impl TraceModel {
         joined: Joined,
         path: Option<CriticalPath>,
     ) -> bool {
-        match &mut self.source {
-            Source::Loaded(loaded) => loaded.adopt_critical_path(profile, joined, path),
-            _ => false,
-        }
+        self.loaded_mut()
+            .is_some_and(|loaded| loaded.adopt_critical_path(profile, joined, path))
     }
 
     /// The traced path's steps; none while it is traced or where the profile
@@ -1171,7 +1185,7 @@ impl TraceModel {
     /// panel holding state derived from the aggregate each hear only their own
     /// step, exactly once per build.
     pub(crate) fn ensure_aggregates(&mut self, cx: &mut Context<Self>) {
-        let Source::Loaded(loaded) = &self.source else {
+        let Some(loaded) = self.loaded() else {
             return;
         };
         let scan = loaded.flamer.clone();
@@ -1256,8 +1270,8 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, TraceModel, TracedPath, Tracing,
-        clock_source, critical_steps, nearly_critical_actions, step_slices,
+        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, Recorded, TraceModel, TracedPath,
+        Tracing, clock_source, critical_steps, nearly_critical_actions, step_slices,
     };
     use crate::flame_panel::{WEIGHT_CHOICES, weight_choice};
     use crate::groups::STACKED_GROUPS;
@@ -1289,7 +1303,9 @@ mod tests {
         let json = format!(
             r#"{{{other_data}"traceEvents":[{{"cat":"general information","name":"a","ph":"X","ts":0,"dur":100,"tid":1}}]}}"#
         );
-        Profile::from_bytes(json.as_bytes()).expect("parse test profile")
+        Profile::from_bytes(json.as_bytes())
+            .expect("parse test profile")
+            .into_inner()
     }
 
     #[test]
@@ -1324,7 +1340,9 @@ mod tests {
             {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}},
             {"cat":"general information","name":"a","ph":"X","ts":0,"dur":100,"tid":1}
         ]}"#;
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse test profile")
+            .into_inner();
         Arc::new(TrackFlamer::new(&Arc::new(profile)))
     }
 
@@ -1335,7 +1353,10 @@ mod tests {
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
 
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
         assert!(model.working_lanes().is_none());
 
@@ -1352,7 +1373,10 @@ mod tests {
         assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
 
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
         assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
         assert!(matches!(
             model.critical_path(),
@@ -1372,12 +1396,15 @@ mod tests {
         let unlogged = Joined::of(&session);
         let mut model = model();
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
         assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
 
         session.report_logged_spawns(LoggedSpawns::default());
         let logged = Joined::of(&session);
-        let Source::Loaded(loaded_profile) = &mut model.source else {
+        let Some(loaded_profile) = model.loaded_mut() else {
             panic!("a loaded profile");
         };
         loaded_profile.critical_path.retrace(tracing(logged));
@@ -1389,19 +1416,45 @@ mod tests {
         assert!(model.adopt_critical_path(loaded.profile(), logged, None));
     }
 
+    /// A profile read up to where its file is cut off is shown whole as far
+    /// as it goes, and said to end early.
+    #[test]
+    fn a_profile_cut_off_is_shown_as_far_as_it_goes() {
+        let mut model = model();
+        let loaded = flamer();
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
+        assert!(!model.cut_off());
+        model.source = Source::Loaded(Recorded::CutOff(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
+        assert!(model.cut_off());
+        assert!(
+            model
+                .profile()
+                .is_some_and(|shown| Arc::ptr_eq(shown, loaded.profile()))
+        );
+    }
+
     #[test]
     fn a_path_traced_before_the_action_graph_was_reported_is_traced_again_with_it() {
         let mut session = Session::default();
         let ungraphed = Joined::of(&session);
         let mut model = model();
         let loaded = flamer();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
         assert!(model.adopt_critical_path(loaded.profile(), ungraphed, None));
 
         session.report_action_graph(ActionGraph::default());
         let graphed = Joined::of(&session);
         assert_ne!(graphed, ungraphed);
-        let Source::Loaded(loaded_profile) = &mut model.source else {
+        let Some(loaded_profile) = model.loaded_mut() else {
             panic!("a loaded profile");
         };
         assert_ne!(
@@ -1429,9 +1482,12 @@ mod tests {
             critical_path: tracing(graphed),
             ..derivations()
         };
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derived));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derived,
+        )));
         assert!(model.adopt_critical_path(loaded.profile(), graphed, None));
-        let Source::Loaded(loaded_profile) = &model.source else {
+        let Some(loaded_profile) = model.loaded() else {
             panic!("a loaded profile");
         };
         assert_eq!(loaded_profile.critical_path.asked(), Joined::of(&session));
@@ -1447,7 +1503,7 @@ mod tests {
         let loaded = flamer();
         let mut loaded_profile = LoadedProfile::deriving(loaded.clone(), derivations());
         loaded_profile.critical_path.retrace(tracing(logged));
-        model.source = Source::Loaded(loaded_profile);
+        model.source = Source::Loaded(Recorded::Complete(loaded_profile));
         assert!(matches!(
             model.critical_path(),
             Some(TracedPath::Tracing { .. })
@@ -1495,11 +1551,16 @@ mod tests {
             r#"{{"cat":"action processing","name":"Compiling b","ph":"X","ts":0,"dur":90,"tid":{IDLE_TID},"out":"bazel-out/b.o"}}"#
         ));
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse test profile")
+            .into_inner();
         let path = CriticalPath::of(&profile, None, graph);
         let loaded = Arc::new(TrackFlamer::new(&Arc::new(profile)));
         let mut model = model();
-        model.source = Source::Loaded(LoadedProfile::deriving(loaded.clone(), derivations()));
+        model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
+            loaded.clone(),
+            derivations(),
+        )));
         assert!(model.adopt_critical_path(loaded.profile(), Joined::default(), path));
         let tracks = loaded.profile().threads().len();
         model.visible_tracks = vec![true; tracks];
@@ -1567,7 +1628,9 @@ mod tests {
             {{"cat":"action processing","name":"Linking a","ph":"X","ts":105,"dur":996,"tid":1,"out":"bazel-out/a","args":{{"target":"//a:a","configuration":"{CONFIGURATION}"}}}},
             {{"cat":"critical path component","name":"action 'Linking b'","ph":"X","ts":2000,"dur":10,"tid":0}}]}}"#
         );
-        let profile = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse test profile")
+            .into_inner();
         let path = CriticalPath::of(&profile, None, None).expect("a critical path");
         let steps = critical_steps(path.steps());
         assert_eq!(steps[0].primary_output(), Some("bazel-out/a"));

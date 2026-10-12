@@ -31,7 +31,9 @@ fn profile(wall: i64, steps: &[Event], spans: &[Event]) -> Profile {
             .map(|(span, tid)| span.json("action processing", tid)),
     );
     let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-    Profile::from_bytes(json.as_bytes()).expect("parse")
+    Profile::from_bytes(json.as_bytes())
+        .expect("parse")
+        .into_inner()
 }
 
 fn thread(tid: i64, name: &str) -> String {
@@ -177,7 +179,9 @@ fn a_profile_without_a_critical_path_lane_has_no_critical_path() {
         thread(MAIN_TID, "Main Thread"),
         event("buildTargets", 0, 10).json("general information", MAIN_TID)
     );
-    let profile = Profile::from_bytes(json.as_bytes()).expect("parse");
+    let profile = Profile::from_bytes(json.as_bytes())
+        .expect("parse")
+        .into_inner();
     assert_eq!(CriticalPath::of(&profile, None, None), None);
 }
 

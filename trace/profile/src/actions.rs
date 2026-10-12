@@ -414,7 +414,9 @@ mod tests {
             r#"{{"otherData":{{"profile_start_ts":{ORIGIN_MS}}},"traceEvents":[{}]}}"#,
             events.join(",")
         );
-        Profile::from_bytes(json.as_bytes()).expect("parse")
+        Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner()
     }
 
     fn runner(remote: bool, nested: &[Span]) -> Runner {
@@ -683,7 +685,9 @@ mod tests {
         let json = format!(
             r#"{{"traceEvents":[{{"cat":"{ACTION_CATEGORY}","name":"a","ph":"X","ts":0,"dur":100,"tid":2}}]}}"#
         );
-        let p = Profile::from_bytes(json.as_bytes()).expect("parse");
+        let p = Profile::from_bytes(json.as_bytes())
+            .expect("parse")
+            .into_inner();
         assert_eq!(p.actions().len(), 1);
         assert!(p.attempts().is_none());
     }

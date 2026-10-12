@@ -552,7 +552,11 @@ mod tests {
             {"name":"action count","ph":"C","ts":0,"tid":0,"args":{"action":3}},
             {"name":"action count","ph":"C","ts":100,"tid":0,"args":{"action":7}}
         ]}"#;
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     #[test]

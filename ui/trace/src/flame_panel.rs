@@ -1232,7 +1232,11 @@ mod tests {
             ));
         }
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     /// A profile of two execution lanes, "link" running alongside the first
@@ -1249,7 +1253,11 @@ mod tests {
             ));
         }
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     /// The aggregate over every track of `profile` under `weight`, each frame
@@ -1388,7 +1396,11 @@ mod tests {
         events.extend((0..THIN).map(|i| span(1, &format!("t{i:02}"), 8_000 + 5 * i, 5)));
         events.push(span(2, "link", 5_000, 5_000));
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     #[test]
@@ -1438,7 +1450,11 @@ mod tests {
             events.push(span(&format!("n{i:02}"), 5 * i, 5));
         }
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     #[test]
@@ -1526,7 +1542,11 @@ mod tests {
             }
         }
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     /// The tooltip lines ahead of the figures for the box of `profile`'s
@@ -1641,7 +1661,11 @@ mod tests {
             {"cat":"action processing","name":"Compiling a","ph":"X","ts":0,"dur":1000,"tid":1,
              "args":{"mnemonic":"Rustc"}}
         ]}"#;
-        let profile = Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"));
+        let profile = Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        );
         assert_eq!(
             heading(&profile, FlameLabels::Kind, "Compiling a", 2),
             ["Compiling a", "action processing"]

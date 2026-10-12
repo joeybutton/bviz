@@ -22,5 +22,7 @@ pub(crate) fn profile_of(threads: &[(String, usize)]) -> Profile {
         }
     }
     let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-    Profile::from_bytes(json.as_bytes()).expect("parse test profile")
+    let parsed = Profile::from_bytes(json.as_bytes()).expect("parse test profile");
+    assert!(!parsed.is_cut_off(), "the test profile parses whole");
+    parsed.into_inner()
 }

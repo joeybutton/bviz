@@ -2472,7 +2472,11 @@ mod tests {
 
     fn profile_of_events(events: Vec<String>) -> Arc<Profile> {
         let json = format!(r#"{{"traceEvents":[{}]}}"#, events.join(","));
-        Arc::new(Profile::from_bytes(json.as_bytes()).expect("parse test profile"))
+        Arc::new(
+            Profile::from_bytes(json.as_bytes())
+                .expect("parse test profile")
+                .into_inner(),
+        )
     }
 
     /// A profile of two threads, each carrying `per_thread` back-to-back
