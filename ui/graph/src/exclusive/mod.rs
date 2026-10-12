@@ -298,8 +298,10 @@ impl ExclusivePanel {
                 view.reselect(cx);
             }
         });
-        let filter_changed =
-            cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refilter(cx));
+        let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
+            view.roots.filter_changed();
+            view.refilter(cx);
+        });
         let verdicts_landed =
             cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.refilter(cx));
         let roots = roots::Setting::new(cx);
