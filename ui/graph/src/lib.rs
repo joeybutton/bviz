@@ -45,6 +45,7 @@ mod exclusive;
 mod filter;
 mod framing;
 mod fuzzy;
+mod hidden;
 mod hints;
 mod history;
 mod holder;

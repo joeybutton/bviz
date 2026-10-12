@@ -3,15 +3,15 @@
 
 use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
+use crate::hidden::{self, HiddenBy};
 use crate::history::History;
 use crate::mode::LayoutMode;
 use crate::point::{point_label, written_name};
 use crate::{GraphPanel, Palette, pins, why};
 use bviz_graph_layout::Id;
-use bviz_graph_layout::select::Hiding;
-use bviz_ui_components::{Button, LabelLine, TruncatingLabel};
+use bviz_ui_components::Button;
 use bviz_ui_workspace::PanelEvent;
-use gpui::{ClickEvent, Context, Div, actions, div, prelude::*};
+use gpui::{ClickEvent, Context, Div, actions};
 
 actions!(
     bviz_graph_reveal,
@@ -20,37 +20,6 @@ actions!(
         Accept,
     ]
 );
-
-/// What keeps a node out of the drawing, as a reader names it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum HiddenBy {
-    Paths,
-    /// The reader's own pin.
-    Pin,
-    /// The query the filter is scoped to, which does not name the node.
-    Query,
-    /// The panel's boxes menu, which unwraps the node.
-    Boxes,
-    /// The node frames others and none of them is drawn.
-    NothingToFrame,
-}
-
-impl HiddenBy {
-    /// Whether a reveal can bring the node into the drawing.
-    pub(crate) fn revealable(self) -> bool {
-        self != HiddenBy::NothingToFrame
-    }
-
-    pub(crate) fn describe(self) -> &'static str {
-        match self {
-            HiddenBy::Paths => "hidden by the dependency paths drawn",
-            HiddenBy::Pin => "hidden by its pin",
-            HiddenBy::Query => "outside the query",
-            HiddenBy::Boxes => "unwrapped by the boxes menu",
-            HiddenBy::NothingToFrame => "hidden: nothing it holds is drawn",
-        }
-    }
-}
 
 /// What a reveal waiting on a derivation does once it lands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -86,12 +55,7 @@ pub(crate) fn hidden_by(view: &GraphPanel, id: Id) -> Option<HiddenBy> {
 fn named(hidden: Hidden) -> HiddenBy {
     match hidden {
         Hidden::OffPaths => HiddenBy::Paths,
-        Hidden::Filtered(hiding) => match hiding {
-            Hiding::Pin => HiddenBy::Pin,
-            Hiding::Scope => HiddenBy::Query,
-            Hiding::Rule(_) => HiddenBy::Boxes,
-            Hiding::NothingToFrame => HiddenBy::NothingToFrame,
-        },
+        Hidden::Filtered(hiding) => HiddenBy::of(hiding),
     }
 }
 
@@ -303,79 +267,36 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
     let shared = &loaded.shared;
     let name = point_label(node, shared);
     let written = written_name(&shared.names, &shared.facets, shared.labels.repos(), node);
-    Some(
-        div()
-            .w_full()
-            .occlude()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2()
-            .rounded_md()
-            .bg(palette.container)
-            .text_xs()
-            .text_color(palette.label)
-            .child(LabelLine::new(name, palette.colors.text_muted).hinted("reveal-name", written))
-            .child(TruncatingLabel::new("reveal-reason", by.describe()))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_1()
-                    .children(by.revealable().then(|| {
-                        let reveal = Button::new(
-                            "reveal-anyway",
-                            cx.listener(move |view, _: &ClickEvent, _, cx| {
-                                reveal_anyway(view, node, cx)
-                            }),
-                        )
-                        .keys_for(&Accept, &view.focus_handle)
-                        .compact();
-                        match by {
-                            HiddenBy::Pin => reveal.label("unpin").tooltip("Unpin node"),
-                            _ => reveal.label("reveal anyway"),
-                        }
-                    }))
-                    .child(
-                        Button::new(
-                            "reveal-close",
-                            cx.listener(|view, _: &ClickEvent, _, cx| {
-                                dismiss(view);
-                                cx.notify();
-                            }),
-                        )
-                        .label("close")
-                        .tooltip("Close card")
-                        .keys_for(&crate::Dismiss, &view.focus_handle)
-                        .compact(),
-                    ),
-            ),
+    let reveal = by.revealable().then(|| {
+        let reveal = Button::new(
+            "reveal-anyway",
+            cx.listener(move |view, _: &ClickEvent, _, cx| reveal_anyway(view, node, cx)),
+        )
+        .keys_for(&Accept, &view.focus_handle)
+        .compact();
+        match by {
+            HiddenBy::Pin => reveal.label("unpin").tooltip("Unpin node"),
+            _ => reveal.label("reveal anyway"),
+        }
+    });
+    let close = Button::new(
+        "reveal-close",
+        cx.listener(|view, _: &ClickEvent, _, cx| {
+            dismiss(view);
+            cx.notify();
+        }),
     )
+    .label("close")
+    .tooltip("Close card")
+    .keys_for(&crate::Dismiss, &view.focus_handle)
+    .compact();
+    let offers = reveal.into_iter().chain([close]);
+    Some(hidden::card(name, written, by.describe(), offers, palette))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn filtered(hiding: Hiding) -> HiddenBy {
-        named(Hidden::Filtered(hiding))
-    }
-
-    /// The panel's own rules are the boxes menu's, so the reader is told to
-    /// turn that back.
-    #[test]
-    fn a_rule_is_named_as_the_boxes_menu() {
-        assert_eq!(filtered(Hiding::Rule(0)), HiddenBy::Boxes);
-    }
-
-    /// A pin outranks the scope, so revealing a node the query leaves out
-    /// draws it.
-    #[test]
-    fn a_node_outside_the_query_is_hidden_by_it_and_revealable() {
-        let by = filtered(Hiding::Scope);
-        assert_eq!(by, HiddenBy::Query);
-        assert!(by.revealable());
-    }
 
     /// The node a stop names, where it names one.
     fn node(stop: Option<Stop>) -> Option<Id> {
@@ -412,17 +333,5 @@ mod tests {
         assert_eq!(node(jumps.back()), Some(Id(5)));
         assert_eq!(node(jumps.back()), Some(Id(1)));
         assert!(jumps.back().is_none());
-    }
-
-    #[test]
-    fn only_a_frame_with_nothing_drawn_inside_cannot_be_revealed() {
-        assert!(!filtered(Hiding::NothingToFrame).revealable());
-        for revealable in [
-            HiddenBy::Paths,
-            filtered(Hiding::Pin),
-            filtered(Hiding::Scope),
-        ] {
-            assert!(revealable.revealable());
-        }
     }
 }
