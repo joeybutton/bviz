@@ -737,11 +737,7 @@ fn listed(
     })
     .child(div().flex_grow_1().min_w_0().child({
         let (shown, parts) = index::reading(shared, candidate);
-        // A shorthand shows a name's chars where its place reads them, ahead
-        // of the chars of the place matched before them.
-        let mut matched: Vec<u32> = row.matched.iter().filter_map(|&at| shown.at(at)).collect();
-        matched.sort_unstable();
-        matched.dedup();
+        let matched = fuzzy::shown_matches(&shown, &row.matched);
         let picked = fuzzy::matched_style(palette.highlight.into());
         LabelLine::parted(shown.into_text(), parts, colors.text_muted)
             .picked(matched, picked)

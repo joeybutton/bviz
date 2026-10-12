@@ -191,21 +191,25 @@ impl Parts {
         }
     }
 
-    /// The parts of `text` with its lead in the ink of its name, ending at
-    /// the byte `place_start`, and its name starting at the byte
-    /// `name_start`; `None` where those are out of order or not char
-    /// boundaries of `text`.
-    pub fn led(text: &str, place_start: usize, name_start: usize) -> Option<Self> {
-        let parts = Self {
-            place_start,
-            name_start,
+    /// The parts of `text` with its lead in the ink of its name, its place
+    /// the chars `place`, its name the chars after; `None` where `place` is
+    /// out of order or reaches past the end of `text`.
+    pub fn led(text: &str, place: Range<u32>) -> Option<Self> {
+        let in_order = place.start <= place.end && place.end as usize <= text.chars().count();
+        in_order.then(|| Self {
+            place_start: byte_at(text, place.start),
+            name_start: byte_at(text, place.end),
             lead_muted: false,
-        };
-        let bounds = place_start <= name_start
-            && text.is_char_boundary(place_start)
-            && text.is_char_boundary(name_start);
-        bounds.then_some(parts)
+        })
     }
+}
+
+/// The byte of `text` where its char `char` starts, or its length for the
+/// char past its last.
+fn byte_at(text: &str, char: u32) -> usize {
+    text.char_indices()
+        .nth(char as usize)
+        .map_or(text.len(), |(byte, _)| byte)
 }
 
 /// Text cut short to fit, or the whole of it where it fits, with where each
@@ -384,13 +388,7 @@ fn lay_out(
         true => 0,
         false => fitted.at(place_start as u32).unwrap_or(0),
     };
-    let byte = |char: u32| {
-        let text = &fitted.text;
-        text.char_indices()
-            .nth(char as usize)
-            .map_or(text.len(), |(byte, _)| byte)
-    };
-    fitted.muted = byte(start.min(end))..byte(end);
+    fitted.muted = byte_at(&fitted.text, start.min(end))..byte_at(&fitted.text, end);
     fitted
 }
 
@@ -555,7 +553,7 @@ mod tests {
     #[test]
     fn a_led_text_keeps_its_lead_and_maps_the_chars_it_keeps() {
         let text = "CppCompile out/k8/bin/foo.o";
-        let parts = Parts::led(text, 11, 22).unwrap();
+        let parts = Parts::led(text, 11..22).unwrap();
         let fitted = super::fit(text, parts, 20.0, chars);
         assert_eq!(fitted.text(), "CppCompile o…n/foo.o");
         assert_eq!(fitted.muted(), 11..17);
@@ -563,7 +561,7 @@ mod tests {
         assert_eq!(fitted.at(13), None);
         assert_eq!(fitted.at(20), Some(13));
         assert_eq!(fitted.at(22), Some(15));
-        assert_eq!(Parts::led(text, 22, 11), None);
+        assert_eq!(Parts::led(text, 11..40), None);
     }
 
     #[test]

@@ -233,16 +233,8 @@ pub(crate) fn container(shared: &Shared, id: Id, kind: Kind) -> Option<String> {
 /// parted where that leads up to the node's own name.
 pub(crate) fn reading(shared: &Shared, candidate: &Candidate) -> (Shown, Parts) {
     let shown = shared.labels.repos().names().show(&candidate.text);
-    let parts = Parts::of_label(shown.text()).or_else(|| {
-        let text = shown.text();
-        let path = path(text, candidate.kind);
-        let byte = |char: u32| {
-            text.char_indices()
-                .nth(char as usize)
-                .map_or(text.len(), |(byte, _)| byte)
-        };
-        Parts::led(text, byte(path.start), byte(path.end))
-    });
+    let text = shown.text();
+    let parts = Parts::of_label(text).or_else(|| Parts::led(text, path(text, candidate.kind)));
     (shown, parts.unwrap_or_default())
 }
 

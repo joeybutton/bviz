@@ -13,10 +13,14 @@ use bviz_graph_layout::query_lang::{
     ArgType, Command, Function, Params, Place, Readable, Vocabulary, word_at, written_word,
 };
 use bviz_graph_layout::{Id, Kind};
+use bviz_label::names::RepoNames;
+use bviz_label::shown::Parts;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place as PointerPlace, Pointer,
 };
-use bviz_ui_components::{ListScroll, TextTooltip, key_text_within, list_scrollbar, menu_chrome};
+use bviz_ui_components::{
+    LabelLine, ListScroll, TextTooltip, key_text_within, list_scrollbar, menu_chrome,
+};
 use gpui::{
     App, ClickEvent, Context, Deferred, Div, Entity, Focusable, KeyContext, MouseButton,
     MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
@@ -681,6 +685,7 @@ pub(super) fn list(
                 let row = Listed {
                     completion: &completion,
                     row,
+                    names: offered.completions.shared().labels.repos().names(),
                     index,
                     kind,
                     note,
@@ -724,6 +729,8 @@ pub(super) fn list(
 struct Listed<'a> {
     completion: &'a Completion<'a>,
     row: &'a Row,
+    /// The names the graph shows repositories by.
+    names: &'a RepoNames,
     index: usize,
     kind: &'static str,
     /// The row's tooltip.
@@ -740,6 +747,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
     let Listed {
         completion,
         row,
+        names,
         index,
         kind,
         note,
@@ -752,17 +760,32 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
         Named::Function(function) => Some(function),
         _ => None,
     };
-    let (text, muted) = match function {
-        Some(function) => {
-            let signature = signature(function);
-            let name = chars(function.name())..chars(&signature);
-            (signature, name)
-        }
-        None => (completion.text.to_string(), completion.path.clone()),
-    };
     let ink = match function.and_then(Function::unevaluable) {
         Some(_) => colors.text_disabled,
         None => colors.text,
+    };
+    let text = match function {
+        Some(function) => {
+            let signature = signature(function);
+            let name = chars(function.name())..chars(&signature);
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis_start()
+                .child(fuzzy::highlighted(
+                    signature.into(),
+                    &name,
+                    &row.matched,
+                    colors.text_muted,
+                    palette.highlight.into(),
+                ))
+                .into_any_element()
+        }
+        None => {
+            let line = pattern_line(completion, row, names, palette);
+            line.hinted("text", completion.text.to_owned())
+                .into_any_element()
+        }
     };
     let aimed = accepts == Some(Accepts::Aimed);
     menu_chrome::clear_of_scrollbar(menu_chrome::aimed_row(
@@ -782,22 +805,7 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
             }
         });
     })
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis_start()
-            .text_color(ink)
-            .child(fuzzy::highlighted(
-                text.into(),
-                &muted,
-                &row.matched,
-                colors.text_muted,
-                palette.highlight.into(),
-            )),
-    )
+    .child(div().flex_1().min_w_0().text_color(ink).child(text))
     .children(accepts_keys.map(|keys| {
         div()
             .flex_none()
@@ -816,6 +824,27 @@ fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Sta
             .text_color(colors.text_muted)
             .child(kind),
     )
+}
+
+/// The pattern `completion` offers as `names` shows it, parted where it leads
+/// up to what it names, the chars `row` matched picked out.
+fn pattern_line(
+    completion: &Completion,
+    row: &Row,
+    names: &RepoNames,
+    palette: &Palette,
+) -> LabelLine {
+    let shown = names.show(completion.text);
+    let matched = fuzzy::shown_matches(&shown, &row.matched);
+    let text = shown.text();
+    let led = || {
+        let start = shown.at(completion.path.start)?;
+        let end = shown.at(completion.path.end).unwrap_or(chars(text));
+        Parts::led(text, start..end)
+    };
+    let parts = Parts::of_label(text).or_else(led).unwrap_or_default();
+    let picked = fuzzy::matched_style(palette.highlight.into());
+    LabelLine::parted(shown.into_text(), parts, palette.colors.text_muted).picked(matched, picked)
 }
 
 /// How a row reads `function`: its name and Bazel's signature for it, an

@@ -4,6 +4,7 @@
 mod rank;
 
 use crate::GraphPanel;
+use bviz_label::shown::Shown;
 use gpui::{
     Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
     px, rems,
@@ -316,6 +317,16 @@ pub(crate) fn rank_few<'a>(
     found.sort_by_key(|&(score, index, _)| (std::cmp::Reverse(score), index));
     let found = found.into_iter().map(|(_, index, text)| (index, text));
     rank::rank(found, query, &pattern, &mut matcher, standing)
+}
+
+/// The chars of `shown` standing for the chars `matched` of the text as it
+/// is written, ascending. A shorthand shows a name's chars where its place
+/// reads them, ahead of the chars of the place matched before them.
+pub(crate) fn shown_matches(shown: &Shown, matched: &[u32]) -> Vec<u32> {
+    let mut shown_matched: Vec<u32> = matched.iter().filter_map(|&at| shown.at(at)).collect();
+    shown_matched.sort_unstable();
+    shown_matched.dedup();
+    shown_matched
 }
 
 /// `text` with its `path` muted and the `matched` chars picked out over it.
