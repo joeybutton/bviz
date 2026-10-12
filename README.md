@@ -44,6 +44,8 @@ not tested in CI. The macOS binaries are not signed, and macOS blocks an unsigne
 download until you clear its quarantine flag:
 `xattr -d com.apple.quarantine bviz`.
 
+bviz reads the outputs of Bazel 8.0 or newer.
+
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quick start
@@ -66,6 +68,18 @@ echo 'try-import %workspace%/.bviz/bazelrc' >> .bazelrc
 ```
 
 Then follow the instructions at the top of `.bviz/bazelrc`.
+
+Each input flag takes the file one Bazel invocation writes. The bazelrc adds
+further flags that give the views more to show.
+
+| bviz flag | Written by |
+| --- | --- |
+| `--profile FILE` | `bazel build --profile=FILE` |
+| `--bep FILE` | `bazel build --build_event_binary_file=FILE` |
+| `--exec_log FILE` | `bazel build --execution_log_compact_file=FILE` |
+| `--query FILE` | `bazel query --output=streamed_proto ... > FILE` |
+| `--cquery FILE` | `bazel cquery --output=streamed_proto --transitions=lite ... > FILE` |
+| `--aquery FILE` | `bazel aquery --output=streamed_proto ... > FILE` |
 
 ## Getting help
 
