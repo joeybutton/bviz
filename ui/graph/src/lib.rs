@@ -208,7 +208,6 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
-        KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
@@ -219,7 +218,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", scatter::RevealAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
-    bindings.extend(chips::bindings(unless_typing));
+    bindings.extend(chips::bindings());
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(KEY_CONTEXT));
@@ -1659,21 +1658,23 @@ mod tests {
     }
 
     /// The exclusive-deps panel's roots field is reached by the keys reaching
-    /// the graph's query bar and finder, and `q` is text inside it.
+    /// the graph's finder, `q` reaching the query bar as in every view, and
+    /// both are text inside it.
     #[test]
-    fn the_roots_field_is_reached_by_q_and_the_find_keys() {
+    fn the_roots_field_is_reached_by_the_find_keys() {
         const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
         const IN_ROOTS: &[&str] = &[
             exclusive::KEY_CONTEXT.id(),
             exclusive::ROOTS_KEY_CONTEXT.id(),
             text_input::KEY_CONTEXT.id(),
         ];
-        for keys in ["q", "secondary-f", "/"] {
+        for keys in ["secondary-f", "/"] {
             assert!(
                 is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
                 "{keys}"
             );
         }
+        assert!(is(dispatched("q", IN_EXCLUSIVE), chips::Focus));
         assert!(dispatched("q", IN_ROOTS).is_none());
         let in_query_field = &[
             exclusive::KEY_CONTEXT.id(),
@@ -1904,6 +1905,7 @@ mod tests {
                 chips::FIELD_KEY_CONTEXT.id(),
                 text_input::KEY_CONTEXT.id(),
             ];
+            assert!(is(dispatched("q", outside), chips::Focus), "{holder}");
             assert!(
                 is(dispatched("secondary-enter", outside), chips::Apply),
                 "{holder}"

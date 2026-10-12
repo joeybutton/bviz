@@ -146,9 +146,8 @@ const NOTICE_WIDTH: Pixels = px(480.);
 
 const PLACEHOLDER: &str = "query: //foo/... or deps()";
 
-/// The bar's keys; `unless_typing` scopes the key focusing it from the graph
-/// panel.
-pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
+/// The bar's keys.
+pub(crate) fn bindings() -> Vec<KeyBinding> {
     let field = Some(FIELD_KEY_CONTEXT.id());
     let on_chips = format!("{KEY_CONTEXT} && !{FIELD_KEY_CONTEXT}");
     let on_chips = Some(on_chips.as_str());
@@ -158,6 +157,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
     // bar, its own field included: one predicate, which the keys help lists
     // once.
     let outside_fields = HOLDERS.map(text_input::unless_typing).join(" || ");
+    let holders = Some(outside_fields.as_str());
     let holder_or_bar = format!("{outside_fields} || {KEY_CONTEXT}");
     let holder_or_bar = Some(holder_or_bar.as_str());
     vec![
@@ -166,7 +166,7 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
         KeyBinding::new("tab", AcceptCompletion, completing),
         KeyBinding::new("enter", AcceptCompletion, aimed),
         KeyBinding::new("escape", CloseCompletion, completing),
-        KeyBinding::new("q", Focus, unless_typing),
+        KeyBinding::new("q", Focus, holders),
         KeyBinding::new("secondary-enter", Apply, holder_or_bar),
         KeyBinding::new("enter", Commit, field),
         KeyBinding::new("escape", Leave, field),

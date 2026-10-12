@@ -1765,6 +1765,10 @@ impl Render for ExclusivePanel {
                     picker.cycle(cx);
                 }
             }))
+            .on_action(cx.listener(|view, _: &chips::Focus, window, cx| {
+                view.chips
+                    .update(cx, |bar, cx| chips::focus(bar, window, cx));
+            }))
             .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
                 view.chips.update(cx, chips::apply_staged);
             }))
