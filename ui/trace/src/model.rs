@@ -11,14 +11,16 @@ use bviz_invocation::spawn::LoggedSpawns;
 use bviz_invocation::{
     ActionGraph, Chosen, ConfiguredTarget, CriticalStep, Recorded, Revision, Session,
 };
+use bviz_label::names::RepoNames;
 use bviz_trace_layout::{
     FlameMode, LaneLayout, ScopeAggregate, TimeSelection, TrackFlamer, WorkingLanes, lay_out_lanes,
 };
-use bviz_trace_profile::{LaneClass, Profile, SliceAt, TimeSpan};
+use bviz_trace_profile::{LaneClass, Profile, SliceAt, Str, TimeSpan};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_playback::{Clock, DocumentClock, OnClock, Span};
 use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -160,9 +162,25 @@ impl HeldChoice {
     }
 }
 
+/// The names the repositories the labels `profile` records name are shown
+/// by, told apart among those alone.
+fn repo_names(profile: &Profile) -> RepoNames {
+    let mut targets: HashSet<Str> = HashSet::new();
+    for track in profile.threads() {
+        let named = profile
+            .details(track)
+            .iter()
+            .filter_map(|detail| detail.target.get());
+        targets.extend(named);
+    }
+    RepoNames::of_labels(targets.into_iter().map(|target| profile.str(target)))
+}
+
 /// A loaded profile with what is derived from it once for every reader of it.
 pub(crate) struct LoadedProfile {
     flamer: Arc<TrackFlamer>,
+    /// The names the repositories the profile's labels name are shown by.
+    repos: RepoNames,
     working_lanes: Derived<WorkingLanes>,
     critical_path: TracedPath,
     /// Derives the profile's action timings and attempts and reports them to
@@ -330,6 +348,7 @@ impl LoadedProfile {
     /// its critical path joined to what `session` holds.
     fn new(
         profile: Profile,
+        repos: RepoNames,
         session: Option<&Entity<Session>>,
         cx: &mut Context<TraceModel>,
     ) -> LoadedProfile {
@@ -375,13 +394,19 @@ impl LoadedProfile {
                     working_lanes: deriving,
                     critical_path: tracing,
                 },
+                repos,
             )
         }
     }
 
-    fn deriving(flamer: Arc<TrackFlamer>, derivations: Derivations) -> LoadedProfile {
+    fn deriving(
+        flamer: Arc<TrackFlamer>,
+        derivations: Derivations,
+        repos: RepoNames,
+    ) -> LoadedProfile {
         LoadedProfile {
             flamer,
+            repos,
             working_lanes: Derived::Deriving {
                 _derivation: derivations.working_lanes,
             },
@@ -531,15 +556,18 @@ impl TraceModel {
             .map(|session| cx.observe(session, |model, _, cx| model.rejoin(cx)));
         let load = load_in_background(
             cx,
-            move || profile.join(),
-            |model, result, cx| {
+            move || {
+                let profile = profile.join()?;
+                let repos = repo_names(profile.get());
+                Ok((profile, repos))
+            },
+            |model, result: Result<(Recorded<Profile>, RepoNames), String>, cx| {
                 let source = match result {
-                    Ok(profile) => {
+                    Ok((profile, repos)) => {
                         let session = model.session.clone();
-                        Source::Loaded(
-                            profile
-                                .map(|profile| LoadedProfile::new(profile, session.as_ref(), cx)),
-                        )
+                        Source::Loaded(profile.map(|profile| {
+                            LoadedProfile::new(profile, repos, session.as_ref(), cx)
+                        }))
                     }
                     Err(err) => Source::Failed(err),
                 };
@@ -657,6 +685,14 @@ impl TraceModel {
 
     pub(crate) fn profile(&self) -> Option<&Arc<Profile>> {
         self.loaded().map(LoadedProfile::profile)
+    }
+
+    /// The names the loaded profile's repositories are shown by.
+    pub(crate) fn repos(&self) -> Option<&RepoNames> {
+        match &self.source {
+            Source::Loaded(loaded) => Some(&loaded.get().repos),
+            _ => None,
+        }
     }
 
     /// The loaded profile's working lanes, once derived.
@@ -1269,8 +1305,8 @@ fn clock_source(profile: &Profile) -> Option<bviz_ui_playback::Source> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, Recorded, TraceModel, TracedPath,
-        Tracing, clock_source, critical_steps, nearly_critical_actions, step_slices,
+        Chosen, Derivations, HeldChoice, Joined, LoadedProfile, Recorded, RepoNames, TraceModel,
+        TracedPath, Tracing, clock_source, critical_steps, nearly_critical_actions, step_slices,
     };
     use crate::groups::STACKED_GROUPS;
     use crate::track_order::TrackSort;
@@ -1344,6 +1380,27 @@ mod tests {
         Arc::new(TrackFlamer::new(&Arc::new(profile)))
     }
 
+    /// The repositories a profile's labels name are shown as a graph of the
+    /// same build shows them, told apart among those the profile names.
+    #[test]
+    fn a_profile_s_labels_are_shown_by_the_repositories_it_names() {
+        let json = r#"{"traceEvents":[
+            {"name":"thread_name","ph":"M","tid":1,"args":{"name":"skyframe-evaluator-execution-1"}},
+            {"cat":"action processing","name":"Compiling a","ph":"X","ts":0,"dur":10,"tid":1,"args":{"target":"@@llvm++llvm+llvm-project//llvm:Support"}},
+            {"cat":"action processing","name":"Compiling b","ph":"X","ts":20,"dur":10,"tid":1,"args":{"target":"//b:b"}}
+        ]}"#;
+        let profile = Profile::from_bytes(json.as_bytes())
+            .expect("parse test profile")
+            .into_inner();
+        let repos = super::repo_names(&profile);
+        let shown = |label| repos.shown_label(label);
+        assert_eq!(
+            shown("@@llvm++llvm+llvm-project//llvm:Support"),
+            "@llvm-project//llvm:Support"
+        );
+        assert_eq!(shown("//b:b"), "//b");
+    }
+
     #[test]
     fn working_lanes_are_adopted_only_by_the_loaded_profile_they_were_derived_from() {
         let mut model = model();
@@ -1354,6 +1411,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(!model.adopt_working_lanes(&replaced, replaced.working_lanes()));
         assert!(model.working_lanes().is_none());
@@ -1374,6 +1432,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(!model.adopt_critical_path(replaced.profile(), unlogged, None));
         assert!(matches!(
@@ -1397,6 +1456,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(model.adopt_critical_path(loaded.profile(), unlogged, None));
 
@@ -1423,11 +1483,13 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(!model.cut_off());
         model.source = Source::Loaded(Recorded::CutOff(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(model.cut_off());
         assert!(
@@ -1446,6 +1508,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(model.adopt_critical_path(loaded.profile(), ungraphed, None));
 
@@ -1483,6 +1546,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derived,
+            RepoNames::default(),
         )));
         assert!(model.adopt_critical_path(loaded.profile(), graphed, None));
         let Some(loaded_profile) = model.loaded() else {
@@ -1499,7 +1563,8 @@ mod tests {
         let logged = Joined::of(&session);
         let mut model = model();
         let loaded = flamer();
-        let mut loaded_profile = LoadedProfile::deriving(loaded.clone(), derivations());
+        let mut loaded_profile =
+            LoadedProfile::deriving(loaded.clone(), derivations(), RepoNames::default());
         loaded_profile.critical_path.retrace(tracing(logged));
         model.source = Source::Loaded(Recorded::Complete(loaded_profile));
         assert!(matches!(
@@ -1558,6 +1623,7 @@ mod tests {
         model.source = Source::Loaded(Recorded::Complete(LoadedProfile::deriving(
             loaded.clone(),
             derivations(),
+            RepoNames::default(),
         )));
         assert!(model.adopt_critical_path(loaded.profile(), Joined::default(), path));
         let tracks = loaded.profile().threads().len();

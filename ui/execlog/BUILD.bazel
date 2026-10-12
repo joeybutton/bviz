@@ -13,6 +13,7 @@ rust_library(
     deps = [
         "//execlog",
         "//invocation",
+        "//label",
         "//ui/assets",
         "//ui/components",
         "//ui/execlog/args",

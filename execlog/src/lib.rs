@@ -76,6 +76,12 @@ impl ExecLog {
         self.spawns.len()
     }
 
+    /// The labels of the targets the log's spawns belong to, one per spawn
+    /// naming one.
+    pub fn target_labels(&self) -> impl Iterator<Item = &str> {
+        self.spawns().filter_map(|spawn| spawn.target_label())
+    }
+
     /// Every spawn's time summed: spawns overlap, so this is no wall time.
     pub fn timing(&self) -> PhaseTiming {
         let mut sum = PhaseTiming::default();

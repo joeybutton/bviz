@@ -4,11 +4,14 @@ use crate::model::Source;
 use crate::palette::Palette;
 use crate::summary::{GroupRow, Runner, Summary, TopSpawn};
 use bviz_execlog::{Phase, PhaseTiming};
+use bviz_label::names::RepoNames;
+use bviz_label::shown::Parts;
 use bviz_ui_components::gesture::{GestureRow, Gestures, Pointer};
 use bviz_ui_components::{
-    Dropdown, DropdownEvent, KeyScope, Legend, LegendEntry, LegendState, ListScroll, OneRow,
-    SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip, TruncatingLabel, cut_off_note,
-    legend_gestures, list_scrollbar, sort_gesture, sort_header, sort_hint,
+    Dropdown, DropdownEvent, HintedLabelLine, KeyScope, LabelLine, Legend, LegendEntry,
+    LegendState, ListScroll, OneRow, SCROLLBAR_THICKNESS, ShowLegend, Sort, Swatch, TextTooltip,
+    TruncatingLabel, cut_off_note, legend_gestures, list_scrollbar, sort_gesture, sort_header,
+    sort_hint,
 };
 use bviz_ui_spawn_phase::phase_name;
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -234,7 +237,7 @@ impl SpawnTimePanel {
                     .child(section(
                         "Longest in a phase",
                         Some(labelled("Phase", shown.phase_picker.clone())),
-                        top_table(phase, &summary.top[phase.index()], palette),
+                        top_table(phase, &summary.top[phase.index()], &summary.repos, palette),
                         palette,
                     ))
             });
@@ -514,8 +517,11 @@ const TOP_COLUMNS: [Column; 4] = [
     text(Width::Rest),
 ];
 
+/// What names a spawn that names neither its target nor its output.
+const NO_TARGET_OR_OUTPUT: &str = "no target or output";
+
 /// `spawns`, longest in `phase` first, each named by its target and output.
-fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
+fn top_table(phase: Phase, spawns: &[TopSpawn], repos: &RepoNames, palette: &Palette) -> Div {
     if spawns.is_empty() {
         return div()
             .text_color(palette.colors.text_muted)
@@ -530,11 +536,23 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
             .map(|(column, title)| cell(column, title)),
         palette,
     );
+    let muted = palette.colors.text_muted;
+    let label = |label: &str| {
+        let written = repos.written_label(label);
+        LabelLine::new(repos.show(&written).into_text(), muted)
+            .hinted("target", written.into_owned())
+    };
+    let path = |id: &'static str, path: &SharedString| -> HintedLabelLine {
+        LabelLine::parted(path.clone(), Parts::of_path(path), muted).hinted(id, path.clone())
+    };
     let body = spawns.iter().enumerate().map(|(index, spawn)| {
         let (first, second) = match (&spawn.target_label, &spawn.primary_output) {
-            (Some(label), output) => (label.clone(), output.clone()),
-            (None, Some(output)) => (output.clone(), None),
-            (None, None) => ("no target or output".into(), None),
+            (Some(target), output) => (label(target), output.as_ref().map(|o| path("output", o))),
+            (None, Some(output)) => (path("output", output), None),
+            (None, None) => {
+                let none = LabelLine::new(NO_TARGET_OR_OUTPUT, muted);
+                (none.hinted("none", NO_TARGET_OR_OUTPUT), None)
+            }
         };
         row(
             ("top", index),
@@ -552,11 +570,12 @@ fn top_table(phase: Phase, spawns: &[TopSpawn], palette: &Palette) -> Div {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
-                        .child(TruncatingLabel::new("first", first))
+                        .child(first)
                         .children(second.map(|output| {
-                            TruncatingLabel::new("second", output)
+                            div()
                                 .text_xs()
                                 .text_color(palette.colors.text_muted)
+                                .child(output)
                         })),
                 ),
             ],

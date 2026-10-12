@@ -5,6 +5,7 @@ use bviz_critical_path::{
     Coverage, CriticalPath, Fit, Lever, Modeled, NearlyCritical, Part, Phase, Ran, SpanSplit,
     SpawnRunner, Spawned, Step, StepModel, Work,
 };
+use bviz_label::names::RepoNames;
 pub(crate) use bviz_ui_spawn_phase::phase_name;
 use std::time::Duration;
 
@@ -319,12 +320,24 @@ pub(crate) fn part_account(part: Part, path: &CriticalPath) -> String {
 
 /// A step's tooltip: everything known of what it ran. `logged` says whether
 /// an execution log of the invocation was given.
-pub(crate) fn step_tip(step: &Step, logged: bool) -> String {
+pub(crate) fn step_tip(step: &Step, logged: bool, repos: &RepoNames) -> String {
     let mut lines = vec![step.name().to_owned()];
-    let known = [step.mnemonic(), step.target(), step.primary_output()];
-    lines.extend(known.into_iter().flatten().map(str::to_owned));
+    lines.extend(step.mnemonic().map(str::to_owned));
+    lines.extend(
+        step.target()
+            .into_iter()
+            .flat_map(|target| named(target, repos)),
+    );
+    lines.extend(step.primary_output().map(str::to_owned));
     lines.extend(work_note(step.work(), logged));
     lines.join("\n")
+}
+
+/// The lines a tooltip names `target`, a label as the profile prints it, in:
+/// as `repos` shows it, and as written where that reads otherwise.
+fn named(target: &str, repos: &RepoNames) -> impl Iterator<Item = String> {
+    let (shown, written) = repos.shown_with_written(target);
+    std::iter::once(shown).chain(written)
 }
 
 /// What a step's Could save cell shows: its ceiling, nothing where the
@@ -418,14 +431,12 @@ pub(crate) const NO_NEARLY_CRITICAL: &str = "No action off the path can turn cri
 
 /// An action nearly critical's tooltip: everything known of it, and its
 /// slack.
-pub(crate) fn nearly_critical_tip(action: &NearlyCritical) -> String {
+pub(crate) fn nearly_critical_tip(action: &NearlyCritical, repos: &RepoNames) -> String {
     let mut lines = vec![action.description.clone()];
-    let known = [
-        action.mnemonic.as_deref(),
-        action.target.as_deref(),
-        Some(action.primary_output.as_str()),
-    ];
-    lines.extend(known.into_iter().flatten().map(str::to_owned));
+    lines.extend(action.mnemonic.clone());
+    let target = action.target.as_deref();
+    lines.extend(target.into_iter().flat_map(|target| named(target, repos)));
+    lines.push(action.primary_output.clone());
     lines.push(format!(
         "{} · slack {}",
         duration(action.duration),
@@ -653,7 +664,7 @@ pub(super) mod tests {
         let modeled = path.modeled().expect("modeled");
         assert_eq!(nearly_critical_title(modeled), "nearly critical (2)");
         assert_eq!(
-            nearly_critical_tip(&modeled.nearly_critical()[1]),
+            nearly_critical_tip(&modeled.nearly_critical()[1], &RepoNames::default()),
             "Compiling b.c\nCppCompile\n//b\nbazel-out/b.o\n1.50ms · slack 800µs"
         );
     }
@@ -710,5 +721,22 @@ pub(super) mod tests {
         assert_eq!(waited(0, Duration::ZERO), "");
         assert_eq!(waited(1, Duration::ZERO), NO_WAIT);
         assert_eq!(waited(1, ms(6)), "6.00ms");
+    }
+
+    /// A target shown shorter than the profile prints it is named as
+    /// written too.
+    #[test]
+    fn a_target_shown_shorter_is_named_as_written_too() {
+        let target = "@@llvm++llvm+llvm-project//llvm:Support";
+        let repos = RepoNames::of_labels([target].into_iter());
+        assert_eq!(
+            named(target, &repos).collect::<Vec<_>>(),
+            [
+                "@llvm-project//llvm:Support",
+                "written @@llvm++llvm+llvm-project//llvm:Support"
+            ]
+        );
+        let plain = "//a:b";
+        assert_eq!(named(plain, &repos).collect::<Vec<_>>(), ["//a:b"]);
     }
 }

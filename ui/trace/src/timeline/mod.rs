@@ -411,8 +411,9 @@ impl Render for Timeline {
             }
             let model = timeline.model.read(cx);
             let session = model.session().map(|session| session.read(cx));
+            let repos = model.repos()?;
             Some(ShownCard {
-                lines: slice_tooltip(&hovered, session).into(),
+                lines: slice_tooltip(&hovered, session, repos).into(),
                 anchor: CardAnchor::Pointer(at),
             })
         });

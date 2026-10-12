@@ -19,6 +19,8 @@ use bviz_critical_path::{
     Coverage, CriticalPath, Modeled, NearlyCritical, Part, Phase, Spawned, Step,
 };
 use bviz_invocation::Chosen;
+use bviz_label::names::RepoNames;
+use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{self, Entry, GestureRow, Gestures, Input, Place, Pointer};
 use bviz_ui_components::{
     KeyScope, LegendEntry, ListScroll, SCROLLBAR_THICKNESS, Sort, Swatch, TextTooltip, ToggleGroup,
@@ -463,20 +465,28 @@ impl CriticalPathPanel {
                     let Some(modeled) = traced_path(model).and_then(CriticalPath::modeled) else {
                         return Vec::new();
                     };
+                    let Some(repos) = model.repos() else {
+                        return Vec::new();
+                    };
                     let chosen = model.chosen(cx).map(|(chosen, _)| chosen);
                     range
                         .map(|row| {
                             let index = order[row];
-                            nearly_critical_row(index, &modeled.nearly_critical()[index], &palette)
-                                .map(|row| {
-                                    choosable(
-                                        row,
-                                        Chosen::NearlyCritical(index),
-                                        chosen,
-                                        entity.clone(),
-                                        &palette,
-                                    )
-                                })
+                            nearly_critical_row(
+                                index,
+                                &modeled.nearly_critical()[index],
+                                repos,
+                                &palette,
+                            )
+                            .map(|row| {
+                                choosable(
+                                    row,
+                                    Chosen::NearlyCritical(index),
+                                    chosen,
+                                    entity.clone(),
+                                    &palette,
+                                )
+                            })
                         })
                         .collect()
                 }
@@ -533,7 +543,7 @@ impl CriticalPathPanel {
             let entity = entity.clone();
             move |range, _, cx| {
                 let model = entity.read(cx).model.read(cx);
-                let Some(path) = traced_path(model) else {
+                let (Some(path), Some(repos)) = (traced_path(model), model.repos()) else {
                     return Vec::new();
                 };
                 let against = Against {
@@ -547,9 +557,15 @@ impl CriticalPathPanel {
                     .map(|row| {
                         let index = order[row];
                         let entity = entity.clone();
-                        step_row(index, &path.steps()[index], against, &palette, &fills).map(
-                            |row| choosable(row, Chosen::Step(index), chosen, entity, &palette),
+                        step_row(
+                            index,
+                            &path.steps()[index],
+                            repos,
+                            against,
+                            &palette,
+                            &fills,
                         )
+                        .map(|row| choosable(row, Chosen::Step(index), chosen, entity, &palette))
                     })
                     .collect()
             }
@@ -951,6 +967,7 @@ struct Against {
 fn step_row(
     index: usize,
     step: &Step,
+    repos: &RepoNames,
     against: Against,
     palette: &Palette,
     fills: &Fills,
@@ -962,10 +979,7 @@ fn step_row(
         modeled,
     } = against;
     let [name, start, waited, own, could_save, share, bar_column] = &COLUMNS;
-    let ran: Vec<&str> = [step.mnemonic(), step.target()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let ran = ran(step.mnemonic(), step.target(), repos, palette);
     let tag = words::work_tag(step.work(), logged.given()).map(|tag| {
         div()
             .flex_shrink_0()
@@ -985,14 +999,12 @@ fn step_row(
         .w_full()
         .min_w_0()
         .tooltip(TextTooltip::builder(
-            words::step_tip(step, logged.given()).into(),
+            words::step_tip(step, logged.given(), repos).into(),
             palette.colors.tooltip(),
         ))
         .child(line(step.name().to_owned()))
         .children(tag)
-        .when(!ran.is_empty(), |described| {
-            described.child(line(ran.join(" · ")).text_color(palette.muted_label))
-        });
+        .children(ran);
     let total = step.gap() + step.own();
     let parts: Vec<(Part, Duration)> = step.parts().collect();
     let segments = parts.iter().map(|&(part, time)| {
@@ -1048,13 +1060,53 @@ fn step_row(
         .child(table_cell(bar_column.width, [div().w_full().child(bar_of)]))
 }
 
+/// What ran a step or an action, where the profile says: its `mnemonic`,
+/// and its `target`'s label as `repos` shows it, in `palette`'s muted ink.
+fn ran(
+    mnemonic: Option<&str>,
+    target: Option<&str>,
+    repos: &RepoNames,
+    palette: &Palette,
+) -> Option<Div> {
+    if mnemonic.is_none() && target.is_none() {
+        return None;
+    }
+    let label = target.map(|target| {
+        let shown = repos.shown_label(target);
+        div()
+            .min_w_0()
+            .child(LabelLine::new(shown, palette.muted_label.into()))
+    });
+    let between = (mnemonic.is_some() && label.is_some()).then_some(RAN_SEPARATOR);
+    Some(
+        div()
+            .flex()
+            .min_w_0()
+            .whitespace_nowrap()
+            .text_color(palette.muted_label)
+            .children(mnemonic.map(|mnemonic| div().flex_none().child(mnemonic.to_owned())))
+            .children(between.map(|between| div().flex_none().child(between)))
+            .children(label),
+    )
+}
+
+/// Between the mnemonic and the label of what ran.
+const RAN_SEPARATOR: &str = " · ";
+
 /// Row `index` of the table of actions nearly critical, showing `action`.
-fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette) -> Stateful<Div> {
+fn nearly_critical_row(
+    index: usize,
+    action: &NearlyCritical,
+    repos: &RepoNames,
+    palette: &Palette,
+) -> Stateful<Div> {
     let [name, took, slack] = &NEARLY_CRITICAL_COLUMNS;
-    let ran: Vec<&str> = [action.mnemonic.as_deref(), action.target.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let ran = ran(
+        action.mnemonic.as_deref(),
+        action.target.as_deref(),
+        repos,
+        palette,
+    );
     let described = div()
         .id(("critical-path-nearly-critical-action", index))
         .flex()
@@ -1064,13 +1116,11 @@ fn nearly_critical_row(index: usize, action: &NearlyCritical, palette: &Palette)
         .w_full()
         .min_w_0()
         .tooltip(TextTooltip::builder(
-            words::nearly_critical_tip(action).into(),
+            words::nearly_critical_tip(action, repos).into(),
             palette.colors.tooltip(),
         ))
         .child(line(action.description.clone()))
-        .when(!ran.is_empty(), |described| {
-            described.child(line(ran.join(" · ")).text_color(palette.muted_label))
-        });
+        .children(ran);
     div()
         .id(("critical-path-nearly-critical-row", index))
         .flex()

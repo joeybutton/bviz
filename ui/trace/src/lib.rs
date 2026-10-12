@@ -21,6 +21,7 @@ mod track_label;
 mod track_order;
 mod tracks_menu;
 
+use bviz_label::names::RepoNames;
 use chart::{format_duration, format_time, nice_step, span_seconds};
 
 pub use critical_path::CriticalPathPanel;
@@ -1716,7 +1717,11 @@ fn configuration_label<'a>(checksum: &'a str, session: Option<&Session>) -> Cow<
 
 /// The lines of the tooltip for a hovered slice: its name, its category and
 /// duration, and its args.
-fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<String> {
+fn slice_tooltip(
+    hovered: &HoveredSlice,
+    session: Option<&Session>,
+    repos: &RepoNames,
+) -> Vec<String> {
     let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
     let category = profile.str(detail.category);
     let took = format_duration(slice.dur_us);
@@ -1725,7 +1730,11 @@ fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<Strin
         None => format!("{category} · {took}"),
     };
     let mut lines = vec![profile.str(slice.name).to_string(), timing];
-    lines.extend(profile.opt_str(detail.target).map(str::to_owned));
+    if let Some(target) = profile.opt_str(detail.target) {
+        let (shown, written) = repos.shown_with_written(target);
+        lines.push(shown);
+        lines.extend(written);
+    }
     let configuration = (profile.opt_str(detail.configuration))
         .map(|checksum| configuration_label(checksum, session).to_string());
     let ran: Vec<String> = [

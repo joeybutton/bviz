@@ -1,7 +1,9 @@
 //! What the spawn-time view shows of a log, derived once off the UI thread.
 
 use bviz_execlog::{ExecLog, Group, Phase, PhaseTiming};
+use bviz_label::names::RepoNames;
 use gpui::SharedString;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How the spawns of a log are summed for one row of a table.
@@ -51,6 +53,8 @@ pub(crate) struct Summary {
     /// The spawns longest in each phase, longest first, indexed as
     /// [`Phase::ALL`].
     pub(crate) top: [Vec<TopSpawn>; Phase::ALL.len()],
+    /// The names the repositories the log's labels name are shown by.
+    pub(crate) repos: Arc<RepoNames>,
 }
 
 impl Summary {
@@ -72,6 +76,7 @@ impl Summary {
             timing: log.timing(),
             runners,
             top: Phase::ALL.map(|phase| top_spawns(log, phase)),
+            repos: Arc::new(RepoNames::of_labels(log.target_labels())),
         }
     }
 
