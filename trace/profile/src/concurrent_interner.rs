@@ -156,6 +156,10 @@ impl Arena {
     /// publish and are never rewritten, so the read never races a write.
     fn str(&self, h: Str) -> &str {
         let r = h.range();
+        debug_assert!(
+            r.end <= self.page_cursor.load(Ordering::Relaxed),
+            "handle {h:?} reaches past the reserved pool"
+        );
         // SAFETY: r lies in a written, immutable region; the bytes there are
         // valid UTF-8 (a copied token).
         unsafe {

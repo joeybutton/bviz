@@ -11,7 +11,11 @@ pub struct Str {
 }
 
 impl Str {
-    pub const fn new(off: u32, len: u32) -> Str {
+    /// The handle at offset 0, which every pool reserves, so it names no text
+    /// a profile holds.
+    pub const RESERVED: Str = Str { off: 0, len: 0 };
+
+    pub(crate) const fn new(off: u32, len: u32) -> Str {
         Str { off, len }
     }
 
