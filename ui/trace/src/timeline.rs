@@ -2635,15 +2635,14 @@ mod tests {
             [
                 "Compiling a.cc",
                 "action processing · 1.00ms",
-                "mnemonic: CppCompile",
-                "configuration: k8-fastbuild",
+                "CppCompile · k8-fastbuild",
             ]
         );
     }
 
     #[test]
     fn a_tooltip_shows_the_checksum_of_a_configuration_no_session_names() {
-        let by_checksum = format!("configuration: {CONFIGURATION}");
+        let by_checksum = format!("CppCompile · {CONFIGURATION}");
         let unread = Session::default();
         let elsewhere = crate::tests::session_knowing(&[("0c3d9a7714be", "k8-opt-exec")]);
         for session in [None, Some(&unread), Some(&elsewhere)] {

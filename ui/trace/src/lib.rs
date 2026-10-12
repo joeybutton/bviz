@@ -1683,29 +1683,28 @@ fn configuration_label<'a>(checksum: &'a str, session: Option<&Session>) -> Cow<
 /// duration, and its args.
 fn slice_tooltip(hovered: &HoveredSlice, session: Option<&Session>) -> Vec<String> {
     let (profile, slice, detail) = (hovered.profile(), hovered.slice(), hovered.detail());
-    let mut lines = vec![
-        profile.str(slice.name).to_string(),
-        format!(
-            "{} · {}",
-            profile.str(detail.category),
-            format_duration(slice.dur_us)
-        ),
-    ];
-    if let Some(self_us) = hovered.self_us() {
-        lines.push(format!("self: {}", format_duration(self_us)));
-    }
-    if let Some(target) = profile.opt_str(detail.target) {
-        lines.push(format!("target: {target}"));
-    }
-    if let Some(mnemonic) = profile.opt_str(detail.mnemonic) {
-        lines.push(format!("mnemonic: {mnemonic}"));
-    }
-    if let Some(checksum) = profile.opt_str(detail.configuration) {
-        let configuration = configuration_label(checksum, session);
-        lines.push(format!("configuration: {configuration}"));
+    let category = profile.str(detail.category);
+    let took = format_duration(slice.dur_us);
+    let timing = match hovered.self_us() {
+        Some(self_us) => format!("{category} · {took} · self {}", format_duration(self_us)),
+        None => format!("{category} · {took}"),
+    };
+    let mut lines = vec![profile.str(slice.name).to_string(), timing];
+    lines.extend(profile.opt_str(detail.target).map(str::to_owned));
+    let configuration = (profile.opt_str(detail.configuration))
+        .map(|checksum| configuration_label(checksum, session).to_string());
+    let ran: Vec<String> = [
+        profile.opt_str(detail.mnemonic).map(str::to_owned),
+        configuration,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !ran.is_empty() {
+        lines.push(ran.join(" · "));
     }
     for (key, value) in profile.slice_others(detail) {
-        lines.push(format!("{}: {}", profile.str(*key), profile.str(*value)));
+        lines.push(format!("{} {}", profile.str(*key), profile.str(*value)));
     }
     lines
 }

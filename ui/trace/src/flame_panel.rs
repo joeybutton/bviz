@@ -363,11 +363,10 @@ fn remainder_label(remainder: &FlameRemainder) -> String {
     }
 }
 
-/// The tooltip's lines for `hovered`, its figures labelled with the weight of
-/// the aggregate the box belongs to. A frame gives its name and what the name
+/// The tooltip's lines for `hovered`. A frame gives its name and what the name
 /// leaves open about its spans (see [`FlameGraph::kind_or_category`]) where
-/// that is not the name itself; a remainder, and the depth drawn beneath one,
-/// says what the remainder's label counts.
+/// that is not the name itself, then its figures; a remainder, and the depth
+/// drawn beneath one, gives what the remainder's label counts and their total.
 fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
     let HoveredBox { aggregates, boxed } = hovered;
     let flame = &aggregates.flame;
@@ -379,14 +378,10 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
             0.0
         }
     };
-    let measure = match aggregates.mode.weight {
-        FlameWeight::Duration => "summed time",
-        FlameWeight::WallShare => "share of wall time",
-    };
     match boxed.content {
         FlameBoxContent::Frame(frame) => {
             let detail = format!(
-                "{measure}: total {}, self {}, {} span{}, {:.1}% of view",
+                "total {} · self {} · {} span{} · {:.1}% of view",
                 format_duration(frame.total_us),
                 format_duration(flame.span_self_us(frame.node)),
                 frame.count,
@@ -409,9 +404,8 @@ fn flame_tooltip_lines(hovered: &HoveredBox) -> Vec<String> {
             let total_us = flame.remainder_total_us(&remainder);
             vec![
                 remainder_label(&remainder),
-                "frames too narrow to draw apart at this zoom".to_string(),
                 format!(
-                    "{measure}: total {}, {:.1}% of view",
+                    "too narrow · total {} · {:.1}% of view",
                     format_duration(total_us),
                     pct(total_us),
                 ),
@@ -1369,7 +1363,7 @@ mod tests {
             [
                 "compile",
                 "general information",
-                "summed time: total 1.00ms, self 1.00ms, 1 span, 66.7% of view"
+                "total 1.00ms · self 1.00ms · 1 span · 66.7% of view"
             ]
         );
         assert_eq!(
@@ -1377,7 +1371,7 @@ mod tests {
             [
                 "compile",
                 "general information",
-                "share of wall time: total 750µs, self 750µs, 1 span, 75.0% of view"
+                "total 750µs · self 750µs · 1 span · 75.0% of view"
             ]
         );
     }
@@ -1426,19 +1420,11 @@ mod tests {
         };
         assert_eq!(
             lines(FlameWeight::Duration),
-            [
-                "(40 others)",
-                "frames too narrow to draw apart at this zoom",
-                "summed time: total 200µs, 1.3% of view"
-            ]
+            ["(40 others)", "too narrow · total 200µs · 1.3% of view"]
         );
         assert_eq!(
             lines(FlameWeight::WallShare),
-            [
-                "(40 others)",
-                "frames too narrow to draw apart at this zoom",
-                "share of wall time: total 100µs, 1.0% of view"
-            ]
+            ["(40 others)", "too narrow · total 100µs · 1.0% of view"]
         );
     }
 
@@ -1483,11 +1469,7 @@ mod tests {
             boxed
         };
         let remainder = of_kind(|c| matches!(c, FlameBoxContent::Remainder(_)));
-        let lines = [
-            "(40 frames)",
-            "frames too narrow to draw apart at this zoom",
-            "summed time: total 200µs, 2.0% of view",
-        ];
+        let lines = ["(40 frames)", "too narrow · total 200µs · 2.0% of view"];
         assert_eq!(lines_at(remainder), lines);
         // The row the thin spans' own children reach is the remainder's too,
         // and names none of them.
@@ -1515,10 +1497,7 @@ mod tests {
             .expect("the box at its own center");
         assert_eq!(
             flame_tooltip_lines(&hovered),
-            [
-                "All",
-                "summed time: total 1.00ms, self 0µs, 0 spans, 100.0% of view"
-            ]
+            ["All", "total 1.00ms · self 0µs · 0 spans · 100.0% of view"]
         );
     }
 
@@ -1621,7 +1600,7 @@ mod tests {
         assert_eq!(
             figures(FlameWeight::Duration),
             (
-                Some("summed time: total 1.00ms, self 600µs, 1 span, 50.0% of view".to_string()),
+                Some("total 1.00ms · self 600µs · 1 span · 50.0% of view".to_string()),
                 600
             )
         );
@@ -1630,10 +1609,7 @@ mod tests {
         assert_eq!(
             figures(FlameWeight::WallShare),
             (
-                Some(
-                    "share of wall time: total 750µs, self 550µs, 1 span, 50.0% of view"
-                        .to_string()
-                ),
+                Some("total 750µs · self 550µs · 1 span · 50.0% of view".to_string()),
                 600
             )
         );
