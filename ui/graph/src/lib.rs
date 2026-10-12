@@ -47,6 +47,7 @@ mod framing;
 mod fuzzy;
 mod hints;
 mod history;
+mod holder;
 mod hover;
 mod hue;
 mod jump;
@@ -343,7 +344,10 @@ pub struct GraphPanel {
     /// Puts away the paths drawn in the filter's place as the panel's own bar
     /// applies a query.
     _query_applied: Subscription,
-    jump: jump::Finder,
+    jump: Entity<jump::JumpPalette>,
+    jump_opened_at: jump::graph::OpenedAt,
+    /// Lands what the palette picks.
+    _jumped: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Repaints the drawing, and only it, as a gesture moves the document's
@@ -517,21 +521,19 @@ impl GraphPanel {
             boxes::choose_boxes(view, event, cx);
         });
         let focus_handle = cx.focus_handle();
-        let drawn: chips::Drawn = {
-            let panel = cx.weak_entity();
-            Box::new(move |cx: &App| {
-                (panel.upgrade())
-                    .map_or_else(Default::default, |panel| jump::drawn_ids(panel.read(cx)))
-            })
-        };
+        let drawn = jump::graph::drawn_reader(cx);
         let chips = cx.new(|cx| {
             chips::ChipBar::new(
                 model.clone(),
-                chips::Holder::Graph,
+                holder::Holder::Graph,
                 focus_handle.clone(),
                 Some(drawn),
                 cx,
             )
+        });
+        let jump = jump::graph::palette(model.clone(), focus_handle.clone(), chips.clone(), cx);
+        let jumped = cx.subscribe(&jump, |view, _, event: &jump::JumpEvent, cx| {
+            jump::graph::landed(view, *event, cx)
         });
         let query_applied = cx.subscribe(&model, |view, _, applied: &QueryApplied, cx| {
             if applied.by == view.chips.entity_id() {
@@ -548,7 +550,7 @@ impl GraphPanel {
         });
         let overlays = cx.new(|_| ChromeLayer {
             parent,
-            draw: |view, palette, window, cx| view.draw_overlays(palette, window, cx),
+            draw: |view, palette, _, cx| view.draw_overlays(palette, cx),
         });
         let chrome_follows = cx.observe_self(|view, cx| {
             mode::sync(view, cx);
@@ -614,7 +616,9 @@ impl GraphPanel {
             _box_choices: box_choices,
             chips,
             _query_applied: query_applied,
-            jump: jump::Finder::default(),
+            jump,
+            jump_opened_at: None,
+            _jumped: jumped,
             _changed: changed,
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
@@ -850,12 +854,7 @@ impl GraphPanel {
         toolbar::toolbar(self, controls, window, cx).into_any_element()
     }
 
-    fn draw_overlays(
-        &self,
-        palette: &Palette,
-        window: &mut Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn draw_overlays(&self, palette: &Palette, cx: &Context<Self>) -> AnyElement {
         div()
             .size_full()
             .child(
@@ -867,7 +866,7 @@ impl GraphPanel {
                     .folding(missing::card(self, palette, cx))
                     .foot(why::card(self, palette, cx)),
             )
-            .children(jump::overlay(self, palette, window, cx))
+            .children(self.jump.read(cx).is_open().then(|| self.jump.clone()))
             .into_any_element()
     }
 
@@ -905,7 +904,7 @@ impl GraphPanel {
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         let clear = self.box_id_at(e.position, cx).is_none();
         let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
@@ -939,7 +938,7 @@ impl GraphPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         let hit = self.box_id_at(e.position, cx);
         GESTURES.dispatch(Pointer::press(e), |intent| match (intent, hit) {
             (CanvasIntent::BoxMenu, Some(node)) => {
@@ -970,12 +969,12 @@ impl GraphPanel {
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         reveal::back(self, cx);
     }
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         reveal::forward(self, cx);
     }
 
@@ -1253,7 +1252,9 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &JumpForward, _, cx| view.go_forward(cx)))
-            .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
+            .on_action(
+                cx.listener(|view, _: &jump::Open, window, cx| jump::graph::open(view, window, cx)),
+            )
             .on_action(cx.listener(|view, _: &chips::Focus, window, cx| {
                 view.chips
                     .update(cx, |bar, cx| chips::focus(bar, window, cx));
@@ -1743,7 +1744,7 @@ mod tests {
         keymap_probe::dispatched_within(
             bindings,
             keys,
-            &chips::completion_stack(chips::Holder::Graph, aimed),
+            &chips::completion_stack(holder::Holder::Graph, aimed),
         )
     }
 
@@ -1888,7 +1889,7 @@ mod tests {
     /// reach the bar from.
     #[test]
     fn every_holder_is_the_view_it_names() {
-        use chips::Holder;
+        use holder::Holder;
         assert_eq!(Holder::Graph.scope(), GraphPanel::kind().key_context);
         assert_eq!(Holder::Scatter.scope(), ScatterPanel::kind().key_context);
         assert_eq!(
@@ -1914,7 +1915,7 @@ mod tests {
     /// outside its text fields and from within the bar.
     #[test]
     fn the_bars_keys_reach_it_in_every_view_holding_it() {
-        for holder in chips::Holder::ALL.map(chips::Holder::scope) {
+        for holder in holder::Holder::ALL.map(holder::Holder::scope) {
             let outside = &[holder.id()];
             let on_chips = &[holder.id(), chips::KEY_CONTEXT.id()];
             let in_field = &[

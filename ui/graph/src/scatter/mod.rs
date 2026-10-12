@@ -11,10 +11,11 @@ mod plot;
 
 use crate::CycleColouring;
 use crate::Palette;
-use crate::chips::{self, ChipBar, Holder};
+use crate::chips::{self, ChipBar};
 use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
+use crate::holder::Holder;
 use crate::hue::Hue;
 use crate::model::{
     FilterChanged, GraphModel, Loaded, MetricsLanded, SourceReplaced, VerdictsLanded,

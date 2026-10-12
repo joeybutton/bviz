@@ -4,9 +4,10 @@
 //! that is one of a vocabulary, matched against the word under the cursor and
 //! listed under the field.
 
-use super::{AcceptCompletion, ChipBar, Holder, command, completion_stack};
+use super::{AcceptCompletion, ChipBar, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
+use crate::holder::Holder;
 use crate::jump::{Candidates, bring_into_view, labelled, package_of};
 use crate::model::Prepared;
 use bviz_graph_layout::query_lang::{

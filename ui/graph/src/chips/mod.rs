@@ -13,6 +13,7 @@ pub(crate) use complete::Completions;
 
 use crate::Palette;
 use crate::filter::DocumentFilter;
+use crate::holder::{HOLDERS, Holder};
 use crate::model::{
     FilterChanged, GraphModel, QueryChanged, QueryCounted, QueryRefused, SourceReplaced,
 };
@@ -80,39 +81,6 @@ actions!(
         CloseCompletion,
     ]
 );
-
-/// A view of the graph document standing a query bar.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Holder {
-    Graph,
-    Scatter,
-    Exclusive,
-}
-
-impl Holder {
-    pub(crate) const ALL: [Holder; 3] = [Holder::Graph, Holder::Scatter, Holder::Exclusive];
-
-    /// The key scope of the view, from which the keys acting on its bar as a
-    /// whole reach the bar.
-    pub(crate) const fn scope(self) -> KeyScope {
-        match self {
-            Holder::Graph => crate::KEY_CONTEXT,
-            Holder::Scatter => crate::scatter::KEY_CONTEXT,
-            Holder::Exclusive => crate::exclusive::KEY_CONTEXT,
-        }
-    }
-}
-
-/// The key scope of every [`Holder`].
-const HOLDERS: [KeyScope; Holder::ALL.len()] = {
-    let mut scopes = [crate::KEY_CONTEXT; Holder::ALL.len()];
-    let mut at = 0;
-    while at < scopes.len() {
-        scopes[at] = Holder::ALL[at].scope();
-        at += 1;
-    }
-    scopes
-};
 
 /// The key context the bar carries, scoping the keys that act on its chips.
 pub(crate) const KEY_CONTEXT: KeyScope =

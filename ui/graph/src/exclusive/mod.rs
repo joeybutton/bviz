@@ -13,8 +13,9 @@ mod transition;
 pub(crate) use roots::NOTICE_SEPARATOR;
 
 use crate::Palette;
-use crate::chips::{self, ChipBar, Holder};
+use crate::chips::{self, ChipBar};
 use crate::history::History;
+use crate::holder::Holder;
 use crate::hue::{Colouring, Hue};
 use crate::model::{
     DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey, VerdictsLanded,
