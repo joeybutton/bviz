@@ -143,6 +143,7 @@ pub fn register_keys(cx: &mut App) {
             KEY_CONTEXT,
             exclusive::KEY_CONTEXT,
             exclusive::ROOTS_KEY_CONTEXT,
+            exclusive::OFFERING,
             scatter::KEY_CONTEXT,
             scatter::PICKING,
             scatter::OFFERING,
@@ -185,6 +186,13 @@ fn bindings() -> Vec<KeyBinding> {
     let scatter_offering = Some(scatter_offering.as_str());
     let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
     let exclusive_canvas = Some(exclusive_canvas.as_str());
+    let exclusive_offering = format!(
+        "{} && {} && !{}",
+        exclusive::KEY_CONTEXT,
+        exclusive::OFFERING,
+        text_input::KEY_CONTEXT
+    );
+    let exclusive_offering = Some(exclusive_offering.as_str());
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
@@ -222,6 +230,9 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", exclusive::SelectChild, exclusive_canvas),
         KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
         KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
+        // After the binding it shares Enter with, which it outranks while a
+        // card stands.
+        KeyBinding::new("enter", reveal::Accept, exclusive_offering),
         KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
         KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
@@ -247,6 +258,7 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
     bindings.extend(find_key_bindings(scatter::KEY_CONTEXT, jump::Open));
+    bindings.extend(find_key_bindings(exclusive::KEY_CONTEXT, jump::Open));
     bindings
 }
 
@@ -1728,11 +1740,30 @@ mod tests {
         assert!(dispatched("r", IN_ROOTS).is_none());
         assert!(dispatched("q", IN_ROOTS).is_none());
         for keys in ["secondary-f", "/"] {
-            assert!(
-                !is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
-                "{keys}"
-            );
+            assert!(is(dispatched(keys, IN_EXCLUSIVE), jump::Open), "{keys}");
         }
+    }
+
+    /// While a card stands in the exclusive deps view, Enter answers it and
+    /// Escape puts it away; with none, they act on the selected cell.
+    #[test]
+    fn the_exclusive_view_answers_its_card_ahead_of_its_cells() {
+        const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
+        const OFFERING: &[&str] = &["GraphExclusive exclusiveOffering"];
+        assert!(is(
+            dispatched("enter", IN_EXCLUSIVE),
+            exclusive::FocusSelected
+        ));
+        assert!(is(dispatched("enter", OFFERING), reveal::Accept));
+        assert!(is(dispatched("escape", OFFERING), exclusive::Deselect));
+        let in_palette = &[
+            exclusive::KEY_CONTEXT.id(),
+            jump::KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        assert!(is(dispatched("enter", in_palette), jump::Go));
+        assert!(is(dispatched("up", in_palette), jump::Previous));
+        assert!(dispatched("r", in_palette).is_none());
     }
 
     /// The scatter plot opens the palette by the find keys, and while a card

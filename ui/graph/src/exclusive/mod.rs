@@ -5,6 +5,7 @@
 mod ancestry;
 mod cell_menu;
 mod icicle;
+mod landing;
 mod paint;
 mod roots;
 mod selection;
@@ -14,15 +15,20 @@ pub(crate) use roots::NOTICE_SEPARATOR;
 
 use crate::Palette;
 use crate::chips::{self, ChipBar};
+use crate::hidden::{self, Offering, Unshown};
 use crate::history::History;
 use crate::holder::Holder;
 use crate::hue::{Colouring, Hue};
+use crate::jump::{self, JumpEvent, JumpPalette};
 use crate::model::{
-    DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey, VerdictsLanded,
+    DominatorsLanded, ExclusionNamed, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey,
+    VerdictsLanded,
 };
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
 };
+use crate::reveal;
+use crate::stand_in::Writers;
 use crate::unit_picker::{CyclePoints, UnitPicker};
 use ancestry::{Spot, Stands};
 use bviz_graph_layout::Id;
@@ -38,9 +44,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
-    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
-    over_window,
+    Nesting, OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup,
+    cached_layer, centered_notice, centered_spinner, defer_hover_card, legend_gestures,
+    load_in_background, over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
@@ -63,6 +69,18 @@ use transition::Transition;
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphExclusive", "Exclusive deps");
+
+/// The identifier the panel's key context carries while a card offers to
+/// show a node a jump could not land on.
+pub(crate) const OFFERING: KeyScope = KeyScope::within(
+    &KEY_CONTEXT,
+    Nesting::State,
+    "exclusiveOffering",
+    "Hidden card",
+);
+
+/// How wide the card offering to show a node stands.
+const CARD_WIDTH: Pixels = px(300.);
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 
@@ -218,6 +236,14 @@ pub struct ExclusivePanel {
     menu: Option<CellMenu>,
     /// The card describing what is selected.
     card: HoverCard<Stands>,
+    jump: Entity<JumpPalette>,
+    /// How the tree was drawn as the palette opened, which closing it
+    /// unpicked returns to.
+    opened: Option<Opened>,
+    offering: Offering,
+    _exclusion_named: Subscription,
+    /// Lands what the palette picks.
+    _jumped: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
@@ -253,6 +279,8 @@ impl ExclusivePanel {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
+            view.opened = None;
+            view.offering.clear();
             view.restate_shown(cx);
             view.rooting = None;
             view.choosing = None;
@@ -300,9 +328,19 @@ impl ExclusivePanel {
                 cx,
             )
         });
+        let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let jump = Self::palette(&model, &focus_handle, &chips, cx);
+        let jumped = cx.subscribe(&jump, |view, _, event: &JumpEvent, cx| {
+            view.jumped(*event, cx)
+        });
         Self {
             focus_handle,
             legend,
+            jump,
+            opened: None,
+            offering: Offering::new(model.clone()),
+            _exclusion_named: exclusion_named,
+            _jumped: jumped,
             picker,
             model,
             shown: false,
@@ -325,6 +363,219 @@ impl ExclusivePanel {
             _filter_changed: filter_changed,
             _verdicts_landed: verdicts_landed,
             _roots_typed: roots_typed,
+        }
+    }
+
+    /// The jump palette the icicle stands.
+    fn palette(
+        model: &Entity<GraphModel>,
+        focus: &FocusHandle,
+        chips: &Entity<ChipBar>,
+        cx: &mut Context<Self>,
+    ) -> Entity<JumpPalette> {
+        let panel = cx.weak_entity();
+        let standing = Box::new(move |id, cx: &App| {
+            let Some(panel) = panel.upgrade() else {
+                return jump::Stands::Here;
+            };
+            let Some(drawn) = &panel.read(cx).drawn else {
+                return jump::Stands::Here;
+            };
+            let (coloured, shown) = (&drawn.coloured, &drawn.shown);
+            let tree = &coloured.tree;
+            landing::stands(tree, &shown.tree, shown.by.as_deref(), &coloured.over(), id)
+        });
+        let (model, focus, chips) = (model.clone(), focus.clone(), chips.clone());
+        cx.new(|cx| JumpPalette::new(model, Holder::Exclusive, focus, chips, None, standing, cx))
+    }
+
+    /// Opens the palette over the icicle, noting how the tree was drawn as
+    /// it opened.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.jump.update(cx, |palette, cx| palette.open(window, cx)) {
+            self.opened = self.drawn.as_ref().map(Opened::of);
+        }
+    }
+
+    /// Lands what the palette asks of the icicle. Only a jump keeps where a
+    /// preview drew the icicle; the palette closing otherwise draws it as it
+    /// opened.
+    fn jumped(&mut self, event: JumpEvent, cx: &mut Context<Self>) {
+        if let JumpEvent::Preview(id) = event {
+            self.preview(id, cx);
+            return;
+        }
+        match event {
+            JumpEvent::Go(id) => {
+                self.land(id, cx);
+                self.opened = None;
+            }
+            JumpEvent::AskWhy(id) => {
+                self.restore_opened(cx);
+                self.model.update(cx, |model, cx| model.ask_why(id, cx));
+            }
+            JumpEvent::AlwaysShow(id) => {
+                self.restore_opened(cx);
+                // The pin goes on the point the filter hides, which may stand
+                // for `id` rather than be it.
+                let pinned = match self.landing(id) {
+                    Some(landing::Landing::Hidden(point, _)) => point,
+                    _ => id,
+                };
+                self.offering.always_show(id, pinned, cx);
+            }
+            JumpEvent::Preview(_) | JumpEvent::Closed | JumpEvent::Dismissed => {
+                self.restore_opened(cx)
+            }
+        }
+        cx.notify();
+    }
+
+    /// What a jump to `id` lands on in the tree drawn; none while none is.
+    fn landing(&self, id: Id) -> Option<landing::Landing> {
+        let drawn = self.drawn.as_ref()?;
+        let (coloured, shown) = (&drawn.coloured, &drawn.shown);
+        let tree = &coloured.tree;
+        let landing =
+            landing::landing(tree, &shown.tree, shown.by.as_deref(), &coloured.over(), id);
+        Some(landing)
+    }
+
+    /// Draws the icicle as a jump to `id` would, from the tree as the palette
+    /// found it, without the selection a jump makes going any further than
+    /// the palette.
+    fn preview(&mut self, id: Id, cx: &mut Context<Self>) {
+        if self.opened.is_none() {
+            self.opened = self.drawn.as_ref().map(Opened::of);
+        }
+        if let Some(landing::Landing::Cell { node, above }) = self.landing(id) {
+            self.land_on(node, above, cx);
+        }
+    }
+
+    /// Draws the icicle from what the cell of `id` stands under and selects
+    /// that cell, as one step after the tree as the palette found it. Where
+    /// the tree draws no cell for `id`, a jump that is `committed` puts up the
+    /// card saying why and offering to show the node another way; with no
+    /// tree drawn yet, it waits for one.
+    fn land(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.offering.clear();
+        let Some(landing) = self.landing(id) else {
+            self.offering.wait_for(id);
+            return;
+        };
+        match (landing, unshown(landing)) {
+            (landing::Landing::Cell { node, above }, _) => self.land_on(node, above, cx),
+            (_, Some(unshown)) => self.offering.stand(id, unshown, cx),
+            (_, None) => {}
+        }
+        cx.notify();
+    }
+
+    /// Draws the icicle from `above`, as one step after the tree as the
+    /// palette found it, and selects the cell of `node` there.
+    fn land_on(&mut self, node: u32, above: Above, cx: &mut Context<Self>) {
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        let (tree, shown) = (&drawn.coloured.tree, &drawn.shown);
+        let on = match above {
+            Above::Roots => None,
+            Above::Shared => Some(Focused::Shared),
+            Above::Node(parent) => Some(Focused::Node(parent)),
+        };
+        let focus = on.map(|on| Focus::on(tree, &shown.tree, on));
+        let opened = (self.opened.as_ref())
+            .filter(|opened| Arc::ptr_eq(&opened.shown, shown))
+            .map(|opened| opened.history.clone());
+        drawn.selection = None;
+        self.travel(
+            move |history| {
+                if let Some(opened) = opened {
+                    *history = opened;
+                }
+                history.push(focus);
+            },
+            cx,
+        );
+        self.select_node(node, cx);
+    }
+
+    /// Selects the cell holding the tree's node `node` among those drawn, as
+    /// the keys select one.
+    fn select_node(&mut self, node: u32, cx: &mut Context<Self>) {
+        let (Some(drawn), Some(laid)) = (&self.drawn, self.laid_out()) else {
+            return;
+        };
+        let shown = &drawn.shown.tree;
+        let holds_node = |cell: &&Cell| match cell.holds {
+            Holds::Node(at) => at == node,
+            Holds::Rest(run) => run.siblings(shown).is_some_and(|run| run.contains(&node)),
+            Holds::Build | Holds::Shared => false,
+        };
+        let Some(&cell) = laid.cells.iter().find(holds_node) else {
+            return;
+        };
+        self.card.pick();
+        self.select(Spot::Cell(cell), Picked::Keys, cx);
+        // A run of cells too narrow to draw apart is selected as a whole,
+        // so its description names the one landed on.
+        if let Holds::Rest(_) = cell.holds
+            && let Some(drawn) = &mut self.drawn
+            && let Some(selection) = &mut drawn.selection
+        {
+            let coloured = &drawn.coloured;
+            let unit = coloured.tree.scope().unit();
+            let name = point_name(coloured.tree.id(node), unit, &coloured.shared);
+            selection.lines.insert(0, format!("{name} {AMONG_THESE}"));
+        }
+    }
+
+    /// Draws the tree as it was drawn as the palette opened, where the
+    /// filter has drawn it alike since.
+    fn restore_opened(&mut self, cx: &mut Context<Self>) {
+        let Some(opened) = self.opened.take() else {
+            return;
+        };
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        if !Arc::ptr_eq(&opened.shown, &drawn.shown) {
+            return;
+        }
+        drawn.selection = opened.selection;
+        let history = opened.history;
+        self.travel(move |current| *current = history, cx);
+        cx.notify();
+    }
+
+    /// Takes up a tree drawn afresh: moves the card to where its node now
+    /// lands, and lands the jump waiting for the tree.
+    fn redrawn(&mut self, cx: &mut Context<Self>) {
+        let offer = self.offering.offer();
+        let now = offer
+            .and_then(|offer| self.landing(offer.node))
+            .and_then(unshown);
+        self.offering.redrawn(now, cx);
+        if let Some(id) = self.offering.take_waiting() {
+            self.land(id, cx);
+        }
+    }
+
+    /// Answers the card as its key does, leaving the key to the icicle where
+    /// the card offers only to close.
+    fn accept(&mut self, cx: &mut Context<Self>) {
+        match self.offering.accept(cx) {
+            true => cx.notify(),
+            false => cx.propagate(),
+        }
+    }
+
+    /// Puts away the card, or with none the selection.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        match self.offering.dismiss() {
+            true => cx.notify(),
+            false => self.deselect(cx),
         }
     }
 
@@ -588,9 +839,13 @@ impl ExclusivePanel {
             return;
         };
         let (tree, shared) = (Arc::clone(tree), loaded.shared.clone());
+        let Some(writers) = model.writers() else {
+            return;
+        };
         self.drawing = Some(load_in_background(
             cx,
             move || {
+                let writers = Arc::clone(writers.get());
                 let unit = tree.scope().unit();
                 let points = || (0..tree.total()).map(|node| (tree.id(node), tree.kind(node)));
                 let colouring = Colouring::of(unit, points().map(|(id, _)| id), &shared.facets);
@@ -601,6 +856,7 @@ impl ExclusivePanel {
                     key,
                     tree,
                     shared,
+                    writers,
                     colouring: Arc::new(colouring),
                     legend,
                     targets,
@@ -683,6 +939,9 @@ impl ExclusivePanel {
             match alike {
                 Some(alike) if Arc::ptr_eq(&drawn.shown, &alike) => drawn.shown = shown,
                 _ => {
+                    if let Some(opened) = &mut self.opened {
+                        opened.reshow(&drawn.coloured.tree, &shown);
+                    }
                     drawn.reshow(shown);
                     self.menu = None;
                     self.reselect(cx);
@@ -690,6 +949,7 @@ impl ExclusivePanel {
             }
             self.restate_shown(cx);
             self.invalidate_canvas(cx);
+            self.redrawn(cx);
             return;
         }
         let Some(rooting) = self
@@ -711,8 +971,10 @@ impl ExclusivePanel {
         if self.shown {
             self.want(key, cx);
         }
+        self.opened = None;
         self.restate_shown(cx);
         self.invalidate_canvas(cx);
+        self.redrawn(cx);
     }
 
     /// The rows over the focus and the cells drawn from it at rest, where
@@ -1342,6 +1604,8 @@ struct Coloured {
     tree: Arc<Dominators>,
     /// The graph whose points `tree` holds.
     shared: Shared,
+    /// The actions writing each file of `shared`.
+    writers: Arc<Writers>,
     colouring: Arc<Colouring>,
     legend: Vec<(SharedString, Hue)>,
     /// The targets each node's subtree holds, where its points are configured
@@ -1350,6 +1614,15 @@ struct Coloured {
 }
 
 impl Coloured {
+    /// The graph the tree was drawn over, for finding a node in it.
+    fn over(&self) -> landing::Over<'_> {
+        landing::Over {
+            graph: &self.shared.base,
+            facets: &self.shared.facets,
+            writers: &self.writers,
+        }
+    }
+
     fn by(&self) -> RootedBy {
         RootedBy::of(&self.key.roots)
     }
@@ -1445,11 +1718,7 @@ impl Drawn {
     /// Draws `shown` of the tree, each focus taken up to what still shows of
     /// it, the move under way ended.
     fn reshow(&mut self, shown: Arc<Shown>) {
-        let (tree, drawn) = (&*self.coloured.tree, &shown.tree);
-        self.history.rewrite(|focus| {
-            let on = focus.as_ref()?.on.lifted(tree, drawn)?;
-            Some(Focus::on(tree, drawn, on))
-        });
+        lift(&mut self.history, &self.coloured.tree, &shown.tree);
         self.shown = shown;
         self.transition = None;
     }
@@ -1570,6 +1839,7 @@ impl Focus {
 
 /// What is ringed and described in the tooltip, described once as it is
 /// selected, so a pointer moving within it only moves the tooltip.
+#[derive(Clone)]
 struct Selection {
     spot: Spot,
     by: Picked,
@@ -1585,6 +1855,54 @@ enum Picked {
     /// A right press, whose menu stands over the cell until it closes, the
     /// pointer leaving the cell for the menu letting go of nothing.
     Menu,
+}
+
+/// Takes each focus of `history` of `tree` up to what `drawn` still shows of
+/// it.
+fn lift(history: &mut History<Option<Focus>>, tree: &Dominators, drawn: &ShownTree) {
+    history.rewrite(|focus| {
+        let on = focus.as_ref()?.on.lifted(tree, drawn)?;
+        Some(Focus::on(tree, drawn, on))
+    });
+}
+
+/// How a tree was drawn as the palette opened.
+struct Opened {
+    /// What the tree drew, which the foci of `history` are of.
+    shown: Arc<Shown>,
+    history: History<Option<Focus>>,
+    selection: Option<Selection>,
+}
+
+impl Opened {
+    fn of(drawn: &Drawn) -> Self {
+        Opened {
+            shown: Arc::clone(&drawn.shown),
+            history: drawn.history.clone(),
+            selection: drawn.selection.clone(),
+        }
+    }
+
+    /// Takes up `tree` drawn as `shown`, as the drawing it notes is.
+    fn reshow(&mut self, tree: &Dominators, shown: &Arc<Shown>) {
+        lift(&mut self.history, tree, &shown.tree);
+        self.shown = Arc::clone(shown);
+        self.selection = None;
+    }
+}
+
+/// What the description of a run of cells landed on says of the one it was
+/// landed on, after its name.
+const AMONG_THESE: &str = "is among these";
+
+/// Why the icicle shows no part of a node a jump to which lands as
+/// `landing`; none where it lands on a cell.
+fn unshown(landing: landing::Landing) -> Option<Unshown> {
+    match landing {
+        landing::Landing::Cell { .. } => None,
+        landing::Landing::Hidden(point, by) => Some(Unshown::Hidden { point, by }),
+        landing::Landing::Absent(why) => Some(Unshown::Absent(why)),
+    }
 }
 
 /// A menu put up over a cell, let go of once it closes.
@@ -2024,6 +2342,7 @@ impl Panel for ExclusivePanel {
 
     fn gestures() -> Vec<GestureRow> {
         (GESTURES.rows())
+            .chain(jump::gestures())
             .chain(chips::gestures())
             .chain(legend_gestures())
             .collect()
@@ -2053,7 +2372,11 @@ impl Panel for ExclusivePanel {
                 self.focus_handle.focus(window, cx);
                 self.compute(cx);
             }
-            false => self.clear_hover(cx),
+            false => {
+                self.clear_hover(cx);
+                self.jump.update(cx, |palette, cx| palette.dismiss(cx));
+                self.opened = None;
+            }
         }
     }
 }
@@ -2061,8 +2384,12 @@ impl Panel for ExclusivePanel {
 impl Render for ExclusivePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let key_context = match self.offering.offer() {
+            Some(_) => format!("{KEY_CONTEXT} {OFFERING}"),
+            None => KEY_CONTEXT.to_string(),
+        };
         let root = div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholeBuild, _, cx| view.focus_on(None, cx)))
             .on_action(cx.listener(|view, _: &FocusUp, _, cx| view.focus_up(cx)))
             .on_action(cx.listener(|view, _: &SelectPrevious, _, cx| {
@@ -2071,7 +2398,11 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectNext, _, cx| view.step(Step::Next, cx)))
             .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
-            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.deselect(cx)))
+            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| view.accept(cx)))
+            .on_action(
+                cx.listener(|view, _: &jump::Open, window, cx| view.open_palette(window, cx)),
+            )
             .on_action(cx.listener(|view, _: &FocusSelected, window, cx| {
                 view.focus_selected(window, cx);
             }))
@@ -2121,6 +2452,7 @@ impl Render for ExclusivePanel {
                 }),
             )
             .track_focus(&self.focus_handle)
+            .relative()
             .flex_1()
             .flex()
             .flex_col()
@@ -2130,6 +2462,16 @@ impl Render for ExclusivePanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
+        let jump = self.jump.read(cx).is_open().then(|| self.jump.clone());
+        let card = hidden::offer_card(
+            &self.offering,
+            |view: &mut Self| &mut view.offering,
+            &palette,
+            &self.focus_handle,
+            &Deselect,
+            cx,
+        );
+        let card = card.map(|card| div().absolute().top_2().right_2().w(CARD_WIDTH).child(card));
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
         let root = root.when(self.picker.is_some(), |root| {
@@ -2177,7 +2519,9 @@ impl Render for ExclusivePanel {
         };
         let root = root.children(report);
         let Some(drawn) = drawn else {
-            return root.child(centered_spinner(COMPUTING, &palette.colors));
+            return (root.child(centered_spinner(COMPUTING, &palette.colors)))
+                .children(jump)
+                .children(card);
         };
         let tree = &drawn.coloured.tree;
         if tree.total() == 0 {
@@ -2186,12 +2530,16 @@ impl Render for ExclusivePanel {
                 RootedBy::Tops => format!("The graph holds no {many}."),
                 RootedBy::Targets => format!("The target set names no {many} of the graph."),
             };
-            return root.child(centered_notice(empty, &palette.colors));
+            return (root.child(centered_notice(empty, &palette.colors)))
+                .children(jump)
+                .children(card);
         }
         if drawn.shown.tree.total() == 0 {
             let many = unit_names(tree.scope().unit()).many;
             let hidden = format!("The filter hides every one of the {many} drawn here.");
-            return root.child(centered_notice(hidden, &palette.colors));
+            return (root.child(centered_notice(hidden, &palette.colors)))
+                .children(jump)
+                .children(card);
         }
         root.child(
             div()
@@ -2201,6 +2549,8 @@ impl Render for ExclusivePanel {
                 .min_h(px(0.))
                 .child(cached_layer(self.canvas.clone()))
                 .child(hover_layer(cx.entity(), palette))
+                .children(card)
+                .children(jump)
                 .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -2413,7 +2763,11 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                     drawn.selection = moved;
                 }
             });
-            if let Some((lines, anchor)) = view.read(cx).card() {
+            // The palette stands over the cells, which a card describing the
+            // cell its keys preview would cover it with.
+            let panel = view.read(cx);
+            let card = panel.card().filter(|_| !panel.jump.read(cx).is_open());
+            if let Some((lines, anchor)) = card {
                 let tooltip = palette.colors.tooltip();
                 defer_hover_card(lines, anchor, bounds, tooltip, window, cx);
             }

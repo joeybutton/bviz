@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 const LENGTH: usize = 100;
 
 /// Steps in order, one of them the current.
+#[derive(Clone)]
 pub(crate) struct History<T> {
     /// Oldest first; never empty, and never longer than [`LENGTH`].
     steps: VecDeque<T>,
