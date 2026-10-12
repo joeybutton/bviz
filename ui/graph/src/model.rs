@@ -5,6 +5,7 @@ use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
 use crate::filter::{Applied, DocumentFilter, Judgement};
+use crate::fuzzy::{self, Matching};
 use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -551,7 +552,17 @@ pub(crate) struct VerdictsLanded;
 pub(crate) struct QueryChanged;
 
 /// A query asked to be applied was not, for the reason it carries.
-pub(crate) struct QueryRefused(pub(crate) SharedString);
+pub(crate) struct QueryRefused {
+    /// The query bar that asked for the apply.
+    pub(crate) by: EntityId,
+    pub(crate) why: SharedString,
+}
+
+/// The query bar `by` asked for has been applied, whether or not that changed
+/// the filter.
+pub(crate) struct QueryApplied {
+    pub(crate) by: EntityId,
+}
 
 /// A pass over the whole of a graph, which is only taken once a view drawing
 /// what it yields asks for it.
@@ -661,6 +672,9 @@ pub(crate) struct GraphModel {
     /// Applies the query committed last; replacing it gives up an apply still
     /// under way.
     _applying: Task<()>,
+    /// The matcher pool the lists over the graph — each panel's palette and
+    /// each query bar's completion — take up in turn.
+    matchers: fuzzy::Pool,
     joined: Option<Joined>,
     /// The playback clock of the document the graph is opened in, where that
     /// document plays back.
@@ -684,6 +698,7 @@ impl EventEmitter<FilterChanged> for GraphModel {}
 impl EventEmitter<VerdictsLanded> for GraphModel {}
 impl EventEmitter<QueryChanged> for GraphModel {}
 impl EventEmitter<QueryRefused> for GraphModel {}
+impl EventEmitter<QueryApplied> for GraphModel {}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -830,6 +845,7 @@ impl GraphModel {
             query: Stack::default(),
             prefixes: Arc::default(),
             _applying: Task::ready(()),
+            matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
         }
@@ -948,6 +964,17 @@ impl GraphModel {
         self.edit_query(|query| *query = applied.unwrap_or_default(), cx);
     }
 
+    /// A matching with no query, on the graph's matcher pool where no list
+    /// holds it.
+    pub(crate) fn take_matcher(&mut self) -> Matching {
+        self.matchers.take()
+    }
+
+    /// Hands the pool of `matching` back for another list to take up.
+    pub(crate) fn park_matcher(&mut self, matching: Matching) {
+        self.matchers.park(matching);
+    }
+
     /// The values of the query's prefixes over the loaded graph, shared by
     /// every evaluation of the query.
     pub(crate) fn prefixes(&self) -> Arc<Prefixes> {
@@ -955,12 +982,12 @@ impl GraphModel {
     }
 
     /// Scopes the filter to what the chips staged name, off the UI thread,
-    /// giving up an apply asked for before.
-    pub(crate) fn apply_query(&mut self, cx: &mut Context<Self>) {
+    /// giving up an apply asked for before; `by` is the query bar asking.
+    pub(crate) fn apply_query(&mut self, by: EntityId, cx: &mut Context<Self>) {
         let stack = self.query.clone();
         if matches!(stack.compile(), Ok(None)) {
             self._applying = Task::ready(());
-            self.scope_landed(stack, Ok(None), cx);
+            self.scope_landed(stack, Ok(None), by, cx);
             return;
         }
         let Some(universe) = self.universe() else {
@@ -973,7 +1000,7 @@ impl GraphModel {
                 let scope = scope_of(&stack, universe.get(), &prefixes);
                 (stack, scope)
             },
-            |model, (stack, scope), cx| model.scope_landed(stack, scope, cx),
+            move |model, (stack, scope), cx| model.scope_landed(stack, scope, by, cx),
         );
     }
 
@@ -981,16 +1008,18 @@ impl GraphModel {
         &mut self,
         stack: Stack,
         scope: Result<Option<select::Scope>, SharedString>,
+        by: EntityId,
         cx: &mut Context<Self>,
     ) {
         match scope {
             Ok(scope) => {
+                cx.emit(QueryApplied { by });
                 let applied = scope.map(|scope| Applied::new(stack, scope));
                 if self.filter.set_applied(applied) {
                     self.filter_changed(true, cx);
                 }
             }
-            Err(why) => cx.emit(QueryRefused(why)),
+            Err(why) => cx.emit(QueryRefused { by, why }),
         }
     }
 

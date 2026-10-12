@@ -4,10 +4,10 @@
 //! that is one of a vocabulary, matched against the word under the cursor and
 //! listed under the field.
 
-use super::{AcceptCompletion, GraphPanel, command, completion_stack};
+use super::{AcceptCompletion, ChipBar, command, completion_stack};
 use crate::Palette;
 use crate::fuzzy::{self, Feeder, Matching, Row, Standing, TEXT_SIZE};
-use crate::jump::{Candidates, bring_into_view, drawn_ids, labelled, package_of};
+use crate::jump::{Candidates, bring_into_view, labelled, package_of};
 use crate::model::Prepared;
 use bviz_graph_layout::query_lang::{
     ArgType, Command, Function, Params, Place, Readable, Vocabulary, word_at, written_word,
@@ -26,7 +26,7 @@ use gpui::{
     MouseDownEvent, Pixels, SharedString, Stateful, TextStyleRefinement, Window, div, prelude::*,
     px, uniform_list,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -400,28 +400,28 @@ impl Offered {
 }
 
 /// The matching of what the field offers.
-fn matching(view: &mut GraphPanel) -> Option<&mut Matching> {
-    Some(&mut view.chips.completer.offered.as_mut()?.matching)
+fn matching(view: &mut ChipBar) -> Option<&mut Matching> {
+    Some(&mut view.completer.offered.as_mut()?.matching)
 }
 
 /// Stops offering, parking the matcher's pool for another list to take up;
 /// the next edit offers afresh.
-pub(super) fn release(view: &mut GraphPanel) {
-    if let Some(offered) = view.chips.completer.offered.take() {
-        view.matchers.park(offered.matching);
+pub(super) fn release(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    if let Some(offered) = view.completer.offered.take() {
+        (view.model).update(cx, |model, _| model.park_matcher(offered.matching));
     }
 }
 
 /// Matches the word now under the field's cursor, starting to offer the
 /// graph's patterns on the first edit or cursor move made over it.
-pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if view.chips.completer.offered.is_none() {
+pub(super) fn follow(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    if view.completer.offered.is_none() {
         let Some(completions) = view.model.read(cx).completions() else {
             return;
         };
-        view.chips.completer.offered = Some(Offered {
+        view.completer.offered = Some(Offered {
             completions: completions.clone(),
-            matching: view.matchers.take(),
+            matching: view.model.update(cx, |model, _| model.take_matcher()),
             few: Few::Functions(Vec::new()),
             word: None,
             offers: Offers::at(Place::Pattern),
@@ -437,7 +437,7 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         };
         fuzzy::inject(view, matching, take_up, feed, cx);
     }
-    let field = view.chips.field.read(cx);
+    let field = view.field.read(cx);
     let text = field.text(cx);
     let typed = word_at(&text, field.cursor(cx));
     let offers = typed.as_ref().map(|word| Offers::at(word.place));
@@ -454,14 +454,14 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         _ => String::new(),
     };
     let word = typed.map(|word| word.span);
-    let Some(offered) = view.chips.completer.offered.as_mut() else {
+    let Some(offered) = view.completer.offered.as_mut() else {
         return;
     };
     offered.word = word;
     offered.few = few;
     offered.offers = offers.unwrap_or(Offers::at(Place::Pattern));
     offered.aimed = None;
-    view.chips.completer.scroll.to_top();
+    view.completer.scroll.to_top();
     if offered.matching.set_query(query.into()) {
         fuzzy::poll(view, matching, take_up, cx);
     }
@@ -469,14 +469,14 @@ pub(super) fn follow(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 }
 
 /// Keeps the list closed while the field holds what it holds now.
-pub(super) fn hold_closed(view: &mut GraphPanel, cx: &App) {
-    view.chips.completer.closed_at = Some(at_cursor(view, cx));
+pub(super) fn hold_closed(view: &mut ChipBar, cx: &App) {
+    view.completer.closed_at = Some(at_cursor(view, cx));
 }
 
 /// Takes up what the matcher has found since the last poll.
-fn take_up(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let drawn = drawn_ids(view);
-    let Some(offered) = view.chips.completer.offered.as_mut() else {
+fn take_up(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    let drawn = (view.drawn.as_ref()).map_or_else(FxHashSet::default, |drawn| drawn(cx));
+    let Some(offered) = view.completer.offered.as_mut() else {
         return;
     };
     let completions = &offered.completions;
@@ -497,8 +497,8 @@ fn take_up(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 }
 
 /// What the field holds, and where the word under its cursor stands.
-fn at_cursor(view: &GraphPanel, cx: &App) -> (SharedString, Option<Range<usize>>) {
-    let field = view.chips.field.read(cx);
+fn at_cursor(view: &ChipBar, cx: &App) -> (SharedString, Option<Range<usize>>) {
+    let field = view.field.read(cx);
     let text = field.text(cx);
     let word = word_at(&text, field.cursor(cx)).map(|word| word.span);
     (text, word)
@@ -508,14 +508,14 @@ fn at_cursor(view: &GraphPanel, cx: &App) -> (SharedString, Option<Range<usize>>
 /// has the focus, the cursor is on the word matched, the list was not closed
 /// over what the field holds and the word at its cursor, and the best match
 /// is not the word as it is written.
-fn shown<'a>(view: &'a GraphPanel, window: &Window, cx: &App) -> Option<&'a Offered> {
-    let offered = view.chips.completer.offered.as_ref()?;
-    let field = view.chips.field.read(cx);
+fn shown<'a>(view: &'a ChipBar, window: &Window, cx: &App) -> Option<&'a Offered> {
+    let offered = view.completer.offered.as_ref()?;
+    let field = view.field.read(cx);
     if !field.focus_handle(cx).is_focused(window) {
         return None;
     }
     let at = at_cursor(view, cx);
-    if view.chips.completer.closed_at.as_ref() == Some(&at) {
+    if view.completer.closed_at.as_ref() == Some(&at) {
         return None;
     }
     let (text, word) = at;
@@ -534,7 +534,7 @@ fn shown<'a>(view: &'a GraphPanel, window: &Window, cx: &App) -> Option<&'a Offe
 }
 
 /// Whether the list stands open under the field.
-pub(super) fn is_shown(view: &GraphPanel, window: &Window, cx: &App) -> bool {
+pub(super) fn is_shown(view: &ChipBar, window: &Window, cx: &App) -> bool {
     shown(view, window, cx).is_some()
 }
 
@@ -575,10 +575,10 @@ fn insertion<'a>(text: &str, cursor: usize, completion: &Completion<'a>) -> Opti
 /// row or else the first, and closes the list. Rows ranked for an earlier
 /// query are not accepted.
 pub(super) fn accept(
-    view: &mut GraphPanel,
+    view: &mut ChipBar,
     at: Option<usize>,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<ChipBar>,
 ) {
     let Some(offered) = shown(view, window, cx) else {
         return;
@@ -590,14 +590,14 @@ pub(super) fn accept(
     let Some((completion, _)) = offered.row(at) else {
         return;
     };
-    let field = view.chips.field.read(cx);
+    let field = view.field.read(cx);
     let text = field.text(cx);
     let Some(insertion) = insertion(&text, field.cursor(cx), &completion) else {
         return;
     };
     let Insertion { span, text, cursor } = insertion;
     let (text, cursor) = (text.into_owned(), span.start + cursor);
-    view.chips.field.update(cx, |field, cx| {
+    view.field.update(cx, |field, cx| {
         field.replace(span, &text, cx);
         field.set_cursor(cursor, cx);
     });
@@ -606,27 +606,26 @@ pub(super) fn accept(
 }
 
 /// Closes the list until the field holds something else.
-pub(super) fn close(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+pub(super) fn close(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     hold_closed(view, cx);
     cx.notify();
 }
 
 /// Moves the aim `step` rows.
-pub(super) fn aim(view: &mut GraphPanel, step: isize, cx: &mut Context<GraphPanel>) {
-    let Some(offered) = view.chips.completer.offered.as_mut() else {
+pub(super) fn aim(view: &mut ChipBar, step: isize, cx: &mut Context<ChipBar>) {
+    let Some(offered) = view.completer.offered.as_mut() else {
         return;
     };
     offered.aimed = stepped(offered.aimed, step, offered.rows());
     if let Some(aimed) = offered.aimed {
-        bring_into_view(&view.chips.completer.scroll, aimed);
+        bring_into_view(&view.completer.scroll, aimed);
     }
     cx.notify();
 }
 
 /// Whether the arrow keys have moved onto a row.
-pub(super) fn is_aimed(view: &GraphPanel) -> bool {
-    view.chips
-        .completer
+pub(super) fn is_aimed(view: &ChipBar) -> bool {
+    view.completer
         .offered
         .as_ref()
         .is_some_and(|offered| offered.aimed.is_some())
@@ -647,10 +646,10 @@ fn stepped(aimed: Option<usize>, step: isize, rows: usize) -> Option<usize> {
 /// `None` while it is closed. It stands no taller than the window, past
 /// which its rows scroll.
 pub(super) fn list(
-    view: &GraphPanel,
+    view: &ChipBar,
     palette: &Palette,
     window: &mut Window,
-    cx: &Context<GraphPanel>,
+    cx: &Context<ChipBar>,
 ) -> Option<Deferred> {
     let offered = shown(view, window, cx)?;
     let count = offered.rows();
@@ -665,7 +664,7 @@ pub(super) fn list(
     let listing = *palette;
     let rows = uniform_list("chip-completions", count, move |range, _, cx| {
         let view = entity.read(cx);
-        let Some(offered) = view.chips.completer.offered.as_ref() else {
+        let Some(offered) = view.completer.offered.as_ref() else {
             return Vec::new();
         };
         let inputs = offered.completions.shared().inputs.inputs();
@@ -700,7 +699,7 @@ pub(super) fn list(
     .flex_1()
     .min_h_0()
     .w_full()
-    .track_scroll(view.chips.completer.scroll.uniform_handle());
+    .track_scroll(view.completer.scroll.uniform_handle());
     let sheet = menu_chrome::sheet(&palette.colors)
         .w(LIST_WIDTH)
         .max_w(room.width)
@@ -709,7 +708,7 @@ pub(super) fn list(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, event: &MouseDownEvent, _, cx| {
-                view.chips.completer.scroll.press(event.position);
+                view.completer.scroll.press(event.position);
                 // Keep the press off the panel, which would take the focus
                 // from the field and so close the list mid-click.
                 cx.stop_propagation();
@@ -719,8 +718,8 @@ pub(super) fn list(
         .child(rows)
         .child(list_scrollbar(
             cx.entity(),
-            |view: &GraphPanel| &view.chips.completer.scroll,
-            |view: &mut GraphPanel| &mut view.chips.completer.scroll,
+            |view: &ChipBar| &view.completer.scroll,
+            |view: &mut ChipBar| &mut view.completer.scroll,
             palette.scroll,
         ));
     Some(menu_chrome::under_trigger(sheet))
@@ -746,7 +745,7 @@ struct Listed<'a> {
 /// One row: the pattern or the function's signature with the characters the
 /// word matched picked out, and what it names. A function no graph
 /// evaluates is dimmed.
-fn listed(listed: Listed, palette: &Palette, entity: &Entity<GraphPanel>) -> Stateful<Div> {
+fn listed(listed: Listed, palette: &Palette, entity: &Entity<ChipBar>) -> Stateful<Div> {
     let Listed {
         completion,
         row,

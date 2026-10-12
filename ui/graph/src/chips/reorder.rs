@@ -1,6 +1,6 @@
 //! Reordering chips by dragging a pill within its group.
 
-use super::GraphPanel;
+use super::ChipBar;
 use crate::drag::past_slop;
 use bviz_graph_layout::query_lang::{Chip, ChipId, Stack};
 use bviz_ui_components::{DragEnd, overlay_canvas, track_drag};
@@ -53,11 +53,11 @@ pub(super) enum Slot {
 
 /// Starts a press on the pill of `chip` at `at`.
 pub(super) fn press(
-    view: &mut GraphPanel,
+    view: &mut ChipBar,
     chip: ChipId,
     at: Point<Pixels>,
     window: &Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<ChipBar>,
 ) {
     let panel = cx.weak_entity();
     let here = window.window_handle();
@@ -70,9 +70,9 @@ pub(super) fn press(
             return;
         }
         let cancelled = panel.update(cx, |view, cx| {
-            let pressed = matches!(view.chips.gesture, Gesture::Pressed(_));
+            let pressed = matches!(view.gesture, Gesture::Pressed(_));
             if pressed {
-                view.chips.gesture = Gesture::Idle;
+                view.gesture = Gesture::Idle;
                 cx.notify();
             }
             pressed
@@ -81,7 +81,7 @@ pub(super) fn press(
             cx.stop_propagation();
         }
     });
-    view.chips.gesture = Gesture::Pressed(Press {
+    view.gesture = Gesture::Pressed(Press {
         chip,
         from: at,
         at,
@@ -120,13 +120,13 @@ impl Gesture {
 }
 
 /// Whether a click on a pill is the release of a drag, which acts on nothing.
-pub(super) fn swallows_click(view: &mut GraphPanel) -> bool {
-    view.chips.gesture.takes_click()
+pub(super) fn swallows_click(view: &mut ChipBar) -> bool {
+    view.gesture.takes_click()
 }
 
 /// The press being carried, if one is.
-fn carried(view: &GraphPanel) -> Option<&Press> {
-    match &view.chips.gesture {
+fn carried(view: &ChipBar) -> Option<&Press> {
+    match &view.gesture {
         Gesture::Pressed(press) if press.carried => Some(press),
         _ => None,
     }
@@ -134,7 +134,7 @@ fn carried(view: &GraphPanel) -> Option<&Press> {
 
 /// Whether `chip` shows the drop mark ahead of itself, and behind itself as
 /// the last of its group.
-pub(super) fn marked(view: &GraphPanel, chip: ChipId, cx: &App) -> (bool, bool) {
+pub(super) fn marked(view: &ChipBar, chip: ChipId, cx: &App) -> (bool, bool) {
     let Some(press) = carried(view) else {
         return (false, false);
     };
@@ -156,8 +156,8 @@ fn group_of(stack: &Stack, chip: ChipId) -> &[Chip] {
 
 /// The window-global handlers carrying a press past its pill, installed for as
 /// long as one is held.
-pub(super) fn handlers(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Canvas<()>> {
-    if !matches!(view.chips.gesture, Gesture::Pressed(_)) {
+pub(super) fn handlers(view: &ChipBar, cx: &Context<ChipBar>) -> Option<Canvas<()>> {
+    if !matches!(view.gesture, Gesture::Pressed(_)) {
         return None;
     }
     let panel = cx.entity();
@@ -171,8 +171,8 @@ pub(super) fn handlers(view: &GraphPanel, cx: &Context<GraphPanel>) -> Option<Ca
     }))
 }
 
-fn moved(view: &mut GraphPanel, at: Point<Pixels>, cx: &mut Context<GraphPanel>) {
-    let Gesture::Pressed(press) = &mut view.chips.gesture else {
+fn moved(view: &mut ChipBar, at: Point<Pixels>, cx: &mut Context<ChipBar>) {
+    let Gesture::Pressed(press) = &mut view.gesture else {
         return;
     };
     press.at = at;
@@ -180,7 +180,7 @@ fn moved(view: &mut GraphPanel, at: Point<Pixels>, cx: &mut Context<GraphPanel>)
         return;
     }
     let starts_scrolling = !press.carried || edge_step(view, at).is_none();
-    if let Gesture::Pressed(press) = &mut view.chips.gesture {
+    if let Gesture::Pressed(press) = &mut view.gesture {
         press.carried = true;
     }
     if starts_scrolling && edge_step(view, at).is_some() {
@@ -193,7 +193,7 @@ fn moved(view: &mut GraphPanel, at: Point<Pixels>, cx: &mut Context<GraphPanel>)
                 }
             }
         });
-        if let Gesture::Pressed(press) = &mut view.chips.gesture {
+        if let Gesture::Pressed(press) = &mut view.gesture {
             press._scrolling = scrolling;
         }
     }
@@ -202,26 +202,26 @@ fn moved(view: &mut GraphPanel, at: Point<Pixels>, cx: &mut Context<GraphPanel>)
 }
 
 /// Aims the press at the slot under the pointer.
-fn aim(view: &mut GraphPanel, cx: &App) {
+fn aim(view: &mut ChipBar, cx: &App) {
     let Some(press) = carried(view) else {
         return;
     };
     let slot = slot_at(view, press.chip, press.at, cx);
-    if let Gesture::Pressed(press) = &mut view.chips.gesture {
+    if let Gesture::Pressed(press) = &mut view.gesture {
         press.slot = slot;
     }
 }
 
 /// Steps the row's scroll towards the end the pointer rests near, and re-aims
 /// the press; reports whether it stepped.
-fn step_at_edge(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) -> bool {
+fn step_at_edge(view: &mut ChipBar, cx: &mut Context<ChipBar>) -> bool {
     let Some(at) = carried(view).map(|press| press.at) else {
         return false;
     };
     let Some(step) = edge_step(view, at) else {
         return false;
     };
-    let scroll = &view.chips.scroll;
+    let scroll = &view.scroll;
     let offset = scroll.offset();
     let reach = scroll.max_offset().x;
     let x = (offset.x + step).clamp(-reach, px(0.));
@@ -236,8 +236,8 @@ fn step_at_edge(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) -> bool {
 
 /// How far a pointer at `at` steps the row's scroll: towards the start near
 /// its left end, the end near its right; `None` away from both.
-fn edge_step(view: &GraphPanel, at: Point<Pixels>) -> Option<Pixels> {
-    let row = view.chips.scroll.bounds();
+fn edge_step(view: &ChipBar, at: Point<Pixels>) -> Option<Pixels> {
+    let row = view.scroll.bounds();
     if at.y < row.top() || at.y > row.bottom() {
         return None;
     }
@@ -250,8 +250,8 @@ fn edge_step(view: &GraphPanel, at: Point<Pixels>) -> Option<Pixels> {
     }
 }
 
-fn ended(view: &mut GraphPanel, end: DragEnd, cx: &mut Context<GraphPanel>) {
-    let Some(press) = view.chips.gesture.release() else {
+fn ended(view: &mut ChipBar, end: DragEnd, cx: &mut Context<ChipBar>) {
+    let Some(press) = view.gesture.release() else {
         return;
     };
     if let (true, DragEnd::Released, Some(slot)) = (press.carried, end, press.slot) {
@@ -263,8 +263,7 @@ fn ended(view: &mut GraphPanel, end: DragEnd, cx: &mut Context<GraphPanel>) {
             model.edit_query(|stack| stack.move_before(press.chip, before), cx)
         });
         if moved {
-            view.chips
-                .scroll_to(view.model.read(cx).query(), press.chip);
+            view.scroll_to(view.model.read(cx).query(), press.chip);
         }
     }
     cx.notify();
@@ -273,8 +272,8 @@ fn ended(view: &mut GraphPanel, end: DragEnd, cx: &mut Context<GraphPanel>) {
 /// Where in the group of `chip` a drop at `at` lands it: ahead of the first
 /// other chip of the group whose middle lies past `at`, or at the group's end.
 /// `None` where `at` lies off the row, or the row has not laid the group out.
-fn slot_at(view: &GraphPanel, chip: ChipId, at: Point<Pixels>, cx: &App) -> Option<Slot> {
-    let scroll = &view.chips.scroll;
+fn slot_at(view: &ChipBar, chip: ChipId, at: Point<Pixels>, cx: &App) -> Option<Slot> {
+    let scroll = &view.scroll;
     let row = scroll.bounds();
     if !row.contains(&at) {
         return None;

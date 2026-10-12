@@ -1,6 +1,6 @@
 //! A chip drawn as a pill: its text, what it named, and its menu.
 
-use super::{GraphPanel, edit, open_menu, reorder, select};
+use super::{ChipBar, edit, open_menu, reorder, select};
 use crate::Palette;
 use bviz_graph_layout::query_lang::{Chip, Counts, Outcome};
 use bviz_ui_components::gesture::{
@@ -59,7 +59,7 @@ pub(super) fn pill(
     selected: bool,
     editing: bool,
     palette: &Palette,
-    cx: &Context<GraphPanel>,
+    cx: &Context<ChipBar>,
 ) -> Stateful<Div> {
     let id = chip.id();
     let colors = &palette.colors;

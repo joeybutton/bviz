@@ -858,10 +858,9 @@ pub(crate) fn opened(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     view.derived.opened_on(loaded);
-    crate::chips::reset(view, cx);
     crate::why::reset(view);
     crate::reveal::reset(view);
-    crate::jump::reset(view);
+    crate::jump::reset(view, cx);
     let scoped = view.model.read(cx).filter().applied().is_some();
     follow(view, scoped, cx);
     ensure_layout(view, cx);

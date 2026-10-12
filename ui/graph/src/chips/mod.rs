@@ -11,20 +11,21 @@ mod reorder;
 
 pub(crate) use complete::Completions;
 
-use crate::model::{GraphModel, QueryChanged, QueryRefused};
-use crate::{GraphPanel, Palette, derive};
-use bviz_graph_layout::Input;
+use crate::Palette;
+use crate::model::{FilterChanged, GraphModel, QueryChanged, QueryRefused, SourceReplaced};
 use bviz_graph_layout::query_lang::{ChipId, Command, Evaluation, Stack};
+use bviz_graph_layout::{Id, Input};
 use bviz_ui_components::gesture::GestureRow;
 use bviz_ui_components::{
     Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
-    load_in_background, over_window, text_input,
+    load_in_background, menu_chrome, over_window, text_input,
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, KeyContext, Pixels, Point, ScrollHandle, SharedString, Subscription, Task, Window,
-    actions, div, point, prelude::*, px,
+    KeyBinding, KeyContext, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
+    Window, actions, div, point, prelude::*, px,
 };
+use rustc_hash::FxHashSet;
 
 actions!(
     bviz_graph_chips,
@@ -160,9 +161,17 @@ pub(crate) fn bindings(unless_typing: Option<&str>) -> Vec<KeyBinding> {
     ]
 }
 
-/// The bar's state, held by the panel; the chips it stages are the
-/// document's [`GraphModel::query`].
-pub(crate) struct Chips {
+/// The query bar a view of the graph document stands in its toolbar. The
+/// chips it stages are the document's [`GraphModel::query`], which every bar
+/// over the document shows and edits alike; what is typed, selected and
+/// scrolled is this bar's own.
+pub(crate) struct ChipBar {
+    model: Entity<GraphModel>,
+    /// The view holding the bar, which leaving the bar gives the focus back
+    /// to.
+    host: FocusHandle,
+    /// The nodes the holder draws, which completion ranks first.
+    drawn: Option<Drawn>,
     field: Entity<QueryField>,
     /// Held by the bar while a chip is selected, so that the keys acting on
     /// chips reach the bar.
@@ -170,7 +179,7 @@ pub(crate) struct Chips {
     selected: Option<ChipId>,
     /// The chip the field holds the text of, which committing the field
     /// rewrites.
-    editing: Option<ChipId>,
+    editing: Option<Editing>,
     /// Counts each change to the stack or the field, so that an evaluation of
     /// a stack since changed lands nothing.
     generation: u64,
@@ -193,8 +202,31 @@ pub(crate) struct Chips {
     _typed: Subscription,
     /// Counts the stack afresh as any bar over the document edits it.
     _staged: Subscription,
-    /// Says why a query asked to be applied was not.
+    /// Says why a query this bar asked to be applied was not.
     _refused: Subscription,
+    /// Restates whether the stack is staged as another one is applied.
+    _applied: Subscription,
+    /// Counts the stack afresh over the graph the document has read.
+    _source_replaced: Subscription,
+}
+
+/// The nodes a bar's holder draws, read as the completion ranks its rows.
+pub(crate) type Drawn = Box<dyn Fn(&App) -> FxHashSet<Id>>;
+
+/// A chip the field holds the text of, as that text stood when the edit
+/// began. Another bar removing the chip or rewriting its text ends the edit,
+/// so that committing the field never overwrites an edit made elsewhere: the
+/// field's text stays, as the draft of a chip of its own.
+struct Editing {
+    chip: ChipId,
+    from: String,
+}
+
+impl Editing {
+    /// Whether `stack` still holds the chip edited, its text untouched.
+    fn survives(&self, stack: &Stack) -> bool {
+        (stack.chip(self.chip)).is_some_and(|chip| chip.text() == self.from)
+    }
 }
 
 /// What evaluating the stack with the field's chip in place came to.
@@ -210,8 +242,15 @@ struct OpenMenu {
     _dismissed: Subscription,
 }
 
-impl Chips {
-    pub(crate) fn new(model: &Entity<GraphModel>, cx: &mut Context<GraphPanel>) -> Self {
+impl ChipBar {
+    /// A bar over `model` in the view `host` focuses, whose completion ranks
+    /// first the nodes `drawn` reads.
+    pub(crate) fn new(
+        model: Entity<GraphModel>,
+        host: FocusHandle,
+        drawn: Option<Drawn>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let field = cx.new(|cx| QueryField::new("chips", PLACEHOLDER, FIELD_WIDTH, cx));
         let typed = cx.subscribe(&field, |view, _, event: &QueryFieldEvent, cx| match event {
             QueryFieldEvent::CursorMoved => {
@@ -225,12 +264,23 @@ impl Chips {
             }
             QueryFieldEvent::Settled => changed(view, cx),
         });
-        let staged = cx.subscribe(model, |view, _, _: &QueryChanged, cx| changed(view, cx));
-        let refused = cx.subscribe(model, |view, _, refused: &QueryRefused, cx| {
-            view.chips.notice = Some(refused.0.clone());
+        let staged = cx.subscribe(&model, |view, _, _: &QueryChanged, cx| restacked(view, cx));
+        let refused = cx.subscribe(&model, |view, _, refused: &QueryRefused, cx| {
+            if refused.by == cx.entity_id() {
+                view.notice = Some(refused.why.clone());
+                cx.notify();
+            }
+        });
+        let applied = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
+            restage(view, cx);
             cx.notify();
         });
-        Chips {
+        let source_replaced =
+            cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| reset(view, cx));
+        let mut bar = ChipBar {
+            model,
+            host,
+            drawn,
             field,
             focus_handle: cx.focus_handle(),
             selected: None,
@@ -247,7 +297,18 @@ impl Chips {
             _typed: typed,
             _staged: staged,
             _refused: refused,
-        }
+            _applied: applied,
+            _source_replaced: source_replaced,
+        };
+        changed(&mut bar, cx);
+        bar
+    }
+
+    /// Whether the field holds the text of the chip `id`.
+    fn edits(&self, id: ChipId) -> bool {
+        self.editing
+            .as_ref()
+            .is_some_and(|editing| editing.chip == id)
     }
 
     /// `stack` with the field's text in place: as the chip it edits, or as a
@@ -256,7 +317,7 @@ impl Chips {
         let text = self.field.read(cx).text(cx);
         let mut stack = stack.clone();
         let text = text.trim();
-        let draft = match self.editing {
+        let draft = match self.editing.as_ref().map(|editing| editing.chip) {
             Some(id) => {
                 if !text.is_empty() {
                     stack.set_text(id, text);
@@ -294,14 +355,14 @@ impl Chips {
 
 /// Restates whether the stack, with the field's chip in place, names other
 /// than what was applied.
-pub(crate) fn restage(view: &mut GraphPanel, cx: &App) {
+fn restage(view: &mut ChipBar, cx: &App) {
     let model = view.model.read(cx);
-    let (stack, _) = view.chips.with_field(model.query(), cx);
+    let (stack, _) = view.with_field(model.query(), cx);
     let written = stack
         .compile()
         .map(|compiled| compiled.map(|c| c.expr.to_string()));
     let applied = (model.filter().applied()).map(|applied| applied.scope().query());
-    view.chips.staged = match written {
+    view.staged = match written {
         Ok(written) => written.as_deref() != applied,
         Err(_) => true,
     };
@@ -309,29 +370,51 @@ pub(crate) fn restage(view: &mut GraphPanel, cx: &App) {
 
 /// Starts the bar over the graph the document has read: what the chips name
 /// is evaluated afresh.
-pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    complete::release(view);
-    view.chips.landed = None;
+fn reset(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    complete::release(view, cx);
+    view.landed = None;
     changed(view, cx);
 }
 
+/// Takes up a change any bar made to the stack: ends an edit of a chip
+/// removed or rewritten, as [`Editing`] says, and a selection of a chip
+/// removed.
+fn restacked(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    let stack = view.model.read(cx).query();
+    let edited_elsewhere = (view.editing.as_ref()).is_some_and(|editing| !editing.survives(stack));
+    let selection_gone = (view.selected).is_some_and(|id| stack.chip(id).is_none());
+    if edited_elsewhere {
+        view.editing = None;
+    }
+    if selection_gone {
+        view.selected = None;
+    }
+    changed(view, cx);
+    if edited_elsewhere {
+        view.notice = Some(EDITED_ELSEWHERE.into());
+    }
+}
+
+/// What the bar says as an edit elsewhere ends its own.
+const EDITED_ELSEWHERE: &str = "chip changed in another view; the text here stays as a new chip";
+
 /// Takes up a change to the stack or the field: counts it afresh off the UI
 /// thread.
-fn changed(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    view.chips.generation += 1;
-    view.chips.notice = None;
+fn changed(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    view.generation += 1;
+    view.notice = None;
     restage(view, cx);
     evaluate(view, cx);
     cx.notify();
 }
 
-fn evaluate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let (stack, draft) = view.chips.with_field(view.model.read(cx).query(), cx);
-    let generation = view.chips.generation;
+fn evaluate(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    let (stack, draft) = view.with_field(view.model.read(cx).query(), cx);
+    let generation = view.generation;
     // An empty stack names nothing, which needs no universe to know: a graph
     // nobody queries never prepares one.
     if stack.is_empty() {
-        view.chips._evaluating = Task::ready(());
+        view._evaluating = Task::ready(());
         let evaluation = Evaluation {
             chips: Vec::new(),
             value: None,
@@ -349,7 +432,7 @@ fn evaluate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
         return;
     };
     let prefixes = model.prefixes();
-    view.chips._evaluating = load_in_background(
+    view._evaluating = load_in_background(
         cx,
         move || Landed {
             generation,
@@ -360,9 +443,9 @@ fn evaluate(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     );
 }
 
-fn landed(view: &mut GraphPanel, landed: Landed, cx: &mut Context<GraphPanel>) {
-    if landed.generation == view.chips.generation {
-        view.chips.landed = Some(landed);
+fn landed(view: &mut ChipBar, landed: Landed, cx: &mut Context<ChipBar>) {
+    if landed.generation == view.generation {
+        view.landed = Some(landed);
         cx.notify();
     }
 }
@@ -370,35 +453,35 @@ fn landed(view: &mut GraphPanel, landed: Landed, cx: &mut Context<GraphPanel>) {
 /// Edits the chips the document stages, which every bar over it then counts
 /// afresh.
 fn edit_stack<R>(
-    view: &mut GraphPanel,
-    cx: &mut Context<GraphPanel>,
+    view: &mut ChipBar,
+    cx: &mut Context<ChipBar>,
     edit: impl FnOnce(&mut Stack) -> R,
 ) -> R {
     (view.model).update(cx, |model, cx| model.edit_query(edit, cx))
 }
 
 /// Scrolls the row of chips to the chip `id`.
-fn scroll_to(view: &GraphPanel, id: ChipId, cx: &App) {
-    view.chips.scroll_to(view.model.read(cx).query(), id);
+fn scroll_to(view: &ChipBar, id: ChipId, cx: &App) {
+    view.scroll_to(view.model.read(cx).query(), id);
 }
 
-fn apply(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    derive::show_filter(view, cx);
-    view.model.update(cx, GraphModel::apply_query);
+fn apply(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    let by = cx.entity_id();
+    view.model.update(cx, |model, cx| model.apply_query(by, cx));
 }
 
 /// Puts the field's text on the stack, as the chip it edits or as a chip on
 /// top, empties the field and applies the stack. Text that does not parse
 /// stays in the field, the bar saying why.
-fn commit(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    let text = view.chips.field.read(cx).text(cx);
+fn commit(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    let text = view.field.read(cx).text(cx);
     let text = text.trim();
     if let Some(error) = syntax_error(text) {
-        view.chips.notice = Some(format!("not added: {error}").into());
+        view.notice = Some(format!("not added: {error}").into());
         cx.notify();
         return;
     }
-    let editing = view.chips.editing.take();
+    let editing = view.editing.take().map(|editing| editing.chip);
     let scrolled = edit_stack(view, cx, |stack| match editing {
         Some(id) if text.is_empty() => {
             stack.remove(id);
@@ -414,7 +497,7 @@ fn commit(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     if let Some(id) = scrolled {
         scroll_to(view, id, cx);
     }
-    view.chips.field.update(cx, |field, cx| field.clear(cx));
+    view.field.update(cx, |field, cx| field.clear(cx));
     apply(view, cx);
 }
 
@@ -430,47 +513,47 @@ fn syntax_error(text: &str) -> Option<String> {
 }
 
 /// Adds a chip reading `text` on top of the stack and applies it.
-pub(crate) fn push(view: &mut GraphPanel, text: &str, cx: &mut Context<GraphPanel>) {
+pub(crate) fn push(view: &mut ChipBar, text: &str, cx: &mut Context<ChipBar>) {
     let id = edit_stack(view, cx, |stack| stack.push(text));
     scroll_to(view, id, cx);
     apply(view, cx);
 }
 
 /// Takes the focus into the field.
-pub(crate) fn focus(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
-    view.chips.selected = None;
-    let field = view.chips.field.read(cx).focus_handle(cx);
+pub(crate) fn focus(view: &mut ChipBar, window: &mut Window, cx: &mut Context<ChipBar>) {
+    view.selected = None;
+    let field = view.field.read(cx).focus_handle(cx);
     field.focus(window, cx);
     cx.notify();
 }
 
 /// Gives the focus back to the panel, dropping an edit under way.
-fn leave(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) {
-    view.chips.selected = None;
-    complete::release(view);
-    if view.chips.editing.take().is_some() {
-        view.chips.field.update(cx, |field, cx| field.clear(cx));
+fn leave(view: &mut ChipBar, window: &mut Window, cx: &mut Context<ChipBar>) {
+    view.selected = None;
+    complete::release(view, cx);
+    if view.editing.take().is_some() {
+        view.field.update(cx, |field, cx| field.clear(cx));
     }
-    view.focus_handle.focus(window, cx);
+    view.host.focus(window, cx);
     cx.notify();
 }
 
 /// Selects the chip `id`, taking the focus onto the bar and scrolling the
 /// chip into view.
-fn select(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Context<GraphPanel>) {
-    view.chips.selected = Some(id);
+fn select(view: &mut ChipBar, id: ChipId, window: &mut Window, cx: &mut Context<ChipBar>) {
+    view.selected = Some(id);
     if let Some(at) = view.model.read(cx).query().position(id) {
-        view.chips.scroll.scroll_to_item(at);
+        view.scroll.scroll_to_item(at);
     }
-    view.chips.focus_handle.focus(window, cx);
+    view.focus_handle.focus(window, cx);
     cx.notify();
 }
 
 /// Moves the selection `step` chips along; past the last chip the field takes
 /// the focus.
-fn step(view: &mut GraphPanel, step: isize, window: &mut Window, cx: &mut Context<GraphPanel>) {
+fn step(view: &mut ChipBar, step: isize, window: &mut Window, cx: &mut Context<ChipBar>) {
     let stack = view.model.read(cx).query();
-    let at = (view.chips.selected).and_then(|id| stack.position(id));
+    let at = (view.selected).and_then(|id| stack.position(id));
     let Some(at) = at else {
         return;
     };
@@ -483,19 +566,15 @@ fn step(view: &mut GraphPanel, step: isize, window: &mut Window, cx: &mut Contex
 }
 
 /// Runs `edit` on the selected chip's stack entry and re-evaluates the stack.
-fn edit_selected(
-    view: &mut GraphPanel,
-    cx: &mut Context<GraphPanel>,
-    edit: fn(&mut Stack, ChipId),
-) {
-    if let Some(id) = view.chips.selected {
+fn edit_selected(view: &mut ChipBar, cx: &mut Context<ChipBar>, edit: fn(&mut Stack, ChipId)) {
+    if let Some(id) = view.selected {
         edit_stack(view, cx, |stack| edit(stack, id));
         scroll_to(view, id, cx);
     }
 }
 
-fn move_selected(view: &mut GraphPanel, by: isize, cx: &mut Context<GraphPanel>) {
-    if let Some(id) = view.chips.selected
+fn move_selected(view: &mut ChipBar, by: isize, cx: &mut Context<ChipBar>) {
+    if let Some(id) = view.selected
         && edit_stack(view, cx, |stack| stack.move_by(id, by))
     {
         scroll_to(view, id, cx);
@@ -503,13 +582,13 @@ fn move_selected(view: &mut GraphPanel, by: isize, cx: &mut Context<GraphPanel>)
 }
 
 /// Takes the chip `id` off the stack, selecting the one that took its place.
-fn remove(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Context<GraphPanel>) {
+fn remove(view: &mut ChipBar, id: ChipId, window: &mut Window, cx: &mut Context<ChipBar>) {
     let Some(at) = edit_stack(view, cx, |stack| stack.remove(id)) else {
         return;
     };
-    if view.chips.editing == Some(id) {
-        view.chips.editing = None;
-        view.chips.field.update(cx, |field, cx| field.clear(cx));
+    if view.edits(id) {
+        view.editing = None;
+        view.field.update(cx, |field, cx| field.clear(cx));
     }
     let stack = view.model.read(cx).query();
     let next = stack
@@ -517,40 +596,41 @@ fn remove(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Conte
         .or_else(|| stack.chips().last())
         .map(|chip| chip.id());
     match next {
-        Some(next) if view.chips.selected == Some(id) => select(view, next, window, cx),
-        None if view.chips.selected == Some(id) => focus(view, window, cx),
+        Some(next) if view.selected == Some(id) => select(view, next, window, cx),
+        None if view.selected == Some(id) => focus(view, window, cx),
         _ => {}
     }
 }
 
 /// Puts the chip `id`'s text in the field for editing.
-fn edit(view: &mut GraphPanel, id: ChipId, window: &mut Window, cx: &mut Context<GraphPanel>) {
+fn edit(view: &mut ChipBar, id: ChipId, window: &mut Window, cx: &mut Context<ChipBar>) {
     let Some(chip) = view.model.read(cx).query().chip(id) else {
         return;
     };
     let text = chip.text().to_string();
-    view.chips.editing = Some(id);
-    view.chips
-        .field
-        .update(cx, |field, cx| field.set_text(text, cx));
+    view.editing = Some(Editing {
+        chip: id,
+        from: text.clone(),
+    });
+    view.field.update(cx, |field, cx| field.set_text(text, cx));
     complete::hold_closed(view, cx);
     focus(view, window, cx);
 }
 
 /// Copies the text of the chip `id`, the bar saying it did.
-fn copy_chip(view: &mut GraphPanel, id: ChipId, _: &mut Window, cx: &mut Context<GraphPanel>) {
+fn copy_chip(view: &mut ChipBar, id: ChipId, _: &mut Window, cx: &mut Context<ChipBar>) {
     let Some(text) = (view.model.read(cx).query().chip(id)).map(|chip| chip.text().to_string())
     else {
         return;
     };
-    view.chips.notice = Some(format!("copied {text}").into());
+    view.notice = Some(format!("copied {text}").into());
     cx.write_to_clipboard(ClipboardItem::new_string(text));
     cx.notify();
 }
 
 /// Selects the last chip, for a backspace in the emptied field.
-fn select_last(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPanel>) -> bool {
-    let empty = view.chips.field.read(cx).text(cx).is_empty();
+fn select_last(view: &mut ChipBar, window: &mut Window, cx: &mut Context<ChipBar>) -> bool {
+    let empty = view.field.read(cx).text(cx).is_empty();
     match view
         .model
         .read(cx)
@@ -567,15 +647,15 @@ fn select_last(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<Grap
     }
 }
 
-/// The window point under the pill of the chip `id` of `stack`, held inside
-/// the row of chips; the row's own corner where the row has not laid the pill
-/// out.
-fn foot(chips: &Chips, stack: &Stack, id: ChipId) -> Point<Pixels> {
-    let row = chips.scroll.bounds();
-    let pill = (stack.position(id)).and_then(|at| chips.scroll.bounds_for_item(at));
+/// The window point under the pill of the chip `id`, held inside the row of
+/// chips; the row's own corner where the row has not laid the pill out.
+fn foot(view: &ChipBar, id: ChipId, cx: &App) -> Point<Pixels> {
+    let row = view.scroll.bounds();
+    let at = view.model.read(cx).query().position(id);
+    let pill = at.and_then(|at| view.scroll.bounds_for_item(at));
     match pill {
         Some(pill) => {
-            let left = pill.left() + chips.scroll.offset().x;
+            let left = pill.left() + view.scroll.offset().x;
             point(left.max(row.left()).min(row.right()), row.bottom())
         }
         None => row.bottom_left(),
@@ -584,23 +664,23 @@ fn foot(chips: &Chips, stack: &Stack, id: ChipId) -> Point<Pixels> {
 
 /// Puts up the menu of what can be done with the chip `id` at `at`.
 fn open_menu(
-    view: &mut GraphPanel,
+    view: &mut ChipBar,
     id: ChipId,
     at: Point<Pixels>,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<ChipBar>,
 ) {
     if view.model.read(cx).query().chip(id).is_none() {
         return;
     }
     let panel = cx.weak_entity();
-    let act = |act: fn(&mut GraphPanel, ChipId, &mut Window, &mut Context<GraphPanel>)| {
+    let act = |act: fn(&mut ChipBar, ChipId, &mut Window, &mut Context<ChipBar>)| {
         let panel = panel.clone();
         move |window: &mut Window, cx: &mut App| {
             panel.update(cx, |view, cx| act(view, id, window, cx)).ok();
         }
     };
-    let keys_in = Some(&view.chips.focus_handle);
+    let keys_in = Some(&view.focus_handle);
     let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
     let items = vec![
         item(
@@ -620,31 +700,31 @@ fn open_menu(
         item(&Remove, act(remove)),
         item(&CopyChip, act(copy_chip)),
     ];
-    view.chips.selected = Some(id);
+    view.selected = Some(id);
     put_up(view, items, at, window, cx);
 }
 
 /// Puts up the menu of what can be done with the whole stack at `at`.
 fn open_stack_menu(
-    view: &mut GraphPanel,
+    view: &mut ChipBar,
     at: Point<Pixels>,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<ChipBar>,
 ) {
     let panel = cx.weak_entity();
-    let act = |act: fn(&mut GraphPanel, &mut Context<GraphPanel>)| {
+    let act = |act: fn(&mut ChipBar, &mut Context<ChipBar>)| {
         let panel = panel.clone();
         move |_: &mut Window, cx: &mut App| {
             panel.update(cx, act).ok();
         }
     };
-    let keys_in = Some(&view.chips.focus_handle);
+    let keys_in = Some(&view.focus_handle);
     let item = |action: &dyn Action, chosen| MenuItem::action(action, keys_in, window, cx, chosen);
     let mut items = vec![
         item(&CopyStack, act(copy_stack)),
         item(&ClearQuery, act(clear_query)),
     ];
-    if view.chips.staged {
+    if view.staged {
         items.push(item(&RevertQuery, act(revert_query)));
     }
     put_up(view, items, at, window, cx);
@@ -652,50 +732,50 @@ fn open_stack_menu(
 
 /// Puts the stack applied last back in the bar, emptying the field, which
 /// takes back every edit made since; with none applied, the bar is emptied.
-fn revert_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if !view.chips.staged {
+fn revert_query(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
+    if !view.staged {
         return;
     }
-    view.chips.selected = None;
-    view.chips.editing = None;
-    view.chips.field.update(cx, |field, cx| field.clear(cx));
+    view.selected = None;
+    view.editing = None;
+    view.field.update(cx, |field, cx| field.clear(cx));
     view.model.update(cx, GraphModel::revert_query);
 }
 
 /// Takes every chip off the stack and empties the field. Like every other
 /// edit to the stack it is staged, the scope applied standing until the
 /// stack is applied or the applied stack is reverted to.
-fn clear_query(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+fn clear_query(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     edit_stack(view, cx, |stack| {
         let ids: Vec<ChipId> = stack.chips().map(|chip| chip.id()).collect();
         for id in ids {
             stack.remove(id);
         }
     });
-    view.chips.selected = None;
-    view.chips.editing = None;
-    view.chips.field.update(cx, |field, cx| field.clear(cx));
+    view.selected = None;
+    view.editing = None;
+    view.field.update(cx, |field, cx| field.clear(cx));
 }
 
 /// Puts up a menu of `items` at `at`, which gives the focus back to the bar
 /// as it closes holding it.
 fn put_up(
-    view: &mut GraphPanel,
+    view: &mut ChipBar,
     items: Vec<MenuItem>,
     at: Point<Pixels>,
     window: &mut Window,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<ChipBar>,
 ) {
     let menu = cx.new(|cx| Menu::new(items, at, window, cx));
     let dismissed = cx.subscribe_in(&menu, window, |view, _, event: &MenuEvent, window, cx| {
         let MenuEvent::Dismissed { holding_focus } = event;
-        view.chips.menu = None;
+        view.menu = None;
         if *holding_focus {
-            view.chips.focus_handle.focus(window, cx);
+            view.focus_handle.focus(window, cx);
         }
         cx.notify();
     });
-    view.chips.menu = Some(OpenMenu {
+    view.menu = Some(OpenMenu {
         menu,
         _dismissed: dismissed,
     });
@@ -717,7 +797,7 @@ pub(super) fn command(input: Input) -> Command {
 /// from, where that command reads every function the stack calls; and the bar
 /// says so where the graph joins several commands' output, which no one
 /// command reads alike.
-pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+pub(crate) fn copy_stack(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     let inputs = view
         .model
         .read(cx)
@@ -727,7 +807,7 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     let preferred = deepest.map_or(Command::Query, command);
     let joint = inputs.is_some_and(|inputs| inputs.inputs().count() > 1);
     let text = view.model.read(cx).query().bazel_text(preferred);
-    view.chips.notice = Some(match text {
+    view.notice = Some(match text {
         Ok(query) => {
             let command = query.command.name();
             cx.write_to_clipboard(ClipboardItem::new_string(query.text));
@@ -741,15 +821,9 @@ pub(crate) fn copy_stack(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
     cx.notify();
 }
 
-/// The menu a chip or the stack put up, standing over the whole window.
-pub(crate) fn menu(view: &GraphPanel, window: &Window) -> Option<impl IntoElement> {
-    let open = view.chips.menu.as_ref()?;
-    Some(over_window(&open.menu, window))
-}
-
 /// Commits the field and applies the stack, for the key that does so from
-/// anywhere in the panel.
-pub(crate) fn apply_staged(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+/// anywhere in the holder.
+pub(crate) fn apply_staged(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
     commit(view, cx);
 }
 
@@ -758,14 +832,22 @@ pub(crate) fn gestures() -> impl Iterator<Item = GestureRow> {
     pill::GESTURES.rows().chain(complete::gestures())
 }
 
-/// The bar: the chips, the field, and what applies them.
-pub(crate) fn bar(
-    view: &GraphPanel,
+impl Render for ChipBar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        bar(self, &palette, window, cx)
+    }
+}
+
+/// The bar: the chips, the field, and what applies them, with the menu and
+/// the notice it puts up.
+fn bar(
+    view: &ChipBar,
     palette: &Palette,
     window: &mut Window,
-    cx: &Context<GraphPanel>,
-) -> AnyElement {
-    let chips = &view.chips;
+    cx: &Context<ChipBar>,
+) -> impl IntoElement + use<> {
+    let chips = view;
     let stack = view.model.read(cx).query();
     let current = chips.current();
     let outcome = |id: ChipId| {
@@ -777,7 +859,7 @@ pub(crate) fn bar(
     let mut after_source = false;
     for chip in stack.chips() {
         let selected = focused && chips.selected == Some(chip.id());
-        let editing = chips.editing == Some(chip.id());
+        let editing = chips.edits(chip.id());
         let outcome = outcome(chip.id());
         let pill = pill::pill(chip, outcome, selected, editing, palette, cx);
         let joins = match (after_source, chip.is_source()) {
@@ -834,25 +916,25 @@ pub(crate) fn bar(
         .on_action(cx.listener(|view, _: &MoveBack, _, cx| move_selected(view, -1, cx)))
         .on_action(cx.listener(|view, _: &MoveForward, _, cx| move_selected(view, 1, cx)))
         .on_action(cx.listener(|view, _: &Remove, window, cx| {
-            if let Some(id) = view.chips.selected {
+            if let Some(id) = view.selected {
                 remove(view, id, window, cx);
             }
         }))
         .on_action(cx.listener(|view, _: &Edit, window, cx| {
-            if let Some(id) = view.chips.selected {
+            if let Some(id) = view.selected {
                 edit(view, id, window, cx);
             }
         }))
         .on_action(cx.listener(|view, _: &ClearQuery, _, cx| clear_query(view, cx)))
         .on_action(cx.listener(|view, _: &RevertQuery, _, cx| revert_query(view, cx)))
         .on_action(cx.listener(|view, _: &CopyChip, window, cx| {
-            if let Some(id) = view.chips.selected {
+            if let Some(id) = view.selected {
                 copy_chip(view, id, window, cx);
             }
         }))
         .on_action(cx.listener(|view, _: &OpenChipMenu, window, cx| {
-            if let Some(id) = view.chips.selected {
-                let at = foot(&view.chips, view.model.read(cx).query(), id);
+            if let Some(id) = view.selected {
+                let at = foot(view, id, cx);
                 open_menu(view, id, at, window, cx);
             }
         }))
@@ -944,7 +1026,18 @@ pub(crate) fn bar(
                 .tooltip("Query menu"),
             )
         }))
-        .into_any_element()
+        // The notice opens where the completion list does, which takes the
+        // place while it is up.
+        .children(
+            (!completing)
+                .then(|| notice(view, palette).map(menu_chrome::under_trigger))
+                .flatten(),
+        )
+        .children(
+            view.menu
+                .as_ref()
+                .map(|open| over_window(&open.menu, window)),
+        )
 }
 
 /// The key contexts from the panel's in to the field's text while its
@@ -968,15 +1061,12 @@ fn completion_context(aimed: bool) -> KeyContext {
     context
 }
 
-/// What the bar last has to say, standing over the drawing's top-left corner
-/// clear of the toolbar, whose row it would otherwise widen.
-pub(crate) fn notice(view: &GraphPanel, palette: &Palette) -> Option<impl IntoElement> {
-    let notice = view.chips.notice.clone()?;
+/// What the bar last has to say, put up under the bar, clear of the strip
+/// holding it, whose row it would otherwise widen.
+fn notice(view: &ChipBar, palette: &Palette) -> Option<impl IntoElement + use<>> {
+    let notice = view.notice.clone()?;
     Some(
         div()
-            .absolute()
-            .left_2()
-            .top_2()
             .max_w(NOTICE_WIDTH)
             .px_2()
             .py_1()
@@ -1023,3 +1113,27 @@ const JOINT_RULE_HEIGHT: Pixels = px(16.);
 
 /// The size of the dot saying the stack holds changes not yet applied.
 const STAGED_DOT: Pixels = px(6.);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An edit outlives a change to its chip's switches, and not one to its
+    /// text or the chip's removal.
+    #[test]
+    fn an_edit_ends_as_its_chip_is_rewritten_or_removed() {
+        let mut stack = Stack::default();
+        let chip = stack.push("//a:all");
+        let editing = Editing {
+            chip,
+            from: "//a:all".to_owned(),
+        };
+        stack.toggle_negated(chip);
+        stack.toggle_enabled(chip);
+        assert!(editing.survives(&stack));
+        stack.set_text(chip, "//b:all");
+        assert!(!editing.survives(&stack));
+        stack.remove(chip);
+        assert!(!editing.survives(&stack));
+    }
+}

@@ -145,7 +145,7 @@ pub(crate) fn open(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<
             field,
             _edits: edits,
             scope: Scope::default(),
-            matching: view.matchers.take(),
+            matching: view.model.update(cx, |model, _| model.take_matcher()),
             candidates,
             aimed: 0,
             painted: None,
@@ -382,7 +382,8 @@ fn add_chip(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPa
         return;
     };
     put_away(view, window, cx);
-    chips::push(view, &literal, cx);
+    view.chips
+        .update(cx, |bar, cx| chips::push(bar, &literal, cx));
 }
 
 /// A quoted target pattern naming `id`: the label of the target it belongs
@@ -416,7 +417,7 @@ fn put_away(view: &mut GraphPanel, window: &mut Window, cx: &mut Context<GraphPa
 
 /// Closes the palette, leaving the view where it stands.
 pub(crate) fn dismiss(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
-    if close_palette(view) {
+    if close_palette(view, cx) {
         view.hovered = None;
         view.invalidate_canvas(cx);
     }
@@ -424,19 +425,19 @@ pub(crate) fn dismiss(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
 
 /// Closes the palette, which offered the nodes of a graph that has been
 /// replaced, with the preview its rows put up.
-pub(crate) fn reset(view: &mut GraphPanel) {
-    if close_palette(view) {
+pub(crate) fn reset(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) {
+    if close_palette(view, cx) {
         view.hovered = None;
     }
 }
 
 /// Closes the palette, parking its matcher's pool; reports whether it was
 /// open.
-fn close_palette(view: &mut GraphPanel) -> bool {
+fn close_palette(view: &mut GraphPanel, cx: &mut Context<GraphPanel>) -> bool {
     let Some(jump) = view.jump.open.take() else {
         return false;
     };
-    view.matchers.park(jump.matching);
+    (view.model).update(cx, |model, _| model.park_matcher(jump.matching));
     true
 }
 

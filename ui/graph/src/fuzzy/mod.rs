@@ -3,7 +3,6 @@
 
 mod rank;
 
-use crate::GraphPanel;
 use bviz_label::shown::Shown;
 use gpui::{
     Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
@@ -40,10 +39,10 @@ fn config() -> Config {
 }
 
 /// Reaches the matching `view` holds, while it holds one.
-pub(crate) type Locate = fn(&mut GraphPanel) -> Option<&mut Matching>;
+pub(crate) type Locate<V> = fn(&mut V) -> Option<&mut Matching>;
 
 /// Takes up a result of a matching that changed since the last poll.
-pub(crate) type TakeUp = fn(&mut GraphPanel, &mut Context<GraphPanel>);
+pub(crate) type TakeUp<V> = fn(&mut V, &mut Context<V>);
 
 /// A matcher over candidates handed to it by index, with the rows its latest
 /// result ranks.
@@ -234,12 +233,12 @@ impl Drop for Injecting {
 
 /// Hands the matching `locate` reaches the candidates `feed` pushes, in place
 /// of any it held, off the UI thread, polling it through `take_up`.
-pub(crate) fn inject(
-    view: &mut GraphPanel,
-    locate: Locate,
-    take_up: TakeUp,
+pub(crate) fn inject<V: 'static>(
+    view: &mut V,
+    locate: Locate<V>,
+    take_up: TakeUp<V>,
     feed: impl FnOnce(&Feeder) + Send + 'static,
-    cx: &mut Context<GraphPanel>,
+    cx: &mut Context<V>,
 ) {
     let Some(matching) = locate(view) else {
         return;
@@ -273,11 +272,11 @@ pub(crate) fn inject(
 
 /// Polls the matching `locate` reaches every [`POLL`] through `take_up`, for
 /// as long as it runs or is handed candidates.
-pub(crate) fn poll(
-    view: &mut GraphPanel,
-    locate: Locate,
-    take_up: TakeUp,
-    cx: &mut Context<GraphPanel>,
+pub(crate) fn poll<V: 'static>(
+    view: &mut V,
+    locate: Locate<V>,
+    take_up: TakeUp<V>,
+    cx: &mut Context<V>,
 ) {
     let Some(matching) = locate(view) else {
         return;

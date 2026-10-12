@@ -85,7 +85,9 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{FilterChanged, GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
+use model::{
+    FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested, SourceReplaced,
+};
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
@@ -334,11 +336,11 @@ pub struct GraphPanel {
     /// Carries a toggled boxes-menu row into the box classes the panel unwraps.
     _box_choices: Subscription,
     /// The query bar, whose chips scope what the document's views draw.
-    chips: chips::Chips,
+    chips: Entity<chips::ChipBar>,
+    /// Puts away the paths drawn in the filter's place as the panel's own bar
+    /// applies a query.
+    _query_applied: Subscription,
     jump: jump::Finder,
-    /// The matcher pool the palette and the query field's completion take
-    /// up in turn.
-    matchers: fuzzy::Pool,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Repaints the drawing, and only it, as a gesture moves the document's
@@ -478,7 +480,21 @@ impl GraphPanel {
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
         });
-        let chips = chips::Chips::new(&model, cx);
+        let focus_handle = cx.focus_handle();
+        let drawn: chips::Drawn = {
+            let panel = cx.weak_entity();
+            Box::new(move |cx: &App| {
+                (panel.upgrade())
+                    .map_or_else(Default::default, |panel| jump::drawn_ids(panel.read(cx)))
+            })
+        };
+        let chips =
+            cx.new(|cx| chips::ChipBar::new(model.clone(), focus_handle.clone(), Some(drawn), cx));
+        let query_applied = cx.subscribe(&model, |view, _, applied: &QueryApplied, cx| {
+            if applied.by == view.chips.entity_id() {
+                derive::show_filter(view, cx);
+            }
+        });
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
             parent: parent.clone(),
@@ -516,7 +532,6 @@ impl GraphPanel {
         });
         let filter_changed = cx.subscribe(&model, |view, _, event: &FilterChanged, cx| {
             derive::filter_changed(view, event.frame, cx);
-            chips::restage(view, cx);
             cx.notify();
         });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
@@ -551,8 +566,8 @@ impl GraphPanel {
             boxes,
             _box_choices: box_choices,
             chips,
+            _query_applied: query_applied,
             jump: jump::Finder::default(),
-            matchers: fuzzy::Pool::default(),
             _changed: changed,
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
@@ -707,7 +722,6 @@ impl GraphPanel {
             )
             .child(cached_layer(self.overlays.clone()))
             .child(cached_layer(self.box_card.layer()))
-            .children(chips::menu(self, window))
             .children(box_menu::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
@@ -785,7 +799,7 @@ impl GraphPanel {
         let controls = Controls {
             legend: self.legend(palette, cx),
         };
-        toolbar::toolbar(self, controls, palette, window, cx).into_any_element()
+        toolbar::toolbar(self, controls, window, cx).into_any_element()
     }
 
     fn draw_overlays(
@@ -806,7 +820,6 @@ impl GraphPanel {
                     .foot(why::card(self, palette, cx)),
             )
             .children(jump::overlay(self, palette, window, cx))
-            .children(chips::notice(self, palette))
             .into_any_element()
     }
 
@@ -1192,11 +1205,16 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &JumpForward, _, cx| view.go_forward(cx)))
             .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
-            .on_action(
-                cx.listener(|view, _: &chips::Focus, window, cx| chips::focus(view, window, cx)),
-            )
-            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
-            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
+            .on_action(cx.listener(|view, _: &chips::Focus, window, cx| {
+                view.chips
+                    .update(cx, |bar, cx| chips::focus(bar, window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
+                view.chips.update(cx, chips::apply_staged);
+            }))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| {
+                view.chips.update(cx, chips::copy_stack);
+            }))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
             .on_action(cx.listener(|view, _: &OpenBoxMenu, window, cx| {
                 box_menu::open_selected(view, window, cx)
