@@ -543,17 +543,14 @@ impl Element for TerminalElement {
             window.paint_quad(quad);
         }
         for positioned in prepaint.lines.iter() {
-            positioned
-                .line
-                .paint(
-                    positioned.origin,
-                    metrics.line_height,
-                    gpui::TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                )
-                .unwrap();
+            let _ = positioned.line.paint(
+                positioned.origin,
+                metrics.line_height,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
         for quad in prepaint.overlays.drain(..) {
             window.paint_quad(quad);

@@ -644,7 +644,7 @@ impl TextElement {
 }
 
 struct TextPrepaint {
-    line: Option<ShapedLine>,
+    line: ShapedLine,
     /// Where the line is painted from.
     origin: Point<Pixels>,
     cursor: Option<PaintQuad>,
@@ -826,7 +826,7 @@ impl Element for TextElement {
             colors.selection,
         );
         TextPrepaint {
-            line: Some(line),
+            line,
             origin,
             cursor: cursor_quad,
             selection: selection_quad,
@@ -849,7 +849,7 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        let line = prepaint.line.take().unwrap();
+        let line = std::mem::take(&mut prepaint.line);
         // The selection and the cursor mark where typing lands, which only a
         // focused field takes.
         let focused = focus_handle.is_focused(window);
@@ -857,15 +857,14 @@ impl Element for TextElement {
             if focused && let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection);
             }
-            line.paint(
+            let _ = line.paint(
                 prepaint.origin,
                 window.line_height(),
                 gpui::TextAlign::Left,
                 None,
                 window,
                 cx,
-            )
-            .unwrap();
+            );
             if focused && let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
