@@ -241,7 +241,7 @@ fn output_path<'a>(paths: &'a Paths, mut output: &'a [u8]) -> Result<Option<&'a 
     while !output.is_empty() {
         match next_field(&mut output)? {
             (exec_log_entry::output::OUTPUT_ID, Value::Varint(id)) => {
-                path = paths.get(id as u32);
+                path = paths.get(entry_id(id)?);
             }
             (exec_log_entry::output::INVALID_OUTPUT_PATH, Value::Bytes(bytes)) => {
                 path = Some(text(bytes)?);
@@ -268,12 +268,18 @@ fn split_entry(mut entry: &[u8]) -> Result<Entry<'_>, DecodeError> {
     let mut payload = None;
     while !entry.is_empty() {
         match next_field(&mut entry)? {
-            (exec_log_entry::ID, Value::Varint(value)) => id = value as u32,
+            (exec_log_entry::ID, Value::Varint(value)) => id = entry_id(value)?,
             (kind, Value::Bytes(bytes)) => payload = Some(Payload { kind, bytes }),
             _ => {}
         }
     }
     Ok(Entry { id, payload })
+}
+
+/// The entry id a varint holds: ids are `uint32` fields, so a varint past
+/// them is no id Bazel writes.
+fn entry_id(value: u64) -> Result<u32, DecodeError> {
+    u32::try_from(value).map_err(|_| DecodeError::new("entry id out of range"))
 }
 
 fn invocation_id(invocation: &[u8]) -> Result<Option<InvocationId>, DecodeError> {
@@ -348,6 +354,7 @@ mod tests {
 
     use super::*;
     use crate::Phase;
+    use crate::spawn_fields::exec_log_entry as fields;
     use crate::test_log::*;
 
     fn ms(millis: u64) -> Duration {
@@ -515,6 +522,42 @@ mod tests {
     fn a_log_that_is_no_zstd_stream_fails() {
         let text = b"not an execution log at all";
         assert!(read_compressed(&text[..], text.len() as u64).is_err());
+    }
+
+    /// `fields` as one length-delimited entry of a compressed log.
+    fn raw_log(fields: &[u8]) -> Vec<u8> {
+        let mut decoded = Vec::with_capacity(crate::wire::MAX_VARINT_BYTES + fields.len());
+        prost::encoding::encode_varint(fields.len() as u64, &mut decoded);
+        decoded.extend_from_slice(fields);
+        zstd::encode_all(decoded.as_slice(), 0).expect("compress in memory")
+    }
+
+    /// Field `number` of a message, holding the varint `value`.
+    fn varint_field(number: u32, value: u64) -> Vec<u8> {
+        let mut field = Vec::with_capacity(2 * crate::wire::MAX_VARINT_BYTES);
+        prost::encoding::encode_key(number, prost::encoding::WireType::Varint, &mut field);
+        prost::encoding::encode_varint(value, &mut field);
+        field
+    }
+
+    const PAST_ENTRY_IDS: u64 = u32::MAX as u64 + 1;
+
+    #[test]
+    fn an_entry_id_past_the_ids_bazel_writes_fails_the_read() {
+        let log = raw_log(&varint_field(fields::ID, PAST_ENTRY_IDS));
+        assert!(matches!(
+            read_compressed(log.as_slice(), log.len() as u64),
+            Err(LoadError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn an_output_id_past_the_ids_bazel_writes_fails_the_read() {
+        let output = varint_field(fields::output::OUTPUT_ID, PAST_ENTRY_IDS);
+        let paths = Paths::with_capacity(0, 0);
+        assert!(output_path(&paths, &output).is_err());
+        let within = varint_field(fields::output::OUTPUT_ID, u64::from(u32::MAX));
+        assert!(matches!(output_path(&paths, &within), Ok(None)));
     }
 
     #[test]
