@@ -273,7 +273,7 @@ fn crossing(
     }
     let beyond = difference.changes.len().saturating_sub(CHANGES_SHOWN);
     if beyond > 0 {
-        let _ = write!(text, "\nand {beyond} more");
+        let _ = write!(text, "\n+{beyond} more");
     }
     text
 }
