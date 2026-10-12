@@ -464,6 +464,20 @@ pub struct Compiled {
     pub from_everything: bool,
 }
 
+/// Two stacks are equal where they hold the same chips in the same order, each
+/// with the same text and the same switches: the rest of a chip follows from
+/// its text.
+impl PartialEq for Stack {
+    fn eq(&self, other: &Self) -> bool {
+        fn written(chip: &Chip) -> (ChipId, &str, bool, bool) {
+            (chip.id, &chip.text, chip.enabled, chip.negated)
+        }
+        self.chips().map(written).eq(other.chips().map(written))
+    }
+}
+
+impl Eq for Stack {}
+
 impl Stack {
     /// The chips, the sources ahead of the refinements; a chip's position in
     /// the stack is its place in this order.
