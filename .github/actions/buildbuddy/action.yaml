@@ -1,12 +1,20 @@
 name: BuildBuddy
 description: >-
-  Build and test on BuildBuddy remote execution when the job's environment
-  carries BUILDBUDDY_API_KEY; without it, Bazel builds locally.
+  Build and test on BuildBuddy remote execution when given an API key; without
+  one, Bazel builds locally. A step that runs Bazel against BuildBuddy needs the
+  key in its environment as BUILDBUDDY_API_KEY, where the credential helper
+  reads it.
+
+inputs:
+  api-key:
+    description: The BuildBuddy API key, empty where the run has none.
+    required: false
+    default: ''
 
 runs:
   using: composite
   steps:
-    - if: env.BUILDBUDDY_API_KEY != ''
+    - if: inputs.api-key != ''
       shell: bash
       run: |
         cat >> user.bazelrc <<'RC'
