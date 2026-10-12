@@ -1372,4 +1372,14 @@ mod tests {
         let loaded = Profile::from_bytes(&gz).expect("the fallback loads it");
         assert_eq!(semantic(&loaded), serial);
     }
+
+    #[test]
+    fn a_truncated_gzip_loads_by_recovery() {
+        let json = chunkable_profile_json();
+        let gz = gzip(&json);
+        let truncated = &gz[..gz.len() * 3 / 4];
+        let p = Profile::from_bytes(truncated).expect("recover");
+        assert_eq!(p.opt_str(p.metadata().bazel_version), Some("9.0.0"));
+        assert!(!p.threads().is_empty());
+    }
 }

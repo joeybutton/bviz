@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 use flate2::read::MultiGzDecoder;
 
@@ -16,13 +16,17 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<String, LoadError> {
 
 /// Inflates a gzip stream into one buffer, reserved from [`gzip_size_hint`] so
 /// the common single-member case decodes without growth reallocations (a
-/// stream the hint understates merely grows past the reservation).
+/// stream the hint understates merely grows past the reservation). A stream
+/// cut off before its end, as an interrupted Bazel leaves it, yields what it
+/// decoded ahead of the cut, for [`super::recover`] to take the whole events
+/// from.
 fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
     let mut out = Vec::with_capacity(gzip_size_hint(bytes).unwrap_or(0));
-    MultiGzDecoder::new(bytes)
-        .read_to_end(&mut out)
-        .map_err(LoadError::Decompress)?;
-    Ok(out)
+    match MultiGzDecoder::new(bytes).read_to_end(&mut out) {
+        Ok(_) => Ok(out),
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof && !out.is_empty() => Ok(out),
+        Err(e) => Err(LoadError::Decompress(e)),
+    }
 }
 
 /// The gzip framing alone: a 10-byte header plus an 8-byte trailer, with no
