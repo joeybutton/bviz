@@ -209,6 +209,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
+        KeyBinding::new("r", exclusive::FocusRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
             exclusive::LeaveRoots,
@@ -226,19 +227,6 @@ fn bindings() -> Vec<KeyBinding> {
     bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
-    // The finder's keys reach the roots field from anywhere in the exclusive
-    // deps view but its query bar, whose field they would take the focus
-    // from; the slash, as the finder's own binding has it, wherever it types
-    // nothing.
-    let outside_query = format!("{} && !{}", exclusive::KEY_CONTEXT, chips::KEY_CONTEXT);
-    bindings.extend([
-        KeyBinding::new(
-            "secondary-f",
-            exclusive::FocusRoots,
-            Some(outside_query.as_str()),
-        ),
-        KeyBinding::new("/", exclusive::FocusRoots, exclusive_canvas),
-    ]);
     bindings
 }
 
@@ -1697,36 +1685,26 @@ mod tests {
         ));
     }
 
-    /// The exclusive-deps panel's roots field is reached by the keys reaching
-    /// the graph's finder, `q` reaching the query bar as in every view, and
-    /// both are text inside it.
+    /// The exclusive-deps panel's roots field is reached by `r`, `q` reaching
+    /// the query bar as in every view, and both are text inside it.
     #[test]
-    fn the_roots_field_is_reached_by_the_find_keys() {
+    fn the_roots_field_is_reached_by_r() {
         const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
         const IN_ROOTS: &[&str] = &[
             exclusive::KEY_CONTEXT.id(),
             exclusive::ROOTS_KEY_CONTEXT.id(),
             text_input::KEY_CONTEXT.id(),
         ];
+        assert!(is(dispatched("r", IN_EXCLUSIVE), exclusive::FocusRoots));
+        assert!(is(dispatched("q", IN_EXCLUSIVE), chips::Focus));
+        assert!(dispatched("r", IN_ROOTS).is_none());
+        assert!(dispatched("q", IN_ROOTS).is_none());
         for keys in ["secondary-f", "/"] {
             assert!(
-                is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
+                !is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
                 "{keys}"
             );
         }
-        assert!(is(dispatched("q", IN_EXCLUSIVE), chips::Focus));
-        assert!(dispatched("q", IN_ROOTS).is_none());
-        let in_query_field = &[
-            exclusive::KEY_CONTEXT.id(),
-            chips::KEY_CONTEXT.id(),
-            chips::FIELD_KEY_CONTEXT.id(),
-            text_input::KEY_CONTEXT.id(),
-        ];
-        assert!(!is(
-            dispatched("secondary-f", in_query_field),
-            exclusive::FocusRoots
-        ));
-        assert!(dispatched("/", IN_ROOTS).is_none());
     }
 
     /// The field's word keys reach it inside the bar, beside the bar's own
