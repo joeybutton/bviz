@@ -17,6 +17,7 @@ use crate::colour;
 use crate::drag::{DOUBLE_CLICK, past_slop};
 use crate::exclusive::NOTICE_SEPARATOR;
 use crate::hidden::{self, Offering, Unshown};
+use crate::history::{Jumps, Stop};
 use crate::holder::Holder;
 use crate::hue::Hue;
 use crate::jump::{self, JumpEvent, JumpPalette, Stands};
@@ -53,9 +54,9 @@ use bviz_ui_components::{KeyStyle, key_text_within};
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use gpui::{
     App, Bounds, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Render,
-    Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful, Subscription, Task,
-    WeakEntity, Window, canvas, div, point, prelude::*, px, uniform_list,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, PinchEvent,
+    Pixels, Point, Render, Rgba, ScrollStrategy, ScrollWheelEvent, SharedString, Size, Stateful,
+    Subscription, Task, WeakEntity, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use hue::{ColourBy, Colouring};
 use landing::{Landing, PointIndex};
@@ -147,6 +148,9 @@ pub struct ScatterPanel {
     /// When the last jump landed, which the marked points pulse from.
     pulsed: Option<Instant>,
     offering: Offering,
+    /// The points jumped to, and the part of each axis shown before the
+    /// first jump.
+    jumps: Jumps<Zoom>,
     legend: Entity<LegendState>,
     /// Where the plot was last laid out, which a pointer is resolved against.
     bounds: Option<Bounds<Pixels>>,
@@ -208,6 +212,7 @@ impl ScatterPanel {
             view.pulsed = None;
             view.opened_zoom = None;
             view.offering.clear();
+            view.jumps = Jumps::default();
             view.restate_shown(cx);
             view.plotting = None;
             view.choice = Choice::of(&view.model, &view.focus, cx);
@@ -247,6 +252,7 @@ impl ScatterPanel {
             selected: None,
             pulsed: None,
             offering: Offering::new(model.clone()),
+            jumps: Jumps::default(),
             choice,
             model,
             shown: false,
@@ -340,7 +346,14 @@ impl ScatterPanel {
         }
         match event {
             JumpEvent::Preview(_) => {}
-            JumpEvent::Go(id) => self.land(id, cx),
+            JumpEvent::Go(id) => {
+                let origin = match self.selected {
+                    Some(selected) => Stop::Node(selected),
+                    None => Stop::View(self.zoom),
+                };
+                self.jumps.visit(id, Some(origin));
+                self.land(id, cx);
+            }
             JumpEvent::AskWhy(id) => self.model.update(cx, |model, cx| model.ask_why(id, cx)),
             JumpEvent::AlwaysShow(id) => {
                 // The pin goes on the point the filter hides, which may stand
@@ -444,6 +457,37 @@ impl ScatterPanel {
         if let Some(id) = self.offering.take_waiting() {
             self.land(id, cx);
         }
+    }
+
+    /// Returns to the point jumped to before the last, or to the axes shown
+    /// before the first jump.
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(stop) = self.jumps.back() {
+            self.revisit(stop, cx);
+        }
+    }
+
+    /// Returns to the point gone back from last.
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(stop) = self.jumps.forward() {
+            self.revisit(stop, cx);
+        }
+    }
+
+    /// Lands on `stop` again, leaving the jumps as they stand.
+    fn revisit(&mut self, stop: Stop<Zoom>, cx: &mut Context<Self>) {
+        match stop {
+            Stop::Node(id) => self.land(id, cx),
+            Stop::View(zoom) => {
+                self.offering.clear();
+                self.selected = None;
+                if let Some(plot) = &mut self.plot {
+                    plot.selected.clear();
+                }
+                self.show_zoom(zoom, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Answers the card as its key does, leaving the key to the plot where
@@ -807,6 +851,21 @@ impl ScatterPanel {
                 // The frame this asks for installs the handlers carrying the
                 // drag.
                 cx.notify();
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Walks the jumps as a mouse's back or forward button asks.
+    fn on_navigate(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        GESTURES.dispatch(gesture::Pointer::press(e), |intent| match intent {
+            ScatterIntent::GoBack => {
+                self.go_back(cx);
+                true
+            }
+            ScatterIntent::GoForward => {
+                self.go_forward(cx);
                 true
             }
             _ => false,
@@ -1313,6 +1372,8 @@ enum ScatterIntent {
     PanAcross,
     Scroll,
     Describe,
+    GoBack,
+    GoForward,
 }
 
 const POINT: Place = Place::On("a point");
@@ -1373,6 +1434,18 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         POINT,
         "Describe point",
         ScatterIntent::Describe,
+    ),
+    Entry::new(
+        gesture::Input::press(gesture::Button::Back),
+        Place::Anywhere,
+        "Go back",
+        ScatterIntent::GoBack,
+    ),
+    Entry::new(
+        gesture::Input::press(gesture::Button::Forward),
+        Place::Anywhere,
+        "Go forward",
+        ScatterIntent::GoForward,
     ),
 ]);
 
@@ -1585,6 +1658,8 @@ impl Render for ScatterPanel {
                 cx.listener(|view, _: &jump::Open, window, cx| view.open_palette(window, cx)),
             )
             .on_action(cx.listener(|view, _: &DismissCard, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &crate::JumpBack, _, cx| view.go_back(cx)))
+            .on_action(cx.listener(|view, _: &crate::JumpForward, _, cx| view.go_forward(cx)))
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| view.accept(cx)))
             .on_action(cx.listener(|view, _: &ShowLegend, window, cx| {
                 view.legend.update(cx, |legend, cx| legend.show(window, cx));
@@ -1731,6 +1806,14 @@ impl Render for ScatterPanel {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_mouse_down(e, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Navigate(NavigationDirection::Back),
+                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_navigate(e, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Navigate(NavigationDirection::Forward),
+                    cx.listener(|view, e: &MouseDownEvent, _, cx| view.on_navigate(e, cx)),
                 )
                 // The window-global handlers are installed only by a frame
                 // painted with the press in progress, which a quick click

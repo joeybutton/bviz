@@ -4,7 +4,7 @@
 use crate::derive::{self, Hidden};
 use crate::framing::{Frame, Held};
 use crate::hidden::{self, HiddenBy};
-use crate::history::History;
+use crate::history;
 use crate::mode::LayoutMode;
 use crate::point::{point_label, written_name};
 use crate::{GraphPanel, Palette, pins, why};
@@ -59,42 +59,11 @@ fn named(hidden: Hidden) -> HiddenBy {
     }
 }
 
-/// One place the panel's view has been moved to.
-#[derive(Clone, Copy, PartialEq)]
-enum Stop {
-    Node(Id),
-    /// Where the view stood, with no node selected, as the first jump left it.
-    View(Held),
-}
+/// The places the panel has been moved to by name, a view with nothing
+/// selected standing where the view held its frame.
+pub(crate) type Jumps = history::Jumps<Held>;
 
-/// The places the panel has been moved to by name, walked back and forth.
-#[derive(Default)]
-pub(crate) struct Jumps(Option<History<Stop>>);
-
-impl Jumps {
-    /// Records a jump onto `id`; the first also records `origin`, where the
-    /// view stood as it left.
-    fn visit(&mut self, id: Id, origin: Option<Stop>) {
-        let onto = Stop::Node(id);
-        match (&mut self.0, origin) {
-            (Some(history), _) => history.push(onto),
-            (None, Some(origin)) => {
-                let mut history = History::new(origin);
-                history.push(onto);
-                self.0 = Some(history);
-            }
-            (None, None) => self.0 = Some(History::new(onto)),
-        }
-    }
-
-    fn back(&mut self) -> Option<Stop> {
-        self.0.as_mut()?.back().copied()
-    }
-
-    fn forward(&mut self) -> Option<Stop> {
-        self.0.as_mut()?.forward().copied()
-    }
-}
+type Stop = history::Stop<Held>;
 
 /// Selects `id` and moves the view onto it, opening what holds it in a layered
 /// drawing, and asks for the panel to be shown. A node the drawing leaves out is
@@ -302,46 +271,4 @@ pub(crate) fn card(view: &GraphPanel, palette: &Palette, cx: &Context<GraphPanel
     .compact();
     let offers = reveal.into_iter().chain([close]);
     Some(hidden::card(name, written, reason, offers, palette))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The node a stop names, where it names one.
-    fn node(stop: Option<Stop>) -> Option<Id> {
-        match stop? {
-            Stop::Node(id) => Some(id),
-            Stop::View(_) => None,
-        }
-    }
-
-    #[test]
-    fn the_jumps_walk_back_and_forth_and_a_new_jump_drops_those_ahead() {
-        let mut jumps = Jumps::default();
-        assert!(jumps.back().is_none());
-        for id in [1, 2, 3] {
-            jumps.visit(Id(id), None);
-        }
-        assert_eq!(node(jumps.back()), Some(Id(2)));
-        assert_eq!(node(jumps.back()), Some(Id(1)));
-        assert!(jumps.back().is_none());
-        assert_eq!(node(jumps.forward()), Some(Id(2)));
-        jumps.visit(Id(4), None);
-        assert!(jumps.forward().is_none());
-        assert_eq!(node(jumps.back()), Some(Id(2)));
-    }
-
-    /// The first jump keeps where the view stood as it left, so stepping back
-    /// after a single jump returns there; later jumps leave from a stop the
-    /// history holds.
-    #[test]
-    fn the_first_jump_keeps_where_the_view_stood() {
-        let mut jumps = Jumps::default();
-        jumps.visit(Id(5), Some(Stop::Node(Id(1))));
-        jumps.visit(Id(6), Some(Stop::Node(Id(9))));
-        assert_eq!(node(jumps.back()), Some(Id(5)));
-        assert_eq!(node(jumps.back()), Some(Id(1)));
-        assert!(jumps.back().is_none());
-    }
 }

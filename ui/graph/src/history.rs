@@ -1,6 +1,7 @@
 //! Steps a view has taken, walked back and forth as a browser walks the pages
 //! it has shown.
 
+use bviz_graph_layout::Id;
 use std::collections::VecDeque;
 
 /// The most steps a history keeps; the oldest give way past it.
@@ -78,6 +79,49 @@ impl<T: PartialEq> History<T> {
         }
         self.at += 1;
         Some(self.current())
+    }
+}
+
+/// One place a view has been moved to by name.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Stop<V> {
+    Node(Id),
+    /// Where the view stood, with no node selected, as the first jump left
+    /// it.
+    View(V),
+}
+
+/// The places a view has been moved to by name, walked back and forth.
+pub(crate) struct Jumps<V>(Option<History<Stop<V>>>);
+
+impl<V> Default for Jumps<V> {
+    fn default() -> Self {
+        Jumps(None)
+    }
+}
+
+impl<V: Copy + PartialEq> Jumps<V> {
+    /// Records a jump onto `id`; the first also records `origin`, where the
+    /// view stood as it left.
+    pub(crate) fn visit(&mut self, id: Id, origin: Option<Stop<V>>) {
+        let onto = Stop::Node(id);
+        match (&mut self.0, origin) {
+            (Some(history), _) => history.push(onto),
+            (None, Some(origin)) => {
+                let mut history = History::new(origin);
+                history.push(onto);
+                self.0 = Some(history);
+            }
+            (None, None) => self.0 = Some(History::new(onto)),
+        }
+    }
+
+    pub(crate) fn back(&mut self) -> Option<Stop<V>> {
+        self.0.as_mut()?.back().copied()
+    }
+
+    pub(crate) fn forward(&mut self) -> Option<Stop<V>> {
+        self.0.as_mut()?.forward().copied()
     }
 }
 
@@ -161,5 +205,42 @@ mod tests {
         }
         assert_eq!(oldest, pushed + 1 - LENGTH);
         assert_eq!(history.steps.len(), LENGTH);
+    }
+
+    /// The node a stop names, where it names one.
+    fn node(stop: Option<Stop<()>>) -> Option<Id> {
+        match stop? {
+            Stop::Node(id) => Some(id),
+            Stop::View(()) => None,
+        }
+    }
+
+    #[test]
+    fn the_jumps_walk_back_and_forth_and_a_new_jump_drops_those_ahead() {
+        let mut jumps = Jumps::<()>::default();
+        assert!(jumps.back().is_none());
+        for id in [1, 2, 3] {
+            jumps.visit(Id(id), None);
+        }
+        assert_eq!(node(jumps.back()), Some(Id(2)));
+        assert_eq!(node(jumps.back()), Some(Id(1)));
+        assert!(jumps.back().is_none());
+        assert_eq!(node(jumps.forward()), Some(Id(2)));
+        jumps.visit(Id(4), None);
+        assert!(jumps.forward().is_none());
+        assert_eq!(node(jumps.back()), Some(Id(2)));
+    }
+
+    /// The first jump keeps where the view stood as it left, so stepping back
+    /// after a single jump returns there; later jumps leave from a stop the
+    /// history holds.
+    #[test]
+    fn the_first_jump_keeps_where_the_view_stood() {
+        let mut jumps = Jumps::default();
+        jumps.visit(Id(5), Some(Stop::View(())));
+        jumps.visit(Id(6), Some(Stop::Node(Id(9))));
+        assert_eq!(node(jumps.back()), Some(Id(5)));
+        assert_eq!(jumps.back(), Some(Stop::View(())));
+        assert!(jumps.back().is_none());
     }
 }

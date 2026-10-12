@@ -249,6 +249,8 @@ fn bindings() -> Vec<KeyBinding> {
             Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
         KeyBinding::new("escape", scatter::DismissCard, scatter_unpicked),
+        KeyBinding::new("alt-left", JumpBack, scatter_canvas),
+        KeyBinding::new("alt-right", JumpForward, scatter_canvas),
         KeyBinding::new("enter", reveal::Accept, scatter_offering),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
@@ -1722,6 +1724,9 @@ mod tests {
                 assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
             }
         }
+        let scatter = &[scatter::KEY_CONTEXT.id()];
+        assert!(is(dispatched("alt-left", scatter), JumpBack));
+        assert!(is(dispatched("alt-right", scatter), JumpForward));
         let exclusive = &[exclusive::KEY_CONTEXT.id()];
         assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
         assert!(is(
