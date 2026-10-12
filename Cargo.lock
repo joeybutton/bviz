@@ -1196,6 +1196,7 @@ dependencies = [
  "bviz_ui_playback",
  "bviz_ui_shell",
  "bviz_ui_theme",
+ "clap",
  "gpui",
 ]
 

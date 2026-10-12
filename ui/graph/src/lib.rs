@@ -19,8 +19,7 @@ use bviz_ui_theme::{DataColors, Theme, ThemeColors};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -1488,19 +1487,11 @@ struct Cli {
 
 /// Parses the query inputs and opens the graph-viewer window.
 pub fn run() {
-    let source = Cli::parse().graph.source().unwrap_or_else(|| {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("one of --{AQUERY_LONG}, --{CQUERY_LONG} or --{QUERY_LONG} is required"),
-            )
-            .exit()
-    });
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz graph",
         bviz_ui_workspace::WINDOW_SIZE,
-        Load::from(source),
-        Vec::new(),
+        |cli: Cli| cli.graph.source().map(Load::from),
+        &format!("one of --{AQUERY_LONG}, --{CQUERY_LONG} or --{QUERY_LONG}"),
         |load: Load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );

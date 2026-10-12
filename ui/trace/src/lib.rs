@@ -50,8 +50,7 @@ use bviz_ui_trace_args::{PROFILE_LONG, TraceArgs, TraceSource};
 use bviz_ui_workspace::{
     Member, Panel, PanelEvent, PanelKind, Role, Titled, ViewKind, ViewSpec, document_label,
 };
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Context, Div, Edges, Element, ElementId,
     Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId,
@@ -1783,20 +1782,11 @@ struct Cli {
 /// Parses `--profile` and opens the trace-viewer window.
 pub fn run() {
     bviz_alloc::retain_freed_memory_across_load();
-    let mut loads = Cli::parse().trace.sources().map(Load::from);
-    let Some(first) = loads.next() else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("--{PROFILE_LONG} is required"),
-            )
-            .exit()
-    };
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz trace",
         bviz_ui_workspace::WINDOW_SIZE,
-        first,
-        loads.collect(),
+        |cli: Cli| cli.trace.sources().map(Load::from),
+        &format!("--{PROFILE_LONG}"),
         |load, window, cx| open(load, None, None, window, cx).into(),
         &[register_keys],
     );

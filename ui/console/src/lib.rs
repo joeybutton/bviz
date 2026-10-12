@@ -20,8 +20,7 @@ use bviz_ui_components::Pending;
 use bviz_ui_console_args::{BEP_LONG, ConsoleArgs, ConsoleSource};
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member, ViewSpec, document_label};
-use clap::error::ErrorKind;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use gpui::{App, Entity, SharedString, Window, prelude::*};
 use std::path::PathBuf;
 
@@ -90,20 +89,11 @@ impl Cli {
 
 /// Parses the build event streams and opens the console-replay window.
 pub fn run() {
-    let mut loads = Cli::parse().sources().map(Load::from);
-    let Some(first) = loads.next() else {
-        Cli::command()
-            .error(
-                ErrorKind::MissingRequiredArgument,
-                format!("--{BEP_LONG} or a file argument is required"),
-            )
-            .exit()
-    };
-    bviz_ui_workspace::run_panels(
+    bviz_ui_workspace::run_viewer(
         "bviz console",
         bviz_ui_workspace::TEXT_WINDOW_SIZE,
-        first,
-        loads.collect(),
+        |cli: Cli| cli.sources().map(Load::from),
+        &format!("--{BEP_LONG} or a file argument"),
         |load, window, cx| {
             Document::playing_on(DocumentClock::alone(cx), |clock| {
                 open(load, None, Some(clock.clone()), window, cx).into()
