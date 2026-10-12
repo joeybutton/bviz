@@ -11,7 +11,7 @@ pub(crate) enum LayoutMode {
 }
 
 impl LayoutMode {
-    /// Every mode, in the order the selector offers them.
+    /// Every mode, in the order the picker offers them.
     pub(crate) const ALL: [Self; 2] = [Self::Map, Self::Layered];
 
     pub(crate) fn label(self) -> &'static str {
@@ -21,7 +21,7 @@ impl LayoutMode {
         }
     }
 
-    /// This mode's place in [`ALL`](Self::ALL), which the selector reports its
+    /// This mode's place in [`ALL`](Self::ALL), which the picker reports its
     /// choice by.
     pub(crate) fn index(self) -> usize {
         match self {

@@ -295,9 +295,9 @@ pub struct GraphPanel {
     emphasis: Emphasis,
     morph: Morph,
     mode: LayoutMode,
-    mode_picker: Entity<Dropdown>,
+    layout_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`GraphPanel::set_mode`].
-    _mode_choices: Subscription,
+    _layout_choices: Subscription,
     colouring: Colouring,
     colour_picker: Entity<Dropdown>,
     /// Carries the picker's selections into [`colour::set`].
@@ -407,7 +407,7 @@ impl GraphPanel {
 
     fn new(model: Entity<GraphModel>, cx: &mut Context<Self>) -> Self {
         let mode = LayoutMode::default();
-        let mode_picker = cx.new(|cx| {
+        let layout_picker = cx.new(|cx| {
             Dropdown::new(
                 "layout-mode",
                 LayoutMode::ALL.map(LayoutMode::label),
@@ -418,7 +418,7 @@ impl GraphPanel {
         });
         // The picker notifies on every repaint it makes, and only a selection
         // should move the view off its layout.
-        let choices = cx.subscribe(&mode_picker, |view, _, event, cx| {
+        let layout_choices = cx.subscribe(&layout_picker, |view, _, event, cx| {
             let DropdownEvent::Changed(index) = event;
             if let Some(mode) = LayoutMode::at(*index) {
                 view.set_mode(mode, cx);
@@ -524,8 +524,8 @@ impl GraphPanel {
             emphasis: Emphasis::none(),
             morph: Morph::none(),
             mode,
-            mode_picker,
-            _mode_choices: choices,
+            layout_picker,
+            _layout_choices: layout_choices,
             colouring,
             colour_picker,
             _colour_choices: colour_choices,
@@ -763,7 +763,7 @@ impl GraphPanel {
         let controls = Controls {
             mode: self.mode,
             chips: chips::bar(self, palette, window, cx),
-            picker: self.mode_picker.clone(),
+            picker: self.layout_picker.clone(),
             boxes: (!self.box_classes.is_empty()).then(|| self.boxes.clone()),
             relation_picker: self.selection.node().map(|_| self.relation_picker.clone()),
             pin_control: pins::control(self, cx).map(IntoElement::into_any_element),
@@ -825,7 +825,7 @@ impl GraphPanel {
             return false;
         }
         self.mode = mode;
-        self.mode_picker
+        self.layout_picker
             .update(cx, |picker, cx| picker.set_selected(mode.index(), cx));
         self.hovered = None;
         self.box_card.forget(cx);
