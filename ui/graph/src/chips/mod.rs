@@ -20,8 +20,8 @@ use bviz_ui_components::gesture::{
     self, Button as PointerButton, Entry, GestureRow, Gestures, Place, Pointer,
 };
 use bviz_ui_components::{
-    Button, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent, TextTooltip,
-    load_in_background, menu_chrome, over_window, text_input,
+    Button, ByRoom, KeyScope, Menu, MenuEvent, MenuItem, Nesting, QueryField, QueryFieldEvent,
+    TextTooltip, load_in_background, menu_chrome, over_window, text_input,
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle,
@@ -986,8 +986,10 @@ fn bar(
         })
     };
     let status = status(view.model.read(cx).filter(), view.shown);
+    let status_line = |id| status_line(id, status.clone(), palette, cx);
     let whole =
         div()
+            .size_full()
             .flex()
             .items_center()
             .gap_1()
@@ -1067,10 +1069,35 @@ fn bar(
                     .tooltip("Query menu"),
                 )
             }))
-            .children(status.map(|status| status_line("chips-status", status, palette, cx)));
+            .children(status.is_some().then(|| status_line("chips-status")));
+    let held_open = focused
+        || view.field.read(cx).focus_handle(cx).is_focused(window)
+        || view.menu.is_some()
+        || !matches!(view.gesture, reorder::Gesture::Idle);
+    let content = match held_open {
+        true => whole.into_any_element(),
+        false => {
+            let folded = div()
+                .size_full()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(status_line("chips-status-folded"))
+                .children(staged_dot());
+            ByRoom::width(
+                MIN_WIDTH,
+                whole.into_any_element(),
+                folded.into_any_element(),
+            )
+            .into_any_element()
+        }
+    };
     div()
         .id("graph-chips")
         .relative()
+        .flex_1()
+        .min_w_0()
+        .h_full()
         .key_context(KEY_CONTEXT)
         .track_focus(&chips.focus_handle)
         .on_action(cx.listener(|view, _: &Leave, window, cx| leave(view, window, cx)))
@@ -1107,7 +1134,11 @@ fn bar(
                 open_menu(view, id, at, window, cx);
             }
         }))
-        .child(whole)
+        // Sets the bar's min-content width, which a strip keeps clear for it
+        // while the strip's groups can give way, without holding the bar
+        // that wide once it is given less.
+        .child(div().w(MIN_WIDTH).h_0())
+        .child(content)
         .children(carrying)
         // The notice opens where the completion list does, which takes the
         // place while it is up.
@@ -1124,14 +1155,15 @@ fn bar(
 }
 
 /// The line saying what the filter the bar applies shows of the holder's
-/// view, `status`; a press on it takes the focus into the field.
+/// view, `status`, or prompting for a query where it shows everything; a
+/// click on it takes the focus into the field.
 fn status_line(
     id: &'static str,
-    status: String,
+    status: Option<String>,
     palette: &Palette,
     cx: &Context<ChipBar>,
 ) -> Stateful<Div> {
-    let text: SharedString = status.into();
+    let text: SharedString = status.unwrap_or_else(|| FOLDED_PROMPT.to_owned()).into();
     let colors = &palette.colors;
     let hover = colors.text;
     div()
@@ -1147,6 +1179,8 @@ fn status_line(
             MouseButton::Left,
             cx.listener(|view, event: &MouseDownEvent, window, cx| {
                 STATUS_GESTURES.dispatch(Pointer::press(event), |intent| match intent {
+                    // Taken on the press, which would otherwise focus the bar
+                    // and unfold it, moving the line from under the release.
                     StatusIntent::Focus => {
                         focus(view, window, cx);
                         cx.stop_propagation();
@@ -1184,6 +1218,18 @@ fn status(filter: &DocumentFilter, shown: Option<Shown>) -> Option<String> {
 
 /// Stands between the parts of the bar's status line.
 const STATUS_SEPARATOR: &str = " · ";
+
+/// What the folded bar reads where the filter shows everything.
+const FOLDED_PROMPT: &str = "query…";
+
+/// The narrowest the bar stands whole: the field, what applies it, and room
+/// beside them for a chip; narrower, it folds to its status line until it
+/// takes the focus.
+const MIN_WIDTH: Pixels = px(420.);
+
+/// The narrowest the folded bar stands beside a strip's controls before the
+/// strip gives up reaching them: room for the start of its status line.
+pub(crate) const FOLDED_WIDTH: Pixels = px(120.);
 
 /// The key contexts from `holder`'s in to the field's text while its
 /// completion's list stands open.
