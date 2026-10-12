@@ -1670,7 +1670,7 @@ impl Panel for ExclusivePanel {
     }
 
     fn description() -> Option<&'static str> {
-        Some("What exists only because of each target (the build's dominator tree)")
+        Some("Build's dominator tree")
     }
 
     fn gestures() -> Vec<GestureRow> {

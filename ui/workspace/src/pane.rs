@@ -1027,10 +1027,7 @@ fn naming_tooltip(
 /// panel's whole title, the document `joined` names, and what the panel's
 /// kind shows.
 fn naming_tip(title: &str, joined: Option<&str>, description: Option<&str>) -> String {
-    let joined = joined.map(|name| format!("Part of {name}"));
-    let lines = iter::once(title)
-        .chain(joined.as_deref())
-        .chain(description);
+    let lines = iter::once(title).chain(joined).chain(description);
     lines.collect::<Vec<_>>().join("\n")
 }
 
@@ -1145,11 +1142,11 @@ mod tests {
                 Some("Invocation a5f7f3e6"),
                 Some("Time by call stack")
             ),
-            format!("{title}\nPart of Invocation a5f7f3e6\nTime by call stack")
+            format!("{title}\nInvocation a5f7f3e6\nTime by call stack")
         );
         assert_eq!(
             naming_tip(title, Some("Invocation a5f7f3e6"), None),
-            format!("{title}\nPart of Invocation a5f7f3e6")
+            format!("{title}\nInvocation a5f7f3e6")
         );
         assert_eq!(
             naming_tip(title, None, Some("Time by call stack")),
