@@ -948,13 +948,6 @@ const SHOW_WHOLE: Entry<ScatterIntent> = Entry::new(
     ScatterIntent::ShowWholePlot,
 );
 
-const REVEAL: Entry<ScatterIntent> = Entry::new(
-    gesture::Input::click(gesture::Button::Left),
-    POINT,
-    "Show in graph or list points",
-    ScatterIntent::Reveal,
-);
-
 const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
     SHOW_WHOLE,
     Entry::new(
@@ -963,7 +956,12 @@ const GESTURES: Gestures<ScatterIntent> = Gestures::new(&[
         "Pan",
         ScatterIntent::Pan,
     ),
-    REVEAL,
+    Entry::new(
+        gesture::Input::click(gesture::Button::Left),
+        POINT,
+        "Show in graph or list points",
+        ScatterIntent::Reveal,
+    ),
     Entry::new(
         gesture::Input::click(gesture::Button::Left),
         Place::On("a listed point"),
@@ -1066,7 +1064,7 @@ fn describe(
     lines.push(plotted.axes.readings(point, time));
     lines.extend(plotted.axes.unplaced(point, time));
     if let Hue::Ran(ran) = mark.hue {
-        lines.push(format!("runner: {}", ran.label()));
+        lines.push(ran.label().to_owned());
     }
     lines.push(format!(
         "fan-in {} · fan-out {}",
@@ -1081,8 +1079,7 @@ fn describe(
         lines.push(format!("{} {actions}", point.actions));
     }
     if others > 0 {
-        let click = REVEAL.gesture().input.text(KeyStyle::NATIVE);
-        lines.push(format!("+{others} more here · {click} to list"));
+        lines.push(format!("+{others} more here"));
     }
     lines
 }
@@ -1837,7 +1834,7 @@ fn legend(state: &Entity<LegendState>, plot: &Plot, palette: &Palette) -> Legend
     let measure = sizing_name(plot.plotted.sizing);
     // Inked apart from every hue, so the key reads as one of size, not colour.
     let size = Swatch::Sizes(palette.colors.text_muted);
-    let size = LegendEntry::new(size, measure).tooltip(format!("mark size: {measure}"));
+    let size = LegendEntry::new(size, measure).tooltip("Mark size");
     Legend::new("scatter-legend", state).entries(hues.chain([size]))
 }
 
