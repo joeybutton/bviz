@@ -1,13 +1,13 @@
 ---
 name: gpui
-description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bviz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, wiring click/keyboard interaction, and running work off the UI thread (background tasks, bridging tokio async runtimes, and rayon data parallelism). Use this whenever a task involves gpui, a `Render` view, `div()` element styling, the desktop UI layer, or the eventual Rust visualization frontend — even if "gpui" is not named explicitly. Also use it when wiring tokio, reqwest/gRPC/SDK async, rayon, or any off-UI-thread background/parallel work into a gpui app, since gpui's executor is not tokio and needs an explicit bridge.
+description: How to write, build, and run gpui (Zed's GPU-accelerated UI framework) code in the bviz repo — opening an application window, defining views and elements/widgets, styling with the div() builder, wiring click/keyboard interaction, and running work off the UI thread (background tasks, bridging tokio async runtimes, and rayon data parallelism). Use this whenever a task involves gpui, a `Render` view, `div()` element styling, or the desktop UI layer — even if "gpui" is not named explicitly. Also use it when wiring tokio, reqwest/gRPC/SDK async, rayon, or any off-UI-thread background/parallel work into a gpui app, since gpui's executor is not tokio and needs an explicit bridge.
 ---
 
 # Writing gpui apps
 
-gpui is Zed's GPU-accelerated UI framework. This repo will use it for the Rust
-visualization frontend. The authoritative reference is real gpui code at a known release
-tag — read it rather than guessing APIs, since the API surface shifts between versions.
+gpui is Zed's GPU-accelerated UI framework. bviz draws all of its UI with it. The
+authoritative reference is real gpui code at a known release tag — read it rather than
+guessing APIs, since the API surface shifts between versions.
 The links below pin to **Zed v1.6.3**. If a local Zed checkout is available, prefer reading
 it over fetching online; confirm its tag matches the version this repo targets.
 
