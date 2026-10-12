@@ -117,4 +117,4 @@ to add.
 [CLAUDE.md](CLAUDE.md) spells out the project's conventions in more detail —
 code comments, commit granularity, hermeticity, licence declarations, Bazel
 style — and can be a useful reference if you want to match the existing code
-closely.
+closely. Its Workflow section is written for AI coding agents; you can skip it.
