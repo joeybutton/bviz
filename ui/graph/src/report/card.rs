@@ -12,9 +12,9 @@ use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip, TruncatingLabel};
+use bviz_ui_components::{Button, ListScroll, MenuItem, TextTooltip, TruncatingLabel};
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
+    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, Window, div, prelude::*,
     uniform_list,
 };
 
@@ -116,12 +116,30 @@ pub(crate) fn control(
             "report-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
-        .when(labelled, |toggle| toggle.label("outcomes"))
+        .when(labelled, |toggle| toggle.label(NAME))
         .leading_icon("list-checks")
         .keys_for(&ToggleOutcomes, &view.focus_handle)
         .selected(view.report.is_up(report)),
     )
 }
+
+/// The overflow menu's row putting the card up and away; `None` where the build
+/// reported nothing for the card to read.
+pub(crate) fn menu_row(
+    view: &GraphPanel,
+    window: &Window,
+    cx: &Context<GraphPanel>,
+) -> Option<MenuItem> {
+    Reported::of(view, cx)?;
+    let panel = cx.weak_entity();
+    let row = MenuItem::new(NAME, move |_, cx| {
+        panel.update(cx, toggle).ok();
+    });
+    Some(row.keys_for(&ToggleOutcomes, &view.focus_handle, window))
+}
+
+/// What the card's toolbar control and its overflow menu row read.
+const NAME: &str = "outcomes";
 
 /// The row `index` of the card's list, which a click shows the node of where
 /// the graph holds one to show. A configuration is named as `configurations`

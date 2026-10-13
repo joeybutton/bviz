@@ -69,7 +69,7 @@ pub(crate) fn toolbar(
             // The prior layout stays interactive while a relayout runs.
             row.busy("relaying-spinner", "laying out…")
         })
-        .trailing(panel_toggles(view, controls.legend, cx));
+        .trailing(panel_toggles(view, controls.legend, window, cx));
     let query = OneRow::new("graph-query-bar")
         .when(!view.box_classes.is_empty(), |query| {
             query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
@@ -113,8 +113,15 @@ const EDGES_NAME: &str = "edges";
 const COLOUR_NAME: &str = "colour";
 const MARK_NAME: &str = "mark";
 
-/// The toggles putting panels up and away, labelled and then icon-only.
-fn panel_toggles(view: &GraphPanel, legend: Legend, cx: &Context<GraphPanel>) -> ToolbarGroup {
+/// The toggles putting panels up and away, labelled, then icon-only, then as
+/// rows of the overflow menu. A card put up shows itself wherever its toggle
+/// stands, so the group never marks the menu's trigger.
+fn panel_toggles(
+    view: &GraphPanel,
+    legend: Legend,
+    window: &Window,
+    cx: &Context<GraphPanel>,
+) -> ToolbarGroup {
     let toggles = |labelled: bool| -> Vec<AnyElement> {
         let report = report::control(view, labelled, cx).map(IntoElement::into_any_element);
         let timecard = timecard::control(view, labelled, cx).map(IntoElement::into_any_element);
@@ -130,8 +137,18 @@ fn panel_toggles(view: &GraphPanel, legend: Legend, cx: &Context<GraphPanel>) ->
             .chain([legend])
             .collect()
     };
+    let legend_row = legend.menu_row(window, cx);
+    let (first, rest) = match (
+        report::menu_row(view, window, cx),
+        timecard::menu_row(view, window, cx),
+    ) {
+        (Some(outcomes), timing) => (outcomes, timing.into_iter().chain([legend_row]).collect()),
+        (None, Some(timing)) => (timing, vec![legend_row]),
+        (None, None) => (legend_row, Vec::new()),
+    };
     ToolbarGroup::new(PANELS, row().children(toggles(true)))
         .or(row().children(toggles(false)))
+        .overflow_rows(first, rest, false)
         .anchoring(legend.popover())
         .parted()
 }
