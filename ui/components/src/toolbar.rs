@@ -44,45 +44,69 @@ fn badge_inset() -> Pixels {
 }
 
 /// A group of a [`OneRow`]'s controls, standing in the narrowest of its
-/// presentations the row's width calls for.
+/// presentations the row's width calls for, and in the row's overflow menu
+/// once even its narrowest finds no room.
 pub struct ToolbarGroup {
     priority: Priority,
     widest: AnyElement,
     narrower: Vec<AnyElement>,
-    overflow: Option<Overflow>,
+    overflow: OverflowRows,
     anchored: Option<AnyElement>,
     parted: bool,
 }
 
-/// How a [`ToolbarGroup`] stands in its row's overflow menu.
-struct Overflow {
+/// How a [`ToolbarGroup`] stands in its row's overflow menu: as one row or
+/// more, so that every control of the row stays in reach.
+pub struct OverflowRows {
     items: Vec<MenuItem>,
-    /// Whether the group stands other than at rest.
+    /// Whether the group stands other than at rest, which marks the menu's
+    /// trigger while the group is in the menu.
     set: bool,
+}
+
+impl OverflowRows {
+    /// The group as the menu row `item`, `set` where it stands other than at
+    /// rest.
+    pub fn row(item: MenuItem, set: bool) -> Self {
+        Self::rows(item, [], set)
+    }
+
+    /// The group as the menu row `first` followed by `rest`, one for each of
+    /// its controls, `set` where it stands other than at rest.
+    pub fn rows(first: MenuItem, rest: impl IntoIterator<Item = MenuItem>, set: bool) -> Self {
+        Self {
+            items: std::iter::once(first).chain(rest).collect(),
+            set,
+        }
+    }
 }
 
 impl ToolbarGroup {
     /// A group standing as `widest` while the row has room for it, holding
-    /// out against the row narrowing by `priority`.
-    pub fn new(priority: Priority, widest: impl IntoElement) -> Self {
+    /// out against the row narrowing by `priority`, and as `overflow` in the
+    /// row's overflow menu.
+    pub fn new(priority: Priority, widest: impl IntoElement, overflow: OverflowRows) -> Self {
         Self {
             priority,
             widest: widest.into_any_element(),
             narrower: Vec::new(),
-            overflow: None,
+            overflow,
             anchored: None,
             parted: false,
         }
     }
 
     /// A group standing as what `build` builds beside the word `name`, then
-    /// without it, holding out by `priority`.
+    /// without it, holding out by `priority`, and as `overflow` in the row's
+    /// overflow menu.
     pub fn named<E: IntoElement>(
         priority: Priority,
         name: impl Into<SharedString>,
+        overflow: OverflowRows,
         mut build: impl FnMut() -> E,
     ) -> Self {
-        Self::new(priority, beside().child(name.into()).child(build())).or(beside().child(build()))
+        let named = beside().child(name.into()).child(build());
+        Self::new(priority, named, overflow).or(beside().child(build()))
     }
 
     /// Offers `narrower` for the group to stand as once the row has no room
@@ -92,30 +116,9 @@ impl ToolbarGroup {
         self
     }
 
-    /// Lets the group leave the row for its overflow menu once it stands at
-    /// its narrowest, as the menu row `item`; `set` says the group stands
-    /// other than at rest, which marks the menu's trigger while it is there.
-    pub fn overflow(self, item: MenuItem, set: bool) -> Self {
-        self.overflow_rows(item, [], set)
-    }
-
-    /// Lets the group leave the row for its overflow menu as
-    /// [`overflow`](Self::overflow) does, as the menu row `first` followed by
-    /// `rest`, one for each of its controls.
-    pub fn overflow_rows(
-        mut self,
-        first: MenuItem,
-        rest: impl IntoIterator<Item = MenuItem>,
-        set: bool,
-    ) -> Self {
-        let items = std::iter::once(first).chain(rest).collect();
-        self.overflow = Some(Overflow { items, set });
-        self
-    }
-
     /// Lays `element` out over where the group is reached: its own bounds
     /// while it stands in the row, the overflow menu trigger's while it stands
-    /// in the menu, and nowhere once it is out of both. A sheet the group
+    /// in the menu, and nowhere once the row has no room for the trigger. A sheet the group
     /// opens, placed in it by [`under_trigger`](crate::menu_chrome::under_trigger),
     /// so opens under whichever the group is reached by.
     pub fn anchoring(mut self, element: impl IntoElement) -> Self {
@@ -224,7 +227,7 @@ impl OneRow {
     /// Adds the element `build` builds as [`filling`](Self::filling) does,
     /// for an element that can stand narrower than its min-content width: it
     /// narrows down to `floor` before the row leaves out its overflow menu's
-    /// trigger, so that the groups in the menu stay in reach.
+    /// trigger, so that every control stays in reach, in the row or the menu.
     pub fn filling_down_to<E: IntoElement>(
         mut self,
         floor: Pixels,
@@ -391,7 +394,9 @@ impl IntoElement for Fitting {
 struct Measured {
     widest: (AnyElement, Size<Pixels>),
     narrower: Vec<(AnyElement, Size<Pixels>)>,
-    overflow: Option<Overflow>,
+    /// The rows a group stands as in the overflow menu; a filling never
+    /// leaves the row.
+    overflow: Option<OverflowRows>,
     anchored: Option<AnyElement>,
     fills: bool,
 }
@@ -421,7 +426,6 @@ impl Measured {
                             .map(|(_, extent)| extent.width)
                             .collect(),
                         priority: group.priority,
-                        overflows: group.overflow.is_some(),
                         parted: group.parted,
                     },
                     side,
@@ -429,7 +433,7 @@ impl Measured {
                 let measured = Measured {
                     widest,
                     narrower,
-                    overflow: group.overflow,
+                    overflow: Some(group.overflow),
                     anchored: group.anchored,
                     fills: false,
                 };

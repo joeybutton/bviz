@@ -43,8 +43,8 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, Button, DEFAULT_MIN_THUMB, Divider, DividerSide, DragEnd, KeyScope, MenuItem, Nesting,
-    Pending, Priority, SCROLLBAR_THICKNESS, Scrollbar, ToolbarGroup, cut_off_note, declare_scopes,
-    find_key_bindings, legend_key_bindings, overlay_canvas, text_input, track_drag,
+    OverflowRows, Pending, Priority, SCROLLBAR_THICKNESS, Scrollbar, ToolbarGroup, cut_off_note,
+    declare_scopes, find_key_bindings, legend_key_bindings, overlay_canvas, text_input, track_drag,
     zoom_key_bindings,
 };
 use bviz_ui_playback::{DocumentClock, unaligned_note};
@@ -600,7 +600,11 @@ pub(crate) fn time_window_group(
         cx,
         move |_, cx| clear_time_window(&model, cx),
     );
-    Some(ToolbarGroup::new(TIME_WINDOW, chip).overflow(row, true))
+    Some(ToolbarGroup::new(
+        TIME_WINDOW,
+        chip,
+        OverflowRows::row(row, true),
+    ))
 }
 
 /// How long the time window chip holds out against its toolbar narrowing:

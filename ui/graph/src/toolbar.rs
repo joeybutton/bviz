@@ -5,8 +5,8 @@ use crate::{
     ToggleCriticalPath, ToggleMap, ToggleNeighborhood, boxes, chips, report, timecard,
 };
 use bviz_ui_components::{
-    Dropdown, Legend, MenuItem, MultiSelect, OneRow, Presentation, Priority, Switch, ToggleGroup,
-    ToggleSegment, ToolbarGroup,
+    Dropdown, Legend, MenuItem, MultiSelect, OneRow, OverflowRows, Presentation, Priority, Switch,
+    ToggleGroup, ToggleSegment, ToolbarGroup,
 };
 use gpui::{
     Action, AnyElement, App, Context, Div, Entity, FocusHandle, IntoElement, Pixels, SharedString,
@@ -38,9 +38,13 @@ pub(crate) fn toolbar(
         set: view.mode != LayoutMode::default(),
     }
     .group(LAYOUT, &view.focus_handle, window, cx);
-    let edges = ToolbarGroup::new(EDGES, mode::reduce_toggle(view, cx)).overflow(
-        mode::reduce_row(view, EDGES_NAME, window, cx),
-        mode::reduction(view).set(),
+    let edges = ToolbarGroup::new(
+        EDGES,
+        mode::reduce_toggle(view, cx),
+        OverflowRows::row(
+            mode::reduce_row(view, EDGES_NAME, window, cx),
+            mode::reduction(view).set(),
+        ),
     );
     let colour = PickerGroup {
         name: COLOUR_NAME,
@@ -51,15 +55,17 @@ pub(crate) fn toolbar(
     }
     .group(COLOUR, &view.focus_handle, window, cx);
     let marking = Marking::of(view, cx);
-    let marks = ToolbarGroup::named(MARK, MARK_NAME, || marking.toggles(view, cx))
-        .or(marking
-            .toggles(view, cx)
-            .presentation(Presentation::Collapsed))
-        .overflow(
-            MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window)),
-            marking.set(),
-        )
-        .parted();
+    let marks_row = MenuItem::submenu(MARK_NAME, marking.toggles(view, cx).submenu(window));
+    let marks = ToolbarGroup::named(
+        MARK,
+        MARK_NAME,
+        OverflowRows::row(marks_row, marking.set()),
+        || marking.toggles(view, cx),
+    )
+    .or(marking
+        .toggles(view, cx)
+        .presentation(Presentation::Collapsed))
+    .parted();
     let drawing = OneRow::new("graph-view-controls")
         .group(layout)
         .group(edges)
@@ -72,9 +78,12 @@ pub(crate) fn toolbar(
         .trailing(panel_toggles(view, controls.legend, window, cx));
     let query = OneRow::new("graph-query-bar")
         .when(!view.box_classes.is_empty(), |query| {
-            query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
-                MenuItem::submenu(boxes::NAME, MultiSelect::submenu(&view.boxes, cx)),
-                !view.derived.unwrapped().is_empty(),
+            let row = MenuItem::submenu(boxes::NAME, MultiSelect::submenu(&view.boxes, cx));
+            let set = !view.derived.unwrapped().is_empty();
+            query.group(ToolbarGroup::new(
+                BOXES,
+                view.boxes.clone(),
+                OverflowRows::row(row, set),
             ))
         })
         .filling_down_to(chips::FOLDED_WIDTH, || view.chips.clone());
@@ -146,9 +155,9 @@ fn panel_toggles(
         (None, Some(timing)) => (timing, vec![legend_row]),
         (None, None) => (legend_row, Vec::new()),
     };
-    ToolbarGroup::new(PANELS, row().children(toggles(true)))
+    let overflow = OverflowRows::rows(first, rest, false);
+    ToolbarGroup::new(PANELS, row().children(toggles(true)), overflow)
         .or(row().children(toggles(false)))
-        .overflow_rows(first, rest, false)
         .anchoring(legend.popover())
         .parted()
 }
@@ -244,6 +253,7 @@ impl PickerGroup<'_> {
             window,
             cx,
         );
-        ToolbarGroup::named(priority, self.name, || self.dropdown.clone()).overflow(row, self.set)
+        let overflow = OverflowRows::row(row, self.set);
+        ToolbarGroup::named(priority, self.name, overflow, || self.dropdown.clone())
     }
 }

@@ -44,7 +44,7 @@ use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{self, Clicks, Entry, GestureRow, Gestures, Held, Motion, Place};
 use bviz_ui_components::{
     CardAnchor, DragEnd, Dropdown, DropdownEvent, HoverCard, KeyScope, Legend, LegendEntry,
-    LegendState, ListScroll, MenuItem, Nesting, OneRow, Presentation, Priority,
+    LegendState, ListScroll, MenuItem, Nesting, OneRow, OverflowRows, Presentation, Priority,
     SCROLLBAR_THICKNESS, ShowLegend, Swatch, Switch, ToggleGroup, ToggleSegment, ToolbarGroup,
     ZOOM_KEY_STEP, ZoomIn, ZoomOut, cached_layer, centered_spinner, defer_hover_card,
     defer_tooltip, legend_gestures, list_scrollbar, load_in_background, menu_chrome,
@@ -2333,13 +2333,15 @@ fn strip(
         ToggleGroup::any_of("scatter-inputs", INPUTS_NAME, switches).tooltip("Inputs measured")
     };
     let inputs_set = (choice.loaded.inputs()).any(|input| Toggle::of(scope, input) == Toggle::Off);
-    let inputs = ToolbarGroup::named(INPUTS, INPUTS_NAME, switches)
-        .or(switches().presentation(Presentation::Collapsed))
-        .overflow(
-            MenuItem::submenu(INPUTS_NAME, switches().submenu(window)),
-            inputs_set,
-        )
-        .parted();
+    let inputs_row = MenuItem::submenu(INPUTS_NAME, switches().submenu(window));
+    let inputs = ToolbarGroup::named(
+        INPUTS,
+        INPUTS_NAME,
+        OverflowRows::row(inputs_row, inputs_set),
+        switches,
+    )
+    .or(switches().presentation(Presentation::Collapsed))
+    .parted();
     let legend = legend.toolbar_group(window, cx);
     OneRow::new("scatter-controls")
         .group(points)

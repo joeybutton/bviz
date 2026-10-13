@@ -15,9 +15,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     Axis, CardAnchor, DEFAULT_MIN_THUMB, DragEnd, HoverCard, KeyScope, Legend, LegendState,
-    MenuItem, OneRow, Presentation, Priority, SCROLLBAR_THICKNESS, Scrollbar, ShowLegend,
-    ShownCard, Switch, ToggleGroup, ToggleSegment, ToolbarGroup, ZOOM_KEY_STEP, ZoomIn, ZoomOut,
-    cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
+    MenuItem, OneRow, OverflowRows, Presentation, Priority, SCROLLBAR_THICKNESS, Scrollbar,
+    ShowLegend, ShownCard, Switch, ToggleGroup, ToggleSegment, ToolbarGroup, ZOOM_KEY_STEP, ZoomIn,
+    ZoomOut, cached_layer, centered_spinner, hover_card_canvas, legend_gestures, overlay_canvas,
     paint_labeled_box, track_drag,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
@@ -605,9 +605,9 @@ impl FlamePanel {
             )
         };
         let choice = |priority, name: &'static str, toggles: &dyn Fn() -> ToggleGroup, set| {
-            ToolbarGroup::named(priority, name, toggles)
+            let row = MenuItem::submenu(name, toggles().submenu(window));
+            ToolbarGroup::named(priority, name, OverflowRows::row(row, set), toggles)
                 .or(toggles().presentation(Presentation::Collapsed))
-                .overflow(MenuItem::submenu(name, toggles().submenu(window)), set)
         };
         let direction = choice(
             DIRECTION,
@@ -616,9 +616,13 @@ impl FlamePanel {
             mode.direction != at_rest.direction,
         );
         let weight = choice(WEIGHT, WEIGHT_NAME, &weight, mode.weight != at_rest.weight);
-        let kinds = ToolbarGroup::named(KINDS, LABELS_NAME, kinds).overflow(
-            MenuItem::submenu(LABELS_NAME, kinds().submenu(window)),
-            mode.labels != at_rest.labels,
+        let kinds_row = MenuItem::submenu(LABELS_NAME, kinds().submenu(window));
+        let kinds_set = mode.labels != at_rest.labels;
+        let kinds = ToolbarGroup::named(
+            KINDS,
+            LABELS_NAME,
+            OverflowRows::row(kinds_row, kinds_set),
+            kinds,
         );
         let legend =
             Legend::new("flame-legend", &self.legend).entries(theme::role_legend(&palette));

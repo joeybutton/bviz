@@ -14,7 +14,8 @@ use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
 use bviz_graph_layout::{Id, Kind};
 use bviz_ui_components::{
-    Button, Hint, KeyScope, MenuItem, Nesting, Priority, QueryField, ToolbarGroup, menu_chrome,
+    Button, Hint, KeyScope, MenuItem, Nesting, OverflowRows, Priority, QueryField, ToolbarGroup,
+    menu_chrome,
 };
 use gpui::{
     App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, Pixels, SharedString,
@@ -471,7 +472,7 @@ pub(super) fn setting(
             .update(cx, |view, cx| view.edit_roots(window, cx))
             .ok();
     });
-    ToolbarGroup::named(ROOTS, BUILD, trigger).overflow(row, set)
+    ToolbarGroup::named(ROOTS, BUILD, OverflowRows::row(row, set), trigger)
 }
 
 /// The sheet editing the roots, open under the strip `view` stands its

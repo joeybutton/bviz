@@ -2,7 +2,9 @@
 //! what it explains until asked for.
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
-use crate::{Button, KeyScope, MenuItem, Priority, TextTooltip, ToolbarGroup, menu_chrome};
+use crate::{
+    Button, KeyScope, MenuItem, OverflowRows, Priority, TextTooltip, ToolbarGroup, menu_chrome,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     App, AvailableSpace, Bounds, Context, Div, ElementId, Entity, FocusHandle, Font, Hsla,
@@ -382,9 +384,9 @@ impl Legend {
     /// once the row has no room for its name, parted from the controls before
     /// it, and then its menu row.
     pub fn toolbar_group(self, window: &Window, cx: &App) -> ToolbarGroup {
-        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle())
+        let overflow = OverflowRows::row(self.menu_row(window, cx), false);
+        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle(), overflow)
             .or(self.clone().toggle().icon_only())
-            .overflow(self.menu_row(window, cx), false)
             .anchoring(self.popover())
             .parted()
     }

@@ -44,9 +44,9 @@ use bviz_ui_components::gesture::{
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    Nesting, OneRow, Priority, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
-    centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
-    over_window,
+    Nesting, OneRow, OverflowRows, Priority, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup,
+    cached_layer, centered_notice, centered_spinner, defer_hover_card, legend_gestures,
+    load_in_background, over_window,
 };
 use bviz_ui_workspace::{Panel, PanelEvent, PanelKind, Role, ViewKind};
 use cell_menu::{Caveat, Offer, PointFacts};
@@ -2836,10 +2836,11 @@ fn travel(
     };
     let back_row = row(&FocusBack, travels.back, ExclusivePanel::go_back);
     let up_row = row(&FocusUp, travels.up, ExclusivePanel::focus_up);
-    ToolbarGroup::new(TRAVEL, div().flex().items_center().child(back).child(up)).overflow_rows(
-        back_row,
-        [up_row],
-        false,
+    let overflow = OverflowRows::rows(back_row, [up_row], false);
+    ToolbarGroup::new(
+        TRAVEL,
+        div().flex().items_center().child(back).child(up),
+        overflow,
     )
 }
 
