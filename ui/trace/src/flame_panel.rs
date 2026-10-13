@@ -635,7 +635,7 @@ impl FlamePanel {
                 |row, chip| row.group(chip.parted()),
             )
             .when(building, |row| row.busy("flame-rebuild", "updating…"))
-            .trailing(legend.toolbar_group())
+            .trailing(legend.toolbar_group(window, cx))
     }
 
     /// Applies a mode chosen on the toolbar, leaving the view alone for a click

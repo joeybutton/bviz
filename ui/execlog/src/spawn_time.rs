@@ -267,7 +267,13 @@ impl SpawnTimePanel {
 
 /// What the log holds in sum, explaining on hover how to read a sum of spawn
 /// time, and the legend naming which colour is which phase.
-fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) -> OneRow {
+fn header(
+    summary: &Summary,
+    legend: &Entity<LegendState>,
+    palette: &Palette,
+    window: &Window,
+    cx: &App,
+) -> OneRow {
     let caveats = "spawns overlap · not wall time\naction-cache hits not logged";
     let totals = || {
         div()
@@ -302,7 +308,7 @@ fn header(summary: &Summary, legend: &Entity<LegendState>, palette: &Palette) ->
                     .child(totals()),
             )
         })
-        .trailing(legend.toolbar_group())
+        .trailing(legend.toolbar_group(window, cx))
 }
 
 /// `control` behind a label naming what it picks.
@@ -722,7 +728,7 @@ impl Render for SpawnTimePanel {
                         .cut_off()
                         .then(|| cut_off_note("execution log", "spawns", &palette.colors)),
                 )
-                .child(header(&shown.summary, &self.legend, &palette))
+                .child(header(&shown.summary, &self.legend, &palette, window, cx))
                 .child(self.body(shown, &palette, cx)),
             None => panel.children(self.model.read(cx).source().placeholder(&palette.colors)),
         }

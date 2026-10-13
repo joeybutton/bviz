@@ -2864,7 +2864,7 @@ fn strip(
         .when(scoping.computing, |row| {
             row.busy("exclusive-computing", "computing…")
         })
-        .trailing(legend.toolbar_group())
+        .trailing(legend.toolbar_group(window, cx))
 }
 
 /// The legend of `drawn`, open as `state` says: what each hue its cells wear

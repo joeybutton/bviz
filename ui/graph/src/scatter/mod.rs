@@ -2340,7 +2340,7 @@ fn strip(
             inputs_set,
         )
         .parted();
-    let legend = legend.toolbar_group();
+    let legend = legend.toolbar_group(window, cx);
     OneRow::new("scatter-controls")
         .group(points)
         .group(grouped(across, AXES))

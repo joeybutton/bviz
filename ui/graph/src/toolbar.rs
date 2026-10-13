@@ -132,6 +132,7 @@ fn panel_toggles(view: &GraphPanel, legend: Legend, cx: &Context<GraphPanel>) ->
     };
     ToolbarGroup::new(PANELS, row().children(toggles(true)))
         .or(row().children(toggles(false)))
+        .anchoring(legend.popover())
         .parted()
 }
 
