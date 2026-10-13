@@ -30,9 +30,6 @@ pub enum QueryFieldEvent {
 pub struct QueryField {
     input: Entity<TextInput>,
     width: Pixels,
-    /// Where set, the field fills its holder up to `width` wide and narrows
-    /// with it to this width.
-    least: Option<Pixels>,
     clear_id: ElementId,
     /// Waits for the text to settle; an edit replaces it, and so gives up the
     /// wait for the text it changed.
@@ -58,19 +55,11 @@ impl QueryField {
         Self {
             input,
             width,
-            least: None,
             clear_id: ElementId::Name(format!("{id}-clear").into()),
             settling: Task::ready(()),
             _edited: edited,
             _moved: moved,
         }
-    }
-
-    /// The field narrowing with its holder down to `least` wide, for a holder
-    /// whose room gives way as its window narrows.
-    pub fn narrowing_to(mut self, least: Pixels) -> Self {
-        self.least = Some(least);
-        self
     }
 
     pub fn text(&self, cx: &App) -> SharedString {
@@ -131,13 +120,8 @@ impl Focusable for QueryField {
 impl Render for QueryField {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let typed = !self.text(cx).is_empty();
-        let input = div().child(self.input.clone());
-        let input = match self.least {
-            None => input.w(self.width).flex_none(),
-            Some(_) => input.flex_1().min_w_0().max_w(self.width),
-        };
+        let input = div().child(self.input.clone()).w(self.width).flex_none();
         div()
-            .when_some(self.least, |field, least| field.w_full().min_w(least))
             .flex()
             .items_center()
             .gap_1()
