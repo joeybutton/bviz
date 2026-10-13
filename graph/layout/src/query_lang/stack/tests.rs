@@ -680,3 +680,43 @@ fn a_chip_names_the_set_operator_it_opens_with() {
     let operators: Vec<_> = chips.chips().map(Chip::leading_operator).collect();
     assert_eq!(operators, [Some(0..6), None, Some(2..3)]);
 }
+
+/// A stack edited back to the chips it held equals what it was, and any edit
+/// that changes a chip's text, its switches or the order of the chips does not.
+#[test]
+fn a_stack_equals_one_holding_the_same_chips_alike() {
+    let original = stack(&["//a:lib", "deps($_)"]);
+    let mut edited = original.clone();
+    let first = id(&edited, 0);
+    edited.toggle_negated(first);
+    assert_ne!(edited, original);
+    edited.toggle_negated(first);
+    assert_eq!(edited, original);
+
+    assert!(!edited.move_by(first, -1));
+    assert_eq!(edited, original);
+    edited.set_text(first, "//b:app");
+    assert_ne!(edited, original);
+}
+
+#[test]
+fn the_chip_leaving_a_node_out_of_the_scope_is_named() {
+    let fixture = Fixture::new();
+    let node = |name: &str| fixture.names.get(&format!("target:{name}")).unwrap();
+    let mut stack = stack(&["//a:*", "//b:app", "- //a:lib", "kind(rule)"]);
+    let excluded = |stack: &Stack, name: &str| {
+        stack.excluded_by(&fixture.universe, &Prefixes::default(), node(name))
+    };
+    let negating = id(&stack, 2);
+    assert_eq!(excluded(&stack, "//a:lib"), Some(Exclusion::Chip(negating)));
+    assert_eq!(excluded(&stack, "//b:test"), Some(Exclusion::Sources));
+    assert_eq!(excluded(&stack, "//a:gen"), None);
+    assert_eq!(
+        excluded(&stack, "//a:lib.cc"),
+        Some(Exclusion::Chip(id(&stack, 3)))
+    );
+
+    stack.toggle_enabled(negating);
+    assert_eq!(excluded(&stack, "//a:lib"), None);
+    assert_eq!(excluded(&Stack::default(), "//a:lib"), None);
+}

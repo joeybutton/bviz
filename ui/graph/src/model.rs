@@ -4,10 +4,13 @@ use crate::build::{build_graph, loaded_inputs};
 use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
+use crate::filter::{Applied, DocumentFilter, Judgement};
+use crate::fuzzy::{self, Matching};
 use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
 use crate::report::Report;
+use crate::stand_in::Writers;
 use crate::status::{Landings, Nodes, Statuses};
 use crate::timecard::Timecard;
 use crate::timing::{NodeTimes, Untimed, landings};
@@ -15,8 +18,8 @@ use bviz_graph_layout::dominators::{Dominators, Roots, ScopeGraph};
 use bviz_graph_layout::graph::Graph;
 use bviz_graph_layout::lod::{DEFAULT_MAX_EDGES, DEFAULT_MAX_NODES, Overflow};
 use bviz_graph_layout::metrics::{Measurement, Scope, measure};
-use bviz_graph_layout::query_lang::Universe;
-use bviz_graph_layout::select::Filter;
+use bviz_graph_layout::query_lang::{Evaluation, Exclusion, Outcome, Prefixes, Stack, Universe};
+use bviz_graph_layout::select;
 use bviz_graph_layout::select::labels::LabelIndex;
 use bviz_graph_layout::target_pattern::TargetIndex;
 use bviz_graph_layout::{Capabilities, Facets, Id, InputSet, Joint, MapLayout, Names, Provenance};
@@ -24,7 +27,7 @@ use bviz_invocation::{ActionGraph, Chosen, Configurations, Revision, Session};
 use bviz_ui_components::{Pending, load_in_background};
 use bviz_ui_graph_args::GraphSource;
 use bviz_ui_playback::{Clock, DocumentClock};
-use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task};
+use gpui::{App, Context, Entity, EntityId, EventEmitter, SharedString, Subscription, Task};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -143,6 +146,9 @@ pub(crate) struct Loaded {
     completions: Prepared<Completions>,
     /// The graph as a query reads it.
     universe: Prepared<Universe>,
+    /// The actions writing each file, which a view of actions lands a file
+    /// on.
+    writers: Prepared<Arc<Writers>>,
     /// Where the execution attempts the invocation's profile recorded stood
     /// at each instant, placed on the graph's nodes; `None` where none lands.
     states: Option<NodeStates>,
@@ -164,11 +170,13 @@ impl Loaded {
             let targets = Arc::clone(indexed.get());
             Universe::with_targets(&shared.base, targets, &shared.facets, &shared.capabilities)
         });
+        let writers = Prepared::new(&shared, |shared| Arc::new(Writers::of(&shared.base)));
         Self {
             targets,
             candidates,
             completions,
             universe,
+            writers,
             shared,
             opening,
             measures: Passes::keeping_all(),
@@ -495,9 +503,8 @@ pub(crate) fn build(source: GraphSource) -> Result<Read, String> {
 
 pub(crate) type Source = bviz_ui_components::Source<Loaded>;
 
-/// The read has landed, loaded or failed. Carried as an event because what it
-/// calls for turns on the layout mode and filter a view has selected, which the
-/// graph does not hold.
+/// The read has landed, loaded or failed, leaving nothing selected. Carried
+/// as an event because what it calls for turns on each view's own state.
 pub(crate) struct SourceReplaced;
 
 /// The loaded graph's map has landed in its [`Placement`].
@@ -519,13 +526,14 @@ pub(crate) enum Reveal {
     /// The node is shown as [`crate::reveal::Ask::InPlace`] asks, and the panel
     /// keeps its place among its pane's.
     InPlace,
+    /// The paths that put the node in the build are drawn, and the panel is
+    /// brought forward as for [`Self::Activate`].
+    AskWhy,
 }
 
 /// The graph panel the graph's other views defer to.
 struct Deferred {
     panel: EntityId,
-    /// The filter the panel draws through.
-    filter: Filter,
     /// Forgets the panel once it is released.
     _released: Subscription,
 }
@@ -539,9 +547,46 @@ pub(crate) struct Landed<K, T> {
 pub(crate) type MetricsLanded = Landed<Scope, Measurement>;
 pub(crate) type DominatorsLanded = Landed<TreeKey, Dominators>;
 
-/// The graph's other views may have another [`GraphModel::filter`] to draw
-/// through.
-pub(crate) struct FilterChanged;
+/// The graph's views have another [`GraphModel::filter`] to draw through.
+pub(crate) struct FilterChanged {
+    /// Whether the change named the part of the graph to look at, which a
+    /// view drawing it moves onto.
+    pub(crate) frame: bool,
+}
+
+/// The verdicts [`GraphModel::verdicts`] was asked for have landed.
+pub(crate) struct VerdictsLanded;
+
+/// Another node, or none, is [`GraphModel::selected`]. A view marks what it
+/// selects itself as it publishes it, so it takes up only a change some other
+/// view made.
+pub(crate) struct SelectionChanged {
+    /// The view that made the selection.
+    pub(crate) by: EntityId,
+}
+
+/// What leaves a node out of the applied query has been named, as
+/// [`GraphModel::exclusion`] reads.
+pub(crate) struct ExclusionNamed;
+
+/// The chips staged in [`GraphModel::query`] changed.
+pub(crate) struct QueryChanged;
+
+/// The chips staged have been counted, as [`GraphModel::counted`] reads.
+pub(crate) struct QueryCounted;
+
+/// A query asked to be applied was not, for the reason it carries.
+pub(crate) struct QueryRefused {
+    /// The query bar that asked for the apply.
+    pub(crate) by: EntityId,
+    pub(crate) why: SharedString,
+}
+
+/// The query bar `by` asked for has been applied, whether or not that changed
+/// the filter.
+pub(crate) struct QueryApplied {
+    pub(crate) by: EntityId,
+}
 
 /// A pass over the whole of a graph, which is only taken once a view drawing
 /// what it yields asks for it.
@@ -631,13 +676,58 @@ pub(crate) struct GraphModel {
     /// The placement of the map in flight once the read has landed, held so
     /// that it is not cancelled.
     _placing: Task<()>,
-    /// The graph panel opened, shown or filtered last, for as long as it is
-    /// open.
+    /// The graph panel opened or shown last, for as long as it is open.
     deferred: Option<Deferred>,
+    /// What every view of the graph shows its share of it through.
+    filter: DocumentFilter,
+    /// `filter` as it stands over the loaded graph, evaluated once a view asks
+    /// for its verdicts; absent while the graph is still being read.
+    judgement: Option<Arc<Judgement>>,
+    /// Announces the verdicts of `judgement` as they land, absent until a view
+    /// asks for them. Replacing it announces nothing of the judgement it
+    /// served, whose evaluation, once running, still runs to its end.
+    judging: Option<Task<()>>,
+    /// The chips the query bars stage, which applying makes the filter's
+    /// scope.
+    query: Stack,
+    /// The values of the query's prefixes over the loaded graph, which only
+    /// that graph's ids index.
+    prefixes: Arc<Prefixes>,
+    /// Applies the query committed last; replacing it gives up an apply still
+    /// under way.
+    _applying: Task<()>,
+    /// The chips staged last counted over the loaded graph, and the stack
+    /// they were as it was counted.
+    counted: Option<(Stack, Arc<Evaluation>)>,
+    /// Counts the chips staged, and the stack being counted; absent while
+    /// none is.
+    counting: Option<(Stack, Task<()>)>,
+    /// What leaves each of the nodes last asked about out of the applied
+    /// query, named or being named; at most [`NAMED_EXCLUSIONS`] of them,
+    /// the oldest first.
+    exclusions: Vec<ExclusionNaming>,
+    selected: Selected,
+    /// The matcher pool the lists over the graph — each panel's palette and
+    /// each query bar's completion — take up in turn.
+    matchers: fuzzy::Pool,
     joined: Option<Joined>,
     /// The playback clock of the document the graph is opened in, where that
     /// document plays back.
     clock: Option<DocumentClock>,
+}
+
+/// How many nodes the document keeps named what leaves them out of the
+/// applied query: one for each view's card, with room for a few more asked
+/// about since.
+const NAMED_EXCLUSIONS: usize = 8;
+
+/// What leaves `node` out of the scope `stack` names, being named off the
+/// UI thread until `named` lands.
+struct ExclusionNaming {
+    node: Id,
+    stack: Stack,
+    named: Option<Option<Exclusion>>,
+    _work: Task<()>,
 }
 
 /// The invocation a graph is opened as part of.
@@ -654,6 +744,25 @@ impl EventEmitter<MapPlaced> for GraphModel {}
 impl EventEmitter<RevealRequested> for GraphModel {}
 impl<K: 'static, T: 'static> EventEmitter<Landed<K, T>> for GraphModel {}
 impl EventEmitter<FilterChanged> for GraphModel {}
+impl EventEmitter<VerdictsLanded> for GraphModel {}
+impl EventEmitter<QueryChanged> for GraphModel {}
+impl EventEmitter<ExclusionNamed> for GraphModel {}
+impl EventEmitter<QueryRefused> for GraphModel {}
+impl EventEmitter<QueryApplied> for GraphModel {}
+impl EventEmitter<QueryCounted> for GraphModel {}
+impl EventEmitter<SelectionChanged> for GraphModel {}
+
+/// The node of the loaded graph every view of it marks as the one selected.
+#[derive(Default)]
+struct Selected(Option<Id>);
+
+impl Selected {
+    /// Selects `node`, or nothing for `None`, reporting whether that changed
+    /// what is selected.
+    fn set(&mut self, node: Option<Id>) -> bool {
+        std::mem::replace(&mut self.0, node) != node
+    }
+}
 
 impl GraphModel {
     /// The graph `load` is reading, viewable once the read finishes and failed
@@ -704,7 +813,11 @@ impl GraphModel {
                     Err(err) => Source::Failed(err),
                 };
                 model.take_up(cx);
-                cx.emit(SourceReplaced);
+                model.judge();
+                model.counted = None;
+                model.counting = None;
+                model.exclusions.clear();
+                model.replaced(cx);
             },
         );
         Self {
@@ -748,6 +861,13 @@ impl GraphModel {
         (changed, reveal)
     }
 
+    /// Announces that the graph has been replaced, whose nodes no selection
+    /// names any longer.
+    fn replaced(&mut self, cx: &mut Context<Self>) {
+        self.selected = Selected::default();
+        cx.emit(SourceReplaced);
+    }
+
     /// Waits on `placing` and lands the map it places through `landing`.
     fn placing(
         placing: Pending<Arc<MapLayout>>,
@@ -762,7 +882,7 @@ impl GraphModel {
                     derive_levels(map, cx);
                     cx.emit(MapPlaced);
                 }
-                None => cx.emit(SourceReplaced),
+                None => model.replaced(cx),
             },
         )
     }
@@ -793,42 +913,41 @@ impl GraphModel {
             _work: work,
             _placing: Task::ready(()),
             deferred: None,
+            filter: DocumentFilter::default(),
+            judgement: None,
+            judging: None,
+            query: Stack::default(),
+            prefixes: Arc::default(),
+            _applying: Task::ready(()),
+            counted: None,
+            counting: None,
+            exclusions: Vec::with_capacity(NAMED_EXCLUSIONS),
+            selected: Selected::default(),
+            matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
         }
     }
 
-    /// Takes `panel`, drawing through `filter`, as the graph panel the graph's
-    /// other views defer to.
-    pub(crate) fn defer_to(
-        &mut self,
-        panel: &Entity<GraphPanel>,
-        filter: Filter,
-        cx: &mut Context<Self>,
-    ) {
+    /// Takes `panel` as the graph panel the graph's other views defer to.
+    pub(crate) fn defer_to(&mut self, panel: &Entity<GraphPanel>, cx: &mut Context<Self>) {
         let id = panel.entity_id();
-        match &mut self.deferred {
-            Some(deferred) if deferred.panel == id => {
-                if deferred.filter == filter {
-                    return;
-                }
-                deferred.filter = filter;
-            }
-            _ => {
-                let released = cx.observe_release(panel, |model, _, cx| {
-                    model.deferred = None;
-                    cx.emit(FilterChanged);
-                    cx.notify();
-                });
-                self.deferred = Some(Deferred {
-                    panel: id,
-                    filter,
-                    _released: released,
-                });
-                cx.notify();
-            }
+        if self
+            .deferred
+            .as_ref()
+            .is_some_and(|deferred| deferred.panel == id)
+        {
+            return;
         }
-        cx.emit(FilterChanged);
+        let released = cx.observe_release(panel, |model, _, cx| {
+            model.deferred = None;
+            cx.notify();
+        });
+        self.deferred = Some(Deferred {
+            panel: id,
+            _released: released,
+        });
+        cx.notify();
     }
 
     /// Whether a graph panel is open to show a node another view names.
@@ -836,11 +955,250 @@ impl GraphModel {
         self.deferred.is_some()
     }
 
-    /// The filter the graph's other views draw their share of it through: the
-    /// one the graph panel they defer to draws through, absent where no graph
-    /// panel is open.
-    pub(crate) fn filter(&self) -> Option<&Filter> {
-        self.deferred.as_ref().map(|deferred| &deferred.filter)
+    /// What every view of the graph shows its share of it through.
+    pub(crate) fn filter(&self) -> &DocumentFilter {
+        &self.filter
+    }
+
+    /// `filter` as it stands over the loaded graph, whose verdicts are
+    /// evaluated once for every view drawing through it.
+    pub(crate) fn judgement(&self) -> Option<&Arc<Judgement>> {
+        self.judgement.as_ref()
+    }
+
+    /// The verdicts of the filter as it stands, where they have landed; asks
+    /// for them otherwise, emitting [`VerdictsLanded`] once they land. What
+    /// they change is each view's own to redraw, so their landing notifies
+    /// none.
+    pub(crate) fn verdicts(&mut self, cx: &mut Context<Self>) -> Option<Arc<select::Verdicts>> {
+        let judgement = self.judgement.as_ref()?;
+        if let Some(verdicts) = judgement.evaluated() {
+            return Some(Arc::clone(verdicts));
+        }
+        if self.judging.is_none() {
+            let judgement = Arc::clone(judgement);
+            self.judging = Some(cx.spawn(async move |model, cx| {
+                let evaluating = async move {
+                    judgement.verdicts();
+                };
+                cx.background_executor().spawn(evaluating).await;
+                model.update(cx, |_, cx| cx.emit(VerdictsLanded)).ok();
+            }));
+        }
+        None
+    }
+
+    /// Pins the nodes `pins` names, and no other.
+    pub(crate) fn set_pins(&mut self, pins: HashMap<Id, select::Pin>, cx: &mut Context<Self>) {
+        if self.filter.set_pins(pins) {
+            self.filter_changed(false, cx);
+        }
+    }
+
+    /// Takes up a change to the filter, `frame` saying whether it named the
+    /// part of the graph to look at.
+    fn filter_changed(&mut self, frame: bool, cx: &mut Context<Self>) {
+        self.judge();
+        cx.emit(FilterChanged { frame });
+    }
+
+    /// Makes the judgement of the filter as it stands over the loaded graph,
+    /// where the one held judges another.
+    fn judge(&mut self) {
+        let Some(loaded) = self.loaded() else {
+            return;
+        };
+        let (filter, base) = (self.filter.filter(), &loaded.shared.base);
+        if (self.judgement.as_ref()).is_some_and(|judgement| judgement.judges(&filter, base)) {
+            return;
+        }
+        self.judgement = Some(Arc::new(Judgement::new(filter, Arc::clone(base))));
+        self.judging = None;
+    }
+
+    /// The chips staged, which the filter takes up once they are applied.
+    pub(crate) fn query(&self) -> &Stack {
+        &self.query
+    }
+
+    /// Runs `edit` on the chips staged, announcing what it changed.
+    pub(crate) fn edit_query<R>(
+        &mut self,
+        edit: impl FnOnce(&mut Stack) -> R,
+        cx: &mut Context<Self>,
+    ) -> R {
+        let before = self.query.clone();
+        let edited = edit(&mut self.query);
+        if self.query != before {
+            cx.emit(QueryChanged);
+        }
+        edited
+    }
+
+    /// Stages the chips applied last again, taking back every edit made
+    /// since; with none applied, none.
+    pub(crate) fn revert_query(&mut self, cx: &mut Context<Self>) {
+        let applied = self.filter.applied().map(|applied| applied.stack().clone());
+        self.edit_query(|query| *query = applied.unwrap_or_default(), cx);
+    }
+
+    /// Counts what the chips staged name off the UI thread, once for every
+    /// view showing them, emitting [`QueryCounted`] as the count lands; does
+    /// nothing where they are counted or being counted as they stand.
+    pub(crate) fn count_query(&mut self, cx: &mut Context<Self>) {
+        let stack = &self.query;
+        let held = |held: &Stack| held == stack;
+        if self
+            .counted
+            .as_ref()
+            .is_some_and(|(counted, _)| held(counted))
+            || self
+                .counting
+                .as_ref()
+                .is_some_and(|(counting, _)| held(counting))
+        {
+            return;
+        }
+        let stack = stack.clone();
+        // An empty stack names nothing, which needs no universe to know: a
+        // graph nobody queries never prepares one.
+        if stack.is_empty() {
+            let nothing = Evaluation {
+                chips: Vec::new(),
+                value: None,
+            };
+            self.counting = None;
+            self.counted = Some((stack, Arc::new(nothing)));
+            cx.emit(QueryCounted);
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let prefixes = Arc::clone(&self.prefixes);
+        let counted = stack.clone();
+        let task = load_in_background(
+            cx,
+            move || stack.evaluate(universe.get(), &prefixes),
+            move |model, evaluation, cx| {
+                model.counting = None;
+                model.counted = Some((counted, Arc::new(evaluation)));
+                cx.emit(QueryCounted);
+            },
+        );
+        self.counting = Some((self.query.clone(), task));
+    }
+
+    /// What the chips staged last counted name; of a stack since edited
+    /// where the count of the stack as it stands has yet to land.
+    pub(crate) fn counted(&self) -> Option<&Evaluation> {
+        self.counted.as_ref().map(|(_, evaluation)| &**evaluation)
+    }
+
+    /// Names off the UI thread what leaves `node` out of the applied query,
+    /// emitting [`ExclusionNamed`] once it is named; does nothing where it is
+    /// named or being named, or where no query is applied.
+    pub(crate) fn name_exclusion(&mut self, node: Id, cx: &mut Context<Self>) {
+        let Some(applied) = self.filter.applied() else {
+            return;
+        };
+        let stack = applied.stack();
+        self.exclusions.retain(|held| held.stack == *stack);
+        if self.exclusions.iter().any(|held| held.node == node) {
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let (prefixes, named) = (self.prefixes(), stack.clone());
+        let work = cx.spawn(async move |model, cx| {
+            let naming = async move { named.excluded_by(universe.get(), &prefixes, node) };
+            let exclusion = cx.background_executor().spawn(naming).await;
+            let _ = model.update(cx, |model, cx| {
+                let named = model.exclusions.iter_mut().find(|held| held.node == node);
+                if let Some(held) = named {
+                    held.named = Some(exclusion);
+                    cx.emit(ExclusionNamed);
+                }
+            });
+        });
+        if self.exclusions.len() == NAMED_EXCLUSIONS {
+            self.exclusions.remove(0);
+        }
+        self.exclusions.push(ExclusionNaming {
+            node,
+            stack: stack.clone(),
+            named: None,
+            _work: work,
+        });
+    }
+
+    /// What leaves `node` out of the applied query, with the applied stack
+    /// naming it, where [`Self::name_exclusion`] has named it.
+    pub(crate) fn exclusion(&self, node: Id) -> Option<(Exclusion, &Stack)> {
+        let stack = self.filter.applied()?.stack();
+        let held = self.exclusions.iter().find(|held| held.node == node)?;
+        let named = held.named.flatten()?;
+        (held.stack == *stack).then_some((named, stack))
+    }
+
+    /// A matching with no query, on the graph's matcher pool where no list
+    /// holds it.
+    pub(crate) fn take_matcher(&mut self) -> Matching {
+        self.matchers.take()
+    }
+
+    /// Hands the pool of `matching` back for another list to take up.
+    pub(crate) fn park_matcher(&mut self, matching: Matching) {
+        self.matchers.park(matching);
+    }
+
+    /// The values of the query's prefixes over the loaded graph, shared by
+    /// every evaluation of the query.
+    pub(crate) fn prefixes(&self) -> Arc<Prefixes> {
+        Arc::clone(&self.prefixes)
+    }
+
+    /// Scopes the filter to what the chips staged name, off the UI thread,
+    /// giving up an apply asked for before; `by` is the query bar asking.
+    pub(crate) fn apply_query(&mut self, by: EntityId, cx: &mut Context<Self>) {
+        let stack = self.query.clone();
+        if matches!(stack.compile(), Ok(None)) {
+            self._applying = Task::ready(());
+            self.scope_landed(stack, Ok(None), by, cx);
+            return;
+        }
+        let Some(universe) = self.universe() else {
+            return;
+        };
+        let prefixes = Arc::clone(&self.prefixes);
+        self._applying = load_in_background(
+            cx,
+            move || {
+                let scope = scope_of(&stack, universe.get(), &prefixes);
+                (stack, scope)
+            },
+            move |model, (stack, scope), cx| model.scope_landed(stack, scope, by, cx),
+        );
+    }
+
+    fn scope_landed(
+        &mut self,
+        stack: Stack,
+        scope: Result<Option<select::Scope>, SharedString>,
+        by: EntityId,
+        cx: &mut Context<Self>,
+    ) {
+        match scope {
+            Ok(scope) => {
+                cx.emit(QueryApplied { by });
+                let applied = scope.map(|scope| Applied::new(stack, scope));
+                if self.filter.set_applied(applied) {
+                    self.filter_changed(true, cx);
+                }
+            }
+            Err(why) => cx.emit(QueryRefused { by, why }),
+        }
     }
 
     /// Has the loaded graph measured off the UI thread in each scope of
@@ -893,6 +1251,10 @@ impl GraphModel {
     /// absent while the graph is still being read.
     pub(crate) fn targets(&self) -> Option<Prepared<Arc<TargetIndex>>> {
         Some(self.loaded()?.targets.clone())
+    }
+
+    pub(crate) fn writers(&self) -> Option<Prepared<Arc<Writers>>> {
+        Some(self.loaded()?.writers.clone())
     }
 
     pub(crate) fn candidates(&self) -> Option<Prepared<Candidates>> {
@@ -949,14 +1311,38 @@ impl GraphModel {
         }
     }
 
+    /// The node every view of the graph marks as the one selected.
+    pub(crate) fn selected(&self) -> Option<Id> {
+        self.selected.0
+    }
+
+    /// Selects `node`, or nothing for `None`, for every view of the graph;
+    /// `by` is the view selecting it. Selecting what is selected already
+    /// announces nothing.
+    pub(crate) fn select(&mut self, node: Option<Id>, by: EntityId, cx: &mut Context<Self>) {
+        if self.selected.set(node) {
+            cx.emit(SelectionChanged { by });
+        }
+    }
+
     /// Asks the graph panel the graph's other views defer to to show the node
     /// `id`, where one is open.
     pub(crate) fn reveal(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.request(id, Reveal::Activate, cx);
+    }
+
+    /// Asks the graph panel the graph's other views defer to why the node
+    /// `id` is in the build, where one is open.
+    pub(crate) fn ask_why(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.request(id, Reveal::AskWhy, cx);
+    }
+
+    fn request(&mut self, node: Id, reveal: Reveal, cx: &mut Context<Self>) {
         if let Some(deferred) = &self.deferred {
             cx.emit(RevealRequested {
                 panel: deferred.panel,
-                node: id,
-                reveal: Reveal::Activate,
+                node,
+                reveal,
             });
         }
     }
@@ -984,6 +1370,33 @@ impl GraphModel {
     }
 }
 
+/// The scope `stack` names over `universe`, `None` where it names none; or
+/// why it cannot be applied.
+fn scope_of(
+    stack: &Stack,
+    universe: &Universe,
+    prefixes: &Prefixes,
+) -> Result<Option<select::Scope>, SharedString> {
+    let compiled = match stack.compile() {
+        Ok(None) => return Ok(None),
+        Ok(Some(compiled)) => compiled,
+        Err(invalid) => return Err(format!("not applied: {}", invalid.error.message).into()),
+    };
+    let evaluation = stack.evaluate(universe, prefixes);
+    let Some(value) = &evaluation.value else {
+        let failed = evaluation
+            .chips
+            .iter()
+            .find_map(|(_, outcome)| match outcome {
+                Outcome::Failed(error) => Some(error.message.clone()),
+                _ => None,
+            });
+        let why = failed.unwrap_or_else(|| "a chip does not evaluate".to_string());
+        return Err(format!("not applied: {why}").into());
+    };
+    Ok(Some(universe.scope(compiled.expr.to_string(), value)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,6 +1409,17 @@ mod tests {
         Spawns, Timings,
     };
     use std::time::Duration;
+
+    #[test]
+    fn selecting_what_is_selected_changes_nothing() {
+        let mut selected = Selected::default();
+        assert!(!selected.set(None));
+        assert!(selected.set(Some(Id(3))));
+        assert!(!selected.set(Some(Id(3))));
+        assert!(selected.set(Some(Id(4))));
+        assert!(selected.set(None));
+        assert_eq!(selected.0, None);
+    }
 
     #[test]
     fn a_graph_describes_its_configurations_by_checksum() {
@@ -1236,7 +1660,6 @@ mod tests {
         let panel = EntityId::from(1);
         model.deferred = Some(Deferred {
             panel,
-            filter: Filter::default(),
             _released: Subscription::new(|| {}),
         });
         assert!(model.take_up_from(&session).1.is_none());

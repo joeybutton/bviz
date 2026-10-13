@@ -2,7 +2,10 @@
 //! it is matched by.
 
 use crate::model::Shared;
-use crate::point::{configuration_readings, mnemonic, primary_output, written_target_label};
+use crate::point::{
+    configuration_readings, mnemonic, primary_output, unit_kinds, written_target_label,
+};
+use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::labels::package_label;
 use bviz_graph_layout::shown::{Parts, Shown};
 use bviz_graph_layout::{Id, Kind};
@@ -55,6 +58,18 @@ impl Scope {
             Scope::Files => "files",
             Scope::All => "everything",
         }
+    }
+
+    /// The narrowest scope offering every kind of point of `unit`: a unit
+    /// plotting targets and source files alike takes in everything, its
+    /// points ranked first by the view listing them.
+    pub(crate) fn of_unit(unit: Unit) -> Self {
+        let kinds = unit_kinds(unit);
+        let offers_all = |scope: &Scope| kinds.iter().all(|&kind| scope.holds(kind));
+        Self::CYCLE
+            .into_iter()
+            .find(offers_all)
+            .unwrap_or(Scope::All)
     }
 
     /// Whether the scope offers nodes of `kind`. A merge group is a box the
@@ -338,6 +353,19 @@ pub(crate) mod tests {
             provenance: Arc::default(),
             inputs: Input::Aquery.into(),
         }
+    }
+
+    /// A view of the points of one unit opens the palette on the scope
+    /// offering them, every point of the unit among what it offers.
+    #[test]
+    fn a_units_scope_offers_its_points() {
+        for unit in [Unit::Target, Unit::ConfiguredTarget, Unit::Action] {
+            for &kind in unit_kinds(unit) {
+                assert!(Scope::of_unit(unit).holds(kind), "{unit:?} {kind:?}");
+            }
+        }
+        assert_eq!(Scope::of_unit(Unit::Action), Scope::Actions);
+        assert_eq!(Scope::of_unit(Unit::ConfiguredTarget), Scope::Configured);
     }
 
     fn offered(candidates: &Candidates, scope: Scope) -> Vec<&str> {

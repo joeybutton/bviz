@@ -49,6 +49,11 @@ impl Why {
         }
     }
 
+    /// Whether a question is asked, whose paths the panel draws.
+    pub(crate) fn asked(&self) -> bool {
+        self.asked.is_some()
+    }
+
     /// The dependency asked about.
     fn dependency(&self) -> Option<Id> {
         self.asked

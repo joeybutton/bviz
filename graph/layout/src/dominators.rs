@@ -8,6 +8,10 @@
 //! on, so that every counted point of the scope sits in the tree; or a chosen
 //! set of points, leaving out of the tree every point none of them reaches.
 
+mod shown;
+
+pub use shown::{Above, Placing, ShownTree};
+
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -967,7 +971,7 @@ mod tests {
 
     /// Configured targets `deps` names, each pair running from a dependency to
     /// its dependent, in the order first named.
-    fn configured(deps: &[(&str, &str)]) -> (Graph, Names) {
+    pub(super) fn configured(deps: &[(&str, &str)]) -> (Graph, Names) {
         let mut graph = Graph::new();
         let mut names = Names::default();
         for name in deps.iter().flat_map(|&(a, b)| [a, b]) {
@@ -982,7 +986,7 @@ mod tests {
         (graph, names)
     }
 
-    fn tree_of(graph: &Graph, names: &Names, unit: Unit) -> Dominators {
+    pub(super) fn tree_of(graph: &Graph, names: &Names, unit: Unit) -> Dominators {
         tree_with(graph, names, &Facets::default(), unit)
     }
 
@@ -1019,7 +1023,7 @@ mod tests {
     }
 
     /// The tree of configured targets from the points `roots` names.
-    fn tree_from(graph: &Graph, names: &Names, roots: &[&str]) -> Dominators {
+    pub(super) fn tree_from(graph: &Graph, names: &Names, roots: &[&str]) -> Dominators {
         let everything = Provenance::new(vec![InputSet::ALL; names.len()]);
         let scope = Scope::new(Unit::ConfiguredTarget, InputSet::ALL).unwrap();
         let facets = Facets::default();
@@ -1142,7 +1146,7 @@ mod tests {
         assert_eq!(path, ["lib", "bin", "test"]);
     }
 
-    fn node(tree: &Dominators, names: &Names, name: &str) -> u32 {
+    pub(super) fn node(tree: &Dominators, names: &Names, name: &str) -> u32 {
         tree.index_of(names.get(name).unwrap()).unwrap()
     }
 
@@ -1642,7 +1646,7 @@ mod tests {
 
     /// A xorshift generator of indices below a bound, so a randomized test is
     /// the same on every run.
-    fn random_indices() -> impl FnMut(usize) -> usize {
+    pub(super) fn random_indices() -> impl FnMut(usize) -> usize {
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         move |bound: usize| {
             state ^= state << 13;
@@ -1718,7 +1722,7 @@ mod tests {
     /// between them, each running from a dependency to its dependent: in the
     /// Action unit, actions linked through the files they write, each also
     /// reading one of `sources` source files at random.
-    fn random_build(
+    pub(super) fn random_build(
         unit: Unit,
         nodes: usize,
         deps: &[(usize, usize)],

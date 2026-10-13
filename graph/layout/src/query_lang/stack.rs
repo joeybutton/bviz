@@ -30,6 +30,7 @@ use super::lex::{self, Token, TokenKind};
 use super::narrow::ActionFilter;
 use super::parse::parse;
 use super::universe::{Counts, Universe};
+use crate::intern::Id;
 
 /// The variable a chip reads the set before it from.
 const CONTINUED: &str = "_";
@@ -464,6 +465,20 @@ pub struct Compiled {
     pub from_everything: bool,
 }
 
+/// Two stacks are equal where they hold the same chips in the same order, each
+/// with the same text and the same switches: the rest of a chip follows from
+/// its text.
+impl PartialEq for Stack {
+    fn eq(&self, other: &Self) -> bool {
+        fn written(chip: &Chip) -> (ChipId, &str, bool, bool) {
+            (chip.id, &chip.text, chip.enabled, chip.negated)
+        }
+        self.chips().map(written).eq(other.chips().map(written))
+    }
+}
+
+impl Eq for Stack {}
+
 impl Stack {
     /// The chips, the sources ahead of the refinements; a chip's position in
     /// the stack is its place in this order.
@@ -705,7 +720,49 @@ impl Stack {
     /// value of every run of chips evaluated before, so that an edit to one
     /// chip evaluates it and the chips above it alone.
     pub fn evaluate(&self, universe: &Universe, prefixes: &Prefixes) -> Evaluation {
+        let walked = self.walk(universe, prefixes);
+        let last = walked.named.last().filter(|_| !walked.broken);
+        Evaluation {
+            chips: walked.chips,
+            value: last.map(|(_, named)| named.value()),
+        }
+    }
+
+    /// What leaves `id` out of the scope over what the stack names: the
+    /// sources, where none names it, or else the last refinement whose scope
+    /// does not hold `id` where the scope over the set it read does. None
+    /// where the scope holds `id`, where the stack names no set, or where
+    /// `id` is no node the universe holds.
+    pub fn excluded_by(
+        &self,
+        universe: &Universe,
+        prefixes: &Prefixes,
+        id: Id,
+    ) -> Option<Exclusion> {
+        let walked = self.walk(universe, prefixes);
+        if walked.broken || walked.named.is_empty() {
+            return None;
+        }
+        let mut held = universe.members().contains(id.0 as usize);
+        let mut excluded = None;
+        for (chip, named) in &walked.named {
+            let holds = universe.scope_holds(&named.value(), id);
+            if held && !holds {
+                excluded = Some(match self.chip(*chip).is_some_and(Chip::is_source) {
+                    true => Exclusion::Sources,
+                    false => Exclusion::Chip(*chip),
+                });
+            }
+            held = holds;
+        }
+        excluded.filter(|_| !held)
+    }
+
+    /// Each chip's outcome over `universe`, and the value of every chip that
+    /// names a set, in the stack's order.
+    fn walk(&self, universe: &Universe, prefixes: &Prefixes) -> Walked {
         let mut chips = Vec::with_capacity(self.len());
+        let mut named_by: Vec<(ChipId, Evaluated)> = Vec::with_capacity(self.len());
         let mut before: Option<Evaluated> = None;
         let mut fingerprint = 0;
         let mut broken = false;
@@ -761,6 +818,7 @@ impl Stack {
                                 counts: named.counts,
                                 before: before.as_ref().map(|b| b.counts),
                             };
+                            named_by.push((chip.id, named.clone()));
                             before = Some(named);
                             outcome
                         }
@@ -773,12 +831,10 @@ impl Stack {
             };
             chips.push((chip.id, outcome));
         }
-        Evaluation {
+        Walked {
             chips,
-            value: (before.filter(|_| !broken)).map(|before| Value {
-                set: Arc::clone(before.named.set()),
-                denied: before.denied,
-            }),
+            named: named_by,
+            broken,
         }
     }
 }
@@ -1030,6 +1086,33 @@ struct Evaluated {
     counts: Counts,
     /// [`Value::denied`] of the chips up to this one.
     denied: Arc<FixedBitSet>,
+}
+
+impl Evaluated {
+    /// What the stack up to this chip names.
+    fn value(&self) -> Value {
+        Value {
+            set: Arc::clone(self.named.set()),
+            denied: Arc::clone(&self.denied),
+        }
+    }
+}
+
+/// What leaves a node out of the scope over what a stack names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Exclusion {
+    /// No source chip names it.
+    Sources,
+    /// The refinement chip that takes it out.
+    Chip(ChipId),
+}
+
+/// A stack's walk over a universe.
+struct Walked {
+    chips: Vec<(ChipId, Outcome)>,
+    named: Vec<(ChipId, Evaluated)>,
+    /// Whether a chip is invalid or failed, leaving the stack no value.
+    broken: bool,
 }
 
 /// The values of the chip prefixes a stack has evaluated, by fingerprint,

@@ -42,10 +42,13 @@ mod drag;
 mod duration;
 mod emphasis;
 mod exclusive;
+mod filter;
 mod framing;
 mod fuzzy;
+mod hidden;
 mod hints;
 mod history;
+mod holder;
 mod hover;
 mod hue;
 mod jump;
@@ -68,6 +71,7 @@ mod scatter;
 mod scroll;
 mod selection;
 mod spatial;
+mod stand_in;
 mod status;
 mod timecard;
 mod timing;
@@ -84,7 +88,10 @@ pub use exclusive::ExclusivePanel;
 use framing::{Framing, Target, build_prepaint};
 use legend::Legend;
 use mode::LayoutMode;
-use model::{GraphModel, MapPlaced, Reveal, RevealRequested, SourceReplaced};
+use model::{
+    ExclusionNamed, FilterChanged, GraphModel, MapPlaced, QueryApplied, Reveal, RevealRequested,
+    SelectionChanged, SourceReplaced, VerdictsLanded,
+};
 use morph::{Frame, Morph};
 use neighborhood::MarkingMemo;
 use paint::{Scene, TitleTarget, canvas_body};
@@ -136,8 +143,10 @@ pub fn register_keys(cx: &mut App) {
             KEY_CONTEXT,
             exclusive::KEY_CONTEXT,
             exclusive::ROOTS_KEY_CONTEXT,
+            exclusive::OFFERING,
             scatter::KEY_CONTEXT,
             scatter::PICKING,
+            scatter::OFFERING,
             jump::KEY_CONTEXT,
             chips::KEY_CONTEXT,
             chips::FIELD_KEY_CONTEXT,
@@ -154,10 +163,36 @@ fn bindings() -> Vec<KeyBinding> {
     let jumping = Some(jump::KEY_CONTEXT.id());
     let scatter_canvas = text_input::unless_typing(scatter::KEY_CONTEXT);
     let scatter_canvas = Some(scatter_canvas.as_str());
-    let picking = format!("{} && {}", scatter::KEY_CONTEXT, scatter::PICKING);
+    // The list's keys stand down in the query bar, whose keys share them.
+    let picking = format!(
+        "{} && {} && !{}",
+        scatter::KEY_CONTEXT,
+        scatter::PICKING,
+        chips::KEY_CONTEXT
+    );
     let picking = Some(picking.as_str());
+    let scatter_unpicked = format!(
+        "{} && !{}",
+        text_input::unless_typing(scatter::KEY_CONTEXT),
+        scatter::PICKING
+    );
+    let scatter_unpicked = Some(scatter_unpicked.as_str());
+    let scatter_offering = format!(
+        "{} && {} && !{}",
+        scatter::KEY_CONTEXT,
+        scatter::OFFERING,
+        text_input::KEY_CONTEXT
+    );
+    let scatter_offering = Some(scatter_offering.as_str());
     let exclusive_canvas = text_input::unless_typing(exclusive::KEY_CONTEXT);
     let exclusive_canvas = Some(exclusive_canvas.as_str());
+    let exclusive_offering = format!(
+        "{} && {} && !{}",
+        exclusive::KEY_CONTEXT,
+        exclusive::OFFERING,
+        text_input::KEY_CONTEXT
+    );
+    let exclusive_offering = Some(exclusive_offering.as_str());
     let mut bindings = vec![
         KeyBinding::new("h", ToggleNeighborhood, unless_typing),
         KeyBinding::new("r", ToggleReduce, unless_typing),
@@ -195,32 +230,43 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", exclusive::SelectChild, exclusive_canvas),
         KeyBinding::new("escape", exclusive::Deselect, exclusive_canvas),
         KeyBinding::new("enter", exclusive::FocusSelected, exclusive_canvas),
+        // After the binding it shares Enter with, which it outranks while a
+        // card stands.
+        KeyBinding::new("enter", reveal::Accept, exclusive_offering),
         KeyBinding::new("g", exclusive::ShowSelected, exclusive_canvas),
         KeyBinding::new("u", unit_picker::CyclePoints, exclusive_canvas),
         KeyBinding::new("alt-left", exclusive::FocusBack, exclusive_canvas),
         KeyBinding::new("alt-right", exclusive::FocusForward, exclusive_canvas),
-        KeyBinding::new("q", exclusive::FocusRoots, exclusive_canvas),
+        KeyBinding::new("r", exclusive::EditRoots, exclusive_canvas),
         KeyBinding::new(
             "escape",
-            exclusive::LeaveRoots,
+            exclusive::CloseRoots,
             Some(exclusive::ROOTS_KEY_CONTEXT.id()),
         ),
+        KeyBinding::new(
+            "enter",
+            exclusive::CloseRoots,
+            Some(exclusive::ROOTS_KEY_CONTEXT.id()),
+        ),
+        KeyBinding::new("escape", scatter::DismissCard, scatter_unpicked),
+        KeyBinding::new("g", scatter::ShowSelectedPoint, scatter_unpicked),
+        KeyBinding::new("alt-left", JumpBack, scatter_canvas),
+        KeyBinding::new("alt-right", JumpForward, scatter_canvas),
+        KeyBinding::new("enter", reveal::Accept, scatter_offering),
         KeyBinding::new("up", scatter::AimUp, picking),
         KeyBinding::new("down", scatter::AimDown, picking),
-        KeyBinding::new("enter", scatter::RevealAimed, picking),
+        KeyBinding::new("enter", scatter::SelectAimed, picking),
         KeyBinding::new("escape", scatter::ClosePickList, picking),
     ];
-    bindings.extend(chips::bindings(unless_typing));
+    bindings.extend(chips::bindings());
     bindings.extend(zoom_key_bindings(KEY_CONTEXT));
     bindings.extend(zoom_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(KEY_CONTEXT));
     bindings.extend(legend_key_bindings(scatter::KEY_CONTEXT));
     bindings.extend(legend_key_bindings(exclusive::KEY_CONTEXT));
     bindings.extend(find_key_bindings(KEY_CONTEXT, jump::Open));
-    bindings.extend(find_key_bindings(
-        exclusive::KEY_CONTEXT,
-        exclusive::FocusRoots,
-    ));
+    bindings.extend(find_key_bindings(scatter::KEY_CONTEXT, jump::Open));
+    bindings.extend(find_key_bindings(exclusive::KEY_CONTEXT, jump::Open));
     bindings
 }
 
@@ -330,14 +376,17 @@ pub struct GraphPanel {
     /// rows stand.
     box_classes: Vec<BoxClass>,
     boxes: Entity<MultiSelect>,
-    /// Carries a toggled boxes-menu row into the panel's filter.
+    /// Carries a toggled boxes-menu row into the box classes the panel unwraps.
     _box_choices: Subscription,
-    /// The query bar, whose chips scope what the panel draws.
-    chips: chips::Chips,
-    jump: jump::Finder,
-    /// The matcher pool the palette and the query field's completion take
-    /// up in turn.
-    matchers: fuzzy::Pool,
+    /// The query bar, whose chips scope what the document's views draw.
+    chips: Entity<chips::ChipBar>,
+    /// Puts away the paths drawn in the filter's place as the panel's own bar
+    /// applies a query.
+    _query_applied: Subscription,
+    jump: Entity<jump::JumpPalette>,
+    jump_opened_at: jump::graph::OpenedAt,
+    /// Lands what the palette picks.
+    _jumped: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     /// Repaints the drawing, and only it, as a gesture moves the document's
@@ -348,6 +397,17 @@ pub struct GraphPanel {
     _source_replaced: Subscription,
     /// Derives the levels of the panel's restriction as the map lands.
     _map_placed: Subscription,
+    /// Draws the graph through the document's filter as it changes.
+    _filter_changed: Subscription,
+    /// Counts what the document's filter shows for the query bar's status
+    /// line as its verdicts land.
+    _verdicts_landed: Subscription,
+    /// Names on the hidden card the chip leaving its node out.
+    _exclusion_named: Subscription,
+    /// Marks a node another view selects, leaving the camera where it is.
+    _selection_changed: Subscription,
+    /// Whether the workspace shows the panel.
+    shown: bool,
     _reveal_requested: Subscription,
     /// The box whose neighborhood a hover marks: the box under the cursor,
     /// or the one the jump palette previews.
@@ -412,6 +472,36 @@ impl GraphPanel {
         }
     }
 
+    /// Tells the query bar how many points the document's filter shows, in
+    /// the finest unit the graph holds, where the panel is shown and the
+    /// filter narrows the graph, asking for the filter's verdicts where they
+    /// have yet to land.
+    fn restate_shown(&mut self, cx: &mut Context<Self>) {
+        if !self.shown {
+            return;
+        }
+        let shown = match self.model.read(cx).filter().narrows() {
+            false => None,
+            true => {
+                self.model.update(cx, |model, cx| model.verdicts(cx));
+                let model = self.model.read(cx);
+                let finest = (model.loaded())
+                    .and_then(|loaded| loaded.shared.inputs.inputs().last())
+                    .map(point::finest_unit);
+                finest.zip(model.judgement()).and_then(|(unit, judgement)| {
+                    let counted = judgement.shown(point::unit_kinds(unit))?;
+                    Some(chips::Shown {
+                        shown: counted.shown,
+                        of: counted.of,
+                        many: point::unit_names(unit).many,
+                        note: None,
+                    })
+                })
+            }
+        };
+        self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
+    }
+
     /// The boxes the selected mode's layout lets the user open or close.
     fn expandable(&self) -> Expandable {
         self.derived.expandable(self.mode)
@@ -473,7 +563,26 @@ impl GraphPanel {
         let box_choices = cx.subscribe(&boxes, |view, _, event: &MultiSelectEvent, cx| {
             boxes::choose_boxes(view, event, cx);
         });
-        let chips = chips::Chips::new(cx);
+        let focus_handle = cx.focus_handle();
+        let drawn = jump::graph::drawn_reader(cx);
+        let chips = cx.new(|cx| {
+            chips::ChipBar::new(
+                model.clone(),
+                holder::Holder::Graph,
+                focus_handle.clone(),
+                Some(drawn),
+                cx,
+            )
+        });
+        let jump = jump::graph::palette(model.clone(), focus_handle.clone(), chips.clone(), cx);
+        let jumped = cx.subscribe(&jump, |view, _, event: &jump::JumpEvent, cx| {
+            jump::graph::landed(view, *event, cx)
+        });
+        let query_applied = cx.subscribe(&model, |view, _, applied: &QueryApplied, cx| {
+            if applied.by == view.chips.entity_id() {
+                derive::show_filter(view, cx);
+            }
+        });
         let parent = cx.entity().downgrade();
         let canvas = cx.new(|_| GraphCanvas {
             parent: parent.clone(),
@@ -484,7 +593,7 @@ impl GraphPanel {
         });
         let overlays = cx.new(|_| ChromeLayer {
             parent,
-            draw: |view, palette, window, cx| view.draw_overlays(palette, window, cx),
+            draw: |view, palette, _, cx| view.draw_overlays(palette, cx),
         });
         let chrome_follows = cx.observe_self(|view, cx| {
             mode::sync(view, cx);
@@ -509,18 +618,37 @@ impl GraphPanel {
         let map_placed = cx.subscribe(&model, |view, _, _: &MapPlaced, cx| {
             derive::placed(view, cx)
         });
+        let filter_changed = cx.subscribe(&model, |view, _, event: &FilterChanged, cx| {
+            derive::filter_changed(view, event.frame, cx);
+            view.restate_shown(cx);
+            cx.notify();
+        });
+        let verdicts_landed = cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| {
+            view.restate_shown(cx)
+        });
+        let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let selection_changed = cx.subscribe(&model, |view, _, event: &SelectionChanged, cx| {
+            if event.by != cx.entity_id() {
+                selection::remark(view, cx);
+            }
+        });
         let reveal_requested = cx.subscribe(&model, |view, _, event: &RevealRequested, cx| {
             if event.panel == cx.entity_id() {
+                derive::catch_up(view, cx);
                 match event.reveal {
                     Reveal::Activate => reveal::reveal(view, event.node, cx),
                     Reveal::InPlace => reveal::show_in_place(view, event.node, cx),
+                    Reveal::AskWhy => {
+                        why::ask_why(view, event.node, cx);
+                        cx.emit(PanelEvent::Activate);
+                    }
                 }
             }
         });
         let derived = Derived::new();
         let legend_state = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
-        let (panel, filter) = (cx.entity(), derived.filter().clone());
-        model.update(cx, |model, cx| model.defer_to(&panel, filter, cx));
+        let panel = cx.entity();
+        model.update(cx, |model, cx| model.defer_to(&panel, cx));
         let mut view = Self {
             focus_handle,
             model,
@@ -540,12 +668,19 @@ impl GraphPanel {
             boxes,
             _box_choices: box_choices,
             chips,
-            jump: jump::Finder::default(),
-            matchers: fuzzy::Pool::default(),
+            _query_applied: query_applied,
+            jump,
+            jump_opened_at: None,
+            _jumped: jumped,
             _changed: changed,
             _clock_moved: clock_moved,
             _source_replaced: source_replaced,
             _map_placed: map_placed,
+            _filter_changed: filter_changed,
+            _verdicts_landed: verdicts_landed,
+            _exclusion_named: exclusion_named,
+            _selection_changed: selection_changed,
+            shown: false,
             _reveal_requested: reveal_requested,
             hovered: None,
             box_card: hover::BoxCard::new(cx),
@@ -682,7 +817,7 @@ impl GraphPanel {
                     .child(bviz_ui_components::centered_notice(notice, &palette.colors))
             }))
             .children(
-                boxes::every_class_hidden(self.derived.filter(), &self.box_classes)
+                boxes::every_class_hidden(self.derived.unwrapped(), &self.box_classes)
                     .filter(|_| zoom.is_some_and(|zoom| drawn.withholds_most(zoom)))
                     .map(|notice| {
                         div()
@@ -694,7 +829,6 @@ impl GraphPanel {
             )
             .child(cached_layer(self.overlays.clone()))
             .child(cached_layer(self.box_card.layer()))
-            .children(chips::menu(self, window))
             .children(box_menu::menu(self, window))
             // A replayed scene installs the handlers recorded with it, which a
             // press's own frame has yet to make; the panel's own paint is what
@@ -772,15 +906,10 @@ impl GraphPanel {
         let controls = Controls {
             legend: self.legend(palette, cx),
         };
-        toolbar::toolbar(self, controls, palette, window, cx).into_any_element()
+        toolbar::toolbar(self, controls, window, cx).into_any_element()
     }
 
-    fn draw_overlays(
-        &self,
-        palette: &Palette,
-        window: &mut Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn draw_overlays(&self, palette: &Palette, cx: &Context<Self>) -> AnyElement {
         div()
             .size_full()
             .child(
@@ -792,8 +921,7 @@ impl GraphPanel {
                     .folding(missing::card(self, palette, cx))
                     .foot(why::card(self, palette, cx)),
             )
-            .children(jump::overlay(self, palette, window, cx))
-            .children(chips::notice(self, palette))
+            .children(self.jump.read(cx).is_open().then(|| self.jump.clone()))
             .into_any_element()
     }
 
@@ -825,13 +953,14 @@ impl GraphPanel {
         self.emphasis.clear();
         self.morph.clear();
         self.framing.refit();
+        selection::remark(self, cx);
         true
     }
 
     fn on_mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         // The palette occludes the canvas, so a press reaching here landed
         // outside it.
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         let clear = self.box_id_at(e.position, cx).is_none();
         let pressed_clear = std::mem::replace(&mut self.pressed_clear, clear && e.click_count == 1);
         // A press on a scroll-bar gutter drives the thumb instead of panning the
@@ -865,7 +994,7 @@ impl GraphPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         let hit = self.box_id_at(e.position, cx);
         GESTURES.dispatch(Pointer::press(e), |intent| match (intent, hit) {
             (CanvasIntent::BoxMenu, Some(node)) => {
@@ -873,8 +1002,7 @@ impl GraphPanel {
                 true
             }
             (CanvasIntent::Deselect, None) => {
-                self.selection.clear();
-                self.invalidate_canvas(cx);
+                selection::select(self, None, cx);
                 true
             }
             _ => false,
@@ -896,12 +1024,12 @@ impl GraphPanel {
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         reveal::back(self, cx);
     }
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
-        jump::dismiss(self, cx);
+        jump::graph::dismiss(self, cx);
         reveal::forward(self, cx);
     }
 
@@ -1042,14 +1170,16 @@ impl GraphPanel {
         self.steer(|framing| framing.move_to(scaled), cx);
     }
 
-    /// Puts away the innermost thing the reader set up: a reveal pending, then
-    /// the selection, and with neither the dependency paths asked for.
+    /// Puts away the innermost thing the reader set up: a reveal pending,
+    /// then the selection where the panel marks it, then the dependency paths
+    /// asked for, and last a selection the panel marks nothing for.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        let selected = self.model.read(cx).selected().is_some();
+        let marked = self.selection.node().is_some();
         if reveal::dismiss(self) {
             cx.notify();
-        } else if self.selection.node().is_some() {
-            self.selection.clear();
-            self.invalidate_canvas(cx);
+        } else if marked || (selected && !self.why.asked()) {
+            selection::select(self, None, cx);
         } else {
             why::clear(self, cx);
         }
@@ -1130,9 +1260,14 @@ impl Panel for GraphPanel {
     }
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.shown = active;
         if active {
+            derive::catch_up(self, cx);
+            self.restate_shown(cx);
             self.focus_handle.focus(window, cx);
-            derive::publish_filter(self, cx);
+            let panel = cx.entity();
+            self.model
+                .update(cx, |model, cx| model.defer_to(&panel, cx));
         } else {
             // The card and the hover belong to a pointer no longer over the
             // drawing.
@@ -1174,12 +1309,19 @@ impl Render for GraphPanel {
             .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| reveal::accept(view, cx)))
             .on_action(cx.listener(|view, _: &JumpBack, _, cx| view.go_back(cx)))
             .on_action(cx.listener(|view, _: &JumpForward, _, cx| view.go_forward(cx)))
-            .on_action(cx.listener(|view, _: &jump::Open, window, cx| jump::open(view, window, cx)))
             .on_action(
-                cx.listener(|view, _: &chips::Focus, window, cx| chips::focus(view, window, cx)),
+                cx.listener(|view, _: &jump::Open, window, cx| jump::graph::open(view, window, cx)),
             )
-            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| chips::apply_staged(view, cx)))
-            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| chips::copy_stack(view, cx)))
+            .on_action(cx.listener(|view, _: &chips::Focus, window, cx| {
+                view.chips
+                    .update(cx, |bar, cx| chips::focus(bar, window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
+                view.chips.update(cx, chips::apply_staged);
+            }))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| {
+                view.chips.update(cx, chips::copy_stack);
+            }))
             .on_action(cx.listener(|view, _: &ShowWholeGraph, _, cx| view.show_whole(cx)))
             .on_action(cx.listener(|view, _: &OpenBoxMenu, window, cx| {
                 box_menu::open_selected(view, window, cx)
@@ -1593,6 +1735,9 @@ mod tests {
                 assert!(!is(dispatched(keys, field), JumpForward), "{keys}");
             }
         }
+        let scatter = &[scatter::KEY_CONTEXT.id()];
+        assert!(is(dispatched("alt-left", scatter), JumpBack));
+        assert!(is(dispatched("alt-right", scatter), JumpForward));
         let exclusive = &[exclusive::KEY_CONTEXT.id()];
         assert!(is(dispatched("alt-left", exclusive), exclusive::FocusBack));
         assert!(is(
@@ -1601,24 +1746,82 @@ mod tests {
         ));
     }
 
-    /// The exclusive-deps panel's roots field is reached by the keys reaching
-    /// the graph's query bar and finder, and `q` is text inside it.
+    /// The exclusive-deps panel's roots are edited by `r`, `q` reaching the
+    /// query bar as in every view, and both are text inside the roots' field,
+    /// which Escape and Enter close.
     #[test]
-    fn the_roots_field_is_reached_by_q_and_the_find_keys() {
+    fn the_roots_are_edited_by_r() {
         const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
         const IN_ROOTS: &[&str] = &[
             exclusive::KEY_CONTEXT.id(),
             exclusive::ROOTS_KEY_CONTEXT.id(),
             text_input::KEY_CONTEXT.id(),
         ];
-        for keys in ["q", "secondary-f", "/"] {
+        assert!(is(dispatched("r", IN_EXCLUSIVE), exclusive::EditRoots));
+        assert!(is(dispatched("q", IN_EXCLUSIVE), chips::Focus));
+        assert!(dispatched("r", IN_ROOTS).is_none());
+        assert!(dispatched("q", IN_ROOTS).is_none());
+        for keys in ["escape", "enter"] {
             assert!(
-                is(dispatched(keys, IN_EXCLUSIVE), exclusive::FocusRoots),
+                is(dispatched(keys, IN_ROOTS), exclusive::CloseRoots),
                 "{keys}"
             );
         }
-        assert!(dispatched("q", IN_ROOTS).is_none());
-        assert!(dispatched("/", IN_ROOTS).is_none());
+        for keys in ["secondary-f", "/"] {
+            assert!(is(dispatched(keys, IN_EXCLUSIVE), jump::Open), "{keys}");
+        }
+    }
+
+    /// While a card stands in the exclusive deps view, Enter answers it and
+    /// Escape puts it away; with none, they act on the selected cell.
+    #[test]
+    fn the_exclusive_view_answers_its_card_ahead_of_its_cells() {
+        const IN_EXCLUSIVE: &[&str] = &[exclusive::KEY_CONTEXT.id()];
+        const OFFERING: &[&str] = &["GraphExclusive exclusiveOffering"];
+        assert!(is(
+            dispatched("enter", IN_EXCLUSIVE),
+            exclusive::FocusSelected
+        ));
+        assert!(is(dispatched("enter", OFFERING), reveal::Accept));
+        assert!(is(dispatched("escape", OFFERING), exclusive::Deselect));
+        let in_palette = &[
+            exclusive::KEY_CONTEXT.id(),
+            jump::KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        assert!(is(dispatched("enter", in_palette), jump::Go));
+        assert!(is(dispatched("up", in_palette), jump::Previous));
+        assert!(dispatched("r", in_palette).is_none());
+    }
+
+    /// The scatter plot opens the palette by the find keys, and while a card
+    /// stands Enter answers it, the list of points under a click still
+    /// taking Enter and Escape while it is up.
+    #[test]
+    fn the_scatter_plot_finds_and_answers_its_card() {
+        const IN_SCATTER: &[&str] = &[scatter::KEY_CONTEXT.id()];
+        const OFFERING: &[&str] = &["GraphScatter scatterOffering"];
+        const PICKING_TOO: &[&str] = &["GraphScatter scatterOffering picking"];
+        for keys in ["secondary-f", "/"] {
+            assert!(is(dispatched(keys, IN_SCATTER), jump::Open), "{keys}");
+        }
+        assert!(is(dispatched("escape", IN_SCATTER), scatter::DismissCard));
+        assert!(dispatched("enter", IN_SCATTER).is_none());
+        assert!(is(dispatched("enter", OFFERING), reveal::Accept));
+        assert!(is(dispatched("enter", PICKING_TOO), scatter::SelectAimed));
+        assert!(is(dispatched("g", IN_SCATTER), scatter::ShowSelectedPoint));
+        assert!(is(
+            dispatched("escape", PICKING_TOO),
+            scatter::ClosePickList
+        ));
+        let in_palette = &[
+            scatter::KEY_CONTEXT.id(),
+            jump::KEY_CONTEXT.id(),
+            text_input::KEY_CONTEXT.id(),
+        ];
+        assert!(is(dispatched("enter", in_palette), jump::Go));
+        assert!(is(dispatched("escape", in_palette), jump::Close));
+        assert!(dispatched("/", in_palette).is_none());
     }
 
     /// The field's word keys reach it inside the bar, beside the bar's own
@@ -1654,7 +1857,11 @@ mod tests {
     fn completing(keys: &str, aimed: bool) -> Option<std::boxed::Box<dyn gpui::Action>> {
         let mut bindings = bindings();
         bindings.extend(text_input::bindings());
-        keymap_probe::dispatched_within(bindings, keys, &chips::completion_stack(aimed))
+        keymap_probe::dispatched_within(
+            bindings,
+            keys,
+            &chips::completion_stack(holder::Holder::Graph, aimed),
+        )
     }
 
     /// While the list completing the field's word stands open, its keys
@@ -1792,6 +1999,63 @@ mod tests {
         };
         assert_eq!(bound(&chips::Apply), 1);
         assert_eq!(bound(&chips::CopyStack), 1);
+    }
+
+    /// Each view standing a query bar is the holder whose scope its keys
+    /// reach the bar from.
+    #[test]
+    fn every_holder_is_the_view_it_names() {
+        use holder::Holder;
+        assert_eq!(Holder::Graph.scope(), GraphPanel::kind().key_context);
+        assert_eq!(Holder::Scatter.scope(), ScatterPanel::kind().key_context);
+        assert_eq!(
+            Holder::Exclusive.scope(),
+            ExclusivePanel::kind().key_context
+        );
+    }
+
+    /// The scatter plot's pick list leaves its keys to the query bar while
+    /// the bar holds the focus.
+    #[test]
+    fn the_pick_list_leaves_its_keys_to_the_query_bar() {
+        let picking = [scatter::KEY_CONTEXT.id(), scatter::PICKING.id()];
+        let picking_context = picking.join(" ");
+        let listing = &[picking_context.as_str()];
+        assert!(is(dispatched("down", listing), scatter::AimDown));
+        let in_bar = &[picking_context.as_str(), chips::KEY_CONTEXT.id()];
+        assert!(!is(dispatched("down", in_bar), scatter::AimDown));
+        assert!(!is(dispatched("enter", in_bar), scatter::SelectAimed));
+    }
+
+    /// Every view holding the query bar reaches it by the same keys, from
+    /// outside its text fields and from within the bar.
+    #[test]
+    fn the_bars_keys_reach_it_in_every_view_holding_it() {
+        for holder in holder::Holder::ALL.map(holder::Holder::scope) {
+            let outside = &[holder.id()];
+            let on_chips = &[holder.id(), chips::KEY_CONTEXT.id()];
+            let in_field = &[
+                holder.id(),
+                chips::KEY_CONTEXT.id(),
+                chips::FIELD_KEY_CONTEXT.id(),
+                text_input::KEY_CONTEXT.id(),
+            ];
+            assert!(is(dispatched("q", outside), chips::Focus), "{holder}");
+            assert!(
+                is(dispatched("secondary-enter", outside), chips::Apply),
+                "{holder}"
+            );
+            assert!(
+                is(dispatched("secondary-shift-c", outside), chips::CopyStack),
+                "{holder}"
+            );
+            assert!(
+                is(dispatched("left", on_chips), chips::SelectPrevious),
+                "{holder}"
+            );
+            assert!(is(dispatched("enter", in_field), chips::Commit), "{holder}");
+            assert!(is(dispatched("escape", in_field), chips::Leave), "{holder}");
+        }
     }
 
     /// A staged stack is applied from anywhere in the panel but the text

@@ -35,7 +35,8 @@ pub enum Nesting {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Within {
-    pub(crate) id: &'static str,
+    /// The scopes this one narrows, any of which it may stand in.
+    pub(crate) parents: &'static [KeyScope],
     pub(crate) nesting: Nesting,
 }
 
@@ -68,7 +69,18 @@ impl KeyScope {
     /// A scope narrowing `parent`, whose help lists this scope's bindings too
     /// whether or not this scope is in effect.
     pub const fn within(
-        parent: &KeyScope,
+        parent: &'static KeyScope,
+        nesting: Nesting,
+        id: &'static str,
+        label: &'static str,
+    ) -> Self {
+        Self::within_each(std::slice::from_ref(parent), nesting, id, label)
+    }
+
+    /// A scope narrowing each of `parents`, for a control any of them may
+    /// hold: the help of each lists this scope's bindings.
+    pub const fn within_each(
+        parents: &'static [KeyScope],
         nesting: Nesting,
         id: &'static str,
         label: &'static str,
@@ -76,10 +88,7 @@ impl KeyScope {
         Self {
             id,
             label: fitting(label),
-            standing: Standing::Within(Within {
-                id: parent.id,
-                nesting,
-            }),
+            standing: Standing::Within(Within { parents, nesting }),
         }
     }
 

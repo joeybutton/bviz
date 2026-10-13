@@ -176,7 +176,7 @@ mod tests {
     fn along(tree: &Laid, depth: usize) -> Holds {
         let mut node = 0;
         for _ in 0..depth {
-            node = tree.children(node).start;
+            node = tree.children(node)[0];
         }
         Holds::Node(node)
     }
@@ -190,7 +190,7 @@ mod tests {
     fn a_shallow_focus_has_every_ancestor_drawn() {
         let tree = tree();
         assert_eq!(rows(&tree, along(&tree, 0)), [Row::Ancestor(Holds::Build)]);
-        let shared_child = Holds::Node(tree.children(2).start);
+        let shared_child = Holds::Node(tree.children(2)[0]);
         assert_eq!(
             rows(&tree, shared_child),
             [

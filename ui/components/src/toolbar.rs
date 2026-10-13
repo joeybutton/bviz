@@ -155,6 +155,19 @@ enum Item {
 struct Filling {
     measured: AnyElement,
     standing: AnyElement,
+    /// The narrowest it stands short of taking the whole row, where that is
+    /// narrower than its least width.
+    floor: Option<Pixels>,
+}
+
+impl Filling {
+    fn of<E: IntoElement>(mut build: impl FnMut() -> E, floor: Option<Pixels>) -> Self {
+        Self {
+            measured: build().into_any_element(),
+            standing: build().into_any_element(),
+            floor,
+        }
+    }
 }
 
 impl OneRow {
@@ -191,11 +204,22 @@ impl OneRow {
     /// across the room the row's groups leave. It holds its min-content width
     /// while any group stands in the row, every group giving way first, and
     /// never leaves the row: narrower still, it takes the whole of it.
-    pub fn filling<E: IntoElement>(mut self, mut build: impl FnMut() -> E) -> Self {
-        self.leading.push(Item::Filling(Filling {
-            measured: build().into_any_element(),
-            standing: build().into_any_element(),
-        }));
+    pub fn filling<E: IntoElement>(mut self, build: impl FnMut() -> E) -> Self {
+        self.leading.push(Item::Filling(Filling::of(build, None)));
+        self
+    }
+
+    /// Adds the element `build` builds as [`filling`](Self::filling) does,
+    /// for an element that can stand narrower than its min-content width: it
+    /// narrows down to `floor` before the row leaves out its overflow menu's
+    /// trigger, so that the groups in the menu stay in reach.
+    pub fn filling_down_to<E: IntoElement>(
+        mut self,
+        floor: Pixels,
+        build: impl FnMut() -> E,
+    ) -> Self {
+        self.leading
+            .push(Item::Filling(Filling::of(build, Some(floor))));
         self
     }
 
@@ -397,7 +421,11 @@ impl Measured {
                 };
                 (measured, measure)
             }
-            Item::Filling(Filling { measured, standing }) => {
+            Item::Filling(Filling {
+                measured,
+                standing,
+                floor,
+            }) => {
                 let held = |element: AnyElement| {
                     div()
                         .w_full()
@@ -415,6 +443,7 @@ impl Measured {
                 let measure = Measure {
                     kind: Kind::Filling {
                         least: extent.width,
+                        floor: floor.map_or(extent.width, |floor| floor.min(extent.width)),
                     },
                     side,
                 };

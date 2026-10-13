@@ -67,7 +67,7 @@ follows every rule below.
 | Show whole view | `0` | double-click empty space, whose first press was also clear |
 | Find | `find_key_bindings` | — |
 | Show legend | `legend_key_bindings` | click the legend's toggle (`legend_gestures`) |
-| Focus the field scoping what is drawn (query, roots) | `q` | — |
+| Focus the query field | `q` | — |
 | History | Alt-← / Alt-→ ("Go back" / "Go forward") | mouse back / forward button |
 | List | ↑ / ↓ move the aim, Enter acts on the aimed row where moving does not, Esc closes the list or clears its choice | a click acts on the row |
 | Escape | closes the topmost transient (completion, field, palette, menu, popup card), else clears the selection, else puts away a lens such as the why paths | — |

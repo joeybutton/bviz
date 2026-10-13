@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// Up from the focus the keys climb the rows over it one at a time, the
-    /// row of hidden ancestors among them, and down they come back to it.
+    /// row of more ancestors among them, and down they come back to it.
     #[test]
     fn up_from_the_focus_climbs_the_rows_over_it_and_down_returns() {
         use super::super::ancestry::{self, Row};

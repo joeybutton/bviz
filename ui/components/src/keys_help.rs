@@ -226,16 +226,20 @@ fn chain_within<'a>(
     panel: KeyScope,
     scopes: &'a [KeyScope],
 ) -> Option<Vec<&'a KeyScope>> {
-    let mut chain = vec![scope];
-    let mut at = scope;
-    while let Some(within) = at.within_scope() {
-        if within.id == panel.id() {
-            return Some(chain);
-        }
-        at = scopes.iter().find(|scope| scope.id() == within.id)?;
-        chain.push(at);
+    let within = scope.within_scope()?;
+    if within
+        .parents
+        .iter()
+        .any(|parent| parent.id() == panel.id())
+    {
+        return Some(vec![scope]);
     }
-    None
+    within.parents.iter().find_map(|parent| {
+        let parent = scopes.iter().find(|held| held.id() == parent.id())?;
+        let mut chain = chain_within(parent, panel, scopes)?;
+        chain.insert(0, scope);
+        Some(chain)
+    })
 }
 
 /// The slot `binding` is filed under: the innermost scope its predicate names,
@@ -713,6 +717,28 @@ mod tests {
                 (UNSCOPED_LABEL, vec!["StepBack".into(), "Quit".into()]),
             ]
         );
+    }
+
+    /// A control several panels hold lists its keys in the help of each.
+    #[test]
+    fn a_scope_within_several_panels_is_listed_in_each() {
+        const HOLDERS: [KeyScope; 2] = [GRAPH, CONSOLE];
+        const BAR: KeyScope = KeyScope::within_each(&HOLDERS, Nesting::Inside, "Bar", "Bar");
+        let keymap = Keymap::new(vec![KeyBinding::new("escape", DismissResults, Some("Bar"))]);
+        let scopes = [WORKSPACE, GRAPH, CONSOLE, BAR];
+        for panel in HOLDERS {
+            let stack = [WORKSPACE.into(), panel.into()];
+            let groups = keys_in_effect(
+                &keymap,
+                &scopes,
+                &stack,
+                panel,
+                |action| action.name().into(),
+                KeyStyle::Words,
+            );
+            let labels: Vec<&str> = groups.iter().map(|group| group.label).collect();
+            assert_eq!(labels, ["Bar"], "in the help of {panel}");
+        }
     }
 
     /// A field's keys stand down for the panel's own while the field is not

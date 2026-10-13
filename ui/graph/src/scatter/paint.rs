@@ -123,6 +123,54 @@ pub(crate) fn paint_ring(mark: &Mark, area: &DataArea, palette: &Palette, window
     ));
 }
 
+/// How far outside the hover ring the ring marking a selected point stands,
+/// so the two read apart on one mark.
+const SELECTION_GAP: f32 = 2.0;
+/// The selection ring's stroke, wide enough to read over any mark's fill.
+const SELECTION_WIDTH: f32 = 2.5;
+/// How far past the selection ring a pulse spreads before it fades out.
+const PULSE_REACH: f32 = 18.0;
+
+/// Rings `mark` in `area` as selected, in the accent emphasis is drawn in,
+/// with a pulse spreading from the ring `pulse` of its way out, where one
+/// is under way.
+pub(crate) fn paint_selection(
+    mark: &Mark,
+    area: &DataArea,
+    palette: &Palette,
+    pulse: Option<f32>,
+    window: &mut Window,
+) {
+    let center = area.place(mark);
+    let circle = |r: f32| {
+        let r = px(r);
+        Bounds::new(center - point(r, r), size(r * 2., r * 2.))
+    };
+    let r = mark.radius + RING_GAP + RING_WIDTH + SELECTION_GAP + SELECTION_WIDTH;
+    let ring = circle(r);
+    window.paint_quad(quad(
+        ring,
+        ring.size.width / 2.,
+        Hsla::transparent_black(),
+        px(SELECTION_WIDTH),
+        palette.highlight,
+        BorderStyle::Solid,
+    ));
+    if let Some(progress) = pulse {
+        let spread = circle(r + PULSE_REACH * progress);
+        let mut fading = palette.highlight;
+        fading.a *= 1.0 - progress;
+        window.paint_quad(quad(
+            spread,
+            spread.size.width / 2.,
+            Hsla::transparent_black(),
+            px(SELECTION_WIDTH),
+            fading,
+            BorderStyle::Solid,
+        ));
+    }
+}
+
 /// Where [`paint_ring`] rings `mark` in `area`.
 pub(crate) fn ring_bounds(mark: &Mark, area: &DataArea) -> Bounds<Pixels> {
     let center = area.place(mark);

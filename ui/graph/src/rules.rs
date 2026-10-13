@@ -1,12 +1,8 @@
-//! The filter rule the boxes menu reads its checkmarks from and writes.
-//!
-//! The control keeps no record of what it has hidden: its checkmarks are read
-//! out of the filter's rule list and a toggle rewrites that list, so the control
-//! and the drawing cannot come to disagree about what is shown. Everything it
-//! hides is held in one rule naming box classes and nothing else.
+//! The box classes the boxes menu unwraps, and the filter rule unwrapping
+//! them.
 
 use bviz_graph_layout::Kind;
-use bviz_graph_layout::select::{Filter, Predicate, Rule, Values, Visibility};
+use bviz_graph_layout::select::{Predicate, Rule, Values, Visibility};
 use std::collections::BTreeSet;
 
 /// A kind of node the drawing puts a box round what the node holds. Hiding
@@ -45,151 +41,58 @@ impl BoxClass {
     }
 }
 
-/// The box classes `filter` hides through the rule the control writes.
-pub(crate) fn hidden(filter: &Filter) -> BTreeSet<BoxClass> {
-    filter.rules.iter().filter_map(written).flatten().collect()
-}
-
-/// `filter` with `class` hidden, or shown where `hidden` is false.
-pub(crate) fn set_hidden(filter: &Filter, class: BoxClass, hidden: bool) -> Filter {
-    let mut classes = self::hidden(filter);
-    match hidden {
-        true => classes.insert(class),
-        false => classes.remove(&class),
-    };
-    let mut rules: Vec<Rule> = filter
-        .rules
-        .iter()
-        .filter(|rule| !by_control(rule))
-        .cloned()
-        .collect();
-    if let Some(kinds) = Values::new(classes.into_iter().map(BoxClass::kind)) {
-        rules.push(Rule {
-            predicate: Predicate {
-                kinds: Some(kinds),
-                holding: true,
-            },
-            visibility: Visibility::Hidden,
-        });
-    }
-    Filter {
-        rules,
-        ..filter.clone()
-    }
-}
-
-/// Whether the boxes menu wrote `rule`.
-pub(crate) fn by_control(rule: &Rule) -> bool {
-    written(rule).is_some()
-}
-
-/// The box classes `rule` hides, where it is the one the control writes;
-/// `None` for any other rule, which the control may not edit.
-fn written(rule: &Rule) -> Option<Vec<BoxClass>> {
-    let kinds = rule.predicate.kinds.as_ref()?;
-    let hides_kinds_alone = rule.visibility == Visibility::Hidden
-        && rule.predicate
-            == Predicate {
-                kinds: Some(kinds.clone()),
-                holding: true,
-            };
-    if !hides_kinds_alone {
-        return None;
-    }
-    kinds
-        .as_slice()
-        .iter()
-        .map(|&kind| BoxClass::of(kind))
-        .collect()
+/// The rule unwrapping every box of the classes `unwrapped`; `None` where it
+/// names none.
+pub(crate) fn unwrapping(unwrapped: &BTreeSet<BoxClass>) -> Option<Rule> {
+    let kinds = Values::new(unwrapped.iter().map(|class| class.kind()))?;
+    Some(Rule {
+        predicate: Predicate {
+            kinds: Some(kinds),
+            holding: true,
+        },
+        visibility: Visibility::Hidden,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bviz_graph_layout::Id;
+    use bviz_graph_layout::graph::{Graph, Node};
+    use bviz_graph_layout::select::{Filter, Verdict};
 
-    /// Unchecking a class writes the rule hiding it, and checking it again takes
-    /// that rule back out, so a filter that hides nothing holds no rules at all.
-    #[test]
-    fn a_class_hidden_and_shown_again_leaves_the_filter_as_it_was() {
-        let hiding = set_hidden(&Filter::default(), BoxClass::Target, true);
-
-        assert_eq!(
-            hiding.rules,
-            vec![Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Target]),
-                    holding: true,
-                },
-                visibility: Visibility::Hidden,
-            }]
-        );
-        assert_eq!(hidden(&hiding), BTreeSet::from([BoxClass::Target]));
-        assert_eq!(
-            set_hidden(&hiding, BoxClass::Target, false),
-            Filter::default()
-        );
+    /// A package holding a target holding an action, beside a target holding
+    /// nothing.
+    fn graph() -> Graph {
+        let mut graph = Graph::new();
+        graph.add_node(Node::new(Id(0), "//app", Kind::Package, None));
+        graph.add_node(Node::new(Id(1), ":bin", Kind::Target, Some(Id(0))));
+        graph.add_node(Node::new(Id(2), "link", Kind::Action, Some(Id(1))));
+        graph.add_node(Node::new(Id(3), ":empty", Kind::Target, Some(Id(0))));
+        graph
     }
 
-    /// One rule carries every class hidden, so hiding a second widens that rule
-    /// rather than laying another beside it.
+    /// A class unwrapped takes away each box of its kind holding another node,
+    /// lifting what that held, and leaves a node of the kind holding nothing.
     #[test]
-    fn classes_hidden_gather_into_one_rule() {
-        let mut filter = Filter::default();
-        for class in [BoxClass::Package, BoxClass::Target] {
-            filter = set_hidden(&filter, class, true);
-        }
-
-        assert_eq!(filter.rules.len(), 1);
-        assert_eq!(
-            hidden(&filter),
-            BTreeSet::from([BoxClass::Package, BoxClass::Target])
-        );
-    }
-
-    /// A rule the control did not write — one over every kind, one naming a
-    /// kind of leaf, one reaching the nodes of its kinds that hold nothing, or
-    /// one that shows rather than hides — is neither read as a checkmark nor
-    /// rewritten by a toggle.
-    #[test]
-    fn a_rule_no_control_wrote_is_left_alone() {
-        let untouched = vec![
-            Rule {
-                predicate: Predicate {
-                    holding: true,
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Hidden,
-            },
-            Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Package, Kind::Action]),
-                    holding: true,
-                },
-                visibility: Visibility::Hidden,
-            },
-            Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Target]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Hidden,
-            },
-            Rule {
-                predicate: Predicate {
-                    kinds: Values::new([Kind::Source]),
-                    ..Predicate::default()
-                },
-                visibility: Visibility::Faded,
-            },
-        ];
+    fn a_class_unwrapped_hides_only_its_boxes_that_hold_something() {
         let filter = Filter {
-            rules: untouched.clone(),
+            rules: unwrapping(&BTreeSet::from([BoxClass::Target]))
+                .into_iter()
+                .collect(),
             ..Filter::default()
         };
+        let verdicts = filter.evaluate(&graph());
 
-        assert!(hidden(&filter).is_empty());
-        let hiding = set_hidden(&filter, BoxClass::Target, true);
-        assert_eq!(hiding.rules[..untouched.len()], untouched[..]);
-        assert_eq!(hiding.rules.len(), untouched.len() + 1);
+        assert_eq!(verdicts.get(Id(1)), Verdict::Hidden);
+        assert_eq!(verdicts.get(Id(2)), Verdict::Shown);
+        assert_eq!(verdicts.get(Id(3)), Verdict::Shown);
+        assert_eq!(verdicts.get(Id(0)), Verdict::Shown);
+    }
+
+    /// Unwrapping nothing writes no rule at all.
+    #[test]
+    fn no_class_unwrapped_writes_no_rule() {
+        assert_eq!(unwrapping(&BTreeSet::new()), None);
     }
 }

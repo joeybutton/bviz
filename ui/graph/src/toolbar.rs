@@ -1,7 +1,7 @@
 use crate::colour::{self, Colouring};
 use crate::mode::{self, LayoutMode};
 use crate::{
-    CRITICAL_PATH_AT_REST, Controls, CycleColouring, GraphPanel, NEIGHBOURHOOD_AT_REST, Palette,
+    CRITICAL_PATH_AT_REST, Controls, CycleColouring, GraphPanel, NEIGHBOURHOOD_AT_REST,
     ToggleCriticalPath, ToggleMap, ToggleNeighborhood, boxes, chips, report, timecard,
 };
 use bviz_ui_components::{
@@ -27,7 +27,6 @@ pub(crate) fn height() -> Pixels {
 pub(crate) fn toolbar(
     view: &GraphPanel,
     controls: Controls,
-    palette: &Palette,
     window: &mut Window,
     cx: &Context<GraphPanel>,
 ) -> Div {
@@ -75,10 +74,10 @@ pub(crate) fn toolbar(
         .when(!view.box_classes.is_empty(), |query| {
             query.group(ToolbarGroup::new(BOXES, view.boxes.clone()).overflow(
                 MenuItem::submenu(boxes::NAME, MultiSelect::submenu(&view.boxes, cx)),
-                boxes::any_hidden(view.derived.filter()),
+                !view.derived.unwrapped().is_empty(),
             ))
         })
-        .filling(|| chips::bar(view, palette, window, cx));
+        .filling_down_to(chips::FOLDED_WIDTH, || view.chips.clone());
     let strips: [OneRow; STRIPS] = [drawing, query];
     div().size_full().flex().flex_col().children(strips)
 }

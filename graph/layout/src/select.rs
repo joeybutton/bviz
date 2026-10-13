@@ -100,8 +100,13 @@ impl Scope {
         &self.query
     }
 
+    /// Whether the query names the node `id`.
+    pub fn names(&self, id: Id) -> bool {
+        self.nodes.contains(id.0 as usize)
+    }
+
     fn holds(&self, node: &crate::graph::Node) -> bool {
-        node.kind.is_frame() || self.nodes.contains(node.id.0 as usize)
+        node.kind.is_frame() || self.names(node.id)
     }
 }
 

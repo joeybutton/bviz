@@ -1,55 +1,73 @@
 //! Where each cell of the icicle drawing a dominator tree stands.
 
-use bviz_graph_layout::dominators::Dominators;
+use bviz_graph_layout::dominators::{Above, ShownTree};
 use gpui::{Bounds, Pixels, point, px, size};
 use std::ops::Range;
 
 /// A tree whose nodes are weighed by how many points each stands over, itself
 /// among them, and whose siblings come heaviest first. Its tops come in two
-/// runs, each heaviest first: the roots, then the shared tops.
+/// rows, each heaviest first: those under the whole build, then the shared
+/// tops.
 pub(crate) trait Tree {
     /// How many points the tree holds, which its tops' weights sum to.
     fn total(&self) -> u32;
-    fn roots(&self) -> Range<u32>;
-    fn shared_tops(&self) -> Range<u32>;
+    fn roots(&self) -> &[u32];
+    fn shared_tops(&self) -> &[u32];
     /// What the weights of the shared tops sum to.
     fn shared_weight(&self) -> u32;
-    fn children(&self, node: u32) -> Range<u32>;
+    fn children(&self, node: u32) -> &[u32];
     fn weight(&self, node: u32) -> u32;
-    fn parent(&self, node: u32) -> Parent;
+    /// What `node` stands under; none where the tree does not draw it.
+    fn parent(&self, node: u32) -> Option<Parent>;
+    /// Where `node` stands among its siblings; none where the tree does not
+    /// draw it.
+    fn place(&self, node: u32) -> Option<u32>;
+
+    /// The nodes standing under `parent`.
+    fn siblings(&self, parent: Parent) -> &[u32] {
+        match parent {
+            Parent::Build => self.roots(),
+            Parent::Shared => self.shared_tops(),
+            Parent::Node(node) => self.children(node),
+        }
+    }
 }
 
-impl Tree for Dominators {
+impl Tree for ShownTree {
     fn total(&self) -> u32 {
-        Dominators::total(self)
+        ShownTree::total(self)
     }
 
-    fn roots(&self) -> Range<u32> {
-        Dominators::roots(self)
+    fn roots(&self) -> &[u32] {
+        ShownTree::roots(self)
     }
 
-    fn shared_tops(&self) -> Range<u32> {
-        Dominators::shared_tops(self)
+    fn shared_tops(&self) -> &[u32] {
+        ShownTree::shared_tops(self)
     }
 
     fn shared_weight(&self) -> u32 {
-        Dominators::shared_weight(self)
+        ShownTree::shared_weight(self)
     }
 
-    fn children(&self, node: u32) -> Range<u32> {
-        Dominators::children(self, node)
+    fn children(&self, node: u32) -> &[u32] {
+        ShownTree::children(self, node)
     }
 
     fn weight(&self, node: u32) -> u32 {
-        Dominators::weight(self, node)
+        ShownTree::weight(self, node)
     }
 
-    fn parent(&self, node: u32) -> Parent {
-        match Dominators::parent(self, node) {
-            Some(parent) => Parent::Node(parent),
-            None if Dominators::shared_tops(self).contains(&node) => Parent::Shared,
-            None => Parent::Build,
-        }
+    fn parent(&self, node: u32) -> Option<Parent> {
+        Some(match self.placing(node)?.above {
+            Above::Node(parent) => Parent::Node(parent),
+            Above::Shared => Parent::Shared,
+            Above::Roots => Parent::Build,
+        })
+    }
+
+    fn place(&self, node: u32) -> Option<u32> {
+        Some(self.placing(node)?.place)
     }
 }
 
@@ -90,7 +108,7 @@ impl Holds {
         match self {
             Holds::Build => None,
             Holds::Shared => Some(Holds::Build),
-            Holds::Node(node) => Some(tree.parent(node).into()),
+            Holds::Node(node) => tree.parent(node).map(Holds::from),
             Holds::Rest(run) => Some(run.parent.into()),
         }
     }
@@ -100,12 +118,18 @@ impl Holds {
     pub(crate) fn stands_under(self, over: Holds, tree: &impl Tree) -> bool {
         match (over, self) {
             (Holds::Rest(run), Holds::Node(node)) => {
-                tree.parent(node) == run.parent && run.siblings().contains(&node)
+                let (places, place) = (run.places(tree), tree.place(node));
+                tree.parent(node) == Some(run.parent)
+                    && places
+                        .zip(place)
+                        .is_some_and(|(places, place)| places.contains(&place))
             }
             (Holds::Rest(run), Holds::Rest(within)) => {
+                let places = run.places(tree).zip(within.places(tree));
                 within.parent == run.parent
-                    && run.siblings().start <= within.first
-                    && within.siblings().end <= run.siblings().end
+                    && places.is_some_and(|(places, within)| {
+                        places.start <= within.start && within.end <= places.end
+                    })
             }
             (Holds::Rest(_), Holds::Build | Holds::Shared) => false,
             (over, holds) => holds.parent(tree) == Some(over),
@@ -134,10 +158,10 @@ impl From<Parent> for Holds {
     }
 }
 
-/// The siblings from `first` to the last under `parent`, which a row of the
-/// icicle had too little room to draw apart. Only [`lay_out`] makes one, so
-/// `count` and `weight` are always how many siblings the run holds and the
-/// points they weigh together.
+/// The siblings from the node `first` to the last under `parent`, which a row
+/// of the icicle had too little room to draw apart. Only [`lay_out`] makes
+/// one, so `count` and `weight` are always how many siblings the run holds
+/// and the points they weigh together, in the tree it was laid out from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
     parent: Parent,
@@ -155,8 +179,24 @@ impl Run {
         self.count
     }
 
-    pub(crate) fn siblings(&self) -> Range<u32> {
-        self.first..self.first + self.count
+    /// Where the siblings stand among those under `parent` in `tree`; none
+    /// where `tree` draws them otherwise than the tree the run was laid out
+    /// from.
+    fn places(&self, tree: &impl Tree) -> Option<Range<u32>> {
+        if tree.parent(self.first)? != self.parent {
+            return None;
+        }
+        let first = tree.place(self.first)?;
+        let places = first..first + self.count;
+        let under = tree.siblings(self.parent).len() as u32;
+        (places.end <= under).then_some(places)
+    }
+
+    /// The siblings in `tree`; none where it draws them otherwise than the
+    /// tree the run was laid out from.
+    pub(crate) fn siblings<'t>(&self, tree: &'t impl Tree) -> Option<&'t [u32]> {
+        let places = self.places(tree)?;
+        Some(&tree.siblings(self.parent)[places.start as usize..places.end as usize])
     }
 
     pub(crate) fn weight(&self) -> u32 {
@@ -242,25 +282,29 @@ pub(crate) fn lay_out(
         for parent in above {
             let Cell { rect, holds } = cells[parent];
             let width = rect.size.width;
-            // `own` is what the cell weighs beyond the siblings laid under it.
+            // `own` is what the cell weighs beyond the siblings laid under it,
+            // which stand at `laid` among those under `parent`.
             let (parent, laid, weight, own) = match holds {
                 Holds::Build => {
-                    let (laid, shared) = (tree.roots(), tree.shared_weight());
-                    (Parent::Build, laid, tree.total(), shared)
+                    let laid = 0..tree.roots().len() as u32;
+                    (Parent::Build, laid, tree.total(), tree.shared_weight())
                 }
                 Holds::Shared => {
-                    let (laid, weight) = (tree.shared_tops(), tree.shared_weight());
-                    (Parent::Shared, laid, weight, 0)
+                    let laid = 0..tree.shared_tops().len() as u32;
+                    (Parent::Shared, laid, tree.shared_weight(), 0)
                 }
-                Holds::Node(node) => (
-                    Parent::Node(node),
-                    tree.children(node),
-                    tree.weight(node),
-                    1,
-                ),
-                Holds::Rest(run) if depth == 1 => (run.parent, run.siblings(), run.weight, 0),
+                Holds::Node(node) => {
+                    let laid = 0..tree.children(node).len() as u32;
+                    (Parent::Node(node), laid, tree.weight(node), 1)
+                }
+                Holds::Rest(run) if depth == 1 => match run.places(tree) {
+                    Some(places) => (run.parent, places, run.weight, 0),
+                    None => continue,
+                },
                 Holds::Rest(_) => continue,
             };
+            let siblings = tree.siblings(parent);
+            let sibling = |place: u32| siblings[place as usize];
             // The siblings share `span` by weight, weighing `span_weight`
             // between them, and the cell keeps `beyond` for what it weighs
             // itself.
@@ -274,31 +318,31 @@ pub(crate) fn lay_out(
             // The children drawn apart are those of `laid` wide enough; a
             // rest cell gathers the rest up to `end`.
             let end = laid.end;
-            let share = |sibling: u32, span: Pixels, span_weight: u32| {
-                span * (tree.weight(sibling) as f32 / span_weight as f32)
+            let share = |place: u32, span: Pixels, span_weight: u32| {
+                span * (tree.weight(sibling(place)) as f32 / span_weight as f32)
             };
             let (page, span, span_weight) = match holds {
-                Holds::Rest(run) if share(run.first, span, span_weight) < min_width => {
+                Holds::Rest(_) if share(laid.start, span, span_weight) < min_width => {
                     let room = width * (1. - RUN_REST_SHARE);
-                    heaviest_page(tree, laid.clone(), room, min_width)
+                    heaviest_page(tree, siblings, laid.clone(), room, min_width)
                 }
                 _ => (laid.clone(), span, span_weight),
             };
             let draw_apart = |cells: &mut Vec<Cell>, page: Range<u32>, span, span_weight| {
                 let (mut x, mut drawn) = (rect.origin.x, 0);
                 let mut gathered = page.end;
-                for child in page {
-                    let width = share(child, span, span_weight);
+                for place in page {
+                    let width = share(place, span, span_weight);
                     if width < min_width {
-                        gathered = child;
+                        gathered = place;
                         break;
                     }
                     cells.push(Cell {
                         rect: Bounds::new(point(x, y), size(width, row)),
-                        holds: Holds::Node(child),
+                        holds: Holds::Node(sibling(place)),
                     });
                     x += width;
-                    drawn += tree.weight(child);
+                    drawn += tree.weight(sibling(place));
                 }
                 (x, drawn, gathered)
             };
@@ -307,7 +351,8 @@ pub(crate) fn lay_out(
             let squeezed = gathered < end && rect.right() - beyond - x < min_width;
             if parent == Parent::Build && squeezed {
                 cells.truncate(first_apart);
-                let (page, room, summed) = heaviest_page(tree, laid, span - min_width, min_width);
+                let (page, room, summed) =
+                    heaviest_page(tree, siblings, laid, span - min_width, min_width);
                 (x, drawn, gathered) = draw_apart(&mut cells, page, room, summed);
             }
             let rest = rect.right() - beyond - x;
@@ -316,7 +361,7 @@ pub(crate) fn lay_out(
                     rect: Bounds::new(point(x, y), size(rest, row)),
                     holds: Holds::Rest(Run {
                         parent,
-                        first: gathered,
+                        first: sibling(gathered),
                         count: end - gathered,
                         weight: weight - own - drawn,
                     }),
@@ -340,40 +385,43 @@ pub(crate) fn lay_out(
 /// The left edge and width [`lay_out`] gives the cell holding `child` by its
 /// weight among its siblings under `parent`, or among those `parent` gathers
 /// where it is a rest cell, whether or not it is wide enough to be drawn
-/// apart.
+/// apart; none where `tree` draws neither so.
 pub(crate) fn share_of(
     tree: &impl Tree,
     parent: Cell,
     child: Holds,
     min_width: Pixels,
-) -> (Pixels, Pixels) {
+) -> Option<(Pixels, Pixels)> {
     let Cell { rect, holds } = parent;
-    let (siblings, weight, span) = match holds {
+    let (under, weight, span) = match holds {
         Holds::Build => {
             let shared = tree.shared_weight();
             let (roots, beyond) = split(rect.size.width, shared, tree.total(), min_width);
             if child == Holds::Shared {
-                return (rect.right() - beyond, beyond);
+                return Some((rect.right() - beyond, beyond));
             }
-            (tree.roots(), tree.total() - shared, roots)
+            (Parent::Build, tree.total() - shared, roots)
         }
-        Holds::Shared => (tree.shared_tops(), tree.shared_weight(), rect.size.width),
-        Holds::Node(node) => (tree.children(node), tree.weight(node), rect.size.width),
-        Holds::Rest(run) => (run.siblings(), run.weight, rect.size.width),
+        Holds::Shared => (Parent::Shared, tree.shared_weight(), rect.size.width),
+        Holds::Node(node) => (Parent::Node(node), tree.weight(node), rect.size.width),
+        Holds::Rest(run) => (run.parent, run.weight, rect.size.width),
+    };
+    let from = match holds {
+        Holds::Rest(run) => run.places(tree)?.start,
+        Holds::Build | Holds::Shared | Holds::Node(_) => 0,
     };
     let first = match child {
-        Holds::Node(node) => node,
-        Holds::Rest(run) => run.first,
-        Holds::Build | Holds::Shared => siblings.start,
+        Holds::Node(node) => tree.place(node)?,
+        Holds::Rest(run) => run.places(tree)?.start,
+        Holds::Build | Holds::Shared => from,
     };
-    let before: u32 = (siblings.start..first)
-        .map(|sibling| tree.weight(sibling))
-        .sum();
+    let before = tree.siblings(under).get(from as usize..first as usize)?;
+    let before: u32 = before.iter().map(|&sibling| tree.weight(sibling)).sum();
     let per_point = span / weight as f32;
-    (
+    Some((
         rect.left() + per_point * before as f32,
         per_point * child.weight(tree) as f32,
-    )
+    ))
 }
 
 /// How a row `width` wide under the whole build, which weighs `weight`, is
@@ -400,24 +448,26 @@ fn split(width: Pixels, shared: u32, weight: u32, min_width: Pixels) -> (Pixels,
     }
 }
 
-/// The heaviest of `siblings` that each stay `min_width` wide when they
-/// share `room` by their summed weight, with `room` and that weight. Only as
-/// many siblings are weighed as are drawn, and one more.
+/// The heaviest of the `siblings` standing at `places` that each stay
+/// `min_width` wide when they share `room` by their summed weight, as the
+/// places they stand at, with `room` and that weight. Only as many siblings
+/// are weighed as are drawn, and one more.
 fn heaviest_page(
     tree: &impl Tree,
-    siblings: Range<u32>,
+    siblings: &[u32],
+    places: Range<u32>,
     room: Pixels,
     min_width: Pixels,
 ) -> (Range<u32>, Pixels, u32) {
-    let first = siblings.start;
+    let first = places.start;
     let (mut end, mut summed) = (first, 0);
-    for sibling in siblings {
-        let weight = tree.weight(sibling);
+    for place in places {
+        let weight = tree.weight(siblings[place as usize]);
         let widened = summed + weight;
         if room * (weight as f32 / widened as f32) < min_width {
             break;
         }
-        (end, summed) = (sibling + 1, widened);
+        (end, summed) = (place + 1, widened);
     }
     (first..end, room, summed)
 }
@@ -435,6 +485,9 @@ pub(super) mod tests {
         /// By node, where its children start, and past the last node the node
         /// count.
         bounds: Vec<u32>,
+        /// Every node's number, in order, which a run of siblings is a slice
+        /// of.
+        numbers: Vec<u32>,
     }
 
     /// A node by its weight and its children.
@@ -464,7 +517,24 @@ pub(super) mod tests {
                 roots: roots.len() as u32,
                 weights: order.iter().map(|spec| spec.0).collect(),
                 bounds,
+                numbers: (0..order.len() as u32).collect(),
             }
+        }
+    }
+
+    impl Laid {
+        /// The nodes numbered `range`.
+        fn nodes(&self, range: Range<u32>) -> &[u32] {
+            &self.numbers[range.start as usize..range.end as usize]
+        }
+
+        /// The node `node` stands under, absent for a top.
+        fn holding(&self, node: u32) -> Option<u32> {
+            (0..self.weights.len() as u32).find(|&p| self.child_range(p).contains(&node))
+        }
+
+        fn child_range(&self, node: u32) -> Range<u32> {
+            self.bounds[node as usize]..self.bounds[node as usize + 1]
         }
     }
 
@@ -473,34 +543,40 @@ pub(super) mod tests {
             (0..self.bounds[0]).map(|top| self.weight(top)).sum()
         }
 
-        fn roots(&self) -> Range<u32> {
-            0..self.roots
+        fn roots(&self) -> &[u32] {
+            self.nodes(0..self.roots)
         }
 
-        fn shared_tops(&self) -> Range<u32> {
-            self.roots..self.bounds[0]
+        fn shared_tops(&self) -> &[u32] {
+            self.nodes(self.roots..self.bounds[0])
         }
 
         fn shared_weight(&self) -> u32 {
-            self.shared_tops().map(|top| self.weight(top)).sum()
+            self.shared_tops().iter().map(|&top| self.weight(top)).sum()
         }
 
-        fn children(&self, node: u32) -> Range<u32> {
-            self.bounds[node as usize]..self.bounds[node as usize + 1]
+        fn children(&self, node: u32) -> &[u32] {
+            self.nodes(self.child_range(node))
         }
 
         fn weight(&self, node: u32) -> u32 {
             self.weights[node as usize]
         }
 
-        fn parent(&self, node: u32) -> Parent {
-            let holding =
-                (0..self.weights.len() as u32).find(|&p| self.children(p).contains(&node));
-            match holding {
+        fn parent(&self, node: u32) -> Option<Parent> {
+            Some(match self.holding(node) {
                 Some(parent) => Parent::Node(parent),
-                None if self.shared_tops().contains(&node) => Parent::Shared,
+                None if node >= self.roots => Parent::Shared,
                 None => Parent::Build,
-            }
+            })
+        }
+
+        fn place(&self, node: u32) -> Option<u32> {
+            Some(match self.holding(node) {
+                Some(parent) => node - self.child_range(parent).start,
+                None if node >= self.roots => node - self.roots,
+                None => node,
+            })
         }
     }
 
@@ -710,6 +786,25 @@ pub(super) mod tests {
                 (Holds::Node(3), 0., 30.),
             ]
         );
+    }
+
+    /// A run laid out from one tree names nothing in a tree that draws its
+    /// row with fewer siblings, and lays out nothing under it there.
+    #[test]
+    fn a_run_from_another_drawing_of_its_row_gathers_nothing() {
+        let wide = Laid::of(&vec![leaf(1); 10]);
+        let cells = lay_out(&wide, Holds::Build, area(100., 2.), ROW, px(20.));
+        let Some(&Cell {
+            holds: Holds::Rest(run),
+            ..
+        }) = cells.last()
+        else {
+            panic!("{cells:#?}");
+        };
+        let narrow = Laid::of(&vec![leaf(1); 3]);
+        assert_eq!(run.siblings(&narrow), None);
+        let cells = lay_out(&narrow, Holds::Rest(run), area(100., 3.), ROW, px(20.));
+        assert_eq!(drawn(&cells), [(Holds::Rest(run), 0., 100.)]);
     }
 
     #[test]

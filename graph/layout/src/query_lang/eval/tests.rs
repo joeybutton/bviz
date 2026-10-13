@@ -731,6 +731,36 @@ fn undenied_scope(universe: &Universe, set: FixedBitSet) -> FixedBitSet {
     })
 }
 
+/// Walking up from one node reads the scope as the whole scope does, for
+/// every node, under stacks that deny what they take out.
+#[test]
+fn a_scope_holds_a_node_as_walking_up_from_it_reads() {
+    let (universe, _) = actions();
+    let stacks: [&[&str]; 5] = [
+        &["//p:gen"],
+        &["mnemonic(Genrule, //p:gen)"],
+        &["//p:all", "- mnemonic(CppCompile, //p:all)"],
+        &["//p:all", "- //p:lib", "+ mnemonic(CppCompile, //p:lib)"],
+        &["deps(//p:lib)", "except //p:in.txt"],
+    ];
+    for chips in stacks {
+        let mut stack = Stack::default();
+        for chip in chips {
+            stack.push(chip);
+        }
+        let evaluation = stack.evaluate(&universe, &Prefixes::default());
+        let value = evaluation.value.expect("a stack naming a set");
+        let scope = universe.scope_nodes(&value);
+        for id in 0..universe.ids() {
+            assert_eq!(
+                universe.scope_holds(&value, Id(id as u32)),
+                scope.contains(id),
+                "{chips:?} at {id}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_scope_holds_what_a_node_holds_and_what_an_action_writes() {
     let (universe, names) = actions();

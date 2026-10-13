@@ -117,7 +117,8 @@ impl Transition {
     /// that it gathers what is too narrow to draw apart as either icicle
     /// does at rest. The lower icicle stands in for the cells the higher
     /// draws in its place, and what either lays out beyond `seen_in` is left
-    /// out, which may reach above `bounds`.
+    /// out, which may reach above `bounds`. Where `tree` no longer draws the
+    /// one under the other, the icicle the move makes for is drawn at rest.
     pub(crate) fn cells(
         &self,
         tree: &impl Tree,
@@ -129,7 +130,13 @@ impl Transition {
     ) -> Vec<Placed> {
         let top = Bounds::new(bounds.origin, size(bounds.size.width, row));
         let higher = icicle::lay_out(tree, self.higher, bounds, row, min_width);
-        let anchor = self.anchor(tree, &higher, bounds, row, min_width);
+        let Some(anchor) = self.anchor(tree, &higher, bounds, row, min_width) else {
+            let end = match self.way {
+                Way::Down => self.path[0],
+                Way::Up => self.higher,
+            };
+            return Placed::still(icicle::lay_out(tree, end, bounds, row, min_width));
+        };
         let at = |from: Pixels, to: Pixels| from + (to - from) * lowered;
         let moved = Bounds::new(
             point(at(anchor.left(), top.left()), at(anchor.top(), top.top())),
@@ -161,7 +168,7 @@ impl Transition {
         bounds: Bounds<Pixels>,
         row: Pixels,
         min_width: Pixels,
-    ) -> Bounds<Pixels> {
+    ) -> Option<Bounds<Pixels>> {
         // Each cell over the next, the lower first and the higher last.
         let chain: Vec<Holds> = self.path.iter().copied().chain([self.higher]).collect();
         let rows = (bounds.size.height / row).floor() as usize;
@@ -180,7 +187,10 @@ impl Transition {
                 })?;
                 let rect = match drawn.holds == holds {
                     true => drawn.rect,
-                    false => within(drawn.rect, icicle::share_of(tree, *drawn, holds, min_width)),
+                    false => within(
+                        drawn.rect,
+                        icicle::share_of(tree, *drawn, holds, min_width)?,
+                    ),
                 };
                 Some((at, rect))
             });
@@ -191,11 +201,10 @@ impl Transition {
                 rect,
                 holds: chain[below + 1],
             };
-            let share = icicle::share_of(tree, over, chain[below], min_width);
-            rect = within(rect, share);
+            rect = within(rect, icicle::share_of(tree, over, chain[below], min_width)?);
             rect.origin.y += row;
         }
-        rect
+        Some(rect)
     }
 }
 
@@ -462,7 +471,7 @@ mod tests {
         let down =
             Transition::between(&tree, Holds::Build, Holds::Node(2), Instant::now()).unwrap();
         let higher: Vec<Cell> = at_rest.iter().map(|placed| placed.cell).collect();
-        let anchor = down.anchor(&tree, &higher, bounds, ROW, min);
+        let anchor = down.anchor(&tree, &higher, bounds, ROW, min).unwrap();
         let per_point = px(100.) / 1002.;
         let expected = Cell {
             rect: Bounds::new(point(per_point * 1000., ROW * 2.), size(per_point, ROW)),
@@ -489,13 +498,13 @@ mod tests {
         let Holds::Rest(gathered) = run else {
             panic!("{narrow:#?}");
         };
-        assert_eq!(gathered.siblings(), 1..5);
+        assert_eq!(gathered.siblings(&tree), Some(&[1, 2, 3, 4][..]));
         let bounds = area(100., 2.);
         let higher = icicle::lay_out(&tree, Holds::Build, bounds, ROW, min);
         assert!(!higher.iter().any(|cell| cell.holds == run
             || matches!(cell.holds, Holds::Rest(_)) && run.stands_under(cell.holds, &tree)));
         let down = Transition::between(&tree, Holds::Build, run, Instant::now()).unwrap();
-        let anchor = down.anchor(&tree, &higher, bounds, ROW, min);
+        let anchor = down.anchor(&tree, &higher, bounds, ROW, min).unwrap();
         assert_eq!(anchor, Bounds::new(point(px(40.), ROW), size(px(60.), ROW)));
     }
 

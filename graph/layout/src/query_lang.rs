@@ -29,8 +29,8 @@ pub use cursor::{Place, TypedWord, word_at, written_word};
 pub use eval::EvalError;
 pub use parse::parse;
 pub use stack::{
-    BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Extension, Invalid, Outcome,
-    Prefixes, Stack, Unportable, Value,
+    BazelQuery, Chip, ChipExpr, ChipId, Command, Compiled, Evaluation, Exclusion, Extension,
+    Invalid, Outcome, Prefixes, Stack, Unportable, Value,
 };
 pub use universe::{Counts, Readable, Universe};
 

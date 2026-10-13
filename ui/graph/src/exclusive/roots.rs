@@ -1,38 +1,42 @@
-//! The field naming the roots of a dominator tree as a Bazel target set, and
+//! The setting naming the roots of a dominator tree as a Bazel target set, and
 //! the points of a unit such a set roots the tree at.
 
-use super::{ExclusivePanel, LeaveRoots, RootedBy};
+use super::{CloseRoots, EditRoots, ExclusivePanel, RootedBy};
 use crate::Palette;
-use crate::model::{GraphModel, Prepared};
-use crate::point::{unit_names, written_name};
+use crate::model::{GraphModel, Prepared, Shared};
+use crate::point::{unit_names, written_name, written_target_label};
 use bviz_graph_layout::Support;
 use bviz_graph_layout::dominators::{Actions, Chosen, ConfiguredTargets, ScopeGraph};
 use bviz_graph_layout::metrics::{ByUnit, Scope, Unit};
+use bviz_graph_layout::select;
 use bviz_graph_layout::shown::written_by_place;
 use bviz_graph_layout::target_pattern::{TargetIndex, TargetPattern};
 use bviz_graph_layout::target_set::{PatternError, Resolved, TargetSet, TopLevel};
-use bviz_ui_components::{KeyScope, Nesting, QueryField, TextTooltip};
-use gpui::{Context, Div, Entity, Pixels, Stateful, div, prelude::*, px};
+use bviz_graph_layout::{Id, Kind};
+use bviz_ui_components::{
+    Button, Hint, KeyScope, MenuItem, Nesting, Priority, QueryField, ToolbarGroup, menu_chrome,
+};
+use gpui::{
+    App, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, Pixels, SharedString,
+    Subscription, Window, div, prelude::*, px,
+};
 use std::sync::Arc;
 
-/// The key context the roots field carries, which [`LeaveRoots`] is scoped to.
+/// The key context the sheet editing the roots carries, which [`CloseRoots`]
+/// is scoped to.
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::within(
     &super::KEY_CONTEXT,
     Nesting::Inside,
     "GraphExclusiveRoots",
-    "Roots field",
+    "Roots",
 );
 
 /// Width the field is drawn at, wide enough for its placeholder.
-pub(super) const FIELD_WIDTH: Pixels = px(380.);
+const FIELD_WIDTH: Pixels = px(380.);
 
-/// The narrowest the field stands in its toolbar, the other controls giving
-/// way before it narrows further.
-pub(super) const FIELD_LEAST: Pixels = px(120.);
+const PLACEHOLDER: &str = "top-level, or target patterns: //... -//tools/...";
 
-pub(super) const PLACEHOLDER: &str = "roots: top-level, or targets: //... -//tools/...";
-
-/// What the field's tooltip says it takes.
+/// What the sheet says the field takes.
 const HELP: &str = "\
 Root target patterns · empty: top-level
 -pattern removes · # comment · from workspace root
@@ -238,23 +242,306 @@ fn copies_noted(guessed: u32, generated: u32, uncopied: u32) -> impl Iterator<It
     guessed.into_iter().chain(generated).chain(uncopied)
 }
 
-/// The roots field `input`, from which Escape returns to the panel.
-pub(super) fn field(
-    input: &Entity<QueryField>,
+/// The header setting naming the roots as a target set, and the sheet that
+/// edits it under the setting.
+pub(super) struct Setting {
+    field: Entity<QueryField>,
+    /// Held by the sheet while it is open, whose losing focus closes it and
+    /// roots the tree at what the field holds.
+    sheet: FocusHandle,
+    open: bool,
+    /// The targets of a query taken for the roots, while the field still
+    /// holds them as taken.
+    taken: Option<Taken>,
+    /// Why the last take from the filter took nothing.
+    untaken: Option<&'static str>,
+    /// Closes the sheet as focus leaves it; installed on the first render,
+    /// where the window is in hand.
+    closing: Option<Subscription>,
+}
+
+/// The targets a query named, written into the field as their labels, so
+/// that the field edits them as any other set; taken once, never following
+/// the query afterwards.
+struct Taken {
+    text: SharedString,
+    targets: u32,
+    /// How many targets the query named, of which the first `targets`
+    /// were taken.
+    of: u32,
+}
+
+impl Setting {
+    pub(super) fn new(cx: &mut Context<ExclusivePanel>) -> Self {
+        Setting {
+            field: cx.new(|cx| QueryField::new("exclusive-roots", PLACEHOLDER, FIELD_WIDTH, cx)),
+            sheet: cx.focus_handle(),
+            open: false,
+            taken: None,
+            untaken: None,
+            closing: None,
+        }
+    }
+
+    pub(super) fn field(&self) -> &Entity<QueryField> {
+        &self.field
+    }
+
+    /// The target set the field holds; none where it is empty.
+    pub(super) fn target_set(&self, cx: &App) -> Option<SharedString> {
+        let text = self.field.read(cx).text(cx);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Takes up another filter, which makes moot why the last take took
+    /// nothing.
+    pub(super) fn filter_changed(&mut self) {
+        self.untaken = None;
+    }
+
+    /// The targets taken for the roots, where the field still holds them.
+    fn taken(&self, text: &str) -> Option<&Taken> {
+        self.taken.as_ref().filter(|taken| taken.text == text)
+    }
+}
+
+/// The labels of the rule targets the nodes `scope` names belong to, as a
+/// reader writes them, each once and in label order. A file is a target of
+/// its own, but building it as a root builds nothing its rule does not, so
+/// only rules are taken: an action or a configured target stands for its
+/// rule, and a file for none.
+fn named_targets(scope: &select::Scope, shared: &Shared) -> Vec<String> {
+    let (base, facets) = (&shared.base, &shared.facets);
+    let is_rule =
+        |id: Id| (base.nodes.get(id.0 as usize)).is_some_and(|node| node.kind == Kind::Target);
+    let named = base.nodes.iter().filter(|node| scope.names(node.id));
+    let mut targets: Vec<Id> = named
+        .filter_map(|node| facets.label(node.id))
+        .filter(|&id| is_rule(id))
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    let mut labels: Vec<String> = Vec::with_capacity(targets.len());
+    labels.extend(
+        targets
+            .into_iter()
+            .filter_map(|id| written_target_label(id, shared)),
+    );
+    labels.sort_unstable();
+    labels
+}
+
+/// Why taking the roots from the filter takes nothing.
+const NO_TARGETS: &str = "the query applied names no rule targets";
+
+/// The most targets taken from the filter, past which the field would hold
+/// more text than a reader can edit.
+const MOST_TAKEN: usize = 1000;
+
+/// The first [`MOST_TAKEN`] of `labels`, and how many there were.
+fn capped(mut labels: Vec<String>) -> (Vec<String>, u32) {
+    let of = labels.len() as u32;
+    labels.truncate(MOST_TAKEN);
+    (labels, of)
+}
+
+impl ExclusivePanel {
+    /// Opens the sheet editing the roots, its field taking focus.
+    pub(super) fn edit_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.roots.closing.is_none() {
+            let closing = cx.on_focus_out(&self.roots.sheet, window, |view, _, _, cx| {
+                view.roots.open = false;
+                view.reroot(cx);
+                cx.notify();
+            });
+            self.roots.closing = Some(closing);
+        }
+        self.roots.open = true;
+        self.roots.untaken = None;
+        self.roots.field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the sheet editing the roots, handing focus back to the panel,
+    /// and roots the tree at what the field holds without waiting for it to
+    /// settle.
+    pub(super) fn close_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.roots.open = false;
+        self.focus_handle.focus(window, cx);
+        self.reroot(cx);
+        cx.notify();
+    }
+
+    /// Roots the tree at the targets the query applied names, as they stand.
+    fn take_from_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        let (Some(applied), Some(loaded)) = (model.filter().applied(), model.loaded()) else {
+            return;
+        };
+        let (labels, of) = capped(named_targets(applied.scope(), &loaded.shared));
+        let roots = &mut self.roots;
+        if labels.is_empty() {
+            roots.untaken = Some(NO_TARGETS);
+            cx.notify();
+            return;
+        }
+        let text: SharedString = labels.join(" ").into();
+        roots.untaken = None;
+        roots.taken = Some(Taken {
+            text: text.clone(),
+            targets: labels.len() as u32,
+            of,
+        });
+        (roots.field).update(cx, |field, cx| field.set_text(text, cx));
+        roots.field.read(cx).focus_handle(cx).focus(window, cx);
+        self.reroot(cx);
+        cx.notify();
+    }
+}
+
+/// Room the setting gives what it reads, past which it is cut short.
+const READING_WIDTH: Pixels = px(260.);
+
+/// What the setting reads of the target set `text`, `taken` from the filter
+/// where it was.
+fn reading(text: &str, taken: Option<&Taken>) -> SharedString {
+    if let Some(taken) = taken {
+        let targets = unit_names(Unit::Target).counted(taken.of);
+        return match taken.targets < taken.of {
+            true => format!("{FROM_FILTER}: first {} of {targets}", taken.targets).into(),
+            false => format!("{FROM_FILTER}: {targets}").into(),
+        };
+    }
+    match text.trim() {
+        "" => TOP_LEVEL.into(),
+        set => set.to_owned().into(),
+    }
+}
+
+/// What the setting reads of the targets taken from the filter.
+const FROM_FILTER: &str = "from filter";
+
+/// Why the roots cannot be taken from the filter.
+const NO_QUERY: &str = "no query applied";
+
+/// What the setting reads with the field empty.
+const TOP_LEVEL: &str = "top-level";
+
+/// The words the setting is labelled with, as a build of its roots reads.
+const BUILD: &str = "bazel build";
+
+/// How long the setting holds out against the panel narrowing.
+const ROOTS: Priority = 3;
+
+/// The setting naming the roots in the panel's header, which opens the
+/// [`sheet`] editing them, and in the strip's overflow menu the row doing so.
+pub(super) fn setting(
+    view: &ExclusivePanel,
+    palette: &Palette,
+    window: &mut Window,
+    cx: &Context<ExclusivePanel>,
+) -> ToolbarGroup {
+    let colors = &palette.colors;
+    let text = view.roots.field.read(cx).text(cx);
+    let set = !text.trim().is_empty();
+    let reading = reading(&text, view.roots.taken(&text));
+    let width = menu_chrome::widest(window, std::iter::once(reading.clone())).min(READING_WIDTH);
+    let focus = &view.focus_handle;
+    let trigger = || {
+        let hint = Hint::default().keys_for(&EditRoots, focus);
+        let open: fn(&ExclusivePanel) -> bool = |view| view.roots.open;
+        menu_chrome::trigger(
+            "exclusive-roots-setting".into(),
+            colors,
+            hint,
+            (cx.weak_entity(), open),
+            width,
+            reading.clone(),
+        )
+        .on_click(
+            cx.listener(|view, _: &ClickEvent, window, cx| match view.roots.open {
+                true => view.close_roots(window, cx),
+                false => view.edit_roots(window, cx),
+            }),
+        )
+    };
+    let panel = cx.weak_entity();
+    let row = MenuItem::action(&EditRoots, Some(focus), window, cx, move |window, cx| {
+        panel
+            .update(cx, |view, cx| view.edit_roots(window, cx))
+            .ok();
+    });
+    ToolbarGroup::named(ROOTS, BUILD, trigger).overflow(row, set)
+}
+
+/// The sheet editing the roots, open under the strip `view` stands its
+/// setting in; outside the strip, so that it stands whether the setting stands
+/// in the strip or has left it for the strip's overflow menu.
+pub(super) fn sheet(
+    view: &ExclusivePanel,
     palette: &Palette,
     cx: &Context<ExclusivePanel>,
-) -> Stateful<Div> {
-    let tip = palette.colors.tooltip();
-    div()
-        .id("exclusive-roots")
-        .key_context(KEY_CONTEXT)
-        .on_action(cx.listener(|view, _: &LeaveRoots, window, cx| {
-            view.focus_handle.focus(window, cx);
-        }))
-        .tooltip(TextTooltip::builder(HELP.into(), tip))
-        .flex_1()
-        .min_w_0()
-        .child(input.clone())
+) -> Option<impl IntoElement + use<>> {
+    let colors = &palette.colors;
+    let roots = &view.roots;
+    roots.open.then(|| {
+        let applied = view.model.read(cx).filter().applied();
+        let query = applied.map(|applied| applied.scope().query());
+        let take =
+            cx.listener(|view, _: &ClickEvent, window, cx| view.take_from_filter(window, cx));
+        let source = match query {
+            Some(query) => format!("targets of {query}"),
+            None => NO_QUERY.to_owned(),
+        };
+        let from_filter = div()
+            .w(FIELD_WIDTH)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .child(
+                Button::new("exclusive-roots-from-filter", take)
+                    .label("Roots from filter")
+                    .compact()
+                    .disabled(query.is_none()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(colors.text_muted)
+                    .child(source),
+            );
+        let untaken = roots.untaken.map(|why| {
+            div()
+                .text_sm()
+                .text_color(colors.error)
+                .whitespace_nowrap()
+                .child(why)
+        });
+        let sheet = div()
+            .track_focus(&roots.sheet)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|view, _: &CloseRoots, window, cx| view.close_roots(window, cx)))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_2()
+            .child(roots.field.clone())
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.text_muted)
+                    .whitespace_nowrap()
+                    .children(HELP.lines().map(|line| div().child(line))),
+            )
+            .child(from_filter)
+            .children(untaken);
+        menu_chrome::under_trigger(menu_chrome::sheet(colors).child(sheet))
+    })
 }
 
 /// The line under the strip saying that the target set the field holds
@@ -396,6 +683,38 @@ mod tests {
         assert_eq!(noted("//...", partial), Some(MANUAL_PARTLY_TOLD));
         assert_eq!(noted("//...", unavailable), Some(MANUAL_UNTOLD));
         assert_eq!(noted("//a:b", unavailable), None);
+    }
+
+    /// The setting reads the set it holds, the targets taken from the filter
+    /// only while it still holds them as taken, and the top-level points
+    /// when empty.
+    #[test]
+    fn the_setting_reads_what_it_holds() {
+        let taken = Taken {
+            text: "//a:b //c:d".into(),
+            targets: 2,
+            of: 2,
+        };
+        let held = |text: &str| reading(text, Some(&taken).filter(|taken| taken.text == text));
+        assert_eq!(held(""), TOP_LEVEL);
+        assert_eq!(held("  "), TOP_LEVEL);
+        assert_eq!(held(" //... "), "//...");
+        assert_eq!(held("//a:b //c:d"), "from filter: 2 targets");
+        assert_eq!(held("//a:b //c:d -//c:d"), "//a:b //c:d -//c:d");
+        let first = Taken { of: 2500, ..taken };
+        assert_eq!(
+            reading("//a:b //c:d", Some(&first)),
+            "from filter: first 2 of 2500 targets"
+        );
+    }
+
+    #[test]
+    fn at_most_a_bounded_number_of_targets_is_taken() {
+        let labels = |count: usize| (0..count).map(|n| format!("//a:{n}")).collect();
+        let (taken, of) = capped(labels(MOST_TAKEN + 5));
+        assert_eq!((taken.len(), of), (MOST_TAKEN, MOST_TAKEN as u32 + 5));
+        let (taken, of) = capped(labels(3));
+        assert_eq!((taken.len(), of), (3, 3));
     }
 
     #[test]

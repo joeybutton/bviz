@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use fixedbitset::FixedBitSet;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::ast::Function;
 use super::config::Configurations;
@@ -186,6 +186,30 @@ impl Universe {
     /// denies.
     pub(super) fn scope_nodes(&self, value: &Value) -> FixedBitSet {
         self.closure(&value.set, true, |id| !value.denied.contains(id))
+    }
+
+    /// Whether a scope over `value` holds `id`, as [`Self::scope_nodes`] does,
+    /// read by walking up through what holds `id` alone: its parent, and for a
+    /// file the actions writing it.
+    pub fn scope_holds(&self, value: &Value, id: Id) -> bool {
+        let mut seen = FxHashSet::default();
+        let mut open = vec![id];
+        while let Some(at) = open.pop() {
+            let index = at.0 as usize;
+            if value.set.contains(index) {
+                return true;
+            }
+            if value.denied.contains(index) || !seen.insert(at) {
+                continue;
+            }
+            let writers = (self.index.kind(at) == Some(Kind::Artifact))
+                .then(|| self.index.dependencies(at))
+                .into_iter()
+                .flatten()
+                .filter(|&writer| self.index.kind(writer) == Some(Kind::Action));
+            open.extend(self.index.parent(at).into_iter().chain(writers));
+        }
+        false
     }
 
     /// `value` with every node its members hold, at any depth: what each

@@ -5,6 +5,7 @@
 mod ancestry;
 mod cell_menu;
 mod icicle;
+mod landing;
 mod paint;
 mod roots;
 mod selection;
@@ -13,26 +14,37 @@ mod transition;
 pub(crate) use roots::NOTICE_SEPARATOR;
 
 use crate::Palette;
+use crate::chips::{self, ChipBar, Unmarked};
+use crate::hidden::{self, Offering, Unshown};
 use crate::history::History;
+use crate::holder::Holder;
 use crate::hue::{Colouring, Hue};
-use crate::model::{DominatorsLanded, FilterChanged, GraphModel, Shared, SourceReplaced, TreeKey};
+use crate::jump::{self, JumpEvent, JumpPalette};
+use crate::model::{
+    DominatorsLanded, ExclusionNamed, FilterChanged, GraphModel, SelectionChanged, Shared,
+    SourceReplaced, TreeKey, VerdictsLanded,
+};
 use crate::point::{
     KindNames, built_for_tool, configuration, identify, unit_names, written_target_label,
 };
+use crate::reveal;
+use crate::stand_in::Writers;
 use crate::unit_picker::{CyclePoints, UnitPicker};
 use ancestry::{Spot, Stands};
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Chosen, Dominators, Elsewhere, Roots, Standing, Targets};
+use bviz_graph_layout::dominators::{
+    Above, Chosen, Dominators, Elsewhere, Roots, ShownTree, Standing, Targets,
+};
 use bviz_graph_layout::metrics::{ByUnit, Count, Scope, Unit};
+use bviz_graph_layout::select::Verdicts;
 use bviz_graph_layout::select::labels::carried_label;
-use bviz_graph_layout::select::{Filter, Verdicts};
 use bviz_graph_layout::target_set::PatternError;
 use bviz_ui_components::gesture::{
     Button, Clicks, Entry, GestureRow, Gestures, Input, Motion, Place, Pointer,
 };
 use bviz_ui_components::{
     CardAnchor, HoverCard, KeyScope, Legend, LegendEntry, LegendState, Menu, MenuEvent, MenuItem,
-    OneRow, Priority, QueryField, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
+    Nesting, OneRow, Priority, QueryFieldEvent, ShowLegend, Swatch, ToolbarGroup, cached_layer,
     centered_notice, centered_spinner, defer_hover_card, legend_gestures, load_in_background,
     over_window,
 };
@@ -47,6 +59,7 @@ use gpui::{
 use icicle::{Cell, Holds, Parent, Run};
 use paint::{MIN_CELL_WIDTH, Scene, point_name, run_name, shared_name};
 use roots::{Found, Within};
+use rustc_hash::FxHashSet;
 use selection::{LaidOut, Step};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -57,6 +70,18 @@ use transition::Transition;
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.
 pub(crate) const KEY_CONTEXT: KeyScope = KeyScope::new("GraphExclusive", "Exclusive deps");
+
+/// The identifier the panel's key context carries while a card offers to
+/// show a node a jump could not land on.
+pub(crate) const OFFERING: KeyScope = KeyScope::within(
+    &KEY_CONTEXT,
+    Nesting::State,
+    "exclusiveOffering",
+    "Hidden card",
+);
+
+/// How wide the card offering to show a node stands.
+const CARD_WIDTH: Pixels = px(300.);
 
 pub(crate) use roots::KEY_CONTEXT as ROOTS_KEY_CONTEXT;
 
@@ -91,8 +116,8 @@ const FOCUS_ANCESTOR: Entry<ExclusiveIntent> = Entry::new(
 
 const LIST_HIDDEN: Entry<ExclusiveIntent> = Entry::new(
     Input::new(Motion::Press(Button::Left, Clicks::Single)),
-    Place::On("the hidden ancestors row"),
-    "List hidden ancestors",
+    Place::On("the more ancestors row"),
+    "List more ancestors",
     ExclusiveIntent::ListHidden,
 );
 
@@ -141,10 +166,10 @@ gpui::actions!(
         ShowWholeBuild,
         /// Go up one level
         FocusUp,
-        /// Leave roots field
-        LeaveRoots,
-        /// Focus roots field
-        FocusRoots,
+        /// Close roots
+        CloseRoots,
+        /// Edit roots
+        EditRoots,
         /// Select previous cell
         SelectPrevious,
         /// Select next cell
@@ -188,20 +213,15 @@ pub struct ExclusivePanel {
     /// Where the cells were last laid out, which a pointer is resolved
     /// against.
     frame: Option<Frame>,
-    /// How the filter the graph's other views draw through takes the nodes of
-    /// the graph read, from the time it is evaluated; absent while no filter
-    /// is drawn through.
-    fade: Option<Fade>,
-    /// Evaluates the filter, absent while none is being evaluated, so that one
-    /// evaluation runs at a time.
-    fading: Option<Task<()>>,
     /// The roots chosen last, from the time the first are chosen.
     rooting: Option<Rooting>,
     /// Chooses the roots afresh, absent while none are being chosen; replaced
     /// by a later choice, which it would only hold up.
     choosing: Option<Choosing>,
-    /// The field naming the roots as a target set.
-    roots_field: Entity<QueryField>,
+    /// The setting naming the roots as a target set.
+    roots: roots::Setting,
+    /// The document's query bar, as this panel stands it.
+    chips: Entity<ChipBar>,
     /// The target set that last failed, which is not resolved again while
     /// the field holds it.
     failed: Option<Failed>,
@@ -210,15 +230,30 @@ pub struct ExclusivePanel {
     coloured: HashMap<TreeKey, Arc<Coloured>>,
     /// Colours a tree landed, absent while none is being coloured.
     drawing: Option<Task<()>>,
+    /// Splices out of a tree coloured the points the filter hides, absent
+    /// while none is being spliced.
+    showing: Option<Showing>,
     /// The menu a right press put up over a cell, while it stands.
     menu: Option<CellMenu>,
     /// The card describing what is selected.
     card: HoverCard<Stands>,
+    jump: Entity<JumpPalette>,
+    /// How the tree was drawn as the palette opened, which closing it
+    /// unpicked returns to.
+    opened: Option<Opened>,
+    offering: Offering,
+    _exclusion_named: Subscription,
+    /// Rings the cell of a node another view selects, leaving the focus
+    /// where it is.
+    _selection_changed: Subscription,
+    /// Lands what the palette picks.
+    _jumped: Subscription,
     /// Redraws as the graph is read.
     _changed: Subscription,
     _source_replaced: Subscription,
     _dominators_landed: Subscription,
     _filter_changed: Subscription,
+    _verdicts_landed: Subscription,
     _roots_typed: Subscription,
 }
 
@@ -235,8 +270,9 @@ impl ExclusivePanel {
     fn card(&self) -> Option<(Vec<String>, CardAnchor)> {
         let Selection { spot, by, lines } = self.at_rest_selection()?;
         let anchor = match (by, self.card.pointer()) {
-            // The menu stands in for the description.
-            (Picked::Menu, _) => return None,
+            // The menu stands in for the description, and a cell another
+            // view selected is only marked.
+            (Picked::Menu | Picked::Linked, _) => return None,
             _ if !self.card.shows(&spot.stands()) => return None,
             (Picked::Pointer, Some(at)) => CardAnchor::Pointer(at),
             (Picked::Pointer, None) | (Picked::Keys, _) => CardAnchor::Item(spot.rect()),
@@ -248,13 +284,16 @@ impl ExclusivePanel {
         let changed = cx.observe(&model, |_, _, cx| cx.notify());
         let source_replaced = cx.subscribe(&model, |view, _, _: &SourceReplaced, cx| {
             view.drawn = None;
-            view.fade = None;
-            view.fading = None;
+            (view.chips).update(cx, |bar, cx| bar.set_unmarked(None, cx));
+            view.opened = None;
+            view.offering.clear();
+            view.restate_shown(cx);
             view.rooting = None;
             view.choosing = None;
             view.failed = None;
             view.coloured.clear();
             view.drawing = None;
+            view.showing = None;
             view.picker = unit_picker(&view.model, &view.focus_handle, cx);
             view.compute(cx);
         });
@@ -265,17 +304,14 @@ impl ExclusivePanel {
                 view.reselect(cx);
             }
         });
-        let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| view.refade(cx));
-        let roots_field = cx.new(|cx| {
-            QueryField::new(
-                "exclusive-roots",
-                roots::PLACEHOLDER,
-                roots::FIELD_WIDTH,
-                cx,
-            )
-            .narrowing_to(roots::FIELD_LEAST)
+        let filter_changed = cx.subscribe(&model, |view, _, _: &FilterChanged, cx| {
+            view.roots.filter_changed();
+            view.refilter(cx);
         });
-        let roots_typed = cx.subscribe(&roots_field, |view, _, event, cx| match event {
+        let verdicts_landed =
+            cx.subscribe(&model, |view, _, _: &VerdictsLanded, cx| view.refilter(cx));
+        let roots = roots::Setting::new(cx);
+        let roots_typed = cx.subscribe(roots.field(), |view, _, event, cx| match event {
             QueryFieldEvent::Edited | QueryFieldEvent::CursorMoved => {}
             QueryFieldEvent::Settled => view.reroot(cx),
         });
@@ -283,30 +319,395 @@ impl ExclusivePanel {
         let focus_handle = cx.focus_handle();
         let legend = cx.new(|cx| LegendState::new(focus_handle.clone(), cx));
         let picker = unit_picker(&model, &focus_handle, cx);
+        let chips = cx.new(|cx| {
+            ChipBar::new(
+                model.clone(),
+                Holder::Exclusive,
+                focus_handle.clone(),
+                None,
+                cx,
+            )
+        });
+        let exclusion_named = cx.subscribe(&model, |_, _, _: &ExclusionNamed, cx| cx.notify());
+        let selection_changed = cx.subscribe(&model, |view, _, event: &SelectionChanged, cx| {
+            if event.by != cx.entity_id() {
+                view.take_up_selection(cx);
+            }
+        });
+        let jump = Self::palette(&model, &focus_handle, &chips, cx);
+        let jumped = cx.subscribe(&jump, |view, _, event: &JumpEvent, cx| {
+            view.jumped(*event, cx)
+        });
         Self {
             focus_handle,
             legend,
+            jump,
+            opened: None,
+            offering: Offering::new(model.clone()),
+            _exclusion_named: exclusion_named,
+            _selection_changed: selection_changed,
+            _jumped: jumped,
             picker,
             model,
             shown: false,
             drawn: None,
             canvas: cx.new(|_| IcicleCanvas { parent }),
             frame: None,
-            fade: None,
-            fading: None,
             rooting: None,
             choosing: None,
-            roots_field,
+            roots,
+            chips,
             failed: None,
             coloured: HashMap::new(),
             drawing: None,
+            showing: None,
             menu: None,
             card: HoverCard::new(cx, |view| &mut view.card, Self::carded),
             _changed: changed,
             _source_replaced: source_replaced,
             _dominators_landed: dominators_landed,
             _filter_changed: filter_changed,
+            _verdicts_landed: verdicts_landed,
             _roots_typed: roots_typed,
+        }
+    }
+
+    /// The jump palette the icicle stands.
+    fn palette(
+        model: &Entity<GraphModel>,
+        focus: &FocusHandle,
+        chips: &Entity<ChipBar>,
+        cx: &mut Context<Self>,
+    ) -> Entity<JumpPalette> {
+        let panel = cx.weak_entity();
+        let standing = Box::new(move |id, cx: &App| {
+            let Some(panel) = panel.upgrade() else {
+                return jump::Stands::Here;
+            };
+            let Some(drawn) = &panel.read(cx).drawn else {
+                return jump::Stands::Here;
+            };
+            let (coloured, shown) = (&drawn.coloured, &drawn.shown);
+            let tree = &coloured.tree;
+            landing::stands(tree, &shown.tree, shown.by.as_deref(), &coloured.over(), id)
+        });
+        let panel = cx.weak_entity();
+        let drawn: chips::Drawn = Box::new(move |cx: &App| {
+            let panel = panel.upgrade();
+            let drawn = panel
+                .as_ref()
+                .and_then(|panel| panel.read(cx).drawn.as_ref());
+            drawn.map_or_else(Default::default, |drawn| Arc::clone(&drawn.shown.points))
+        });
+        let (model, focus, chips) = (model.clone(), focus.clone(), chips.clone());
+        cx.new(|cx| {
+            JumpPalette::new(
+                model,
+                Holder::Exclusive,
+                focus,
+                chips,
+                Some(drawn),
+                standing,
+                cx,
+            )
+        })
+    }
+
+    /// Opens the palette over the icicle, noting how the tree was drawn as
+    /// it opened.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unit = self.scope(cx).map(|scope| scope.unit());
+        let scope = unit.map_or_else(jump::Scope::default, jump::Scope::of_unit);
+        if self
+            .jump
+            .update(cx, |palette, cx| palette.open(scope, window, cx))
+        {
+            self.opened = self.drawn.as_ref().map(Opened::of);
+        }
+    }
+
+    /// Lands what the palette asks of the icicle. Only a jump keeps where a
+    /// preview drew the icicle; the palette closing otherwise draws it as it
+    /// opened.
+    fn jumped(&mut self, event: JumpEvent, cx: &mut Context<Self>) {
+        if let JumpEvent::Preview(id) = event {
+            self.preview(id, cx);
+            return;
+        }
+        match event {
+            JumpEvent::Go(id) => {
+                self.publish(Some(id), cx);
+                self.land(id, cx);
+                self.opened = None;
+            }
+            JumpEvent::AskWhy(id) => {
+                self.restore_opened(cx);
+                self.model.update(cx, |model, cx| model.ask_why(id, cx));
+            }
+            JumpEvent::AlwaysShow(id) => {
+                self.restore_opened(cx);
+                // The pin goes on the point the filter hides, which may stand
+                // for `id` rather than be it.
+                let pinned = match self.landing(id) {
+                    Some(landing::Landing::Hidden(point, _)) => point,
+                    _ => id,
+                };
+                self.offering.always_show(id, pinned, cx);
+            }
+            JumpEvent::Preview(_) | JumpEvent::Closed | JumpEvent::Dismissed => {
+                self.restore_opened(cx)
+            }
+        }
+        cx.notify();
+    }
+
+    /// What a jump to `id` lands on in the tree drawn; none while none is.
+    fn landing(&self, id: Id) -> Option<landing::Landing> {
+        let drawn = self.drawn.as_ref()?;
+        let (coloured, shown) = (&drawn.coloured, &drawn.shown);
+        let tree = &coloured.tree;
+        let landing =
+            landing::landing(tree, &shown.tree, shown.by.as_deref(), &coloured.over(), id);
+        Some(landing)
+    }
+
+    /// Draws the icicle as a jump to `id` would, from the tree as the palette
+    /// found it, without the selection a jump makes going any further than
+    /// the palette.
+    fn preview(&mut self, id: Id, cx: &mut Context<Self>) {
+        if self.opened.is_none() {
+            self.opened = self.drawn.as_ref().map(Opened::of);
+        }
+        if let Some(landing::Landing::Cell { node, above }) = self.landing(id) {
+            self.land_on(node, above, cx);
+        }
+    }
+
+    /// Draws the icicle from what the cell of `id` stands under and selects
+    /// that cell, as one step after the tree as the palette found it. Where
+    /// the tree draws no cell for `id`, a jump that is `committed` puts up the
+    /// card saying why and offering to show the node another way; with no
+    /// tree drawn yet, it waits for one.
+    fn land(&mut self, id: Id, cx: &mut Context<Self>) {
+        self.offering.clear();
+        let Some(landing) = self.landing(id) else {
+            self.offering.wait_for(id);
+            return;
+        };
+        match (landing, unshown(landing)) {
+            (landing::Landing::Cell { node, above }, _) => self.land_on(node, above, cx),
+            (_, Some(unshown)) => self.offering.stand(id, unshown, cx),
+            (_, None) => {}
+        }
+        cx.notify();
+    }
+
+    /// Draws the icicle from `above`, as one step after the tree as the
+    /// palette found it, and selects the cell of `node` there.
+    fn land_on(&mut self, node: u32, above: Above, cx: &mut Context<Self>) {
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        let (tree, shown) = (&drawn.coloured.tree, &drawn.shown);
+        let on = match above {
+            Above::Roots => None,
+            Above::Shared => Some(Focused::Shared),
+            Above::Node(parent) => Some(Focused::Node(parent)),
+        };
+        let focus = on.map(|on| Focus::on(tree, &shown.tree, on));
+        let opened = (self.opened.as_ref())
+            .filter(|opened| Arc::ptr_eq(&opened.shown, shown))
+            .map(|opened| opened.history.clone());
+        drawn.selection = None;
+        self.travel(
+            move |history| {
+                if let Some(opened) = opened {
+                    *history = opened;
+                }
+                history.push(focus);
+            },
+            cx,
+        );
+        self.select_node(node, cx);
+    }
+
+    /// Selects the cell holding the tree's node `node` among those drawn, as
+    /// the keys select one.
+    fn select_node(&mut self, node: u32, cx: &mut Context<Self>) {
+        let (Some(drawn), Some(laid)) = (&self.drawn, self.laid_out()) else {
+            return;
+        };
+        let Some(cell) = holding(&laid, &drawn.shown.tree, node) else {
+            return;
+        };
+        self.card.pick();
+        self.select(Spot::Cell(cell), Picked::Keys, cx);
+        // A run of cells too narrow to draw apart is selected as a whole,
+        // so its description names the one landed on.
+        if let Holds::Rest(_) = cell.holds
+            && let Some(drawn) = &mut self.drawn
+            && let Some(selection) = &mut drawn.selection
+        {
+            let coloured = &drawn.coloured;
+            let unit = coloured.tree.scope().unit();
+            let name = point_name(coloured.tree.id(node), unit, &coloured.shared);
+            selection.lines.insert(0, format!("{name} {AMONG_THESE}"));
+        }
+    }
+
+    /// Draws the tree as it was drawn as the palette opened, where the
+    /// filter has drawn it alike since.
+    fn restore_opened(&mut self, cx: &mut Context<Self>) {
+        let Some(opened) = self.opened.take() else {
+            return;
+        };
+        let Some(drawn) = &mut self.drawn else {
+            return;
+        };
+        if !Arc::ptr_eq(&opened.shown, &drawn.shown) {
+            return;
+        }
+        drawn.selection = opened.selection;
+        let history = opened.history;
+        self.travel(move |current| *current = history, cx);
+        cx.notify();
+    }
+
+    /// Takes up a tree drawn afresh: moves the card to where its node now
+    /// lands, lands the jump waiting for the tree, and rings the cell of the
+    /// node selected.
+    fn redrawn(&mut self, cx: &mut Context<Self>) {
+        let offer = self.offering.offer();
+        let now = offer
+            .and_then(|offer| self.landing(offer.node))
+            .and_then(unshown);
+        self.offering.redrawn(now, cx);
+        if let Some(id) = self.offering.take_waiting() {
+            self.land(id, cx);
+        }
+        self.relink(cx);
+    }
+
+    /// Selects `node`, or nothing for `None`, for every view of the graph.
+    fn publish(&mut self, node: Option<Id>, cx: &mut Context<Self>) {
+        let by = cx.entity_id();
+        self.model
+            .update(cx, |model, cx| model.select(node, by, cx));
+        self.relink(cx);
+    }
+
+    /// Takes up a node another view selected: the cell the keys selected
+    /// gives way to it.
+    fn take_up_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(drawn) = &mut self.drawn
+            && drawn
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.by == Picked::Keys)
+        {
+            drawn.selection = None;
+        }
+        self.relink(cx);
+    }
+
+    /// What the node the document holds selected lands on in the tree drawn,
+    /// resolved once for each node selected in each drawing.
+    fn selection_landing(&mut self, cx: &App) -> Option<landing::Landing> {
+        let selected = self.model.read(cx).selected()?;
+        let drawn = self.drawn.as_ref()?;
+        if let Some((id, shown, landing)) = &drawn.landed
+            && *id == selected
+            && Arc::ptr_eq(shown, &drawn.shown)
+        {
+            return Some(*landing);
+        }
+        let landing = self.landing(selected)?;
+        let drawn = self.drawn.as_mut()?;
+        drawn.landed = Some((selected, Arc::clone(&drawn.shown), landing));
+        Some(landing)
+    }
+
+    /// The cell ringing the node the document holds selected: its own, or
+    /// where the cells drawn leave it out, that of the nearest node above it
+    /// they hold, among the icicle's cells and the ancestors over them. None
+    /// where the tree draws the node outside the cells drawn.
+    fn linked_cell(&mut self, cx: &App) -> Option<Cell> {
+        let landing::Landing::Cell { node, .. } = self.selection_landing(cx)? else {
+            return None;
+        };
+        let (drawn, laid) = (self.drawn.as_ref()?, self.laid_out()?);
+        let shown = &drawn.shown.tree;
+        let holding_whole = |whole: Holds| {
+            laid.spots().find_map(|spot| match spot {
+                Spot::Cell(cell) if cell.holds == whole => Some(cell),
+                _ => None,
+            })
+        };
+        let mut at = node;
+        loop {
+            if let Some(cell) = holding(&laid, shown, at) {
+                return Some(cell);
+            }
+            match shown.placing(at)?.above {
+                Above::Node(above) => at = above,
+                Above::Shared => return holding_whole(Holds::Shared),
+                Above::Roots => return holding_whole(Holds::Build),
+            }
+        }
+    }
+
+    /// Rings the cell of the node the document holds selected, as
+    /// [`Self::linked_cell`] finds it, where the keys, the pointer and a menu
+    /// ring no other, and has the query bar's status line say where no cell
+    /// rings it.
+    fn relink(&mut self, cx: &mut Context<Self>) {
+        let landing = self.selection_landing(cx);
+        let linked = self.linked_cell(cx);
+        let unmarked = match landing {
+            Some(landing::Landing::Cell { .. }) => {
+                (linked.is_none() && self.frame.is_some()).then_some(Unmarked::Outside)
+            }
+            landing => landing.and_then(landing::Landing::unmarked),
+        };
+        self.chips
+            .update(cx, |bar, cx| bar.set_unmarked(unmarked, cx));
+        let Some(drawn) = &self.drawn else {
+            return;
+        };
+        let ringed = drawn.selection.as_ref().map(|selection| selection.by);
+        match (ringed, linked) {
+            (None | Some(Picked::Linked), Some(cell)) => {
+                self.select(Spot::Cell(cell), Picked::Linked, cx)
+            }
+            (Some(Picked::Linked), None) => self.drop_selection(cx),
+            _ => {}
+        }
+    }
+
+    /// Answers the card as its key does, leaving the key to the icicle where
+    /// the card offers only to close.
+    fn accept(&mut self, cx: &mut Context<Self>) {
+        match self.offering.accept(cx) {
+            true => cx.notify(),
+            false => cx.propagate(),
+        }
+    }
+
+    /// Puts away the card; with none, a ring on a cell other than the one
+    /// ringing the node selected, which gives way to that one; and otherwise
+    /// the selection, here and in every other view.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.offering.dismiss() {
+            cx.notify();
+            return;
+        }
+        let ringed = (self.drawn.as_ref())
+            .and_then(|drawn| drawn.selection.as_ref())
+            .map(|selection| selection.spot.stands());
+        let linked = self.linked_cell(cx).map(|cell| Stands::Cell(cell.holds));
+        match ringed {
+            Some(stands) if Some(stands) != linked => self.let_go(cx),
+            _ => self.deselect(cx),
         }
     }
 
@@ -340,7 +741,7 @@ impl ExclusivePanel {
         }
         self.reroot(cx);
         self.grow(cx);
-        self.refade(cx);
+        self.refilter(cx);
     }
 
     /// Has the tree of the chosen scope from the roots chosen in it computed,
@@ -353,13 +754,12 @@ impl ExclusivePanel {
         self.redraw(cx);
     }
 
-    /// The target set the roots field holds; none where it is empty.
+    /// The target set the roots setting holds; none where it is empty.
     fn target_set(&self, cx: &App) -> Option<SharedString> {
-        let text = self.roots_field.read(cx).text(cx);
-        (!text.trim().is_empty()).then_some(text)
+        self.roots.target_set(cx)
     }
 
-    /// How the target set the roots field holds failed in the scope chosen,
+    /// How the target set the roots setting holds failed in the scope chosen,
     /// where it is the set that last failed.
     fn failure(&self, cx: &App) -> Option<&Failed> {
         let (scope, text) = (self.scope(cx)?, self.target_set(cx)?);
@@ -367,7 +767,7 @@ impl ExclusivePanel {
     }
 
     /// Chooses the roots of the chosen scope by the target set the roots
-    /// field holds, or as the top-level points with the field empty, where
+    /// setting holds, or as the top-level points with it empty, where
     /// neither the roots in place nor those being chosen are chosen so. A
     /// target set that failed gives up the choice under way and leaves in
     /// place the roots an earlier set named in the scope, and otherwise
@@ -476,44 +876,53 @@ impl ExclusivePanel {
             .update(cx, |model, cx| model.want_dominators(&wanted, cx));
     }
 
-    /// Evaluates the filter the graph's other views draw through, where the
-    /// panel is shown and that is not the filter the cells are faded by. The
-    /// filter is evaluated over every node of the graph, so this runs off the
-    /// UI thread, and an evaluation running evaluates again once it lands.
-    fn refade(&mut self, cx: &mut Context<Self>) {
-        if !self.shown || self.fading.is_some() {
+    /// Draws the tree as the document's filter as it stands shows it, where
+    /// the panel is shown, asking for the filter's verdicts where they have
+    /// yet to land.
+    fn refilter(&mut self, cx: &mut Context<Self>) {
+        if !self.shown {
             return;
         }
+        self.model.update(cx, |model, cx| model.verdicts(cx));
+        self.restate_shown(cx);
+        self.redraw(cx);
+        cx.notify();
+    }
+
+    /// What the document's filter as it stands shows of a tree.
+    fn wanted(&self, cx: &App) -> Wanted {
         let model = self.model.read(cx);
-        let Some(loaded) = model.loaded() else {
-            return;
-        };
-        let wanted = model.filter().cloned();
-        if self.fade.as_ref().map(|fade| &fade.filter) == wanted.as_ref() {
-            return;
+        if !model.filter().narrows() {
+            return Wanted::Every;
         }
-        let shared = loaded.shared.clone();
-        let Some(filter) = wanted else {
-            self.fade = None;
-            self.invalidate_canvas(cx);
-            return;
+        let evaluated = model
+            .judgement()
+            .and_then(|judgement| judgement.evaluated());
+        evaluated.map_or(Wanted::Pending, |verdicts| Wanted::By(Arc::clone(verdicts)))
+    }
+
+    /// Tells the query bar how many points of the tree drawn the document's
+    /// filter shows, where it narrows the graph and the tree drawn is spliced
+    /// by the verdicts it stands at.
+    fn restate_shown(&self, cx: &mut Context<Self>) {
+        let current = match self.wanted(cx) {
+            Wanted::By(verdicts) => Some(verdicts),
+            Wanted::Every | Wanted::Pending => None,
         };
-        self.fading = Some(load_in_background(
-            cx,
-            move || {
-                let verdicts = filter.evaluate(&shared.base);
-                Fade {
-                    filter,
-                    verdicts: Arc::new(verdicts),
+        let shown = self.drawn.as_ref().and_then(|drawn| {
+            let current = current.as_ref()?;
+            let by = drawn.shown.by.as_ref()?;
+            Arc::ptr_eq(by, current).then(|| {
+                let tree = &drawn.coloured.tree;
+                chips::Shown {
+                    shown: drawn.shown.tree.total() as usize,
+                    of: tree.total() as usize,
+                    many: unit_names(tree.scope().unit()).many,
+                    note: hides_any(tree, &drawn.shown.tree).then_some(WIDTHS_COUNT_SHOWN),
                 }
-            },
-            |view, fade, cx| {
-                view.fading = None;
-                view.fade = Some(fade);
-                view.invalidate_canvas(cx);
-                view.refade(cx);
-            },
-        ));
+            })
+        });
+        self.chips.update(cx, |bar, cx| bar.set_shown(shown, cx));
     }
 
     /// Draws the unit chosen.
@@ -537,29 +946,20 @@ impl ExclusivePanel {
         {
             // Two target sets can name the roots of one tree and different
             // targets.
+            let coloured = Arc::clone(&drawn.coloured);
             if drawn.as_targets != as_targets {
                 drawn.as_targets = as_targets;
                 self.want(key, cx);
                 self.reselect(cx);
             }
+            self.show(coloured, cx);
             return;
         }
         let model = self.model.read(cx);
         self.coloured
             .retain(|key, _| model.dominators(key).is_some());
         if let Some(coloured) = self.coloured.get(&key) {
-            self.drawn = Some(Drawn {
-                coloured: Arc::clone(coloured),
-                as_targets,
-                history: History::new(None),
-                transition: None,
-                selection: None,
-                pressed_clear: false,
-            });
-            if self.shown {
-                self.want(key, cx);
-            }
-            self.invalidate_canvas(cx);
+            self.show(Arc::clone(coloured), cx);
             return;
         }
         if self.drawing.is_some() {
@@ -570,24 +970,27 @@ impl ExclusivePanel {
             return;
         };
         let (tree, shared) = (Arc::clone(tree), loaded.shared.clone());
+        let Some(writers) = model.writers() else {
+            return;
+        };
         self.drawing = Some(load_in_background(
             cx,
             move || {
+                let writers = Arc::clone(writers.get());
                 let unit = tree.scope().unit();
                 let points = || (0..tree.total()).map(|node| (tree.id(node), tree.kind(node)));
                 let colouring = Colouring::of(unit, points().map(|(id, _)| id), &shared.facets);
                 let legend = colouring.legend(points(), &shared.facets);
                 let targets =
                     (unit == Unit::ConfiguredTarget).then(|| Targets::of(&tree, &shared.facets));
-                let reached = tree.roots().any(|root| paint::reached(&tree, root));
                 Coloured {
                     key,
                     tree,
                     shared,
+                    writers,
                     colouring: Arc::new(colouring),
                     legend,
                     targets,
-                    reached,
                 }
             },
             |view, coloured, cx| {
@@ -599,11 +1002,121 @@ impl ExclusivePanel {
         ));
     }
 
+    /// Draws `coloured` as the document's filter shows it, once that is
+    /// known. Splicing is a pass over the whole tree, so it runs off the UI
+    /// thread, one at a time, and the tree drawn stays until it lands.
+    fn show(&mut self, coloured: Arc<Coloured>, cx: &mut Context<Self>) {
+        let by = match self.wanted(cx) {
+            Wanted::Pending => return,
+            Wanted::Every => None,
+            Wanted::By(verdicts) => Some(verdicts),
+        };
+        let drawn = self.drawn.as_ref();
+        let drawn = drawn.filter(|drawn| Arc::ptr_eq(&drawn.coloured, &coloured));
+        if drawn.is_some_and(|drawn| drawn.shown.is_by(by.as_ref())) {
+            self.showing = None;
+            return;
+        }
+        if (self.showing.as_ref()).is_some_and(|showing| showing.is(&coloured, by.as_ref())) {
+            return;
+        }
+        let was = drawn.map(|drawn| Arc::clone(&drawn.shown));
+        let (tree, verdicts) = (Arc::clone(&coloured.tree), by.clone());
+        let work = load_in_background(
+            cx,
+            move || {
+                let shows = |id| (verdicts.as_ref()).is_none_or(|by| by.get(id).drawn());
+                let spliced = ShownTree::of(&tree, shows);
+                let roots = spliced.roots().iter();
+                let reached = roots.clone().any(|&root| paint::reached(&tree, root));
+                let alike = was.filter(|was| was.tree == spliced);
+                let drawn = (0..tree.total()).filter(|&node| spliced.shows(node));
+                let points = Arc::new(drawn.map(|node| tree.id(node)).collect());
+                let shown = Shown {
+                    tree: spliced,
+                    by: verdicts,
+                    reached,
+                    points,
+                };
+                (shown, alike)
+            },
+            {
+                let coloured = Arc::clone(&coloured);
+                move |view, (shown, alike), cx| {
+                    view.showing = None;
+                    view.place(coloured, Arc::new(shown), alike, cx);
+                    view.redraw(cx);
+                }
+            },
+        );
+        self.showing = Some(Showing {
+            coloured,
+            by,
+            _work: work,
+        });
+    }
+
+    /// Draws `coloured` as `shown`, where it is the tree drawn or the one
+    /// chosen to be. A tree drawn already keeps its focus, history and
+    /// selection, each moved up to what still shows, unless what it drew is
+    /// `alike`, the drawing `shown` draws the same cells as.
+    fn place(
+        &mut self,
+        coloured: Arc<Coloured>,
+        shown: Arc<Shown>,
+        alike: Option<Arc<Shown>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(drawn) = &mut self.drawn
+            && Arc::ptr_eq(&drawn.coloured, &coloured)
+        {
+            match alike {
+                Some(alike) if Arc::ptr_eq(&drawn.shown, &alike) => drawn.shown = shown,
+                _ => {
+                    if let Some(opened) = &mut self.opened {
+                        opened.reshow(&drawn.coloured.tree, &shown);
+                    }
+                    drawn.reshow(shown);
+                    self.menu = None;
+                    self.reselect(cx);
+                }
+            }
+            self.restate_shown(cx);
+            self.invalidate_canvas(cx);
+            self.redrawn(cx);
+            return;
+        }
+        let Some(rooting) = self
+            .rooting(cx)
+            .filter(|rooting| rooting.key() == coloured.key)
+        else {
+            return;
+        };
+        let (key, as_targets) = (rooting.key(), rooting.as_targets());
+        self.drawn = Some(Drawn {
+            coloured,
+            shown,
+            as_targets,
+            history: History::new(None),
+            transition: None,
+            selection: None,
+            pressed_clear: false,
+            landed: None,
+        });
+        if self.shown {
+            self.want(key, cx);
+        }
+        self.opened = None;
+        self.restate_shown(cx);
+        self.invalidate_canvas(cx);
+        self.redrawn(cx);
+    }
+
     /// The rows over the focus and the cells drawn from it at rest, where
     /// they are laid out.
     fn laid_out(&self) -> Option<LaidOut> {
         let (drawn, frame) = (self.drawn.as_ref()?, self.frame?);
-        let tree = &*drawn.coloured.tree;
+        let tree = &drawn.shown.tree;
         let rows = ancestry::rows(tree, drawn.top());
         let (above, under) = ancestry::lay_out(&rows, frame.bounds, frame.row);
         let cells = icicle::lay_out(tree, drawn.top(), under, frame.row, MIN_CELL_WIDTH);
@@ -626,7 +1139,7 @@ impl ExclusivePanel {
             return;
         };
         if drawn.focused() != on {
-            let focus = on.map(|on| Focus::on(&drawn.coloured.tree, on));
+            let focus = on.map(|on| Focus::on(&drawn.coloured.tree, &drawn.shown.tree, on));
             self.refocus(focus, cx);
         }
     }
@@ -663,7 +1176,7 @@ impl ExclusivePanel {
         if drawn.top() == from {
             return;
         }
-        let tree = &*drawn.coloured.tree;
+        let tree = &drawn.shown.tree;
         drawn.transition = Transition::between(tree, from, drawn.top(), Instant::now());
         self.invalidate_canvas(cx);
         self.reselect(cx);
@@ -684,7 +1197,8 @@ impl ExclusivePanel {
 
     /// Selects and describes afresh: where the keys selected, what they
     /// selected wherever it is still drawn and the cell on top where it is
-    /// not, and otherwise what is under the pointer.
+    /// not, and otherwise what is under the pointer, or with nothing there
+    /// the cell of the node selected.
     fn reselect(&mut self, cx: &mut Context<Self>) {
         let Some(drawn) = &mut self.drawn else {
             return;
@@ -696,6 +1210,15 @@ impl ExclusivePanel {
                 by: Picked::Keys,
                 ..
             }) => {
+                let (tree, shown) = (&*drawn.coloured.tree, &drawn.shown.tree);
+                let spot = match spot {
+                    Spot::Cell(cell) => {
+                        let lifted = Focused::of(cell.holds).and_then(|on| on.lifted(tree, shown));
+                        let holds = lifted.map_or(Holds::Build, Focused::holds);
+                        Spot::Cell(Cell { holds, ..cell })
+                    }
+                    Spot::Hidden { .. } => spot,
+                };
                 let laid = self.laid_out();
                 let kept = laid.and_then(|laid| laid.find(&spot).or(laid.top()));
                 match kept {
@@ -705,7 +1228,10 @@ impl ExclusivePanel {
             }
             _ => match pointer {
                 Some(at) => self.hover_at(at, cx),
-                None => cx.notify(),
+                None => {
+                    self.relink(cx);
+                    cx.notify();
+                }
             },
         }
     }
@@ -719,30 +1245,40 @@ impl ExclusivePanel {
         let Some(drawn) = &mut self.drawn else {
             return;
         };
-        let focus = drawn.focused();
         match &mut drawn.selection {
             Some(selection) if selection.spot == spot => selection.by = by,
-            selection => {
-                let coloured = &drawn.coloured;
+            _ => {
+                let focus = drawn.focused();
                 let lines = match spot {
-                    Spot::Cell(cell) => {
-                        describe(coloured, as_targets.as_deref(), cell.holds, focus)
-                    }
-                    Spot::Hidden { count, .. } => describe_hidden(coloured, count, focus),
+                    Spot::Cell(cell) => describe(drawn, as_targets.as_deref(), cell.holds, focus),
+                    Spot::Hidden { count, .. } => describe_hidden(drawn, count, focus),
                 };
-                *selection = Some(Selection { spot, by, lines });
+                drawn.selection = Some(Selection { spot, by, lines });
             }
         }
         cx.notify();
     }
 
-    /// Selects nothing.
-    fn deselect(&mut self, cx: &mut Context<Self>) {
+    /// Rings no cell.
+    fn drop_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(drawn) = &mut self.drawn
             && drawn.selection.take().is_some()
         {
             cx.notify();
         }
+    }
+
+    /// Lets go of what the pointer selected, ringing the cell of the node
+    /// selected again.
+    fn let_go(&mut self, cx: &mut Context<Self>) {
+        self.drop_selection(cx);
+        self.relink(cx);
+    }
+
+    /// Selects nothing, here and in every other view of the graph.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        self.publish(None, cx);
+        self.drop_selection(cx);
     }
 
     /// Takes the selection a `step` through what is drawn, or selects the
@@ -754,12 +1290,21 @@ impl ExclusivePanel {
         let selected = drawn.selection.as_ref();
         let selected = selected.and_then(|selection| laid.find(&selection.spot));
         let to = match selected {
-            Some(from) => laid.stepped(&from, step, &*drawn.coloured.tree),
+            Some(from) => laid.stepped(&from, step, &drawn.shown.tree),
             None => laid.top(),
         };
         if let Some(to) = to {
             self.card.pick();
             self.select(to, Picked::Keys, cx);
+            if let Spot::Cell(Cell {
+                holds: Holds::Node(node),
+                ..
+            }) = to
+                && let Some(drawn) = &self.drawn
+            {
+                let id = drawn.coloured.tree.id(node);
+                self.publish(Some(id), cx);
+            }
         }
     }
 
@@ -798,10 +1343,10 @@ impl ExclusivePanel {
         }
     }
 
-    /// Whether `tree` is the tree drawn, which a gesture begun over another
-    /// names none of the nodes of.
-    fn draws(&self, tree: &Arc<Dominators>) -> bool {
-        (self.drawn.as_ref()).is_some_and(|drawn| Arc::ptr_eq(&drawn.coloured.tree, tree))
+    /// Whether `shown` is the drawing on screen, which a gesture begun over
+    /// another names none of the cells of.
+    fn draws(&self, shown: &Arc<Shown>) -> bool {
+        (self.drawn.as_ref()).is_some_and(|drawn| Arc::ptr_eq(&drawn.shown, shown))
     }
 
     /// Draws the icicle from what the focus stands under.
@@ -810,7 +1355,7 @@ impl ExclusivePanel {
             return;
         };
         if let Some(on) = drawn.focused() {
-            let up = on.holds().parent(&*drawn.coloured.tree);
+            let up = on.holds().parent(&drawn.shown.tree);
             self.focus_on(up.and_then(Focused::of), cx);
         }
     }
@@ -823,9 +1368,13 @@ impl ExclusivePanel {
         };
         if holds == drawn.top() {
             self.focus_up(cx);
-        } else {
-            self.focus_on(Focused::of(holds), cx);
+            return;
         }
+        if let Holds::Node(node) = holds {
+            let id = drawn.coloured.tree.id(node);
+            self.publish(Some(id), cx);
+        }
+        self.focus_on(Focused::of(holds), cx);
     }
 
     /// Acts on a press as [`GESTURES`] has it. A double click returns to the
@@ -883,7 +1432,7 @@ impl ExclusivePanel {
         }
     }
 
-    /// Selects the row of hidden ancestors `spot` and puts up the menu
+    /// Selects the row of more ancestors `spot` and puts up the menu
     /// listing them at `at`, choosing one focusing it.
     fn list_hidden(
         &mut self,
@@ -900,8 +1449,8 @@ impl ExclusivePanel {
             &drawn.coloured.shared,
             drawn.coloured.by(),
         );
-        let panel = cx.weak_entity();
-        let hidden = ancestry::hidden(&**tree, drawn.top());
+        let (panel, shown) = (cx.weak_entity(), &drawn.shown);
+        let hidden = ancestry::hidden(&shown.tree, drawn.top());
         let nodes: Vec<u32> = hidden.iter().filter_map(|holds| holds.node()).collect();
         let hints = paint::hints_among(tree, shared, &nodes, &[]);
         let items: Vec<MenuItem> = hidden
@@ -913,10 +1462,10 @@ impl ExclusivePanel {
                     Some(hint) => format!("{name}{}{hint}", paint::PART_SEPARATOR),
                     None => name,
                 };
-                let (panel, tree) = (panel.clone(), Arc::clone(tree));
+                let (panel, shown) = (panel.clone(), Arc::clone(shown));
                 Some(MenuItem::new(name, move |_: &mut Window, cx: &mut App| {
                     let done =
-                        panel.update(cx, |view, cx| view.take(&Deed::Click(holds), &tree, cx));
+                        panel.update(cx, |view, cx| view.take(&Deed::Click(holds), &shown, cx));
                     done.ok();
                 }))
             })
@@ -982,9 +1531,9 @@ impl ExclusivePanel {
         let written = |node: u32| written_target_label(tree.id(node), shared);
         let panel = cx.weak_entity();
         let deed = |deed: Deed| {
-            let (panel, tree) = (panel.clone(), Arc::clone(tree));
+            let (panel, shown) = (panel.clone(), Arc::clone(&drawn.shown));
             move |_: &mut Window, cx: &mut App| {
-                let done = panel.update(cx, |view, cx| view.take(&deed, &tree, cx));
+                let done = panel.update(cx, |view, cx| view.take(&deed, &shown, cx));
                 done.ok();
             }
         };
@@ -1019,22 +1568,21 @@ impl ExclusivePanel {
         items.collect()
     }
 
-    /// Carries out `deed`, chosen from the menu of a cell of `tree`, where
-    /// that is still the tree drawn.
-    fn take(&mut self, deed: &Deed, tree: &Arc<Dominators>, cx: &mut Context<Self>) {
-        if !self.draws(tree) {
+    /// Carries out `deed`, chosen from the menu of a cell of `shown`, where
+    /// that is still the drawing on screen.
+    fn take(&mut self, deed: &Deed, shown: &Arc<Shown>, cx: &mut Context<Self>) {
+        let Some(drawn) = self.drawn.as_ref().filter(|_| self.draws(shown)) else {
             return;
-        }
+        };
         match deed {
             Deed::Click(holds) => self.click_cell(*holds, cx),
             &Deed::Reveal(node) => {
-                let id = tree.id(node);
+                let id = drawn.coloured.tree.id(node);
                 self.model.update(cx, |model, cx| model.reveal(id, cx));
             }
             Deed::Root(label) => {
                 let label = label.clone();
-                self.roots_field
-                    .update(cx, |field, cx| field.set_text(label, cx));
+                (self.roots.field()).update(cx, |field, cx| field.set_text(label, cx));
                 self.reroot(cx);
             }
         }
@@ -1051,7 +1599,7 @@ impl ExclusivePanel {
         };
         match spot {
             Some(spot) => self.select(spot, Picked::Pointer, cx),
-            None if drawn.picked_by_pointer() => self.deselect(cx),
+            None if drawn.picked_by_pointer() => self.let_go(cx),
             None => {}
         }
     }
@@ -1062,7 +1610,7 @@ impl ExclusivePanel {
             cx.notify();
         }
         if self.drawn.as_ref().is_some_and(Drawn::picked_by_pointer) {
-            self.deselect(cx);
+            self.let_go(cx);
         }
     }
 
@@ -1070,7 +1618,7 @@ impl ExclusivePanel {
     /// for the card.
     fn carded(&self, _: &App) -> Option<Stands> {
         let selection = self.drawn.as_ref()?.selection.as_ref()?;
-        (selection.by != Picked::Menu).then_some(selection.spot.stands())
+        matches!(selection.by, Picked::Pointer | Picked::Keys).then_some(selection.spot.stands())
     }
 
     /// Repaints the cells along with the layer over them; every change to what
@@ -1213,13 +1761,6 @@ impl RootedBy {
     }
 }
 
-/// How the cells are faded, kept with the filter it was evaluated from so a
-/// filter that changes is told apart from the one the cells are faded by.
-struct Fade {
-    filter: Filter,
-    verdicts: Arc<Verdicts>,
-}
-
 /// A tree landed, coloured: the hue of each of its points, and the legend
 /// naming the hues, which hold for as long as the graph read does.
 struct Coloured {
@@ -1227,18 +1768,78 @@ struct Coloured {
     tree: Arc<Dominators>,
     /// The graph whose points `tree` holds.
     shared: Shared,
+    /// The actions writing each file of `shared`.
+    writers: Arc<Writers>,
     colouring: Arc<Colouring>,
     legend: Vec<(SharedString, Hue)>,
     /// The targets each node's subtree holds, where its points are configured
     /// targets.
     targets: Option<Targets>,
-    /// Whether the build also reaches a root of `tree` as a dependency.
-    reached: bool,
 }
 
 impl Coloured {
+    /// The graph the tree was drawn over, for finding a node in it.
+    fn over(&self) -> landing::Over<'_> {
+        landing::Over {
+            graph: &self.shared.base,
+            facets: &self.shared.facets,
+            writers: &self.writers,
+        }
+    }
+
     fn by(&self) -> RootedBy {
         RootedBy::of(&self.key.roots)
+    }
+}
+
+/// A tree coloured as the document's filter shows it.
+struct Shown {
+    tree: ShownTree,
+    /// The verdicts `tree` shows the points of, which the cells are faded
+    /// by; none where it shows every point.
+    by: Option<Arc<Verdicts>>,
+    /// Whether the build also reaches a node `tree` draws under the whole
+    /// build as a dependency.
+    reached: bool,
+    /// The points `tree` shows, which a list over the icicle ranks first.
+    points: Arc<FxHashSet<Id>>,
+}
+
+impl Shown {
+    fn is_by(&self, by: Option<&Arc<Verdicts>>) -> bool {
+        same_verdicts(self.by.as_ref(), by)
+    }
+}
+
+/// Whether `a` and `b` are the same verdicts, or both none.
+fn same_verdicts(a: Option<&Arc<Verdicts>>, b: Option<&Arc<Verdicts>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (a, b) => a.is_none() && b.is_none(),
+    }
+}
+
+/// What the document's filter shows of a tree.
+enum Wanted {
+    Every,
+    /// The points these verdicts show.
+    By(Arc<Verdicts>),
+    /// What the filter narrows to is still being evaluated.
+    Pending,
+}
+
+/// The points of `coloured` the filter hides being spliced out by the
+/// verdicts `by`, or every point kept where there are none.
+struct Showing {
+    coloured: Arc<Coloured>,
+    by: Option<Arc<Verdicts>>,
+    /// Dropping it gives the splicing up.
+    _work: Task<()>,
+}
+
+impl Showing {
+    fn is(&self, coloured: &Arc<Coloured>, by: Option<&Arc<Verdicts>>) -> bool {
+        Arc::ptr_eq(&self.coloured, coloured) && same_verdicts(self.by.as_ref(), by)
     }
 }
 
@@ -1246,6 +1847,8 @@ impl Coloured {
 /// the tree is drawn.
 struct Drawn {
     coloured: Arc<Coloured>,
+    /// What of `coloured` the cells draw.
+    shown: Arc<Shown>,
     /// The [`Rooting::as_targets`] of the roots the tree is drawn from.
     as_targets: Option<TreeKey>,
     /// The foci the icicle has been drawn from, the current one drawn; none
@@ -1257,6 +1860,9 @@ struct Drawn {
     selection: Option<Selection>,
     /// Whether the last press landed clear of every cell, starting a click.
     pressed_clear: bool,
+    /// What the node the document holds selected lands on in the tree as
+    /// the drawing named draws it, and that node.
+    landed: Option<(Id, Arc<Shown>, landing::Landing)>,
 }
 
 impl Drawn {
@@ -1278,6 +1884,14 @@ impl Drawn {
         self.focus().map(|focus| focus.on)
     }
 
+    /// Draws `shown` of the tree, each focus taken up to what still shows of
+    /// it, the move under way ended.
+    fn reshow(&mut self, shown: Arc<Shown>) {
+        lift(&mut self.history, &self.coloured.tree, &shown.tree);
+        self.shown = shown;
+        self.transition = None;
+    }
+
     /// What the cell on top holds.
     fn top(&self) -> Holds {
         self.focused().map_or(Holds::Build, Focused::holds)
@@ -1287,7 +1901,7 @@ impl Drawn {
     /// the build also reaches as a dependency.
     fn draws_reached(&self) -> bool {
         match self.focus() {
-            None => self.coloured.reached,
+            None => self.shown.reached,
             Some(focus) => focus.reached,
         }
     }
@@ -1322,9 +1936,37 @@ impl Focused {
         }
     }
 
-    /// The points of `tree` this stands over.
-    fn weight(self, tree: &Dominators) -> u32 {
-        self.holds().weight(tree)
+    /// The points of `shown` this stands over.
+    fn weight(self, shown: &ShownTree) -> u32 {
+        self.holds().weight(shown)
+    }
+
+    /// What `shown`, drawn from `tree`, draws of this: itself where it shows,
+    /// and otherwise the nearest it draws above it; none for the whole
+    /// build. A run of siblings is taken up to what it stands under, since
+    /// another drawing of its row gathers others.
+    fn lifted(self, tree: &Dominators, shown: &ShownTree) -> Option<Self> {
+        let shared = || (!shown.shared_tops().is_empty()).then_some(Self::Shared);
+        let node = match self {
+            Self::Shared => return shared(),
+            Self::Node(node) => node,
+            Self::Run(run) => match run.parent() {
+                Parent::Build => return None,
+                Parent::Shared => return shared(),
+                Parent::Node(node) => node,
+            },
+        };
+        let mut top = node;
+        for at in std::iter::successors(Some(node), |&at| tree.parent(at)) {
+            if shown.shows(at) {
+                return Some(Self::Node(at));
+            }
+            top = at;
+        }
+        match tree.shared_tops().contains(&top) {
+            true => shared(),
+            false => None,
+        }
     }
 
     /// How a tooltip names this in `tree`, whose roots
@@ -1350,11 +1992,13 @@ struct Focus {
 }
 
 impl Focus {
-    fn on(tree: &Dominators, on: Focused) -> Self {
+    /// The focus on `on` of `shown`, drawn from `tree`.
+    fn on(tree: &Dominators, shown: &ShownTree, on: Focused) -> Self {
         let reached = match on {
             Focused::Node(node) => paint::reached(tree, node),
             Focused::Run(run) if run.parent() == Parent::Build => {
-                run.siblings().any(|root| paint::reached(tree, root))
+                let siblings = run.siblings(shown).unwrap_or_default();
+                siblings.iter().any(|&root| paint::reached(tree, root))
             }
             Focused::Shared | Focused::Run(_) => false,
         };
@@ -1364,6 +2008,7 @@ impl Focus {
 
 /// What is ringed and described in the tooltip, described once as it is
 /// selected, so a pointer moving within it only moves the tooltip.
+#[derive(Clone)]
 struct Selection {
     spot: Spot,
     by: Picked,
@@ -1379,6 +2024,72 @@ enum Picked {
     /// A right press, whose menu stands over the cell until it closes, the
     /// pointer leaving the cell for the menu letting go of nothing.
     Menu,
+    /// The document's selection, made in another view or in this one, which
+    /// the keys, the pointer and a menu each ring another cell over.
+    Linked,
+}
+
+/// The cell holding `tree`'s node `node` among those `laid` out, over the
+/// icicle or in it: its own, or that of the run of cells too narrow to draw
+/// apart it is among.
+fn holding(laid: &LaidOut, tree: &ShownTree, node: u32) -> Option<Cell> {
+    laid.spots().find_map(|spot| match spot {
+        Spot::Cell(cell) => match cell.holds {
+            Holds::Node(at) => at == node,
+            Holds::Rest(run) => run.siblings(tree).is_some_and(|run| run.contains(&node)),
+            Holds::Build | Holds::Shared => false,
+        }
+        .then_some(cell),
+        Spot::Hidden { .. } => None,
+    })
+}
+
+/// Takes each focus of `history` of `tree` up to what `drawn` still shows of
+/// it.
+fn lift(history: &mut History<Option<Focus>>, tree: &Dominators, drawn: &ShownTree) {
+    history.rewrite(|focus| {
+        let on = focus.as_ref()?.on.lifted(tree, drawn)?;
+        Some(Focus::on(tree, drawn, on))
+    });
+}
+
+/// How a tree was drawn as the palette opened.
+struct Opened {
+    /// What the tree drew, which the foci of `history` are of.
+    shown: Arc<Shown>,
+    history: History<Option<Focus>>,
+    selection: Option<Selection>,
+}
+
+impl Opened {
+    fn of(drawn: &Drawn) -> Self {
+        Opened {
+            shown: Arc::clone(&drawn.shown),
+            history: drawn.history.clone(),
+            selection: drawn.selection.clone(),
+        }
+    }
+
+    /// Takes up `tree` drawn as `shown`, as the drawing it notes is.
+    fn reshow(&mut self, tree: &Dominators, shown: &Arc<Shown>) {
+        lift(&mut self.history, tree, &shown.tree);
+        self.shown = Arc::clone(shown);
+        self.selection = None;
+    }
+}
+
+/// What the description of a run of cells landed on says of the one it was
+/// landed on, after its name.
+const AMONG_THESE: &str = "is among these";
+
+/// Why the icicle shows no part of a node a jump to which lands as
+/// `landing`; none where it lands on a cell.
+fn unshown(landing: landing::Landing) -> Option<Unshown> {
+    match landing {
+        landing::Landing::Cell { .. } => None,
+        landing::Landing::Hidden(point, by) => Some(Unshown::Hidden { point, by }),
+        landing::Landing::Absent(why) => Some(Unshown::Absent(why)),
+    }
 }
 
 /// A menu put up over a cell, let go of once it closes.
@@ -1405,22 +2116,33 @@ struct Frame {
     row: Pixels,
 }
 
-/// What the tooltip over the cell holding `holds` of the tree of `coloured`
-/// drawn from `focus` reads: what it stands for, how much of the build exists
-/// only because of it, and where its target stands in `as_targets`, the tree
-/// of targets rooted by the choice that rooted the tree drawn.
+/// What the tooltip over the cell holding `holds` of `drawn` from `focus`
+/// reads: what it stands for, how much of the build exists only because of
+/// it, and where its target stands in `as_targets`, the tree of targets
+/// rooted by the choice that rooted the tree drawn.
 fn describe(
-    coloured: &Coloured,
+    drawn: &Drawn,
     as_targets: Option<&Dominators>,
     holds: Holds,
     focus: Option<Focused>,
 ) -> Vec<String> {
+    let coloured = &*drawn.coloured;
     let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
+    let shown = &drawn.shown.tree;
     let unit = tree.scope().unit();
     let names = unit_names(unit);
-    let exclusive = |weight: u32| exclusive(weight, &names);
+    let filtered = hides_any(tree, shown);
+    // How many points of what a cell holds are shown, and of the build.
+    let exclusive = |weight: u32, in_build: u32| match filtered {
+        false => exclusive(weight, &names),
+        true => exclusive_shown(weight, in_build, &names),
+    };
+    let of_build = match filtered {
+        false => "of build",
+        true => "of shown",
+    };
     let shares = |weight: u32, within: Option<Focused>| {
-        let of_build = format!("{} of build", share(weight, tree.total()));
+        let of_build = format!("{} {of_build}", share(weight, shown.total()));
         match within {
             Some(within) => {
                 let name = match within {
@@ -1429,7 +2151,7 @@ fn describe(
                 };
                 format!(
                     "{of_build} · {} of {name}",
-                    share(weight, within.weight(tree))
+                    share(weight, within.weight(shown))
                 )
             }
             None => of_build,
@@ -1437,30 +2159,40 @@ fn describe(
     };
     let on_top = Focused::of(holds) == focus;
     // A share of the focus is told only of what stands under it.
-    let under = focus.filter(|focus| ancestry::ancestors(tree, holds).contains(&focus.holds()));
+    let under = focus.filter(|focus| ancestry::ancestors(shown, holds).contains(&focus.holds()));
     let mut lines = Vec::new();
     match holds {
-        Holds::Build => lines.extend([WHOLE_BUILD.to_owned(), names.counted(tree.total())]),
+        Holds::Build => {
+            let counted = match filtered {
+                false => names.counted(tree.total()),
+                true => counted_shown(shown.total(), tree.total(), &names),
+            };
+            lines.extend([WHOLE_BUILD.to_owned(), counted]);
+        }
         Holds::Shared => {
-            let (count, weight) = (tree.shared_tops().len() as u32, tree.shared_weight());
+            let (count, weight) = (shown.shared_tops().len() as u32, shown.shared_weight());
             lines.push(shared_name(tree, by));
             lines.push(gathered_as_shared(count, by.word(), &names));
-            lines.push(exclusive(weight));
+            lines.push(exclusive(weight, tree.shared_weight()));
             lines.push(shares(weight, under));
         }
         Holds::Node(node) => {
             identify(tree.id(node), tree.kind(node), unit, shared, &mut lines);
-            let weight = tree.weight(node);
-            lines.push(exclusive(weight));
+            let weight = shown.weight(node);
+            lines.push(exclusive(weight, tree.weight(node)));
             if let Some(targets) = &coloured.targets {
                 let held = targets.held(node);
                 lines.extend(targets_held(held.targets(), held.only_here()));
             }
             lines.push(shares(weight, under));
             match tree.parent(node) {
-                Some(parent) => lines.push(dominated_by(tree, parent, shared)),
-                None => standing(tree, node, by, shared, &mut lines),
+                Some(parent) => {
+                    let dominator = dominated_by(tree, parent, shared);
+                    lines.push(marked_hidden(dominator, shown.shows(parent)));
+                }
+                None => standing(tree, shown, node, by, shared, &mut lines),
             }
+            lines.extend(drawn_via(drawn, node));
             let id = tree.id(node);
             lines.extend(as_targets.and_then(|targets| as_target(targets, id, by, shared)));
         }
@@ -1470,7 +2202,9 @@ fn describe(
                 true => run_name(tree, shared, by, run),
                 false => format!("{} · too narrow", names.counted(count)),
             });
-            lines.push(exclusive(weight));
+            let siblings = run.siblings(shown).unwrap_or_default();
+            let in_build = siblings.iter().map(|&node| tree.weight(node));
+            lines.push(exclusive(weight, in_build.sum()));
             lines.push(shares(weight, under));
         }
     }
@@ -1478,15 +2212,84 @@ fn describe(
 }
 
 /// What the tooltip over the row gathering the `count` ancestors of `focus`
-/// left out in the tree of `coloured` reads.
-fn describe_hidden(coloured: &Coloured, count: u32, focus: Option<Focused>) -> Vec<String> {
+/// left out of the rows over `drawn` reads, with the hidden dominators
+/// spliced out above them.
+fn describe_hidden(drawn: &Drawn, count: u32, focus: Option<Focused>) -> Vec<String> {
+    let coloured = &drawn.coloured;
     let (tree, shared, by) = (&*coloured.tree, &coloured.shared, coloured.by());
     let ancestors = if count == 1 { "ancestor" } else { "ancestors" };
-    let hidden = format!("{count} hidden {ancestors}");
-    vec![match focus {
-        Some(focus) => format!("{hidden} of {}", focus.name(tree, shared, by)),
-        None => hidden,
-    }]
+    let more = format!("{count} more {ancestors}");
+    let named = match focus {
+        Some(focus) => format!("{more} of {}", focus.name(tree, shared, by)),
+        None => more,
+    };
+    let shown = &drawn.shown.tree;
+    let gathered = ancestry::hidden(shown, drawn.top()).into_iter();
+    let placings = gathered.filter_map(|holds| shown.placing(holds.node()?));
+    let spliced = placings.map(|placing| placing.spliced).sum();
+    [Some(named), via_hidden(spliced)]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// `named`, naming a point of the tree, marked where the filter hides that
+/// point, it being `shown` otherwise.
+fn marked_hidden(named: String, shown: bool) -> String {
+    match shown {
+        true => named,
+        false => format!("{named} · hidden"),
+    }
+}
+
+/// Whether `shown` leaves out any point of `tree`, which it is drawn from.
+fn hides_any(tree: &Dominators, shown: &ShownTree) -> bool {
+    shown.total() < tree.total()
+}
+
+/// What the status says of how the cells' widths are taken while the filter
+/// hides some of the points.
+const WIDTHS_COUNT_SHOWN: &str = "widths count shown";
+
+/// What a tooltip says of where `node` of `drawn` stands where hidden
+/// dominators were spliced out above it: what it is drawn under, and past how
+/// many; absent where none were.
+fn drawn_via(drawn: &Drawn, node: u32) -> Option<String> {
+    let placing = drawn.shown.tree.placing(node)?;
+    let hidden = via_hidden(placing.spliced)?;
+    let (tree, shared, by) = (
+        &drawn.coloured.tree,
+        &drawn.coloured.shared,
+        drawn.coloured.by(),
+    );
+    let under = match placing.above {
+        Above::Node(above) => point_name(tree.id(above), tree.scope().unit(), shared),
+        Above::Roots => WHOLE_BUILD.to_owned(),
+        Above::Shared => shared_name(tree, by),
+    };
+    Some(format!("drawn under {under} · {hidden}"))
+}
+
+/// How a reader counts the `spliced` hidden dominators between a point and
+/// what it is drawn under; absent where there are none.
+fn via_hidden(spliced: u32) -> Option<String> {
+    (spliced > 0).then(|| format!("via {spliced} hidden"))
+}
+
+/// How a tooltip counts the `shown` points, which `names` names, that exist
+/// only because of what it describes and that the filter shows, of the
+/// `in_build` points in the build.
+fn exclusive_shown(shown: u32, in_build: u32, names: &KindNames) -> String {
+    format!(
+        "{} exclusive shown · {in_build} in build",
+        names.counted(shown)
+    )
+}
+
+/// How a reader counts the `shown` points, which `names` names, of the
+/// `in_build` the build holds.
+fn counted_shown(shown: u32, in_build: u32, names: &KindNames) -> String {
+    format!("{} shown · {in_build} in build", names.counted(shown))
 }
 
 /// What a tooltip says of the `targets` distinct targets a configured
@@ -1534,10 +2337,18 @@ fn dominated_by(tree: &Dominators, parent: u32, shared: &Shared) -> String {
     format!("dominator {dominator}")
 }
 
-/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree` whose
-/// roots were chosen `by`: that it is a root, and how many roots reach it or
-/// share it, listing the first few.
-fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: &mut Vec<String>) {
+/// Pushes onto `lines` what a tooltip says of `node`, a top of `tree`, drawn
+/// as `shown`, whose roots were chosen `by`: that it is a root, and how many
+/// roots reach it or share it, listing the first few and marking those the
+/// filter hides.
+fn standing(
+    tree: &Dominators,
+    shown: &ShownTree,
+    node: u32,
+    by: RootedBy,
+    shared: &Shared,
+    lines: &mut Vec<String>,
+) {
     let unit = tree.scope().unit();
     let word = by.word();
     let elsewhere = tree
@@ -1560,9 +2371,10 @@ fn standing(tree: &Dominators, node: u32, by: RootedBy, shared: &Shared, lines: 
     let colon = if named.is_empty() { "" } else { ":" };
     let named_as = unit_names(unit).of(count.value());
     lines.push(format!("{}{colon}", said(count, word, named_as)));
-    let listed = named
-        .iter()
-        .map(|&above| point_name(tree.id(above), unit, shared));
+    let listed = named.iter().map(|&above| {
+        let name = point_name(tree.id(above), unit, shared);
+        marked_hidden(name, shown.shows(above))
+    });
     lines.extend(listed.map(|name| format!("{LISTED}{name}")));
     let more = count.less(named.len() as u32);
     if !named.is_empty() && more.value() > 0 {
@@ -1716,7 +2528,11 @@ impl Panel for ExclusivePanel {
     }
 
     fn gestures() -> Vec<GestureRow> {
-        GESTURES.rows().chain(legend_gestures()).collect()
+        (GESTURES.rows())
+            .chain(jump::gestures())
+            .chain(chips::gestures())
+            .chain(legend_gestures())
+            .collect()
     }
 
     fn status(&self, cx: &App) -> Option<SharedString> {
@@ -1743,7 +2559,11 @@ impl Panel for ExclusivePanel {
                 self.focus_handle.focus(window, cx);
                 self.compute(cx);
             }
-            false => self.clear_hover(cx),
+            false => {
+                self.clear_hover(cx);
+                self.jump.update(cx, |palette, cx| palette.dismiss(cx));
+                self.opened = None;
+            }
         }
     }
 }
@@ -1751,8 +2571,12 @@ impl Panel for ExclusivePanel {
 impl Render for ExclusivePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::from_theme(&bviz_ui_theme::theme(window, cx));
+        let key_context = match self.offering.offer() {
+            Some(_) => format!("{KEY_CONTEXT} {OFFERING}"),
+            None => KEY_CONTEXT.to_string(),
+        };
         let root = div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context.as_str())
             .on_action(cx.listener(|view, _: &ShowWholeBuild, _, cx| view.focus_on(None, cx)))
             .on_action(cx.listener(|view, _: &FocusUp, _, cx| view.focus_up(cx)))
             .on_action(cx.listener(|view, _: &SelectPrevious, _, cx| {
@@ -1761,7 +2585,11 @@ impl Render for ExclusivePanel {
             .on_action(cx.listener(|view, _: &SelectNext, _, cx| view.step(Step::Next, cx)))
             .on_action(cx.listener(|view, _: &SelectParent, _, cx| view.step(Step::Parent, cx)))
             .on_action(cx.listener(|view, _: &SelectChild, _, cx| view.step(Step::Child, cx)))
-            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.deselect(cx)))
+            .on_action(cx.listener(|view, _: &Deselect, _, cx| view.dismiss(cx)))
+            .on_action(cx.listener(|view, _: &reveal::Accept, _, cx| view.accept(cx)))
+            .on_action(
+                cx.listener(|view, _: &jump::Open, window, cx| view.open_palette(window, cx)),
+            )
             .on_action(cx.listener(|view, _: &FocusSelected, window, cx| {
                 view.focus_selected(window, cx);
             }))
@@ -1775,6 +2603,16 @@ impl Render for ExclusivePanel {
                 if let Some(picker) = &view.picker {
                     picker.cycle(cx);
                 }
+            }))
+            .on_action(cx.listener(|view, _: &chips::Focus, window, cx| {
+                view.chips
+                    .update(cx, |bar, cx| chips::focus(bar, window, cx));
+            }))
+            .on_action(cx.listener(|view, _: &chips::Apply, _, cx| {
+                view.chips.update(cx, chips::apply_staged);
+            }))
+            .on_action(cx.listener(|view, _: &chips::CopyStack, _, cx| {
+                view.chips.update(cx, chips::copy_stack);
             }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1801,6 +2639,7 @@ impl Render for ExclusivePanel {
                 }),
             )
             .track_focus(&self.focus_handle)
+            .relative()
             .flex_1()
             .flex()
             .flex_col()
@@ -1810,36 +2649,46 @@ impl Render for ExclusivePanel {
         if let Some(placeholder) = model.source().placeholder(&palette.colors) {
             return root.child(placeholder);
         }
+        let jump = self.jump.read(cx).is_open().then(|| self.jump.clone());
+        let card = hidden::offer_card(
+            &self.offering,
+            |view: &mut Self| &mut view.offering,
+            &palette,
+            &self.focus_handle,
+            &Deselect,
+            cx,
+        );
+        let card = card.map(|card| div().absolute().top_2().right_2().w(CARD_WIDTH).child(card));
         let drawn = self.drawn.as_ref();
         let key = self.key(cx);
         let root = root.when(self.picker.is_some(), |root| {
-            root.on_action(cx.listener(|view, _: &FocusRoots, window, cx| {
-                view.roots_field.read(cx).focus_handle(cx).focus(window, cx);
-            }))
+            root.on_action(
+                cx.listener(|view, _: &EditRoots, window, cx| view.edit_roots(window, cx)),
+            )
         });
         let root = root.children(self.picker.as_ref().map(|picker| {
             let computing = self.choosing.is_some()
+                || self.showing.is_some()
+                || matches!(self.wanted(cx), Wanted::Pending)
                 || drawn.is_some_and(|drawn| Some(&drawn.coloured.key) != key.as_ref());
             let travels = drawn.map_or_else(Travels::default, |drawn| Travels {
                 back: drawn.history.has_back(),
                 up: drawn.focused().is_some(),
             });
             let scoping = Scoping {
-                roots: &self.roots_field,
+                roots: roots::setting(self, &palette, window, cx),
                 computing,
                 travels,
             };
             let legend = legend(&self.legend, drawn, &palette);
-            strip(
-                picker,
-                scoping,
-                legend,
-                &self.focus_handle,
-                &palette,
-                window,
-                cx,
-            )
+            let strip = strip(picker, scoping, legend, &self.focus_handle, window, cx);
+            div()
+                .relative()
+                .child(strip)
+                .children(roots::sheet(self, &palette, cx))
         }));
+        let chips = &self.chips;
+        let root = root.child(OneRow::new("exclusive-query-bar").filling(|| chips.clone()));
         let rooting = self.rooting(cx);
         let report = match self.failure(cx) {
             Some(failed) => {
@@ -1853,7 +2702,9 @@ impl Render for ExclusivePanel {
         };
         let root = root.children(report);
         let Some(drawn) = drawn else {
-            return root.child(centered_spinner(COMPUTING, &palette.colors));
+            return (root.child(centered_spinner(COMPUTING, &palette.colors)))
+                .children(jump)
+                .children(card);
         };
         let tree = &drawn.coloured.tree;
         if tree.total() == 0 {
@@ -1862,7 +2713,16 @@ impl Render for ExclusivePanel {
                 RootedBy::Tops => format!("The graph holds no {many}."),
                 RootedBy::Targets => format!("The target set names no {many} of the graph."),
             };
-            return root.child(centered_notice(empty, &palette.colors));
+            return (root.child(centered_notice(empty, &palette.colors)))
+                .children(jump)
+                .children(card);
+        }
+        if drawn.shown.tree.total() == 0 {
+            let many = unit_names(tree.scope().unit()).many;
+            let hidden = format!("The filter hides every one of the {many} drawn here.");
+            return (root.child(centered_notice(hidden, &palette.colors)))
+                .children(jump)
+                .children(card);
         }
         root.child(
             div()
@@ -1872,6 +2732,8 @@ impl Render for ExclusivePanel {
                 .min_h(px(0.))
                 .child(cached_layer(self.canvas.clone()))
                 .child(hover_layer(cx.entity(), palette))
+                .children(card)
+                .children(jump)
                 .when(drawn.picked_by_pointer(), |icicle| icicle.cursor_pointer())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1918,9 +2780,9 @@ impl Render for ExclusivePanel {
 const POINTS: Priority = 2;
 
 /// What the strip holds past its picker.
-struct Scoping<'a> {
-    /// The field choosing the roots of the tree.
-    roots: &'a Entity<QueryField>,
+struct Scoping {
+    /// The setting choosing the roots of the tree.
+    roots: ToolbarGroup,
     /// Whether the roots of a new choice are chosen and its tree computed over
     /// the one drawn for the last.
     computing: bool,
@@ -1991,7 +2853,6 @@ fn strip(
     scoping: Scoping,
     legend: Legend,
     focus: &FocusHandle,
-    palette: &Palette,
     window: &Window,
     cx: &Context<ExclusivePanel>,
 ) -> OneRow {
@@ -1999,7 +2860,7 @@ fn strip(
     OneRow::new("exclusive-controls")
         .group(travel(scoping.travels, focus, window, cx))
         .group(points)
-        .filling(|| roots::field(scoping.roots, palette, cx))
+        .group(scoping.roots)
         .when(scoping.computing, |row| {
             row.busy("exclusive-computing", "computing…")
         })
@@ -2060,8 +2921,9 @@ fn reached_key(unit: Unit, by: RootedBy, fill: Rgba, palette: &Palette) -> [Lege
 /// The layer over the cells that rings and describes the one selected,
 /// painted apart from the cells so that neither repaints any of them, and
 /// only while they are at rest. Its layout records where the cells lie for
-/// the pointer handlers and the keys, and lets go of a cell the pointer
-/// selected where they are laid out elsewhere.
+/// the pointer handlers and the keys, lets go of a cell the pointer selected
+/// where they are laid out elsewhere, and rings the cell of the node selected
+/// among them.
 fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoElement {
     let prepaint = {
         let view = view.clone();
@@ -2070,7 +2932,7 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                 bounds,
                 row: paint::row_height(window),
             };
-            view.update(cx, |view, _| {
+            view.update(cx, |view, cx| {
                 if view.frame == Some(frame) {
                     return;
                 }
@@ -2079,12 +2941,18 @@ fn hover_layer(view: Entity<ExclusivePanel>, palette: Palette) -> impl IntoEleme
                 if let Some(drawn) = &mut view.drawn {
                     let moved = drawn.selection.take().and_then(|selection| {
                         let spot = laid.as_ref()?.find(&selection.spot)?;
-                        (selection.by == Picked::Keys).then_some(Selection { spot, ..selection })
+                        let kept = matches!(selection.by, Picked::Keys | Picked::Linked);
+                        kept.then_some(Selection { spot, ..selection })
                     });
                     drawn.selection = moved;
                 }
+                view.relink(cx);
             });
-            if let Some((lines, anchor)) = view.read(cx).card() {
+            // The palette stands over the cells, which a card describing the
+            // cell its keys preview would cover it with.
+            let panel = view.read(cx);
+            let card = panel.card().filter(|_| !panel.jump.read(cx).is_open());
+            if let Some((lines, anchor)) = card {
                 let tooltip = palette.colors.tooltip();
                 defer_hover_card(lines, anchor, bounds, tooltip, window, cx);
             }
@@ -2113,8 +2981,9 @@ impl Render for IcicleCanvas {
             let drawn = panel.drawn.as_ref()?;
             Some(Scene {
                 colouring: Arc::clone(&drawn.coloured.colouring),
-                verdicts: panel.fade.as_ref().map(|fade| Arc::clone(&fade.verdicts)),
+                verdicts: drawn.shown.by.clone(),
                 tree: Arc::clone(&drawn.coloured.tree),
+                shown: Arc::clone(&drawn.shown),
                 by: drawn.coloured.by(),
                 top: drawn.top(),
                 transition: drawn.transition.clone(),
@@ -2160,6 +3029,22 @@ mod tests {
     #[test]
     fn every_gesture_fits_the_keys_help() {
         assert_eq!(GESTURES.overlong(), []);
+    }
+
+    /// A filter hiding points leaves a tooltip counting both what it shows
+    /// and what the build holds, and the hidden dominators passed over.
+    #[test]
+    fn a_tooltip_counts_the_shown_points_beside_the_build_s() {
+        let names = unit_names(Unit::Target);
+        assert_eq!(
+            exclusive_shown(312, 4870, &names),
+            "312 targets exclusive shown · 4870 in build"
+        );
+        assert_eq!(counted_shown(1, 9, &names), "1 target shown · 9 in build");
+        assert_eq!(via_hidden(0), None);
+        assert_eq!(via_hidden(3).as_deref(), Some("via 3 hidden"));
+        assert_eq!(marked_hidden("//:a".into(), true), "//:a");
+        assert_eq!(marked_hidden("//:a".into(), false), "//:a · hidden");
     }
 
     #[test]

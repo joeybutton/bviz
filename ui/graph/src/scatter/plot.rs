@@ -309,11 +309,36 @@ impl Span {
         Span::new(self.lo + at * (self.len - len), len)
     }
 
+    /// The span showing the stretch of the axis from `lo` to `hi` within the
+    /// part of it from `from` to `to` across it: this span where it does so
+    /// clear of [`ONTO_MARGIN`] at either end of that part, and otherwise
+    /// one as long, or longer where the stretch needs it, centring the
+    /// stretch there.
+    fn onto(self, lo: f32, hi: f32, from: f32, to: f32) -> Self {
+        let room = to - from;
+        let inner = |span: Span| {
+            let margin = ONTO_MARGIN * room;
+            (span.along(from + margin), span.along(to - margin))
+        };
+        let (start, end) = inner(self);
+        if room <= 0.0 || (start <= lo && hi <= end) {
+            return self;
+        }
+        let needed = (hi - lo) / (room * (1.0 - 2.0 * ONTO_MARGIN));
+        let len = self.len.max(needed);
+        let centre = (lo + hi) / 2.0;
+        Span::new(centre - (from + room / 2.0) * len, len)
+    }
+
     /// The span slid `by` of its own length toward the axis's far end.
     fn panned(self, by: f32) -> Self {
         Span::new(self.lo + by * self.len, self.len)
     }
 }
+
+/// The share of the room a jump lands in that its marks stay clear of at
+/// either end, so none lands against an edge.
+const ONTO_MARGIN: f32 = 0.15;
 
 /// The part of each axis the plot shows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -414,6 +439,36 @@ impl DataArea {
         }
     }
 
+    /// The zoom showing every one of `marks` in the part of the plot below
+    /// the height `clear_below`, as [`Span::onto`] moves each axis; the zoom
+    /// drawn where it shows them there already.
+    pub(crate) fn onto<'m>(
+        &self,
+        marks: impl IntoIterator<Item = &'m Mark>,
+        clear_below: Pixels,
+    ) -> Zoom {
+        let mut stretch: Option<[f32; 4]> = None;
+        for mark in marks {
+            let (x, y) = (self.x.fraction(mark.x), self.y.fraction(mark.y));
+            let [x_lo, x_hi, y_lo, y_hi] = stretch.get_or_insert([x, x, y, y]);
+            (*x_lo, *x_hi) = (x_lo.min(x), x_hi.max(x));
+            (*y_lo, *y_hi) = (y_lo.min(y), y_hi.max(y));
+        }
+        let Some([x_lo, x_hi, y_lo, y_hi]) = stretch else {
+            return self.zoom;
+        };
+        let height = self.bounds.size.height;
+        let below = (clear_below - self.bounds.top()).max(px(0.));
+        let top = match height > px(0.) {
+            true => (1.0 - below / height).max(0.0),
+            false => 1.0,
+        };
+        Zoom {
+            x: self.zoom.x.onto(x_lo, x_hi, 0.0, 1.0),
+            y: self.zoom.y.onto(y_lo, y_hi, 0.0, top),
+        }
+    }
+
     /// Where on the axes a pointer at `at` lies.
     pub(crate) fn spot(&self, at: Point<Pixels>) -> Spot {
         let across_x = (at.x - self.bounds.left()) / self.bounds.size.width;
@@ -492,6 +547,14 @@ pub(crate) struct Picked {
 }
 
 impl Picked {
+    /// The marks `covered`, by their indices among the plotted marks, as a
+    /// pointer naming the first of them would pick them; none where there
+    /// are none.
+    pub(crate) fn of(covered: Vec<usize>) -> Option<Self> {
+        let mark = *covered.first()?;
+        Some(Picked { mark, covered })
+    }
+
     pub(crate) fn covered(&self) -> &[usize] {
         &self.covered
     }
@@ -848,6 +911,25 @@ mod tests {
         assert_eq!(Span::WHOLE.zoomed(0.5, 1e6, NARROWEST).len, NARROWEST);
         assert_eq!(span.panned(-10.0).lo, 0.0);
         assert!((span.panned(10.0).lo - 0.75).abs() < 1e-6);
+    }
+
+    /// A stretch already well inside the span leaves it be; one outside it,
+    /// or against its edge, is centred in the room, the span widened only
+    /// where the stretch needs more than it shows.
+    #[test]
+    fn a_jump_moves_the_span_only_as_far_as_it_must() {
+        let span = Span::new(0.25, 0.25);
+        assert_eq!(span.onto(0.35, 0.4, 0.0, 1.0), span);
+        let slid = span.onto(0.8, 0.8, 0.0, 1.0);
+        assert!((slid.len - 0.25).abs() < 1e-6);
+        assert!((slid.across(0.8) - 0.5).abs() < 1e-6);
+        let wide = span.onto(0.3, 0.6, 0.0, 1.0);
+        assert!(wide.len > 0.4, "{wide:?}");
+        assert!(wide.across(0.3) >= ONTO_MARGIN - 1e-6, "{wide:?}");
+        assert!(wide.across(0.6) <= 1.0 - ONTO_MARGIN + 1e-6, "{wide:?}");
+        let below = span.onto(0.8, 0.8, 0.0, 0.5);
+        assert!((below.across(0.8) - 0.25).abs() < 1e-6, "{below:?}");
+        assert_eq!(Span::WHOLE.onto(0.0, 1.0, 0.0, 1.0), Span::WHOLE);
     }
 
     #[test]

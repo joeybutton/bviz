@@ -4,7 +4,7 @@
 use super::ancestry::{self, Spot};
 use super::icicle::{self, Cell, Holds, Parent, Run};
 use super::transition::{Placed, Transition};
-use super::{RootedBy, SEVERAL, WHOLE_BUILD, what_is_shared};
+use super::{RootedBy, SEVERAL, Shown, WHOLE_BUILD, what_is_shared};
 use crate::Palette;
 use crate::hints::hints_where_alike;
 use crate::hue::Colouring;
@@ -14,7 +14,7 @@ use crate::point::{
     KindNames, configuration_readings, mnemonic, point_label, primary_output, unit_names,
 };
 use bviz_graph_layout::Id;
-use bviz_graph_layout::dominators::{Dominators, Standing};
+use bviz_graph_layout::dominators::{Dominators, ShownTree, Standing};
 use bviz_graph_layout::metrics::Unit;
 use bviz_graph_layout::select::{Verdict, Verdicts};
 use bviz_graph_layout::shown::{ELLIPSIS, fit_label, name_start};
@@ -110,6 +110,8 @@ pub(crate) fn row_height(window: &Window) -> Pixels {
 /// borrow of the panel.
 pub(crate) struct Scene {
     pub(crate) tree: Arc<Dominators>,
+    /// What of `tree` the cells draw.
+    pub(crate) shown: Arc<Shown>,
     /// How the roots of `tree` were chosen.
     pub(crate) by: RootedBy,
     pub(crate) colouring: Arc<Colouring>,
@@ -141,7 +143,7 @@ pub(crate) fn paint_icicle(
     cx: &mut App,
 ) {
     let row = row_height(window);
-    let tree = &*scene.tree;
+    let tree = &scene.shown.tree;
     let lowered = scene
         .transition
         .as_ref()
@@ -227,6 +229,7 @@ fn paint_cells(
 ) {
     let cells: Vec<Cell> = placed.iter().map(|placed| placed.cell).collect();
     let hints = hints_among(&scene.tree, &scene.shared, trail, &cells);
+    let hints = noting_spliced(hints, &scene.shown.tree, scene.top.node());
     for &Placed { cell, on_top } in placed {
         let live = over(fill(scene, cell.holds), scene.palette.background);
         let above = ((top - cell.rect.top()) / row).clamp(0., 1.);
@@ -242,6 +245,7 @@ fn paint_above(scene: &Scene, above: &[Spot], trail: &[u32], window: &mut Window
     let palette = &scene.palette;
     let named: Vec<u32> = trail.iter().copied().chain(scene.top.node()).collect();
     let hints = hints_among(&scene.tree, &scene.shared, &named, &[]);
+    let hints = noting_spliced(hints, &scene.shown.tree, trail.iter().copied());
     for &spot in above {
         match spot {
             Spot::Cell(cell) => {
@@ -251,6 +255,28 @@ fn paint_above(scene: &Scene, above: &[Spot], trail: &[u32], window: &mut Window
             Spot::Hidden { rect, count } => paint_hidden(rect, count, palette, window, cx),
         }
     }
+}
+
+/// `hints` with what each of `nodes` passes over to stand where `shown`
+/// draws it, the hidden dominators spliced out above it, added to its hint,
+/// so that the rows over the focus and the cell on top read what the filter
+/// leaves out between them.
+fn noting_spliced(
+    mut hints: HashMap<u32, String>,
+    shown: &ShownTree,
+    nodes: impl IntoIterator<Item = u32>,
+) -> HashMap<u32, String> {
+    for node in nodes {
+        let placing = shown.placing(node);
+        let Some(note) = placing.and_then(|placing| super::via_hidden(placing.spliced)) else {
+            continue;
+        };
+        hints
+            .entry(node)
+            .and_modify(|hint| *hint = format!("{hint}{PART_SEPARATOR}{note}"))
+            .or_insert(note);
+    }
+    hints
 }
 
 /// How far a row over the focus is carried from the hue of the cell it stands
@@ -298,8 +324,9 @@ fn paint_cell(
         }
         (_, Holds::Shared) => {
             let (room, font_size) = style.label_room(rect);
-            let whole = cell_name(&scene.tree, &scene.shared, scene.by, Holds::Shared);
-            let count = scene.tree.shared_tops().len();
+            let shown = &scene.shown.tree;
+            let whole = cell_name(&scene.tree, shown, &scene.shared, scene.by, Holds::Shared);
+            let count = shown.shared_tops().len();
             let width = text_width(window, font_size, label);
             CellName::plain(shared_cell_name(whole, count, room, width))
         }
@@ -310,7 +337,10 @@ fn paint_cell(
             let hint = hints.get(&node).map(String::as_str);
             name.fitted(hint, room, text_width(window, font_size, label))
         }
-        (_, holds) => CellName::plain(cell_name(&scene.tree, &scene.shared, scene.by, holds)),
+        (_, holds) => {
+            let (tree, shown) = (&scene.tree, &scene.shown.tree);
+            CellName::plain(cell_name(tree, shown, &scene.shared, scene.by, holds))
+        }
     };
     let strength = match cell.holds {
         Holds::Node(node) if faded(scene, scene.tree.id(node)) => UNMARKED_FADE,
@@ -375,14 +405,14 @@ fn paint_hidden(
         .ok();
 }
 
-/// The icon closing the name of the row of hidden ancestors, which opens the
+/// The icon closing the name of the row of more ancestors, which opens the
 /// list of them.
 const CARET: &str = "caret-down";
 
-/// Room between the name of the row of hidden ancestors and its caret.
+/// Room between the name of the row of more ancestors and its caret.
 const CARET_GAP: f32 = 2.0;
 
-/// What the row gathering `count` hidden ancestors reads, ahead of its caret.
+/// What the row gathering `count` more ancestors reads, ahead of its caret.
 pub(crate) fn hidden_name(count: u32) -> String {
     format!("{ELLIPSIS} {}", more(count))
 }
@@ -421,13 +451,9 @@ pub(crate) fn paint_ring(rect: Bounds<Pixels>, palette: &Palette, window: &mut W
     ));
 }
 
-/// Whether the filter fading the cells of `scene` draws the node `id` as no
-/// part of what it selects.
+/// Whether the filter fading the cells of `scene` fades the node `id`.
 fn faded(scene: &Scene, id: Id) -> bool {
-    scene
-        .verdicts
-        .as_ref()
-        .is_some_and(|verdicts| matches!(verdicts.get(id), Verdict::Hidden | Verdict::Faded))
+    (scene.verdicts.as_ref()).is_some_and(|verdicts| verdicts.get(id) == Verdict::Faded)
 }
 
 fn fill(scene: &Scene, holds: Holds) -> Rgba {
@@ -464,14 +490,27 @@ fn rest_fill(palette: &Palette) -> Rgba {
     mix(palette.data.neutral, palette.background, REST_RECEDE)
 }
 
-/// What the cell holding `holds` of `tree`, whose roots were chosen `by`,
-/// reads.
-fn cell_name(tree: &Dominators, shared: &Shared, by: RootedBy, holds: Holds) -> String {
+/// What the cell holding `holds` of `shown`, drawn from `tree`, whose roots
+/// were chosen `by`, reads.
+fn cell_name(
+    tree: &Dominators,
+    shown: &ShownTree,
+    shared: &Shared,
+    by: RootedBy,
+    holds: Holds,
+) -> String {
     let many = unit_names(tree.scope().unit()).many;
     match holds {
+        Holds::Build if super::hides_any(tree, shown) => {
+            format!(
+                "whole build · {} of {} {many} shown",
+                shown.total(),
+                tree.total()
+            )
+        }
         Holds::Build => format!("whole build · {} {many}", tree.total()),
         Holds::Shared => {
-            let (name, count) = (shared_name(tree, by), tree.shared_tops().len());
+            let (name, count) = (shared_name(tree, by), shown.shared_tops().len());
             format!("{name} · {count}")
         }
         Holds::Node(node) => point_name(tree.id(node), tree.scope().unit(), shared),
