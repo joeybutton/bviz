@@ -25,8 +25,9 @@ pub(crate) enum Kind {
         parted: bool,
     },
     /// An item taking the room the groups leave, at `least` through every
-    /// step of [`narrowings`] and narrower only past the last.
-    Filling { least: Pixels },
+    /// step of [`narrowings`] up to the overflow menu's trigger leaving the
+    /// row, before which it narrows to `floor`; narrower only past the last.
+    Filling { least: Pixels, floor: Pixels },
 }
 
 /// Which edge of the row an item is held against.
@@ -129,8 +130,9 @@ enum Step {
 /// row. Only once no group can narrow further do groups move into the
 /// overflow, in that same order, so that a control stays in the row, however
 /// compact, for as long as one can. A row still too narrow then leaves out the
-/// groups that cannot move into the menu, in that order, and last the menu's
-/// trigger, which reaches every group given up before it.
+/// groups that cannot move into the menu, in that order, narrows each filling
+/// to its floor, and last leaves out the menu's trigger, which reaches every
+/// group given up before it.
 fn narrowings(items: &[Measure]) -> Vec<Step> {
     struct Group<'a> {
         at: usize,
@@ -171,6 +173,13 @@ fn narrowings(items: &[Measure]) -> Vec<Step> {
                 .map(|group| Step::Narrow(group.at, stand)),
         );
     }
+    steps.extend(
+        (items.iter().enumerate())
+            .filter(
+                |(_, item)| matches!(item.kind, Kind::Filling { least, floor } if floor < least),
+            )
+            .map(|(at, _)| Step::Narrow(at, Stand::Shown(1))),
+    );
     steps.push(Step::LeaveTrigger);
     steps
 }
@@ -221,7 +230,10 @@ impl State {
             };
             let (width, parted, fills) = match &item.kind {
                 Kind::Group { widths, parted, .. } => (widths[stage], *parted, false),
-                Kind::Filling { least } => (*least, false, true),
+                Kind::Filling { least, floor } => match stage {
+                    0 => (*least, false, true),
+                    _ => (*floor, false, true),
+                },
             };
             let ruled = parted && !standing.is_empty();
             standing.push(Standing {
@@ -340,8 +352,17 @@ mod tests {
     }
 
     fn filling(least: f32) -> Measure {
+        folding(least, least)
+    }
+
+    /// A filling standing at `least` while groups give way, and narrowing to
+    /// `floor` before the overflow menu's trigger leaves the row.
+    fn folding(least: f32, floor: f32) -> Measure {
         Measure {
-            kind: Kind::Filling { least: px(least) },
+            kind: Kind::Filling {
+                least: px(least),
+                floor: px(floor),
+            },
             side: Side::Leading,
         }
     }
@@ -534,6 +555,28 @@ mod tests {
         assert_eq!(seen(&fitted), [Out, Shown(0)]);
         assert_eq!(fitted.trigger, None);
         assert!(matches!(fitted.spots[1], Spot::Row { width, .. } if width == px(100.)));
+    }
+
+    /// A filling able to stand narrower than its least does so before the
+    /// row leaves out the trigger reaching the groups it gave up, and takes
+    /// the whole row only once even its floor leaves no room for the trigger.
+    #[test]
+    fn a_folding_filling_keeps_the_trigger_in_the_row() {
+        const LEAST: f32 = 420.;
+        const FLOOR: f32 = 120.;
+        let items = [group(&[90.], 1, true), folding(LEAST, FLOOR)];
+        let beside_trigger = |least: f32| least + GAP_WIDTH + OVERFLOW_WIDTH;
+        assert_eq!(stands(&items, beside_trigger(LEAST)), [Menu, Shown(0)]);
+        let folded = fit(&items, room(beside_trigger(LEAST) - 1.));
+        assert_eq!(seen(&folded), [Menu, Shown(1)]);
+        assert_eq!(
+            folded.trigger,
+            Some(px(beside_trigger(LEAST) - 1. - OVERFLOW_WIDTH))
+        );
+        assert_eq!(stands(&items, beside_trigger(FLOOR)), [Menu, Shown(1)]);
+        let whole = fit(&items, room(beside_trigger(FLOOR) - 1.));
+        assert_eq!(seen(&whole), [Out, Shown(1)]);
+        assert_eq!(whole.trigger, None);
     }
 
     /// A graph's query row as a layout at a fractional scale measured it: the
