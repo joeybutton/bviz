@@ -3,7 +3,7 @@ mod fit;
 use crate::button::ICON_SIZE;
 use crate::menu::{Menu, MenuEvent, MenuItem, over_window};
 use crate::{Button, CONTROL_HEIGHT, spinner};
-use fit::{Fitted, Kind, Measure, Room, Side, Spot};
+use fit::{Kind, Measure, Room, Side, Spot};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Div, ElementId, Empty, Entity,
     FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, RenderOnce,
@@ -50,6 +50,7 @@ pub struct ToolbarGroup {
     widest: AnyElement,
     narrower: Vec<AnyElement>,
     overflow: Option<Overflow>,
+    anchored: Option<AnyElement>,
     parted: bool,
 }
 
@@ -69,6 +70,7 @@ impl ToolbarGroup {
             widest: widest.into_any_element(),
             narrower: Vec::new(),
             overflow: None,
+            anchored: None,
             parted: false,
         }
     }
@@ -108,6 +110,16 @@ impl ToolbarGroup {
     ) -> Self {
         let items = std::iter::once(first).chain(rest).collect();
         self.overflow = Some(Overflow { items, set });
+        self
+    }
+
+    /// Lays `element` out over where the group is reached: its own bounds
+    /// while it stands in the row, the overflow menu trigger's while it stands
+    /// in the menu, and nowhere once it is out of both. A sheet the group
+    /// opens, placed in it by [`under_trigger`](crate::menu_chrome::under_trigger),
+    /// so opens under whichever the group is reached by.
+    pub fn anchoring(mut self, element: impl IntoElement) -> Self {
+        self.anchored = Some(element.into_any_element());
         self
     }
 
@@ -380,6 +392,7 @@ struct Measured {
     widest: (AnyElement, Size<Pixels>),
     narrower: Vec<(AnyElement, Size<Pixels>)>,
     overflow: Option<Overflow>,
+    anchored: Option<AnyElement>,
     fills: bool,
 }
 
@@ -417,6 +430,7 @@ impl Measured {
                     widest,
                     narrower,
                     overflow: group.overflow,
+                    anchored: group.anchored,
                     fills: false,
                 };
                 (measured, measure)
@@ -451,6 +465,7 @@ impl Measured {
                     widest: (held(standing), extent),
                     narrower: Vec::new(),
                     overflow: None,
+                    anchored: None,
                     fills: true,
                 };
                 (measured, measure)
@@ -511,6 +526,28 @@ fn prepaint_natural(
     element
 }
 
+/// Lays `element` out in a holder spanning `over`, for what it holds to place
+/// itself by.
+fn prepaint_over(
+    element: AnyElement,
+    over: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut holder = div()
+        .relative()
+        .w(over.size.width)
+        .h(over.size.height)
+        .child(element)
+        .into_any_element();
+    let space = size(
+        AvailableSpace::Definite(over.size.width),
+        AvailableSpace::Definite(over.size.height),
+    );
+    holder.prepaint_as_root(over.origin, space, window, cx);
+    holder
+}
+
 impl Element for Fitting {
     type RequestLayoutState = ();
     type PrepaintState = Vec<AnyElement>;
@@ -564,19 +601,26 @@ impl Element for Fitting {
                 .width,
             rule: RULE + GAP,
         };
-        let Fitted {
-            spots,
-            trigger,
-            free,
-        } = fit::fit(&measures, room);
+        let fitted = fit::fit(&measures, room);
         let mut overflowed = Vec::new();
         let mut set = false;
         let statuses = std::mem::take(&mut self.status);
         let mask = ContentMask { bounds };
         let laid = window.with_content_mask(Some(mask), |window| {
-            let mut laid = Vec::with_capacity(measured.len() + 2);
-            for (item, spot) in measured.into_iter().zip(spots) {
-                match spot {
+            let anchors = measured.iter().filter(|item| item.anchored.is_some());
+            let mut anchored = Vec::with_capacity(anchors.count());
+            let mut laid = Vec::with_capacity(measured.len() * 2 + anchored.capacity() + 2);
+            for (at, mut item) in measured.into_iter().enumerate() {
+                if let (Some(element), Some((x, width))) =
+                    (item.anchored.take(), fitted.reached_at(at, room))
+                {
+                    let over = Bounds::new(
+                        point(bounds.left() + x, bounds.top()),
+                        size(width, bounds.size.height),
+                    );
+                    anchored.push((element, over));
+                }
+                match fitted.spots[at] {
                     Spot::Row {
                         stage,
                         x,
@@ -602,7 +646,7 @@ impl Element for Fitting {
                     Spot::Out => {}
                 }
             }
-            if let Some(x) = trigger {
+            if let Some(x) = fitted.trigger {
                 let chosen = match set {
                     true => &mut self.trigger.marked,
                     false => &mut self.trigger.unmarked,
@@ -616,7 +660,10 @@ impl Element for Fitting {
                     cx,
                 ));
             }
-            let (free_start, free_end) = free;
+            for (element, over) in anchored {
+                laid.push(prepaint_over(element, over, window, cx));
+            }
+            let (free_start, free_end) = fitted.free;
             for mut status in statuses {
                 let extent = status.layout_as_root(natural(), window, cx);
                 if free_start + extent.width <= free_end {

@@ -80,6 +80,25 @@ pub(crate) struct Fitted {
     pub free: (Pixels, Pixels),
 }
 
+impl Fitted {
+    /// Where along the row the item at `at` is reached, as the offset of its
+    /// left edge past the row's and its width: its own span, short of its
+    /// rule, while it stands in the row, and the overflow menu trigger's while
+    /// it stands in the menu.
+    pub fn reached_at(&self, at: usize, room: Room) -> Option<(Pixels, Pixels)> {
+        match self.spots[at] {
+            Spot::Row {
+                x, width, ruled, ..
+            } => Some(match ruled {
+                true => (x + room.rule, width - room.rule),
+                false => (x, width),
+            }),
+            Spot::Menu => self.trigger.map(|x| (x, room.overflow)),
+            Spot::Out => None,
+        }
+    }
+}
+
 /// How `items` stand in `room`: the first state of [`narrowings`] whose row
 /// fits, or the last where none does, laid out.
 ///
@@ -520,6 +539,31 @@ mod tests {
         let fitted = fit(&items, room(whole - 1.));
         assert_eq!(seen(&fitted), [Menu, Shown(0)]);
         assert!(matches!(fitted.spots[1], Spot::Row { ruled: false, .. }));
+    }
+
+    /// An item is reached at its own span, short of its rule, while it stands
+    /// in the row, at the trigger's while it stands in the menu, and nowhere
+    /// once the trigger has left the row too.
+    #[test]
+    fn an_item_is_reached_where_it_stands() {
+        let items = [group(&[50.], 2, true), parted(group(&[60.], 1, true))];
+        let whole = 50. + GAP_WIDTH + RULE_WIDTH + 60.;
+        let fitted = fit(&items, room(whole));
+        assert_eq!(
+            fitted.reached_at(1, room(whole)),
+            Some((px(50. + GAP_WIDTH + RULE_WIDTH), px(60.)))
+        );
+        let narrower = room(whole - 1.);
+        let fitted = fit(&items, narrower);
+        assert_eq!(seen(&fitted), [Shown(0), Menu]);
+        assert_eq!(
+            fitted.reached_at(1, narrower),
+            Some((px(50. + GAP_WIDTH), px(OVERFLOW_WIDTH)))
+        );
+        let too_narrow = room(OVERFLOW_WIDTH - 1.);
+        let fitted = fit(&items, too_narrow);
+        assert_eq!(fitted.reached_at(0, too_narrow), None);
+        assert_eq!(fitted.reached_at(1, too_narrow), None);
     }
 
     /// A filling stands at its least while any group stands in the row: every
