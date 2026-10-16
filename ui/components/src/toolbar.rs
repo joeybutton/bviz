@@ -139,7 +139,7 @@ impl ToolbarGroup {
 ///
 /// Where the row is too narrow for its controls, its groups give way by
 /// [`Priority`], narrowing through the presentations they offer and then
-/// moving into a menu behind a trigger ending the left-hand controls.
+/// moving into a menu behind a trigger ending the row.
 #[derive(IntoElement)]
 pub struct OneRow {
     id: ElementId,

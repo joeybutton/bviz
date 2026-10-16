@@ -40,8 +40,8 @@ pub(crate) struct Room {
     pub width: Pixels,
     /// Between neighbouring items of the row.
     pub gap: Pixels,
-    /// The trigger of the overflow menu, an item of the row ending the leading
-    /// ones while any group stands in the menu.
+    /// The trigger of the overflow menu, the item ending the row while any
+    /// group stands in the menu.
     pub overflow: Pixels,
     /// A rule parting a group from the control before it, with the gap after
     /// the rule.
@@ -293,14 +293,12 @@ impl State {
         for item in &leading {
             x += place(item, x) + room.gap;
         }
-        let trigger = self.trigger().then(|| {
-            let at = x;
-            x += room.overflow + room.gap;
-            at
-        });
-        let trailing_start = room.width - spanned(trailing.iter().map(|item| item.width), room.gap);
+        let trigger = self.trigger().then(|| room.width - room.overflow);
+        let trailing_end = trigger.map_or(room.width, |at| at - room.gap);
+        let trailing_start =
+            trailing_end - spanned(trailing.iter().map(|item| item.width), room.gap);
         let free_end = match trailing.is_empty() {
-            true => room.width,
+            true => trailing_end,
             false => trailing_start - room.gap,
         };
         let free = (x, free_end);
@@ -488,10 +486,26 @@ mod tests {
         let all_narrowed = 110. + 100. + 110. + 100. + GAP_WIDTH * 3.;
         let fitted = fit(&groups, room(all_narrowed - 1.));
         assert_eq!(seen(&fitted), [Shown(1), Shown(1), Shown(2), Menu]);
-        assert_eq!(
-            fitted.trigger,
-            Some(px(110. + 100. + 110. + GAP_WIDTH * 3.))
-        );
+        assert_eq!(fitted.trigger, Some(px(all_narrowed - 1. - OVERFLOW_WIDTH)));
+    }
+
+    /// The trigger ends the row, past the trailing items, wherever the
+    /// leading ones end.
+    #[test]
+    fn the_overflow_trigger_ends_the_row() {
+        let items = [
+            group(&[50.], 2),
+            group(&[60.], 1),
+            trailing(group(&[40.], 3)),
+        ];
+        let width = 50. + 60. + 40. + GAP_WIDTH * 2. - 1.;
+        let fitted = fit(&items, room(width));
+        assert_eq!(seen(&fitted), [Shown(0), Menu, Shown(0)]);
+        let trigger = width - OVERFLOW_WIDTH;
+        assert_eq!(fitted.trigger, Some(px(trigger)));
+        let legend = trigger - GAP_WIDTH - 40.;
+        assert!(matches!(fitted.spots[2], Spot::Row { x, .. } if x == px(legend)));
+        assert_eq!(fitted.free, (px(50. + GAP_WIDTH), px(legend - GAP_WIDTH)));
     }
 
     /// The trigger reaches every group the row has given up, so it is the last
@@ -543,7 +557,7 @@ mod tests {
         assert_eq!(seen(&fitted), [Shown(0), Menu]);
         assert_eq!(
             fitted.reached_at(1, narrower),
-            Some((px(50. + GAP_WIDTH), px(OVERFLOW_WIDTH)))
+            Some((px(whole - 1. - OVERFLOW_WIDTH), px(OVERFLOW_WIDTH)))
         );
         let too_narrow = room(OVERFLOW_WIDTH - 1.);
         let fitted = fit(&items, too_narrow);
