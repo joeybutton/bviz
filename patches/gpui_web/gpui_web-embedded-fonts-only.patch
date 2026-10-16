@@ -1,0 +1,51 @@
+Start the text system with only the faces the application embeds
+
+The web platform embeds IBM Plex Sans and Lilex from the root of the Zed
+tree, which a crate built from its own directory cannot reach. The
+application registers its own embedded faces, as it does on Linux, where
+the text system starts without system fonts.
+
+License: Apache-2.0 (Zed v1.6.3)
+
+--- a/crates/gpui_web/src/platform.rs
++++ b/crates/gpui_web/src/platform.rs
+@@ -12,7 +12,6 @@
+ };
+ use gpui_wgpu::WgpuContext;
+ use std::{
+-    borrow::Cow,
+     cell::{Cell, RefCell},
+     path::{Path, PathBuf},
+     rc::Rc,
+@@ -20,17 +19,6 @@
+ };
+ use wasm_bindgen::prelude::*;
+ 
+-static BUNDLED_FONTS: &[&[u8]] = &[
+-    include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
+-    include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Italic.ttf"),
+-    include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"),
+-    include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBoldItalic.ttf"),
+-    include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf"),
+-    include_bytes!("../../../assets/fonts/lilex/Lilex-Bold.ttf"),
+-    include_bytes!("../../../assets/fonts/lilex/Lilex-Italic.ttf"),
+-    include_bytes!("../../../assets/fonts/lilex/Lilex-BoldItalic.ttf"),
+-];
+-
+ pub struct WebPlatform {
+     browser_window: web_sys::Window,
+     background_executor: BackgroundExecutor,
+@@ -70,13 +58,6 @@
+         let text_system = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(
+             "IBM Plex Sans",
+         ));
+-        let fonts = BUNDLED_FONTS
+-            .iter()
+-            .map(|bytes| Cow::Borrowed(*bytes))
+-            .collect();
+-        if let Err(error) = text_system.add_fonts(fonts) {
+-            log::error!("failed to load bundled fonts: {error:#}");
+-        }
+         let text_system: Arc<dyn PlatformTextSystem> = text_system;
+         let active_display: Rc<dyn PlatformDisplay> =
+             Rc::new(WebDisplay::new(browser_window.clone()));

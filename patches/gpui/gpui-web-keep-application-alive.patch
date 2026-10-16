@@ -1,0 +1,23 @@
+Keep the application alive once a browser has launched it
+
+On the web, Platform::run returns at once and the page drives the event
+loop, so the application was dropped as soon as it finished launching,
+and with it every window and the closures the page calls them through.
+
+License: Apache-2.0 (Zed v1.6.3)
+
+--- a/crates/gpui/src/app.rs
++++ b/crates/gpui/src/app.rs
+@@ -207,6 +207,12 @@
+             let cx = &mut *this.borrow_mut();
+             on_finish_launching(cx);
+         }));
++        // A browser's run returns at once, leaving the event loop to the page,
++        // so nothing would hold the application once it finished launching:
++        // it lives as long as the page instead, as it lives as long as the
++        // process where run never returns.
++        #[cfg(target_family = "wasm")]
++        std::mem::forget(self);
+     }
+ 
+     /// Register a handler to be invoked when the platform instructs the application

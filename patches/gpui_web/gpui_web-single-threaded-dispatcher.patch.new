@@ -1,0 +1,18 @@
+Build the single-threaded dispatcher
+
+Without the multithreaded feature the dispatcher still asks whether memory
+is shared before running its waker loop, but the check was compiled only
+with the feature, so gpui_web failed to build single-threaded. The check
+needs nothing the feature brings.
+
+License: Apache-2.0 (Zed v1.6.3)
+--- a/crates/gpui_web/src/dispatcher.rs
++++ b/crates/gpui_web/src/dispatcher.rs
+@@ -10,7 +10,6 @@
+ #[cfg(feature = "multithreaded")]
+ const MIN_BACKGROUND_THREADS: usize = 2;
+ 
+-#[cfg(feature = "multithreaded")]
+ fn shared_memory_supported() -> bool {
+     let global = js_sys::global();
+     let has_shared_array_buffer =

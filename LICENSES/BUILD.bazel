@@ -16,6 +16,7 @@ package_metadata(
         "//patches/gpui:__pkg__",
         "//patches/gpui_linux:__pkg__",
         "//patches/gpui_macos:__pkg__",
+        "//patches/gpui_web:__pkg__",
         "//patches/gpui_wgpu:__pkg__",
         "//patches/media:__pkg__",
         "//tools/scene_header:__pkg__",
