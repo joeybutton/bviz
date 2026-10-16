@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # A coarse filter; the version job admits only Semantic Versioning 2.0.0.
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - id: parse
+        env:
+          TAG: ${{ github.ref_name }}
+        # The regular expression is the one https://semver.org/spec/v2.0.0.html
+        # suggests, in POSIX ERE syntax.
+        run: |
+          number='(0|[1-9][0-9]*)'
+          identifier='(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)'
+          semver="^$number\.$number\.$number(-$identifier(\.$identifier)*)?(\+[0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*)?\$"
+          version=${TAG#v}
+          if [[ ! $version =~ $semver ]]; then
+            echo "::error::$TAG is not a v followed by a Semantic Versioning 2.0.0 version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "${BASH_REMATCH[4]}" ]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  dist:
+    needs: version
+    uses: ./.github/workflows/dist.yaml
+    secrets: inherit
+
+  release:
+    needs: [version, dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/actions
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bviz-*.tar.gz
+          merge-multiple: true
+          path: dist
+
+      # The version is set in the source, so a tag on a commit that does not
+      # carry it would publish binaries that report another one.
+      - name: Check the version bviz reports
+        run: |
+          tar -xzf dist/bviz-linux-x86_64.tar.gz -C "$RUNNER_TEMP" bviz
+          reported=$("$RUNNER_TEMP/bviz" --version)
+          if [ "$reported" != "bviz $VERSION" ]; then
+            echo "::error::The tag is $TAG, but bviz reports \"$reported\"."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/release-notes
+        with:
+          tag: ${{ env.TAG }}
+
+      - run: |
+          gh release create "$TAG" dist/bviz-*.tar.gz \
+            --verify-tag \
+            --prerelease="${{ needs.version.outputs.prerelease }}" \
+            --title "bviz $VERSION" \
+            --notes-file notes.md \
+            --generate-notes
