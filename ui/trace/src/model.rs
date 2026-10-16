@@ -953,7 +953,7 @@ impl TraceModel {
     fn full_lane_layout(&self) -> Option<Rc<LaneLayout>> {
         let profile = self.profile()?;
         if self.lanes.borrow().is_none() {
-            let t = std::time::Instant::now();
+            let t = web_time::Instant::now();
             let layout = lay_out_lanes(profile, &METRICS);
             if std::env::var_os("BVIZ_TRACE_TIMING").is_some() {
                 eprintln!("[timing] lay_out_lanes: {:.3}s", t.elapsed().as_secs_f64());
@@ -1243,7 +1243,7 @@ impl TraceModel {
             let aggregate = cx
                 .background_executor()
                 .spawn(async move {
-                    let t = std::time::Instant::now();
+                    let t = web_time::Instant::now();
                     let aggregate =
                         ScopeAggregate::build_for_tracks_reusing(&scan, mode, &time_window, |i| {
                             selected.get(i).copied().unwrap_or(false)

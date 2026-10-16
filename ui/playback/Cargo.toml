@@ -11,6 +11,7 @@ name = "bviz_ui_playback"
 path = "src/lib.rs"
 
 [dependencies]
+web-time = { workspace = true }
 gpui = { workspace = true }
 bviz_invocation = { workspace = true }
 bviz_ui_assets = { path = "../assets" }

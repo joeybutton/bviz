@@ -7,7 +7,7 @@ use crate::pan_bench::{self, Phase};
 use crate::{GraphPanel, MAX_ZOOM, SETTLE_DURATION, SETTLE_MIN_PAN_STEP, SETTLE_MIN_ZOOM_STEP};
 use bviz_graph_layout::Id;
 use gpui::{App, Bounds, Entity, Pixels, Window, px};
-use std::time::Instant;
+use web_time::Instant;
 
 /// What a frame request moves the view onto.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

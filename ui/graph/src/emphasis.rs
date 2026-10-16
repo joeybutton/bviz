@@ -1,7 +1,8 @@
 use crate::GraphPanel;
 use bviz_graph_layout::Id;
 use gpui::Context;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long the just-toggled box stays emphasized before the highlight fades.
 const HIGHLIGHT_LINGER: Duration = Duration::from_millis(1100);

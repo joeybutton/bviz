@@ -3,7 +3,7 @@ use crate::{FIT_MARGIN, MARGIN, MAX_FRAME_ZOOM, MAX_ZOOM, RECENTER_PAD};
 use bviz_graph_layout::LaidOut;
 use gpui::{Bounds, Pixels, Point, Size, point, px};
 use std::ops::RangeInclusive;
-use std::time::Instant;
+use web_time::Instant;
 
 /// A layout-pixel rectangle by origin and size.
 #[derive(Clone, Copy, Debug)]

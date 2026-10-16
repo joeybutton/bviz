@@ -4,7 +4,8 @@
 use super::icicle::{self, Cell, Holds, Tree, VISIBLE_WIDTH};
 use crate::camera::ease_out_cubic;
 use gpui::{Bounds, Pixels, point, size};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long the icicle takes to move from one focus to the next.
 const DURATION: Duration = Duration::from_millis(200);

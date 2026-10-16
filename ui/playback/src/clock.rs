@@ -1,6 +1,6 @@
 use bviz_invocation::EpochMicros;
 use gpui::{App, AppContext, Context, Entity, Window};
-use std::time::Instant;
+use web_time::Instant;
 
 /// The playback speeds, as multiples of real time, in the order stepping
 /// through them takes.

@@ -14,7 +14,8 @@ use gpui::{
 };
 use std::f32::consts::TAU;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Names the [`Scenario`] to run.
 const SCENARIO_VAR: &str = "BVIZ_PAN_BENCH";

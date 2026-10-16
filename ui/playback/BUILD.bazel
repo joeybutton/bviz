@@ -18,6 +18,7 @@ rust_library(
         "//ui/components",
         "//ui/theme",
         "@crates//:gpui",
+        "@crates//:web-time",
     ],
 )
 

@@ -4,7 +4,8 @@ use bviz_graph_layout::{Box, Id, LaidOut};
 use gpui::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// How long the new drawing's connectors take to fade in. It runs well longer
 /// than the travel: a connector is a thin line against the background, so it

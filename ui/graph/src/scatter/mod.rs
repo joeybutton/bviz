@@ -66,7 +66,8 @@ use placed::Placed;
 use plot::{MIN_RADIUS, Mark, Picked, Plotted, Spot, Zoom};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// The key context scoping the scatter plot's own bindings, so a key pressed
 /// here reaches this panel and no other.

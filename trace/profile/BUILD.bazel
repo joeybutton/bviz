@@ -10,10 +10,10 @@ rust_library(
         "//critical_path:__pkg__",
         "//trace/layout:__pkg__",
         "//ui/trace:__pkg__",
-        "//wasm:__pkg__",
     ],
     deps = [
         "//invocation",
+        "//util/files",
         "//util/parallel",
         "@crates//:crossbeam-channel",
         "@crates//:crossbeam-utils",
@@ -22,6 +22,7 @@ rust_library(
         "@crates//:rustc-hash",
         "@crates//:serde",
         "@crates//:serde_json",
+        "@crates//:web-time",
     ],
 )
 

@@ -11,6 +11,7 @@ name = "trace"
 path = "src/main.rs"
 
 [dependencies]
+web-time = { workspace = true }
 clap = { workspace = true }
 gpui = { workspace = true, features = ["inspector"] }
 bviz_alloc = { path = "../../alloc" }

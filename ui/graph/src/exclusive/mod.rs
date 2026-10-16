@@ -64,8 +64,8 @@ use selection::{LaidOut, Step};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 use transition::Transition;
+use web_time::Instant;
 
 /// The key context scoping the panel's own bindings, so a key pressed here
 /// reaches this panel and no other.

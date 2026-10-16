@@ -11,6 +11,8 @@ name = "bviz_trace_profile"
 path = "src/lib.rs"
 
 [dependencies]
+web-time = { workspace = true }
+bviz_files = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
 hashbrown = { workspace = true }

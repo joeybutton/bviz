@@ -345,7 +345,7 @@ mod tests {
     use gpui::rgb;
     use std::collections::HashSet;
     use std::sync::Arc;
-    use std::time::Instant;
+    use web_time::Instant;
 
     /// The zooms the caret invariant is checked over, spanning both sides of the
     /// band width at which a container's title stops fitting in it.

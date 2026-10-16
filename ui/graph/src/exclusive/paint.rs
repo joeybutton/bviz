@@ -28,7 +28,7 @@ use gpui::{
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Inset of a cell's name from its edges, above and below as at either side.
 const TEXT_PAD: f32 = 3.0;

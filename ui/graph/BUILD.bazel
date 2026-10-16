@@ -21,13 +21,15 @@ rust_library(
         "//ui/playback",
         "//ui/theme",
         "//ui/workspace",
+        "//util/files",
         "//util/parallel",
         "@crates//:clap",
         "@crates//:fixedbitset",
         "@crates//:gpui",
         "@crates//:lyon_tessellation",
-        "@crates//:nucleo",
+        "@crates//:nucleo-matcher",
         "@crates//:rustc-hash",
+        "@crates//:web-time",
     ],
 )
 

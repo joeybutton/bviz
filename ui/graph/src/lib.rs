@@ -26,7 +26,8 @@ use gpui::{
     NavigationDirection, PinchEvent, Pixels, Point, Render, Rgba, ScrollWheelEvent, SharedString,
     StyleRefinement, Subscription, WeakEntity, Window, actions, canvas, div, prelude::*,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 mod actions;
 mod box_menu;
