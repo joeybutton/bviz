@@ -29,8 +29,7 @@ const LAYOUT_RECURSION_STACK: usize = 8 << 20;
 pub fn workers() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count())
+        pool_builder(worker_count())
             .build()
             .expect("build the worker pool")
     })
@@ -49,10 +48,21 @@ pub fn workers() -> &'static rayon::ThreadPool {
 pub fn background_workers() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count().saturating_sub(1).max(1))
+        pool_builder(worker_count().saturating_sub(1).max(1))
             .stack_size(LAYOUT_RECURSION_STACK)
             .build()
             .expect("build the background worker pool")
     })
+}
+
+/// A pool `threads` wide. Where no thread can be spawned (wasm32), the pool is
+/// instead the calling thread alone, as rayon's own global pool falls back to,
+/// so a pass entering it runs inline.
+fn pool_builder(threads: usize) -> rayon::ThreadPoolBuilder {
+    let builder = rayon::ThreadPoolBuilder::new();
+    if cfg!(target_family = "wasm") {
+        builder.num_threads(1).use_current_thread()
+    } else {
+        builder.num_threads(threads)
+    }
 }
