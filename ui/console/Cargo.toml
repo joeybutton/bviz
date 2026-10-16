@@ -15,6 +15,7 @@ name = "bviz_ui_console"
 path = "src/lib.rs"
 
 [dependencies]
+bviz_files = { workspace = true }
 clap = { workspace = true }
 gpui = { workspace = true }
 bviz_invocation = { workspace = true }

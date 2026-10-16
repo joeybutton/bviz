@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read, SeekFrom};
 
 use bviz_invocation::Recorded;
 use flate2::read::MultiGzDecoder;
@@ -78,12 +78,14 @@ pub fn gzip_size_hint(bytes: &[u8]) -> Option<usize> {
 /// stream into memory: verifies the leading [`GZIP_MAGIC`], then seeks to the
 /// ISIZE field. The file cursor is left wherever the reads and seeks land; the
 /// caller re-seeks before use.
-pub(crate) fn gzip_size_hint_from_file(file: &mut std::fs::File) -> std::io::Result<Option<usize>> {
+pub(crate) fn gzip_size_hint_from_file(
+    file: &mut dyn bviz_files::Opened,
+) -> std::io::Result<Option<usize>> {
     let mut magic = [0u8; 2];
     if file.read_exact(&mut magic).is_err() || magic != GZIP_MAGIC {
         return Ok(None);
     }
-    let compressed_len = file.metadata().map_or(0, |m| m.len());
+    let compressed_len = file.size().unwrap_or(0);
     if compressed_len < GZIP_FRAMING_MIN as u64 {
         return Ok(None);
     }

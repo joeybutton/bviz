@@ -16,7 +16,7 @@ pub(crate) fn build_graph(inputs: &[Input]) -> Result<(Joint, Graph), String> {
     let mut q = None;
     for input in inputs {
         let path = input.path.display();
-        let bytes = std::fs::read(&input.path).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = bviz_files::read(&input.path).map_err(|e| format!("{path}: {e}"))?;
         let undecodable = |e| undecodable(input, e);
         match input.kind {
             InputKind::Aquery => {

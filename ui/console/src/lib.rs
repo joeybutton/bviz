@@ -42,8 +42,8 @@ impl From<ConsoleSource> for Load {
         Self {
             stream: Pending::start(move || {
                 let path = source.path.display();
-                let bytes =
-                    std::fs::read(&source.path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let bytes = bviz_files::read(&source.path)
+                    .map_err(|e| format!("cannot read {path}: {e}"))?;
                 model::Stream::parse(&bytes)
             }),
             title,

@@ -227,10 +227,10 @@ const PROBE_PREFIX_BYTES: u64 = 256 << 10;
 /// is not a regular file: reading a pipe could block, and would take from it
 /// bytes it yields only once.
 pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
-    if !std::fs::metadata(path).ok()?.is_file() {
+    if !bviz_files::is_file(path) {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = bviz_files::open(path).ok()?;
     invocation_id_in_prefix(BufReader::new(file), PROBE_PREFIX_BYTES)
 }
 

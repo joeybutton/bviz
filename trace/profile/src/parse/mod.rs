@@ -141,7 +141,7 @@ fn timed<T>(label: &str, f: impl FnOnce() -> T) -> T {
     if std::env::var_os("BVIZ_TRACE_TIMING").is_none() {
         return f();
     }
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let out = f();
     eprintln!("[timing] {label}: {:.3}s", start.elapsed().as_secs_f64());
     out
@@ -156,8 +156,8 @@ impl Profile {
     /// decode or parse failure — reads the whole file and goes through
     /// [`from_whole_buffer`].
     pub fn from_path(path: &Path) -> Result<Recorded<Profile>, LoadError> {
-        if let Ok(mut file) = std::fs::File::open(path)
-            && let Ok(Some(decoded_size)) = gzip_size_hint_from_file(&mut file)
+        if let Ok(mut file) = bviz_files::open(path)
+            && let Ok(Some(decoded_size)) = gzip_size_hint_from_file(&mut *file)
             && file.seek(SeekFrom::Start(0)).is_ok()
             && let Some(profile) = timed("decode+parse (pipelined, streamed)", || {
                 parse_gz_pipelined_reader(
@@ -168,7 +168,9 @@ impl Profile {
         {
             return Ok(Recorded::Complete(profile));
         }
-        let bytes = timed("read file", || std::fs::read(path).map_err(LoadError::Io))?;
+        let bytes = timed("read file", || {
+            bviz_files::read(path).map_err(LoadError::Io)
+        })?;
         from_whole_buffer(&bytes)
     }
 
@@ -329,10 +331,10 @@ const PROBE_HEAD_BYTES: u64 = 64 << 10;
 /// `path` is not a regular file: reading a pipe could block, and would take
 /// from it bytes it yields only once.
 pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
-    if !std::fs::metadata(path).ok()?.is_file() {
+    if !bviz_files::is_file(path) {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let file = bviz_files::open(path).ok()?;
     invocation_id_at_head(BufReader::new(file), PROBE_HEAD_BYTES)
 }
 
