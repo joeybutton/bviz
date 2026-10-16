@@ -405,12 +405,9 @@ fn matching(view: &mut ChipBar) -> Option<&mut Matching> {
     Some(&mut view.completer.offered.as_mut()?.matching)
 }
 
-/// Stops offering, parking the matcher's pool for another list to take up;
-/// the next edit offers afresh.
-pub(super) fn release(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
-    if let Some(offered) = view.completer.offered.take() {
-        (view.model).update(cx, |model, _| model.park_matcher(offered.matching));
-    }
+/// Stops offering; the next edit offers afresh.
+pub(super) fn release(view: &mut ChipBar, _cx: &mut Context<ChipBar>) {
+    view.completer.offered = None;
 }
 
 /// Matches the word now under the field's cursor, starting to offer the
@@ -422,7 +419,7 @@ pub(super) fn follow(view: &mut ChipBar, cx: &mut Context<ChipBar>) {
         };
         view.completer.offered = Some(Offered {
             completions: completions.clone(),
-            matching: view.model.update(cx, |model, _| model.take_matcher()),
+            matching: Matching::new(),
             few: Few::Functions(Vec::new()),
             word: None,
             offers: Offers::at(Place::Pattern),

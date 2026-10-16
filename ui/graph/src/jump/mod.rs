@@ -223,7 +223,7 @@ impl JumpPalette {
                 field,
                 _edits: edits,
                 scope,
-                matching: self.model.update(cx, |model, _| model.take_matcher()),
+                matching: Matching::new(),
                 candidates,
                 aimed: 0,
                 painted: None,
@@ -242,10 +242,9 @@ impl JumpPalette {
     /// Closes the palette, leaving the view where it stands; reports whether
     /// it was open.
     pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(jump) = self.open.take() else {
+        if self.open.take().is_none() {
             return false;
-        };
-        (self.model).update(cx, |model, _| model.park_matcher(jump.matching));
+        }
         cx.notify();
         true
     }

@@ -1,7 +1,7 @@
 //! The order a list lists the candidates a query matches in.
 
-use nucleo::pattern::Pattern;
-use nucleo::{Matcher, Utf32Str};
+use nucleo_matcher::pattern::Pattern;
+use nucleo_matcher::{Matcher, Utf32Str};
 use std::cmp::Reverse;
 use std::ops::Range;
 
@@ -150,8 +150,8 @@ pub(crate) fn rank<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nucleo::pattern::{CaseMatching, Normalization};
-    use nucleo::{Config, Utf32String};
+    use nucleo_matcher::pattern::{CaseMatching, Normalization};
+    use nucleo_matcher::{Config, Utf32String};
 
     /// A candidate's text, the chars of it leading up to its name, and its
     /// weight.

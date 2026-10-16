@@ -1,5 +1,6 @@
-//! Fuzzy matching of a query against candidates a list offers, run off the UI
-//! thread, and the rows it ranks drawn with the matched characters picked out.
+//! Fuzzy matching of a query against candidates a list offers, in time slices
+//! on the thread that polls it, and the rows it ranks drawn with the matched
+//! characters picked out.
 
 mod rank;
 
@@ -8,22 +9,26 @@ use gpui::{
     Context, HighlightStyle, Hsla, Pixels, Rems, SharedString, StyledText, Task, UnderlineStyle,
     px, rems,
 };
-use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Injector, Matcher, Nucleo, Utf32Str, Utf32String};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str, Utf32String};
 pub(crate) use rank::{Row, Standing};
 use std::cell::RefCell;
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+use web_time::Instant;
 
 /// How often a running match is polled for what it has found, often enough
 /// for the rows to keep pace with typing.
 const POLL: Duration = Duration::from_millis(16);
 
-/// How long one poll waits on a match pass to finish, in milliseconds: a
-/// small share of a frame, so the UI thread is not held on it.
-const POLL_WAIT_MS: u64 = 1;
+/// How long one poll spends matching: a small share of a frame, so a long
+/// list is matched over several frames rather than holding the UI thread.
+const MATCH_SLICE: Duration = Duration::from_millis(4);
+
+/// Candidates scored between checks of the time a poll has spent.
+const SCORED_PER_CHECK: usize = 256;
 
 /// The weight of the line under a row's matched characters.
 const MATCH_UNDERLINE: Pixels = px(1.);
@@ -44,10 +49,31 @@ pub(crate) type Locate<V> = fn(&mut V) -> Option<&mut Matching>;
 /// Takes up a result of a matching that changed since the last poll.
 pub(crate) type TakeUp<V> = fn(&mut V, &mut Context<V>);
 
+/// The candidates handed to a matching so far, each with the index it was
+/// handed with, in the order they came.
+type Candidates = Arc<Mutex<Vec<(u32, Utf32String)>>>;
+
 /// A matcher over candidates handed to it by index, with the rows its latest
 /// result ranks.
+///
+/// It scores candidates on the thread that polls it, a time slice per poll,
+/// with no thread of its own, so it matches the same on a desktop as in a
+/// browser. A query extending the last one rescores only what that matched,
+/// as the narrowing it is.
 pub(crate) struct Matching {
-    nucleo: Nucleo<u32>,
+    candidates: Candidates,
+    /// Scores candidates for the query.
+    scorer: Matcher,
+    /// The query's pattern the candidates are scored by.
+    scoring: Pattern,
+    /// What the query matched among the first `covered` candidates: each
+    /// match's score and where its candidate stands among them.
+    found: Vec<(u32, u32)>,
+    covered: usize,
+    /// The matches of the query this one narrows, still to be rescored.
+    narrowing: Vec<(u32, u32)>,
+    /// Whether `found` changed since the last poll.
+    changed: bool,
     /// Finds the characters each row's query matched, for ranking the rows
     /// and highlighting them, on a row's text as written and as shown.
     matcher: RefCell<Matcher>,
@@ -63,50 +89,35 @@ pub(crate) struct Matching {
     /// How many candidates the query matches, of which `rows` lists the
     /// first.
     matched: u32,
-    /// Whether the last pass the matcher was polled on is still running.
-    running: bool,
     /// Whether candidates are still being handed to the matcher.
     streaming: bool,
     _injecting: Injecting,
     _polling: Task<()>,
 }
 
-/// The matcher worker pool a panel keeps while no list of its holds it, so
-/// that a list opened takes it up rather than starting a pool of its own.
-#[derive(Default)]
-pub(crate) struct Pool(Option<Nucleo<u32>>);
-
-impl Pool {
-    /// A matching with no query, on the parked pool where one is parked.
-    pub(crate) fn take(&mut self) -> Matching {
-        Matching::new(self.0.take())
-    }
-
-    /// Parks the pool of `matching`, which stops matching; a pool parked
-    /// already stays, and the other is dropped.
-    pub(crate) fn park(&mut self, matching: Matching) {
-        self.0.get_or_insert(matching.nucleo);
+impl Default for Matching {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Matching {
-    fn new(pool: Option<Nucleo<u32>>) -> Self {
-        let mut nucleo = pool.unwrap_or_else(|| {
-            let workers = Some(bviz_parallel::worker_count());
-            Nucleo::new(config(), Arc::new(|| {}), workers, 1)
-        });
-        nucleo
-            .pattern
-            .reparse(0, "", CaseMatching::Smart, Normalization::Smart, false);
+    /// A matching with no query and no candidates.
+    pub(crate) fn new() -> Self {
         Matching {
-            nucleo,
+            candidates: Candidates::default(),
+            scorer: Matcher::new(config()),
+            scoring: Pattern::default(),
+            found: Vec::new(),
+            covered: 0,
+            narrowing: Vec::new(),
+            changed: false,
             matcher: RefCell::new(Matcher::new(config())),
             pattern: Pattern::default(),
             query: SharedString::default(),
             ranked: SharedString::default(),
             rows: Vec::new(),
             matched: 0,
-            running: false,
             streaming: false,
             _injecting: Injecting::none(),
             _polling: Task::ready(()),
@@ -139,29 +150,75 @@ impl Matching {
         if query == self.query {
             return false;
         }
-        let narrowing = query.starts_with(self.query.as_str());
-        self.nucleo.pattern.reparse(
-            0,
-            &query,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            narrowing,
-        );
+        let narrowing = !self.query.is_empty() && query.starts_with(self.query.as_str());
+        self.scoring
+            .reparse(&query, CaseMatching::Smart, Normalization::Smart);
+        if narrowing {
+            // Only what the shorter query matched can match the longer one;
+            // the candidates past those it covered are scored as they come.
+            let mut previous = std::mem::take(&mut self.found);
+            previous.append(&mut self.narrowing);
+            self.narrowing = previous;
+        } else {
+            self.restart();
+        }
+        self.changed = true;
         self.query = query;
         true
     }
 
-    /// Waits briefly on the matcher, and reports whether its result changed
-    /// since the last poll.
+    /// Scores every candidate afresh.
+    fn restart(&mut self) {
+        self.found.clear();
+        self.narrowing.clear();
+        self.covered = 0;
+    }
+
+    /// Scores candidates for one time slice, and reports whether the result
+    /// changed since the last poll.
     fn tick(&mut self) -> bool {
-        let status = self.nucleo.tick(POLL_WAIT_MS);
-        self.running = status.running;
-        status.changed
+        let candidates = Arc::clone(&self.candidates);
+        let candidates = candidates.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.query.is_empty() {
+            let started = Instant::now();
+            while self.has_work(candidates.len()) && started.elapsed() < MATCH_SLICE {
+                for _ in 0..SCORED_PER_CHECK {
+                    let at = match self.narrowing.pop() {
+                        Some((_, at)) => at,
+                        None if self.covered < candidates.len() => {
+                            self.covered += 1;
+                            (self.covered - 1) as u32
+                        }
+                        None => break,
+                    };
+                    let text = candidates[at as usize].1.slice(..);
+                    if let Some(score) = self.scoring.score(text, &mut self.scorer) {
+                        self.found.push((score, at));
+                    }
+                    self.changed = true;
+                }
+            }
+        } else if self.covered != candidates.len() {
+            // An empty query matches every candidate, and ranks none.
+            self.covered = candidates.len();
+            self.changed = true;
+        }
+        std::mem::take(&mut self.changed)
+    }
+
+    fn has_work(&self, candidates: usize) -> bool {
+        !self.narrowing.is_empty() || self.covered < candidates
     }
 
     /// Whether the matcher runs or is still handed candidates.
     fn at_work(&self) -> bool {
-        self.running || self.streaming
+        self.streaming
+            || self.has_work(
+                self.candidates
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .len(),
+            )
     }
 
     /// Lists the rows the matcher's latest result ranks first, as `standing`
@@ -169,16 +226,26 @@ impl Matching {
     /// to the matcher.
     pub(crate) fn rerank(&mut self, standing: impl Fn(u32) -> Standing) {
         self.ranked = self.query.clone();
-        let snapshot = self.nucleo.snapshot();
-        self.matched = snapshot.matched_item_count();
-        if self.query.is_empty() || snapshot.item_count() == 0 {
+        let candidates = Arc::clone(&self.candidates);
+        let candidates = candidates.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.query.is_empty() {
+            self.matched = candidates.len() as u32;
             self.rows.clear();
             return;
         }
-        let found = snapshot
-            .matched_items(..)
-            .map(|item| (*item.data, item.matcher_columns[0].slice(..)));
-        self.pattern = snapshot.pattern().column_pattern(0).clone();
+        self.matched = self.found.len() as u32;
+        if candidates.is_empty() {
+            self.rows.clear();
+            return;
+        }
+        // The best score first, a tie in the order the candidates came.
+        self.found
+            .sort_unstable_by_key(|&(score, at)| (std::cmp::Reverse(score), at));
+        let found = self.found.iter().map(|&(_, at)| {
+            let (index, text) = &candidates[at as usize];
+            (*index, text.slice(..))
+        });
+        self.pattern = self.scoring.clone();
         self.rows = rank::rank(
             found,
             &self.query,
@@ -191,7 +258,7 @@ impl Matching {
 
 /// Hands candidates to a matcher off the UI thread.
 pub(crate) struct Feeder {
-    injector: Injector<u32>,
+    candidates: Candidates,
     stopped: Arc<AtomicBool>,
 }
 
@@ -202,15 +269,17 @@ impl Feeder {
         if self.stopped.load(Ordering::Relaxed) {
             return false;
         }
-        self.injector
-            .push(index, |_, columns| columns[0] = text.into());
+        self.candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((index, text.into()));
         true
     }
 }
 
 /// Candidates being handed to the matcher off the UI thread, stopped once
-/// this is dropped: a restarted matcher reads nothing handed to it through an
-/// injector taken before.
+/// this is dropped: a restarted matcher reads nothing handed to it through a
+/// feeder taken before.
 struct Injecting {
     stopped: Arc<AtomicBool>,
     _task: Task<()>,
@@ -243,12 +312,13 @@ pub(crate) fn inject<V: 'static>(
     let Some(matching) = locate(view) else {
         return;
     };
-    matching.nucleo.restart(true);
+    matching.candidates = Candidates::default();
+    matching.restart();
     matching.rows.clear();
     matching.matched = 0;
     matching.streaming = true;
     let feeder = Feeder {
-        injector: matching.nucleo.injector(),
+        candidates: Arc::clone(&matching.candidates),
         stopped: Arc::default(),
     };
     let stopped = Arc::clone(&feeder.stopped);
@@ -454,6 +524,95 @@ fn styled_runs(text: &str, path: &Range<u32>, matched: &[u32]) -> Vec<(Range<usi
 mod tests {
     use super::*;
     use bviz_label::names::RepoNames;
+
+    fn unweighted(_: u32) -> Standing {
+        Standing {
+            path: 0..0,
+            drawn: false,
+            weight: 0,
+        }
+    }
+
+    /// A matching over `texts` handed over in order.
+    fn matching_over(texts: &[String]) -> Matching {
+        let matching = Matching::new();
+        let feeder = Feeder {
+            candidates: Arc::clone(&matching.candidates),
+            stopped: Arc::default(),
+        };
+        for (index, text) in (0u32..).zip(texts) {
+            assert!(feeder.push(index, text));
+        }
+        matching
+    }
+
+    /// Polls `matching` until it has scored every candidate, and ranks them;
+    /// reports how many polls that took.
+    fn settle(matching: &mut Matching) -> usize {
+        let mut polls = 0;
+        while matching.has_work(matching.candidates.lock().unwrap().len()) || polls == 0 {
+            matching.tick();
+            polls += 1;
+        }
+        matching.rerank(unweighted);
+        polls
+    }
+
+    fn candidates(rows: &[Row]) -> Vec<u32> {
+        rows.iter().map(|row| row.candidate).collect()
+    }
+
+    /// Rows found by narrowing a query are those of matching the narrower
+    /// query afresh, in the same order.
+    #[test]
+    fn narrowing_finds_what_matching_afresh_finds() {
+        let texts: Vec<String> = (0..5_000)
+            .map(|i| format!("//pkg{}/lib{}:target_{i}", i % 97, i % 13))
+            .collect();
+        let mut narrowed = matching_over(&texts);
+        for query in ["t", "ta", "tar", "targ", "target_1"] {
+            narrowed.set_query(query.into());
+            settle(&mut narrowed);
+        }
+        let mut fresh = matching_over(&texts);
+        fresh.set_query("target_1".into());
+        settle(&mut fresh);
+        assert!(fresh.matched() > 0);
+        assert_eq!(narrowed.matched(), fresh.matched());
+        assert_eq!(candidates(narrowed.rows()), candidates(fresh.rows()));
+        assert_eq!(candidates(&fresh.rows()[..1]), [1]);
+    }
+
+    /// An empty query matches every candidate and ranks none; widening the
+    /// query matches afresh.
+    #[test]
+    fn an_empty_query_matches_all_and_widening_rescores() {
+        let texts: Vec<String> = ["//a:alpha", "//b:beta", "//c:gamma"]
+            .map(String::from)
+            .into();
+        let mut matching = matching_over(&texts);
+        settle(&mut matching);
+        assert_eq!((matching.matched(), matching.rows().len()), (3, 0));
+        matching.set_query("beta".into());
+        settle(&mut matching);
+        assert_eq!(candidates(matching.rows()), [1]);
+        matching.set_query("a".into());
+        settle(&mut matching);
+        assert_eq!(matching.matched(), 3);
+    }
+
+    /// A long list is matched over several polls, each a time slice.
+    #[test]
+    fn a_long_list_is_matched_a_slice_per_poll() {
+        let texts: Vec<String> = (0..400_000)
+            .map(|i| format!("//very/long/package/path/number/{i}:a_target_named_{i}"))
+            .collect();
+        let mut matching = matching_over(&texts);
+        matching.set_query("named_399999".into());
+        let polls = settle(&mut matching);
+        assert!(polls > 1, "{polls} polls");
+        assert_eq!(candidates(&matching.rows()[..1]), [399_999]);
+    }
 
     /// The chars of `written` as `names` shows it that [`picked`] picks out
     /// for `query`, matched against `written` as a list matches it.

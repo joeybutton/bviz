@@ -5,7 +5,6 @@ use crate::chips::Completions;
 use crate::critical::CriticalNodes;
 use crate::derive::derive_levels;
 use crate::filter::{Applied, DocumentFilter, Judgement};
-use crate::fuzzy::{self, Matching};
 use crate::jump::Candidates;
 use crate::playback::NodeStates;
 use crate::point::ConfigNames;
@@ -707,9 +706,6 @@ pub(crate) struct GraphModel {
     /// the oldest first.
     exclusions: Vec<ExclusionNaming>,
     selected: Selected,
-    /// The matcher pool the lists over the graph — each panel's palette and
-    /// each query bar's completion — take up in turn.
-    matchers: fuzzy::Pool,
     joined: Option<Joined>,
     /// The playback clock of the document the graph is opened in, where that
     /// document plays back.
@@ -923,7 +919,6 @@ impl GraphModel {
             counting: None,
             exclusions: Vec::with_capacity(NAMED_EXCLUSIONS),
             selected: Selected::default(),
-            matchers: fuzzy::Pool::default(),
             joined: None,
             clock: None,
         }
@@ -1140,17 +1135,6 @@ impl GraphModel {
         let held = self.exclusions.iter().find(|held| held.node == node)?;
         let named = held.named.flatten()?;
         (held.stack == *stack).then_some((named, stack))
-    }
-
-    /// A matching with no query, on the graph's matcher pool where no list
-    /// holds it.
-    pub(crate) fn take_matcher(&mut self) -> Matching {
-        self.matchers.take()
-    }
-
-    /// Hands the pool of `matching` back for another list to take up.
-    pub(crate) fn park_matcher(&mut self, matching: Matching) {
-        self.matchers.park(matching);
     }
 
     /// The values of the query's prefixes over the loaded graph, shared by
