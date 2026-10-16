@@ -1935,9 +1935,15 @@ fn viewport(window: &Window) -> Bounds<Pixels> {
 /// among them — could make anything of, so the type names the process as well
 /// as the application: a window of another bviz then finds nothing it takes on
 /// offer, and refuses the drop rather than accepting one it cannot carry out.
+/// The process is named by a token drawn once from the hasher keys std seeds
+/// per process, which every platform has; a browser has no process ids.
 fn panel_mime() -> &'static str {
     static MIME: OnceLock<String> = OnceLock::new();
-    MIME.get_or_init(|| format!("application/x-bviz-panel;pid={}", std::process::id()))
+    MIME.get_or_init(|| {
+        use std::hash::BuildHasher;
+        let token = std::collections::hash_map::RandomState::new().hash_one(0u8);
+        format!("application/x-bviz-panel;process={token:016x}")
+    })
 }
 
 /// Whether a press carried from `pressed` to `at` has travelled far enough to be
