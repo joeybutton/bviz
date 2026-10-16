@@ -1,122 +1,92 @@
-//! Global allocator for profile-loading binaries. glibc malloc returns large
-//! freed buffers to the OS eagerly, and that munmap/madvise churn is a
-//! noticeable share of a big profile load; mimalloc retains freed ranges and
-//! reuses them. Each binary declares the allocator itself:
+//! Global allocator for profile-loading binaries: the platform's own (Rust's
+//! [`System`] on a desktop, and on wasm32 the Rust dlmalloc std builds in),
+//! with no C allocator to compile, so every target builds the same crates.
+//! Each binary declares it itself:
 //!
 //! ```ignore
 //! #[global_allocator]
-//! static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
+//! static GLOBAL: bviz_alloc::Allocator = bviz_alloc::Allocator;
 //! ```
+//!
+//! glibc malloc returns large freed buffers to the OS eagerly, and that
+//! munmap/madvise churn is a noticeable share of a big profile load.
+//! [`retain_freed_memory_across_load`] tunes glibc to keep them instead.
 
-use std::alloc::{GlobalAlloc, Layout};
+use std::alloc::{GlobalAlloc, Layout, System};
 
-use libmimalloc_sys::{mi_malloc, mi_realloc, mi_zalloc};
+/// The platform allocator, under the name the binaries declare.
+pub struct Allocator;
 
-/// mimalloc, entered through its plain calls wherever a block's own alignment
-/// suffices. mimalloc 3.3.2, as libmimalloc-sys 0.1.49 bundles it, serves an
-/// aligned request from its size class's free list only up to 128 words, and
-/// only while that list holds a block at the alignment; otherwise, unless the
-/// block size is a power of two of at most 4 KiB, it allocates a block from a
-/// larger class and aligns inside it. That never refills the requested class, so once
-/// the class runs dry every later request of that size wastes the difference,
-/// and most of a layout's allocations are such sizes.
-pub struct MiMalloc;
-
-/// The alignment every mimalloc block has: blocks are sized in whole machine
-/// words from a page start aligned wider still.
-const BLOCK_ALIGN: usize = std::mem::size_of::<usize>();
-
-// SAFETY: every block is mimalloc's: a plain call serves only a layout whose
-// alignment `BLOCK_ALIGN` meets, and `mimalloc::MiMalloc`, whose contract is
-// this trait's, serves the rest.
-unsafe impl GlobalAlloc for MiMalloc {
+// SAFETY: every call forwards to `System`, whose contract is this trait's.
+unsafe impl GlobalAlloc for Allocator {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if layout.align() <= BLOCK_ALIGN {
-            // SAFETY: mi_malloc takes any size.
-            unsafe { mi_malloc(layout.size()).cast() }
-        } else {
-            // SAFETY: the caller upholds `alloc`'s contract.
-            unsafe { mimalloc::MiMalloc.alloc(layout) }
-        }
+        // SAFETY: the caller upholds `alloc`'s contract.
+        unsafe { System.alloc(layout) }
     }
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if layout.align() <= BLOCK_ALIGN {
-            // SAFETY: mi_zalloc takes any size.
-            unsafe { mi_zalloc(layout.size()).cast() }
-        } else {
-            // SAFETY: the caller upholds `alloc_zeroed`'s contract.
-            unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) }
-        }
+        // SAFETY: the caller upholds `alloc_zeroed`'s contract.
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` is a live mimalloc block, which mimalloc frees whatever
-        // call allocated it.
-        unsafe { mimalloc::MiMalloc.dealloc(ptr, layout) }
+        // SAFETY: `ptr` is a live `System` block of `layout`.
+        unsafe { System.dealloc(ptr, layout) }
     }
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if layout.align() <= BLOCK_ALIGN {
-            // SAFETY: `ptr` is a live mimalloc block, and the block mi_realloc
-            // returns has the alignment every block has.
-            unsafe { mi_realloc(ptr.cast(), new_size).cast() }
-        } else {
-            // SAFETY: the caller upholds `realloc`'s contract.
-            unsafe { mimalloc::MiMalloc.realloc(ptr, layout, new_size) }
+        // SAFETY: the caller upholds `realloc`'s contract.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// Has the allocator hold freed memory, so that a load burst reuses its
+/// transient buffers (worker pools, decode buffers) instead of paying the
+/// release-and-refault round-trip mid-load. On glibc that is raising the trim
+/// threshold, past which free hands the heap's top back to the OS, and the
+/// mmap threshold, past which a block is mapped (and unmapped on free) on its
+/// own, to their ceilings. Elsewhere the allocator already keeps freed memory
+/// for reuse, and this does nothing.
+///
+/// # Safety
+///
+/// No other thread may be running: glibc writes these parameters
+/// unsynchronized, and every thread allocating reads them.
+pub unsafe fn retain_freed_memory_across_load() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        /// Free space the heap's top keeps before it is trimmed.
+        const TRIM_THRESHOLD: libc::c_int = 1 << 30;
+        /// glibc's ceiling for the mmap threshold on 64-bit targets
+        /// (`DEFAULT_MMAP_THRESHOLD_MAX`); a larger value is refused.
+        const MMAP_THRESHOLD: libc::c_int = 32 << 20;
+        // SAFETY: mallopt takes any parameter and value, and the caller
+        // guarantees no other thread reads the parameters it writes.
+        unsafe {
+            libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD);
+            libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD);
         }
     }
 }
 
-// `mi_option_purge_delay` in mimalloc.h's `mi_option_e`; `libmimalloc-sys`
-// exports `mi_option_set` only behind its `extended` feature and no constant
-// for this option, so both are declared here.
-const MI_OPTION_PURGE_DELAY: i32 = 15;
-
-unsafe extern "C" {
-    fn mi_option_set(option: i32, value: std::os::raw::c_long);
-}
-
-/// Configures mimalloc to hold freed memory long enough that a load burst
-/// reuses its transient buffers (worker pools, decode buffers) instead of
-/// paying the purge-and-refault round-trip mid-load, while still releasing
-/// idle memory eventually.
-///
-/// # Safety
-///
-/// No other thread may be running: mimalloc writes the option
-/// unsynchronized, and every thread allocating reads it.
-pub unsafe fn retain_freed_memory_across_load() {
-    // Comfortably past a large profile's load time.
-    const PURGE_DELAY_MS: std::os::raw::c_long = 30_000;
-    // SAFETY: mi_option_set takes any option and value, and the caller
-    // guarantees no other thread reads the option it writes.
-    unsafe { mi_option_set(MI_OPTION_PURGE_DELAY, PURGE_DELAY_MS) }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::MI_OPTION_PURGE_DELAY;
-    use std::os::raw::c_long;
+    use super::*;
 
-    unsafe extern "C" {
-        fn mi_option_get(option: i32) -> c_long;
-    }
-
-    /// mimalloc reads each option's `MIMALLOC_<name>` environment variable, so
-    /// the value the test target gives `MIMALLOC_PURGE_DELAY` reads back only
-    /// through the purge delay's own index.
     #[test]
-    fn the_purge_delay_index_names_the_purge_delay() {
-        let set: c_long = std::env::var("MIMALLOC_PURGE_DELAY")
-            .expect("the test target sets MIMALLOC_PURGE_DELAY")
-            .parse()
-            .expect("a number of milliseconds");
-        // SAFETY: mi_option_get takes any option.
-        assert_eq!(unsafe { mi_option_get(MI_OPTION_PURGE_DELAY) }, set);
+    fn allocates_reallocates_and_frees() {
+        // SAFETY: no other thread runs in this test binary's main thread
+        // before the allocations below; glibc's parameters only steer reuse.
+        unsafe { retain_freed_memory_across_load() };
+        let mut v: Vec<u64> = Vec::with_capacity(1 << 20);
+        v.extend(0..1 << 20);
+        v.reserve(1 << 22);
+        assert_eq!(v.iter().sum::<u64>(), (1u64 << 20) * ((1 << 20) - 1) / 2);
+        let boxed = vec![0u8; 64 << 20].into_boxed_slice();
+        assert!(boxed.iter().all(|&b| b == 0));
     }
 }

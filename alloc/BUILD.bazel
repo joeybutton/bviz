@@ -13,15 +13,14 @@ rust_library(
         "//ui/execlog:__pkg__",
         "//ui/trace:__pkg__",
     ],
-    deps = [
-        "@crates//:libmimalloc-sys",
-        "@crates//:mimalloc",
-    ],
+    deps = select({
+        "@platforms//os:linux": ["@crates//:libc"],
+        "//conditions:default": [],
+    }),
 )
 
 rust_test(
     name = "alloc_test",
     size = "small",
     crate = ":alloc",
-    env = {"MIMALLOC_PURGE_DELAY": "4321"},
 )

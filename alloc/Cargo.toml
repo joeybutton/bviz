@@ -11,5 +11,6 @@ name = "bviz_alloc"
 path = "src/lib.rs"
 
 [dependencies]
-libmimalloc-sys = { workspace = true }
-mimalloc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
