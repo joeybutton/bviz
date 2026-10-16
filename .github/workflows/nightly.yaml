@@ -14,76 +14,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelrc: common --config=ci
-          bazelisk-cache: true
-          disk-cache: ${{ secrets.BUILDBUDDY_API_KEY == '' }}
-          repository-cache: ${{ secrets.BUILDBUDDY_API_KEY == '' }}
-      - uses: ./.github/actions/buildbuddy
-        with:
-          api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
-
-      # --keep_going so one platform's failure still yields the others' tarballs.
-      - run: bazel build -c opt --config=release --keep_going //dist
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
-        with:
-          name: remote-build-logs
-          path: |
-            bazel-remote-grpc.log
-            execution_log.binpb.zst
-          retention-days: 7
-          if-no-files-found: ignore
-
-      # GitHub implies success() on an `if:` that names no status function, so
-      # without !cancelled() a failed build would skip the uploads that report
-      # which platform is missing.
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
-        with:
-          path: bazel-bin/dist/bviz-linux-arm64.tar.gz
-          archive: false
-          retention-days: 14
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
-        with:
-          path: bazel-bin/dist/bviz-linux-x86_64.tar.gz
-          archive: false
-          retention-days: 14
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
-        with:
-          path: bazel-bin/dist/bviz-macos-arm64.tar.gz
-          archive: false
-          retention-days: 14
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
-        with:
-          path: bazel-bin/dist/bviz-macos-x86_64.tar.gz
-          archive: false
-          retention-days: 14
-          if-no-files-found: error
+  dist:
+    uses: ./.github/workflows/dist.yaml
+    secrets: inherit
 
   # One pre-release under a fixed tag, replaced on every run, so its download
   # links stay stable and always point at the latest build of main. It is
   # published only when every platform built.
   release:
-    needs: build
+    needs: dist
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -93,29 +32,18 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: nightly
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/actions
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: bviz-*.tar.gz
           merge-multiple: true
           path: dist
-
-      - name: Write the release notes
-        run: |
-          cat > notes.md <<'EOF'
-          Built from ${{ github.sha }}. Each nightly build replaces this release.
-
-          To install, set `platform` to `linux-arm64`, `linux-x86_64`,
-          `macos-arm64` or `macos-x86_64`, and make sure `~/.local/bin` is on your `PATH`:
-
-          ```sh
-          platform=linux-x86_64
-          curl -fsSL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ env.TAG }}/bviz-$platform.tar.gz" | tar -xz bviz
-          mkdir -p ~/.local/bin
-          mv bviz ~/.local/bin/
-          ```
-
-          The requirements for each platform are listed in the [README](${{ github.server_url }}/${{ github.repository }}#install).
-          EOF
+      - uses: ./.github/actions/release-notes
+        with:
+          tag: ${{ env.TAG }}
+          summary: Built from ${{ github.sha }}. Each nightly build replaces this release.
 
       # Deleting the release together with its tag lets the new one tag this
       # run's commit.
