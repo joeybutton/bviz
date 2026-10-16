@@ -105,6 +105,15 @@ the binaries; a dependency with no declared licence, or under a GPL, LGPL or
 AGPL licence, fails that check and needs a maintainer's decision before it can
 go in.
 
+## Releases
+
+To release version `X.Y.Z`, set the `version` of `//cli` to it, and once that
+change is on `main`, push the tag `vX.Y.Z` on it. The tag may carry a
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) pre-release part,
+as in `v1.0.0-rc.1`, which publishes a pre-release. The
+[release workflow](.github/workflows/release.yaml) builds the archives and
+publishes them only if `bviz --version` reports the tag's version.
+
 ## Licensing
 
 bviz is licensed under the Apache License 2.0. Per section 5 of

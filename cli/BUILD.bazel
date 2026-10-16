@@ -5,6 +5,7 @@ rust_library(
     name = "cli",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "bviz_cli",
+    version = "0.1.0-rc1",
     visibility = ["//bviz:__pkg__"],
     deps = [
         "//bazel_flags/args",

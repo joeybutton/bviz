@@ -26,7 +26,9 @@ bviz reads these Bazel outputs, alone or together:
 
 ## Install
 
-Download the latest build of `main` for arm64 or x86_64 Linux or macOS from the
+Download bviz for arm64 or x86_64 Linux or macOS from the
+[latest release](https://github.com/yume-ag/bviz/releases/latest), or the latest
+build of `main` from the
 [nightly release](https://github.com/yume-ag/bviz/releases/tag/nightly).
 
 | | Linux | macOS |

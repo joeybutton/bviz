@@ -6,7 +6,7 @@ body:
     id: build
     attributes:
       label: bviz build
-      description: The nightly's date, or the commit you built from.
+      description: The release's version, the nightly's date, or the commit you built from.
     validations:
       required: true
   - type: input

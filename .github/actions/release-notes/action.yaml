@@ -1,0 +1,41 @@
+name: Release notes
+description: >-
+  Write the notes of a release of the //dist archives, telling how to install
+  them.
+
+inputs:
+  tag:
+    description: The release's tag.
+    required: true
+  summary:
+    description: A paragraph that opens the notes.
+    default: ''
+  path:
+    description: The file to write the notes to.
+    default: notes.md
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SUMMARY: ${{ inputs.summary }}
+      run: |
+        {
+          if [ -n "$SUMMARY" ]; then
+            printf '%s\n\n' "$SUMMARY"
+          fi
+          cat <<'EOF'
+        To install, set `platform` to `linux-arm64`, `linux-x86_64`,
+        `macos-arm64` or `macos-x86_64`, and make sure `~/.local/bin` is on your `PATH`:
+
+        ```sh
+        platform=linux-x86_64
+        curl -fsSL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ inputs.tag }}/bviz-$platform.tar.gz" | tar -xz bviz
+        mkdir -p ~/.local/bin
+        mv bviz ~/.local/bin/
+        ```
+
+        The requirements for each platform are listed in the [README](${{ github.server_url }}/${{ github.repository }}/blob/${{ inputs.tag }}/README.md#install).
+        EOF
+        } > "${{ inputs.path }}"
