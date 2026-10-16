@@ -10,6 +10,7 @@ rust_library(
         "//critical_path:__pkg__",
         "//trace/layout:__pkg__",
         "//ui/trace:__pkg__",
+        "//wasm:__pkg__",
     ],
     deps = [
         "//invocation",

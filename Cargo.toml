@@ -32,6 +32,7 @@ members = [
     "ui/trace/args",
     "ui/workspace",
     "util/parallel",
+    "wasm",
 ]
 exclude = ["third_party/ztracing"]
 resolver = "2"
@@ -68,6 +69,7 @@ rustc-hash = "2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wasm-bindgen = "0.2"
 spdx = "0.13"
 zstd = { version = "0.14", default-features = false }
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }

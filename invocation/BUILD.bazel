@@ -18,6 +18,7 @@ rust_library(
         "//ui/playback:__pkg__",
         "//ui/spawn_phase:__pkg__",
         "//ui/trace:__pkg__",
+        "//wasm:__pkg__",
     ],
 )
 

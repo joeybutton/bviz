@@ -1212,6 +1212,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bviz_wasm"
+version = "0.1.0"
+dependencies = [
+ "bviz_critical_path",
+ "bviz_invocation",
+ "bviz_trace_layout",
+ "bviz_trace_profile",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

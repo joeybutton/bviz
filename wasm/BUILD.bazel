@@ -1,0 +1,39 @@
+load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
+load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen", "rust_wasm_bindgen_toolchain")
+
+# The trace libraries' bindings, as the cdylib wasm-bindgen post-processes.
+# rust_wasm_bindgen builds it for wasm32-unknown-unknown itself, whatever the
+# command line's platform.
+rust_shared_library(
+    name = "bviz_wasm_lib",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "bviz_wasm",
+    deps = [
+        "//critical_path",
+        "//invocation",
+        "//trace/layout",
+        "//trace/profile",
+        "@crates//:serde_json",
+        "@crates//:wasm-bindgen",
+    ],
+)
+
+# The ES module and .wasm the example page imports. Its outputs are named
+# after the target: `bviz_wasm.js` and `bviz_wasm_bg.wasm`.
+rust_wasm_bindgen(
+    name = "bviz_wasm",
+    target = "web",
+    visibility = ["//web:__pkg__"],
+    wasm_file = ":bviz_wasm_lib",
+)
+
+rust_wasm_bindgen_toolchain(
+    name = "wasm_bindgen_toolchain_impl",
+    wasm_bindgen_cli = "@multitool//tools/wasm-bindgen",
+)
+
+toolchain(
+    name = "wasm_bindgen_toolchain",
+    toolchain = ":wasm_bindgen_toolchain_impl",
+    toolchain_type = "@rules_rust_wasm_bindgen//:toolchain_type",
+)

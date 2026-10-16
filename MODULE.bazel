@@ -145,7 +145,9 @@ crate.from_cargo(
     name = "crates",
     cargo_lock = "//:Cargo.lock",
     cargo_toml = "//:Cargo.toml",
-    platform_triples = PLATFORM_TRIPLES,
+    # The browser build of the trace libraries (//wasm) resolves its crates
+    # for wasm32 as well as the hosts.
+    platform_triples = PLATFORM_TRIPLES + ["wasm32-unknown-unknown"],
 )
 
 # Every git source in Cargo.lock is fetched as an archive of its locked commit,
@@ -398,6 +400,14 @@ register_toolchains(
     "@//proto_toolchain:prost_toolchain",
     "@//proto_toolchain:proto_toolchain",
 )
+
+rules_rust_wasm_bindgen = use_extension("@rules_rs//rs:rules_rust_wasm_bindgen.bzl", "rules_rust_wasm_bindgen")
+use_repo(rules_rust_wasm_bindgen, "rules_rust_wasm_bindgen")
+
+# rules_rs's default wasm-bindgen toolchain builds an older CLI than the
+# wasm-bindgen crate Cargo.lock pins, and the two must match exactly, so the
+# CLI is the release binary multitool pins at the crate's version.
+register_toolchains("//wasm:wasm_bindgen_toolchain")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
