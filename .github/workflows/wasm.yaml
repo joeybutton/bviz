@@ -4,14 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - "wasm/**"
-      - "web/**"
-      - "trace/**"
-      - "critical_path/**"
-      - "invocation/**"
-      - "util/parallel/**"
-      - ".github/workflows/wasm.yaml"
   workflow_dispatch:
 
 permissions:
@@ -20,26 +12,22 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
         with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: wasm
-      - name: Install wasm-pack
-        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      - name: Build the wasm package
-        run: web/build.sh
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Binding tests
-        run: node --test web/test/
+          bazelisk-cache: true
+          repository-cache: true
+      # The browser build of the app: //bviz:bviz for wasm32, with the
+      # repository's own toolchains.
+      - name: Build the site
+        run: bazel build --config=wasm //web:site
+      - name: Collect the site
+        run: cp -rL "$(bazel cquery --config=wasm --output=files //web:site)" _site
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: web
+          path: _site
 
   pages:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

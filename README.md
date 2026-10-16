@@ -8,9 +8,9 @@ Seeing what a Bazel build actually did is hard. bviz reads the outputs Bazel
 generates, such as query results, the trace profile and the build event log,
 and lets you explore them visually.
 
-> **This fork adds a wasm mode:** bviz's trace libraries compiled to
-> WebAssembly, with an example page that opens a Bazel profile in the browser.
-> See [WASM.md](WASM.md).
+> **This fork also builds bviz for the browser:** the same app, compiled to
+> WebAssembly and drawn with WebGPU. `bazel run --config=wasm //web:serve`, then
+> open http://127.0.0.1:8080. See [WASM.md](WASM.md).
 
 bviz is early in development. Expect rough edges, and expect the interface and
 command line to change.
