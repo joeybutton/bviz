@@ -56,7 +56,8 @@ pub struct ToolbarGroup {
 }
 
 /// How a [`ToolbarGroup`] stands in its row's overflow menu: as one row or
-/// more, so that every control of the row stays in reach.
+/// more, so that every control of the row stays in reach, each labelled in
+/// lowercase like the row's controls.
 pub struct OverflowRows {
     items: Vec<MenuItem>,
     /// Whether the group stands other than at rest, which marks the menu's
@@ -75,7 +76,9 @@ impl OverflowRows {
     /// its controls, `set` where it stands other than at rest.
     pub fn rows(first: MenuItem, rest: impl IntoIterator<Item = MenuItem>, set: bool) -> Self {
         Self {
-            items: std::iter::once(first).chain(rest).collect(),
+            items: (std::iter::once(first).chain(rest))
+                .map(MenuItem::lowercased)
+                .collect(),
             set,
         }
     }
