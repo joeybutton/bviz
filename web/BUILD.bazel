@@ -1,22 +1,23 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 
-# The example page as a static site: the page, its synthetic profile, and the
-# wasm package under pkg/, where the page imports it from.
+# bviz for the browser as a static site: the page that gathers the files a
+# command line names and starts the app on them, the synthetic profile it
+# offers to try, and the app itself (//bviz:bviz_web) under pkg/.
 copy_to_directory(
     name = "site",
     srcs = [
         "fixture.mjs",
         "index.html",
-        "//wasm:bviz_wasm",
+        "//bviz:bviz_web",
     ],
     exclude_srcs_patterns = ["**/*.d.ts"],
-    replace_prefixes = {"wasm/bviz_wasm/": "pkg/"},
+    replace_prefixes = {"bviz/bviz_web/": "pkg/"},
     visibility = ["//visibility:public"],
 )
 
-# `bazel run -c opt //web:serve` serves the site on http://127.0.0.1:8080
-# (pass a port to choose another).
+# `bazel run --config=wasm //web:serve` serves the site on
+# http://127.0.0.1:8080 (pass a port to choose another).
 rust_binary(
     name = "serve",
     srcs = ["serve.rs"],

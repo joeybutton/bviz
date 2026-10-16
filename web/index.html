@@ -2,450 +2,213 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>bviz in the browser</title>
+<meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, user-scalable=0">
+<title>bviz</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect y='2' width='10' height='3' fill='%23ad6e25'/%3E%3Crect x='3' y='7' width='11' height='3' fill='%23649f57'/%3E%3Crect x='1' y='12' width='7' height='3' fill='%235b79e3'/%3E%3C/svg%3E">
 <style>
+  /* bviz's One Light and One Dark (ui/theme/themes/one.json). */
   :root {
     color-scheme: light dark;
-    /* bviz's One Light theme (ui/theme/themes/one.json). */
     --bg: #fafafa; --panel: #ffffff; --text: #242529; --muted: #58585a; --border: #c9c9ca; --accent: #2f52da;
-    --d-orange: #ad6e25; --d-green: #649f57; --d-cyan: #3882b7; --d-blue: #5b79e3;
-    --d-yellow: #c18401; --d-purple: #a449ab; --d-red: #d3604f; --d-neutral: #a2a3a7;
+    --error: #d3604f;
   }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      /* One Dark. */
-      --bg: #282c33; --panel: #2f343e; --text: #dce0e5; --muted: #a9afbc; --border: #464b57; --accent: #7cb2e9;
-      --d-orange: #bf956a; --d-green: #a1c181; --d-cyan: #6eb4bf; --d-blue: #73ade9;
-      --d-yellow: #dfc184; --d-purple: #b477cf; --d-red: #d07277; --d-neutral: #5d636f;
-    }
+    :root { --bg: #282c33; --panel: #2f343e; --text: #dce0e5; --muted: #a9afbc; --border: #464b57; --accent: #7cb2e9; --error: #d07277; }
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header, main { max-width: 1400px; margin: 0 auto; padding: 16px; }
-  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; }
-  h1 { font-size: 18px; margin: 0; }
-  h2 { font-size: 14px; margin: 0 0 8px; }
-  p { margin: 0 0 8px; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* gpui's window: the canvas it appends fills the page, as a desktop window fills its frame. */
+  body > canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; user-select: none; -webkit-user-select: none; }
+  #launcher { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+  .card { width: min(760px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p { margin-bottom: 12px; }
   .muted { color: var(--muted); }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
-  #drop { border: 2px dashed var(--border); border-radius: 8px; padding: 28px 16px; text-align: center; }
+  code, .cmd { font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  #drop { border: 2px dashed var(--border); border-radius: 8px; padding: 22px 16px; text-align: center; margin: 16px 0; }
   #drop.over { border-color: var(--accent); }
-  button, .btn { font: inherit; color: var(--text); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
-  .tile { border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
-  .tile b { display: block; font-size: 16px; }
-  canvas { display: block; width: 100%; touch-action: none; }
-  #timeline-wrap { position: relative; height: 520px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; }
-  #timeline { height: 100%; cursor: grab; }
-  #tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; max-width: 420px; font-size: 12px; box-shadow: 0 2px 8px #0003; display: none; z-index: 2; overflow-wrap: anywhere; }
-  #error { color: var(--d-red); }
-  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
-  td.num, th.num { text-align: right; white-space: nowrap; }
-  .scroll { overflow-x: auto; }
-  .bar { display: flex; height: 18px; border-radius: 4px; overflow: hidden; margin: 6px 0; }
-  .legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; }
-  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } #timeline-wrap { height: 420px; } }
+  button, .btn { font: inherit; color: var(--text); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+  button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  td { padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow-wrap: anywhere; }
+  td:last-child { text-align: right; white-space: nowrap; }
+  select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; }
+  .cmd { display: block; width: 100%; padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #error { color: var(--error); white-space: pre-wrap; margin-top: 12px; }
+  #error:empty { display: none; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); }
+  details p, details pre { margin-top: 8px; }
 </style>
 </head>
 <body>
-<header>
-  <h1>bviz in the browser</h1>
-  <span class="muted">bviz's Rust trace model compiled to WebAssembly. Your profile is parsed in this tab and never uploaded.</span>
-</header>
-<main>
-  <section class="card" id="drop">
-    <p><b>Drop a Bazel profile here</b> (<code>command.profile.gz</code> or plain JSON), or
-      <label class="btn">choose a file<input type="file" id="file" hidden></label>
-      <button type="button" id="example">load a synthetic example</button></p>
-    <p class="muted">Record one with <code>bazel build //... --profile=/tmp/profile.gz --experimental_profile_include_target_label --experimental_profile_include_primary_output</code>.</p>
-    <p id="error" role="alert"></p>
-  </section>
+<main id="launcher">
+  <div class="card">
+    <h1>bviz</h1>
+    <p class="muted">The bviz app, compiled to WebAssembly. Files open in this tab and are never uploaded.</p>
 
-  <div id="app" hidden>
-    <section class="card">
-      <div class="tiles" id="tiles"></div>
-    </section>
-
-    <section class="card">
-      <div class="row"><h2 style="margin:0">Timeline</h2>
-        <span class="muted">Wheel or pinch to zoom, drag to pan, shift+wheel to scroll lanes, double-click to fit.</span></div>
-      <div id="timeline-wrap"><canvas id="timeline" aria-label="Bazel profile timeline"></canvas></div>
-      <div class="legend" id="legend" style="margin-top:8px"></div>
-    </section>
-
-    <section class="card">
-      <div class="row"><h2 style="margin:0">Flame graph</h2>
-        <button type="button" data-dir="top-down" aria-pressed="true">Top-down</button>
-        <button type="button" data-dir="bottom-up" aria-pressed="false">Bottom-up</button>
-        <button type="button" data-labels="kind" aria-pressed="true">Kinds</button>
-        <button type="button" data-labels="name" aria-pressed="false">Names</button>
-        <button type="button" data-weight="wall" aria-pressed="true">Wall share</button>
-        <button type="button" data-weight="duration" aria-pressed="false">Summed duration</button>
-        <button type="button" id="flame-reset">Reset zoom</button>
-        <span class="muted" id="flame-total"></span></div>
-      <canvas id="flame" aria-label="Flame graph"></canvas>
-    </section>
-
-    <div class="grid2">
-      <section class="card">
-        <h2>Critical path</h2>
-        <div id="critical"></div>
-      </section>
-      <section class="card">
-        <h2>Most self time</h2>
-        <div class="scroll" id="stats"></div>
-      </section>
+    <div id="drop">
+      <p><b>Drop Bazel build files here</b>: a profile, a build event stream, an execution log, or query, cquery and aquery output.</p>
+      <div class="row" style="justify-content:center">
+        <label class="btn">Choose files<input type="file" id="file" multiple hidden></label>
+        <button type="button" id="example">Try a synthetic profile</button>
+      </div>
     </div>
+
+    <table id="files" hidden><tbody></tbody></table>
+
+    <label class="muted" for="args">Command line, as for the desktop app</label>
+    <input class="cmd" id="args" spellcheck="false" autocomplete="off" placeholder="--profile command.profile.gz">
+    <div class="row">
+      <button type="button" class="primary" id="open" disabled>Open</button>
+      <span class="muted" id="status"></span>
+    </div>
+    <div id="error" role="alert"></div>
+
+    <details>
+      <summary>Recording these files, and linking to them</summary>
+      <p>Capture a build with <code>bviz bazelrc</code>'s flags, or name them yourself:
+        <code>--profile=command.profile.gz --build_event_binary_file=build.bep --execution_log_compact_file=exec.binpb.zst</code>,
+        plus <code>--experimental_profile_include_target_label</code>. Graphs come from
+        <code>bazel aquery|cquery|query --output=streamed_proto</code>.</p>
+      <p>A link opens files over HTTP directly, one parameter per flag, for example
+        <code>?profile=https://example.com/command.profile.gz&amp;bep=https://example.com/build.bep</code>.
+        The server must allow this page to fetch them (CORS).</p>
+    </details>
   </div>
-  <div id="tip"></div>
 </main>
 
 <script type="module">
-import init, { Trace } from "./pkg/bviz_wasm.js";
+import init, { provide_file, start } from "./pkg/bviz_web.js";
 import { syntheticProfile } from "./fixture.mjs";
 
-const SLICE = 7, FLAME = 7, HEADER = 18, ROW = 16, GUTTER_WIDE = 180, GUTTER_NARROW = 96, FLAME_ROW = 18;
-const ready = init();
+const FLAGS = ["profile", "bep", "exec_log", "aquery", "cquery", "query"];
 const $ = (id) => document.getElementById(id);
-const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const files = new Map(); // name -> { bytes, flag }
+const ready = init();
 
-// bviz's role_fill: the workload picks the data slot; overhead (non-payload)
-// is mixed 0.4 of the way toward the background.
-const SLOTS = ["--d-orange", "--d-green", "--d-cyan", "--d-blue", "--d-yellow", "--d-purple", "--d-red", "--d-neutral"];
-const WORKLOAD_LABELS = ["Subprocess", "Starlark", "Filesystem", "Remote cache", "Scheduling", "Skyframe", "GC", "Other"];
-let palette = [];
-function hex(c) { const n = parseInt(c.slice(1, 7), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
-function mix(a, b, t) { return "rgb(" + a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",") + ")"; }
-function buildPalette() {
-  const bg = hex(css("--bg"));
-  palette = [];
-  SLOTS.forEach((slot, i) => {
-    const c = hex(css(slot));
-    palette.push(i === 7 ? css(slot) : mix(c, bg, 0.4), css(slot));
-  });
-  $("legend").innerHTML = WORKLOAD_LABELS.map((l, i) =>
-    `<span><span class="swatch" style="background:${palette[i * 2 + 1]}"></span>${l}</span>`).join("") +
-    '<span class="muted">Faded: Bazel overhead around the work</span>';
+/** The flag a file most likely goes under, from its name and first bytes. */
+function guess(name, bytes) {
+  const n = name.toLowerCase();
+  if (n.includes("aquery")) return "aquery";
+  if (n.includes("cquery")) return "cquery";
+  if (/(^|[^a-z])query/.test(n)) return "query";
+  if (/exec(ution)?[_-]?log|\.zst$/.test(n)) return "exec_log";
+  if (/\bbep\b|\.bep$|build[_-]?event/.test(n)) return "bep";
+  if (bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd) return "exec_log";
+  return "profile";
 }
 
-function fmt(us) {
-  us = Number(us) || 0;
-  if (us === 0) return "0";
-  if (us < 1000) return Math.round(us) + " µs";
-  if (us < 1e6) return (us / 1000).toFixed(1) + " ms";
-  if (us < 60e6) return (us / 1e6).toFixed(2) + " s";
-  return Math.floor(us / 60e6) + "m " + Math.round((us % 60e6) / 1e6) + "s";
+/** A name for `name` no other file already has: the command line names each file once. */
+function unique(name) {
+  if (!files.has(name)) return name;
+  for (let i = 2; ; i++) {
+    const dot = name.indexOf(".");
+    const next = dot < 0 ? `${name}-${i}` : `${name.slice(0, dot)}-${i}${name.slice(dot)}`;
+    if (!files.has(next)) return next;
+  }
 }
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-let trace = null, summary = null;
-const view = { start: 0, px: 1, scrollY: 0 };
-const flameView = { dir: "top-down", labels: "kind", weight: "wall", content: 0, scroll: 0 };
-let lastSlices = new Float32Array(), lastBoxes = new Float32Array();
+const quote = (s) => (/^[\w.@%+=:,/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+function commandLine() {
+  return [...files].map(([name, f]) => `--${f.flag} ${quote(name)}`).join(" ");
+}
 
-async function load(bytes, name) {
+function render() {
+  const body = $("files").tBodies[0];
+  body.replaceChildren();
+  for (const [name, f] of files) {
+    const tr = body.insertRow();
+    tr.insertCell().textContent = name;
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `Flag for ${name}`);
+    for (const flag of FLAGS) select.add(new Option(`--${flag}`, flag, false, flag === f.flag));
+    select.addEventListener("change", () => { f.flag = select.value; $("args").value = commandLine(); });
+    tr.insertCell().append(select);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => { files.delete(name); render(); $("args").value = commandLine(); });
+    tr.insertCell().append(remove);
+  }
+  $("files").hidden = files.size === 0;
+  $("open").disabled = $("args").value.trim() === "";
+}
+
+function add(name, bytes, flag) {
+  const key = unique(name);
+  files.set(key, { bytes, flag: flag || guess(key, bytes) });
+  render();
+  $("args").value = commandLine();
+  $("open").disabled = false;
+}
+
+async function addFiles(list) {
+  for (const f of list) add(f.name, new Uint8Array(await f.arrayBuffer()));
+}
+
+/** Splits a command line as a shell would: whitespace, single and double quotes. */
+function split(line) {
+  const out = [];
+  let cur = null, quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === "\\" && quote === '"' && i + 1 < line.length) cur += line[++i];
+      else cur += c;
+    } else if (c === "'" || c === '"') { quote = c; cur ??= ""; }
+    else if (/\s/.test(c)) { if (cur !== null) { out.push(cur); cur = null; } }
+    else if (c === "\\" && i + 1 < line.length) cur = (cur ?? "") + line[++i];
+    else cur = (cur ?? "") + c;
+  }
+  if (cur !== null) out.push(cur);
+  return out;
+}
+
+async function open() {
   $("error").textContent = "";
-  await ready;
+  $("open").disabled = true;
+  $("status").textContent = "Starting…";
   try {
-    const t0 = performance.now();
-    const next = new Trace(bytes, HEADER, ROW);
-    trace?.free();
-    trace = next;
-    summary = JSON.parse(trace.summary());
-    summary.parse_ms = performance.now() - t0;
-    summary.file = name;
+    await ready;
+    for (const [name, f] of files) provide_file(name, f.bytes);
+    start(split($("args").value));
+    // The app's window is the page from here on.
+    $("launcher").remove();
   } catch (e) {
-    $("error").textContent = "Could not read " + name + ": " + (e.message || e);
-    return;
+    $("status").textContent = "";
+    $("open").disabled = false;
+    $("error").textContent = e?.message ?? String(e);
   }
-  $("app").hidden = false;
-  buildPalette();
-  tiles();
-  fit();
-  rebuildFlame();
-  critical();
 }
 
-function tiles() {
-  const s = summary, cp = s.critical_path;
-  const t = [
-    ["Wall time", fmt(s.end_us - s.start_us), s.bazel_version || "Bazel version not recorded"],
-    ["Lanes", s.lanes.length.toLocaleString(), s.lanes.reduce((a, l) => a + l.slices, 0).toLocaleString() + " spans"],
-    ["Critical path", cp ? fmt(cp.path_us) : "–", cp ? cp.steps.length + " steps" : "No critical-path lane"],
-    ["Parsed in", fmt(s.parse_ms * 1000), esc(s.file) + (s.cut_off ? " · cut off, partial" : "")],
-  ];
-  $("tiles").innerHTML = t.map(([k, v, sub]) => `<div class="tile"><span class="muted">${k}</span><b>${v}</b><span class="muted">${sub}</span></div>`).join("");
-}
-
-// ---- timeline -----------------------------------------------------------
-const tl = $("timeline"), tlCtx = tl.getContext("2d");
-function gutter() { return tl.clientWidth < 640 ? GUTTER_NARROW : GUTTER_WIDE; }
-function sizeCanvas(c, h) {
-  const dpr = devicePixelRatio || 1;
-  const w = c.clientWidth;
-  if (h != null) c.style.height = h + "px";
-  const ch = c.clientHeight;
-  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(ch * dpr)) {
-    c.width = Math.round(w * dpr);
-    c.height = Math.round(ch * dpr);
-  }
-  const ctx = c.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return [w, ch];
-}
-function fit() {
-  const w = tl.clientWidth - gutter();
-  const span = Math.max(1, summary.end_us - summary.start_us);
-  // TimeView::fit, 8 px of margin either side.
-  view.px = (w - 16) / span;
-  view.start = summary.start_us - 8 / view.px;
-  view.scrollY = 0;
-  drawTimeline();
-}
-const RULER = 22;
-function drawTimeline() {
-  if (!trace) return;
-  const [w, h] = sizeCanvas(tl);
-  const g = gutter(), cw = w - g, ch = h - RULER;
-  tlCtx.fillStyle = css("--panel");
-  tlCtx.fillRect(0, 0, w, h);
-  lastSlices = trace.visible(view.start, view.px, cw, ch, view.scrollY, 1);
-  tlCtx.save();
-  tlCtx.beginPath(); tlCtx.rect(g, RULER, cw, ch); tlCtx.clip();
-  tlCtx.translate(g, RULER);
-  tlCtx.font = "11px system-ui, sans-serif";
-  tlCtx.textBaseline = "middle";
-  const text = css("--text");
-  for (let i = 0; i < lastSlices.length; i += SLICE) {
-    const x = lastSlices[i], y = lastSlices[i + 1], bw = lastSlices[i + 2], bh = lastSlices[i + 3];
-    tlCtx.fillStyle = palette[lastSlices[i + 4]];
-    tlCtx.fillRect(x, y, Math.max(bw - 0.5, 0.5), bh - 1);
-    if (bw > 40) {
-      tlCtx.fillStyle = text;
-      const name = trace.slice_name(lastSlices[i + 5], lastSlices[i + 6]);
-      const x0 = Math.max(x, 0) + 3;
-      tlCtx.save(); tlCtx.beginPath(); tlCtx.rect(x0, y, Math.min(x + bw, cw) - x0 - 2, bh); tlCtx.clip();
-      tlCtx.fillText(name, x0, y + bh / 2);
-      tlCtx.restore();
-    }
-  }
-  // Phase markers.
-  tlCtx.strokeStyle = css("--accent");
-  tlCtx.setLineDash([3, 3]);
-  for (const m of summary.markers) {
-    const x = (m.start_us - view.start) * view.px;
-    if (x < 0 || x > cw) continue;
-    tlCtx.beginPath(); tlCtx.moveTo(x + 0.5, 0); tlCtx.lineTo(x + 0.5, ch); tlCtx.stroke();
-  }
-  tlCtx.restore();
-
-  // Lane gutter: names on each lane's header band.
-  tlCtx.save();
-  tlCtx.beginPath(); tlCtx.rect(0, RULER, g, ch); tlCtx.clip();
-  tlCtx.font = "11px system-ui, sans-serif";
-  tlCtx.textBaseline = "middle";
-  for (const lane of summary.lanes) {
-    const y = lane.top - view.scrollY + RULER;
-    if (y + lane.height < RULER || y > h) continue;
-    tlCtx.fillStyle = css("--border");
-    tlCtx.fillRect(0, y + lane.height + 0.5, w, 1);
-    tlCtx.fillStyle = lane.class === "CriticalPath" ? css("--accent") : css("--muted");
-    tlCtx.fillText(lane.name.length > (g > 100 ? 26 : 13) ? lane.name.slice(0, g > 100 ? 25 : 12) + "…" : lane.name, 6, y + HEADER / 2 + 1);
-  }
-  tlCtx.restore();
-
-  // Ruler, with ticks at a round step.
-  tlCtx.fillStyle = css("--panel");
-  tlCtx.fillRect(0, 0, w, RULER);
-  tlCtx.fillStyle = css("--muted");
-  tlCtx.font = "11px system-ui, sans-serif";
-  tlCtx.textBaseline = "middle";
-  const target = 110 / view.px;
-  const step = [1, 2, 5].map((m) => m * 10 ** Math.floor(Math.log10(target))).concat([10 ** Math.ceil(Math.log10(target))]).find((s) => s >= target);
-  // Ticks at round times since the profile's start.
-  const origin = summary.start_us;
-  const first = origin + Math.ceil((view.start - origin) / step) * step;
-  for (let t = first; (t - view.start) * view.px < cw; t += step) {
-    const x = g + (t - view.start) * view.px;
-    tlCtx.fillRect(x, RULER - 6, 1, 6);
-    tlCtx.fillText(fmt(t - origin), x + 3, RULER / 2 - 2);
-  }
-  tlCtx.fillRect(0, RULER - 1, w, 1);
-}
-function zoomAt(x, factor) {
-  const t = view.start + x / view.px;
-  const span = Math.max(1, summary.end_us - summary.start_us);
-  const min = (tl.clientWidth - gutter() - 16) / span;
-  view.px = Math.min(Math.max(view.px * factor, min), 50);
-  view.start = t - x / view.px;
-}
-tl.addEventListener("wheel", (e) => {
-  if (!trace) return;
-  e.preventDefault();
-  if (e.shiftKey) {
-    const max = Math.max(0, summary.total_height - (tl.clientHeight - RULER) + 40);
-    view.scrollY = Math.min(Math.max(view.scrollY + e.deltaY + e.deltaX, 0), max);
-  } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-    view.start += e.deltaX / view.px;
-  } else {
-    zoomAt(e.offsetX - gutter(), Math.pow(1.1, -e.deltaY / 24));
-  }
-  drawTimeline();
-}, { passive: false });
-let drag = null;
-tl.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, start: view.start, scroll: view.scrollY }; tl.setPointerCapture(e.pointerId); tl.style.cursor = "grabbing"; });
-tl.addEventListener("pointerup", () => { drag = null; tl.style.cursor = "grab"; });
-tl.addEventListener("pointermove", (e) => {
-  if (!trace) return;
-  if (drag) {
-    view.start = drag.start - (e.clientX - drag.x) / view.px;
-    const max = Math.max(0, summary.total_height - (tl.clientHeight - RULER) + 40);
-    view.scrollY = Math.min(Math.max(drag.scroll - (e.clientY - drag.y), 0), max);
-    hideTip();
-    drawTimeline();
-    return;
-  }
-  const x = e.offsetX - gutter(), y = e.offsetY - RULER;
-  for (let i = lastSlices.length - SLICE; i >= 0; i -= SLICE) {
-    if (x >= lastSlices[i] && x < lastSlices[i] + Math.max(lastSlices[i + 2], 2) && y >= lastSlices[i + 1] && y < lastSlices[i + 1] + lastSlices[i + 3]) {
-      const s = JSON.parse(trace.slice_info(lastSlices[i + 5], lastSlices[i + 6]));
-      showTip(e, `<b>${esc(s.name)}</b><br>${fmt(s.dur_us)} · ${esc(s.category)} · ${esc(s.workload)}${s.payload ? "" : " overhead"}<br>` +
-        `<span class="muted">${esc(s.lane)} · starts ${fmt(s.start_us - summary.start_us)}</span>` +
-        (s.target ? `<br>Target ${esc(s.target)}` : "") + (s.mnemonic ? `<br>Mnemonic ${esc(s.mnemonic)}` : "") +
-        (s.out ? `<br>Output ${esc(s.out)}` : ""));
-      return;
-    }
-  }
-  hideTip();
-});
-tl.addEventListener("pointerleave", hideTip);
-tl.addEventListener("dblclick", fit);
-
-// ---- flame graph --------------------------------------------------------
-const fl = $("flame"), flCtx = fl.getContext("2d");
-function rebuildFlame() {
-  const total = trace.build_flame(flameView.dir, flameView.labels, flameView.weight, 0, 0);
-  $("flame-total").textContent = fmt(total) + (flameView.weight === "wall" ? " of wall time, shared among the lanes working at each instant" : " summed across lanes");
-  flameView.content = 0;
-  flameView.scroll = 0;
-  drawFlame();
-  stats();
-}
-function drawFlame() {
-  if (!trace) return;
-  const h = trace.flame_height(FLAME_ROW) + FLAME_ROW;
-  const [w] = sizeCanvas(fl, Math.max(h, 60));
-  if (!flameView.content) flameView.content = w;
-  flCtx.fillStyle = css("--panel");
-  flCtx.fillRect(0, 0, w, h);
-  lastBoxes = trace.flame_boxes(flameView.scroll, w, flameView.content, FLAME_ROW, 2);
-  flCtx.font = "11px system-ui, sans-serif";
-  flCtx.textBaseline = "middle";
-  const wash = css("--d-neutral");
-  for (let i = 0; i < lastBoxes.length; i += FLAME) {
-    const x = lastBoxes[i], y = lastBoxes[i + 1], bw = lastBoxes[i + 2], bh = lastBoxes[i + 3], c = lastBoxes[i + 4], kind = lastBoxes[i + 5];
-    flCtx.globalAlpha = kind === 0 ? 1 : 0.45;
-    flCtx.fillStyle = c >= 0 ? palette[c] : wash;
-    flCtx.fillRect(x, y, Math.max(bw - 1, 0.5), bh - 1);
-    flCtx.globalAlpha = 1;
-    if (bw > 36 && kind !== 2) {
-      const info = JSON.parse(trace.flame_box_info(lastBoxes[i + 6]));
-      flCtx.fillStyle = css("--text");
-      flCtx.save(); flCtx.beginPath(); flCtx.rect(x, y, bw - 2, bh); flCtx.clip();
-      flCtx.fillText(info.name, Math.max(x, 0) + 3, y + bh / 2);
-      flCtx.restore();
-    }
-  }
-}
-function flameBoxAt(e) {
-  for (let i = lastBoxes.length - FLAME; i >= 0; i -= FLAME) {
-    if (e.offsetX >= lastBoxes[i] && e.offsetX < lastBoxes[i] + lastBoxes[i + 2] && e.offsetY >= lastBoxes[i + 1] && e.offsetY < lastBoxes[i + 1] + lastBoxes[i + 3]) return i;
-  }
-  return -1;
-}
-fl.addEventListener("pointermove", (e) => {
-  const i = flameBoxAt(e);
-  if (i < 0) return hideTip();
-  const b = JSON.parse(trace.flame_box_info(lastBoxes[i + 6]));
-  showTip(e, `<b>${esc(b.name)}</b><br>${fmt(b.total_us)} · ${(b.share * 100).toFixed(1)}% of the graph` +
-    (b.self_us != null ? `<br>Self ${fmt(b.self_us)} · ${b.count.toLocaleString()} spans` : "") + '<br><span class="muted">Click to zoom</span>');
-});
-fl.addEventListener("pointerleave", hideTip);
-fl.addEventListener("click", (e) => {
-  const i = flameBoxAt(e);
-  if (i < 0) return;
-  // Widen the clicked box to the full viewport.
-  const w = fl.clientWidth, x = lastBoxes[i], bw = Math.max(lastBoxes[i + 2], 1);
-  flameView.scroll = ((flameView.scroll + x) * w) / bw;
-  flameView.content = (flameView.content * w) / bw;
-  drawFlame();
-});
-$("flame-reset").addEventListener("click", () => { flameView.content = 0; flameView.scroll = 0; drawFlame(); });
-for (const [attr, key] of [["data-dir", "dir"], ["data-labels", "labels"], ["data-weight", "weight"]]) {
-  document.querySelectorAll(`[${attr}]`).forEach((b) => b.addEventListener("click", () => {
-    flameView[key] = b.getAttribute(attr);
-    document.querySelectorAll(`[${attr}]`).forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
-    rebuildFlame();
-  }));
-}
-
-// ---- critical path and stats -------------------------------------------
-const PARTS = [["LeadIn", "Lead-in", "--d-neutral"], ["Waiting", "Waiting", "--d-yellow"], ["BeforeAction", "Before action", "--d-purple"],
-  ["Action", "Action", "--d-orange"], ["Unspanned", "No action span", "--d-cyan"], ["Tail", "Tail", "--d-blue"]];
-function critical() {
-  const cp = summary.critical_path;
-  if (!cp) {
-    $("critical").innerHTML = '<p class="muted">This profile has no critical-path lane.</p>';
-    return;
-  }
-  const wall = cp.wall_us || 1;
-  const bar = PARTS.map(([k, , c]) => `<span title="${k}" style="width:${(cp.parts[k] / wall) * 100}%;background:${css(c)}"></span>`).join("");
-  const legend = PARTS.filter(([k]) => cp.parts[k] > 0).map(([k, l, c]) =>
-    `<span><span class="swatch" style="background:${css(c)}"></span>${l} ${fmt(cp.parts[k])}</span>`).join("");
-  const steps = cp.steps.slice().sort((a, b) => b.own_us - a.own_us).slice(0, 12);
-  $("critical").innerHTML =
-    `<p class="muted">The build's wall time, partitioned along Bazel's critical path. The parts add up to ${fmt(cp.wall_us)}.</p>` +
-    `<div class="bar">${bar}</div><div class="legend">${legend}</div>` +
-    (cp.levers.length ? `<p style="margin-top:8px"><b>Levers:</b> ${cp.levers.slice(0, 5).map((l) => `${esc(l.lever)} ${fmt(l.us)}`).join(" · ")}</p>` : "") +
-    `<div class="scroll"><table><thead><tr><th>Longest steps</th><th class="num">Own</th><th class="num">Waited</th></tr></thead><tbody>` +
-    steps.map((s) => `<tr><td>${esc(s.name)}${s.mnemonic ? `<br><span class="muted">${esc(s.mnemonic)}${s.target ? " · " + esc(s.target) : ""}</span>` : ""}</td><td class="num">${fmt(s.own_us)}</td><td class="num">${fmt(s.gap_us)}</td></tr>`).join("") +
-    "</tbody></table></div>";
-}
-function stats() {
-  const rows = JSON.parse(trace.stats(15));
-  $("stats").innerHTML = `<table><thead><tr><th>Frame</th><th class="num">Count</th><th class="num">Self</th><th class="num">Share</th><th class="num">Max</th></tr></thead><tbody>` +
-    rows.map((r) => `<tr><td>${esc(r.name)}<br><span class="muted">${esc(r.workload)}</span></td><td class="num">${r.count.toLocaleString()}</td><td class="num">${fmt(r.self_us)}</td><td class="num">${(r.share * 100).toFixed(1)}%</td><td class="num">${fmt(r.max_us)}</td></tr>`).join("") +
-    "</tbody></table>";
-}
-
-// ---- chrome -------------------------------------------------------------
-const tip = $("tip");
-function showTip(e, html) {
-  tip.innerHTML = html;
-  tip.style.display = "block";
-  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8);
-  const y = e.clientY + 14 + tip.offsetHeight > innerHeight ? e.clientY - tip.offsetHeight - 10 : e.clientY + 14;
-  tip.style.left = Math.max(8, x) + "px";
-  tip.style.top = y + "px";
-}
-function hideTip() { tip.style.display = "none"; }
-
-async function readFile(f) { load(new Uint8Array(await f.arrayBuffer()), f.name); }
-$("file").addEventListener("change", (e) => e.target.files[0] && readFile(e.target.files[0]));
-$("example").addEventListener("click", () => load(new TextEncoder().encode(JSON.stringify(syntheticProfile())), "synthetic example"));
+$("file").addEventListener("change", (e) => addFiles(e.target.files));
+$("example").addEventListener("click", () =>
+  add("synthetic.profile.json", new TextEncoder().encode(JSON.stringify(syntheticProfile())), "profile"));
+$("args").addEventListener("input", () => { $("open").disabled = $("args").value.trim() === ""; });
+$("args").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("open").disabled) open(); });
+$("open").addEventListener("click", open);
 const drop = $("drop");
 drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
 drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]); });
-new ResizeObserver(() => { if (trace) { drawTimeline(); drawFlame(); } }).observe(document.body);
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (trace) { buildPalette(); drawTimeline(); drawFlame(); critical(); } });
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files); });
+
+// ?profile=URL&bep=URL…: fetch each file and open them at once.
+const linked = [...new URLSearchParams(location.search)].filter(([k]) => FLAGS.includes(k));
+if (linked.length) {
+  $("status").textContent = "Fetching…";
+  Promise.all(linked.map(async ([flag, url]) => {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url}: ${r.status} ${r.statusText}`);
+    const name = decodeURIComponent(new URL(url, location.href).pathname.split("/").pop() || flag);
+    return [name, new Uint8Array(await r.arrayBuffer()), flag];
+  }))
+    .then((all) => { for (const [name, bytes, flag] of all) add(name, bytes, flag); return open(); })
+    .catch((e) => { $("status").textContent = ""; $("error").textContent = `Could not fetch the linked files: ${e.message}`; });
+}
 </script>
 </body>
 </html>

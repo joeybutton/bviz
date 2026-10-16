@@ -65,7 +65,9 @@ fn respond(root: &Path, stream: TcpStream) -> std::io::Result<()> {
                 stream.write_all(&body)?;
             }
         }
-        None => stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?,
+        None => stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?,
     }
     eprintln!("{method} {target}");
     Ok(())

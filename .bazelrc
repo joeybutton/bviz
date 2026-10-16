@@ -66,7 +66,7 @@ import %workspace%/.bazelrc.remote
 
 try-import %workspace%/user.bazelrc
 
-# The browser build of the trace libraries (//web:site, //web:serve): optimized,
-# with cross-crate LTO, which trims the .wasm the page downloads by a fifth.
+# The browser build of the app (//web:site, //web:serve): optimized, with
+# cross-crate LTO to trim the .wasm the page downloads.
 build:wasm -c opt
 build:wasm --@rules_rs_rules_rust//rust/settings:lto=fat

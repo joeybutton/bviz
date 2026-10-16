@@ -31,10 +31,14 @@ members = [
     "ui/trace",
     "ui/trace/args",
     "ui/workspace",
+    "util/files",
     "util/parallel",
-    "wasm",
 ]
-exclude = ["third_party/ztracing"]
+exclude = [
+    "third_party/alacritty_terminal",
+    "third_party/gpui_platform",
+    "third_party/ztracing",
+]
 resolver = "2"
 
 [workspace.package]
@@ -47,6 +51,7 @@ alacritty_terminal = "0.26"
 bviz_bazel_flags = { path = "bazel_flags" }
 bviz_label = { path = "label" }
 bviz_invocation = { path = "invocation" }
+bviz_files = { path = "util/files" }
 bviz_parallel = { path = "util/parallel" }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
@@ -56,22 +61,22 @@ fixedbitset = "0.5"
 flate2 = { version = "1", features = ["zlib-rs"] }
 hashbrown = { version = "0.16", default-features = false }
 heck = "0.5"
-libmimalloc-sys = "0.1"
+libc = "0.2"
 lyon_tessellation = "1.0"
-mimalloc = "0.1"
-nucleo = "0.5"
+nucleo-matcher = "0.3"
 num_cpus = "1"
 packageurl = "0.7"
 rayon = "1"
 regex-automata = "0.4"
 regex-syntax = "0.8"
+ruzstd = "0.8"
 rustc-hash = "2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasm-bindgen = "0.2"
+web-time = "1"
 spdx = "0.13"
-zstd = { version = "0.14", default-features = false }
 org-eclipse-elk-alg-layered = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-core = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
 org-eclipse-elk-graph = { git = "https://github.com/openedges/elk-rs", tag = "v0.11.0+rs.2" }
@@ -87,3 +92,12 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" 
 # attribute.
 [patch."https://github.com/zed-industries/zed"]
 ztracing = { path = "third_party/ztracing" }
+# gpui_platform taking gpui_web single-threaded, so the browser build needs no
+# nightly toolchain; see third_party/gpui_platform/README.md.
+gpui_platform = { path = "third_party/gpui_platform" }
+
+# alacritty_terminal with its pty and event loop built only for desktop
+# targets, so the console replay also builds for the browser; see
+# third_party/alacritty_terminal/README.md.
+[patch.crates-io]
+alacritty_terminal = { path = "third_party/alacritty_terminal" }

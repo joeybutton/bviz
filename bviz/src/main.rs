@@ -7,12 +7,13 @@ use bviz_cli::{Cli, Request, Source, Sources};
 use bviz_invocation::Session;
 use bviz_ui_playback::DocumentClock;
 use bviz_ui_workspace::{Document, Member};
+#[cfg(not(target_family = "wasm"))]
 use clap::Parser;
 use gpui::{App, AppContext, Entity, Window};
 use group::{File, Given, Kind, Opening};
 
 #[global_allocator]
-static GLOBAL: bviz_alloc::MiMalloc = bviz_alloc::MiMalloc;
+static GLOBAL: bviz_alloc::Allocator = bviz_alloc::Allocator;
 
 /// A document being read, whichever viewer shows it.
 enum Load {
@@ -113,6 +114,7 @@ fn open(opening: Opening<Load>, window: &mut Window, cx: &mut App) -> Document {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn main() {
     // SAFETY: the first statement of main, before any other thread starts.
     unsafe { bviz_alloc::retain_freed_memory_across_load() };
@@ -121,6 +123,14 @@ fn main() {
         Request::Open(sources) => open_window(sources),
     }
 }
+
+/// In a browser the page starts bviz, once it has handed over the files its
+/// command line names: see [`web::start`].
+#[cfg(target_family = "wasm")]
+fn main() {}
+
+#[cfg(target_family = "wasm")]
+mod web;
 
 fn open_window(sources: Sources) {
     let (first, rest) = group::by_invocation(Load::start_all(sources));

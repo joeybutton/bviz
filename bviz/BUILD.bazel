@@ -1,5 +1,6 @@
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen")
 load("//tools/notices:notices.bzl", "third_party_notices")
 
 rust_binary(
@@ -22,7 +23,16 @@ rust_binary(
         "//ui/workspace",
         "@crates//:clap",
         "@crates//:gpui",
-    ],
+    ] + select({
+        # The page's entry points: see src/web.rs.
+        "@platforms//cpu:wasm32": [
+            "//util/files",
+            "//util/parallel",
+            "@crates//:gpui_platform",
+            "@crates//:wasm-bindgen",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 rust_test(
@@ -49,8 +59,16 @@ third_party_notices(
         "//third_party:wayland_package_metadata",
         "//third_party:xkbcommon_package_metadata",
         "//third_party:zed_package_metadata",
-        "//third_party:zstd_package_metadata",
     ],
     toolchain_package_metadata = ["//third_party:rust_std_package_metadata"],
     visibility = ["//dist:__pkg__"],
+)
+
+# The same app, built for the browser: rust_wasm_bindgen compiles :bviz for
+# wasm32-unknown-unknown and emits the ES module that starts it.
+rust_wasm_bindgen(
+    name = "bviz_web",
+    target = "web",
+    visibility = ["//web:__pkg__"],
+    wasm_file = ":bviz",
 )

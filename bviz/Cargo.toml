@@ -23,5 +23,11 @@ bviz_ui_playback = { path = "../ui/playback" }
 bviz_ui_trace = { path = "../ui/trace" }
 bviz_ui_workspace = { path = "../ui/workspace" }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+bviz_files = { workspace = true }
+bviz_parallel = { workspace = true }
+gpui_platform = { workspace = true }
+wasm-bindgen = { workspace = true }
+
 [dev-dependencies]
 bviz_ui_components = { path = "../ui/components" }

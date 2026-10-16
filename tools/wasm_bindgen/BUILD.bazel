@@ -1,0 +1,15 @@
+load("@rules_rust_wasm_bindgen//:defs.bzl", "rust_wasm_bindgen_toolchain")
+
+# rules_rs's default wasm-bindgen toolchain builds an older CLI than the
+# wasm-bindgen crate Cargo.lock pins, and the two must match exactly, so the
+# CLI is the release binary multitool pins at the crate's version.
+rust_wasm_bindgen_toolchain(
+    name = "toolchain_impl",
+    wasm_bindgen_cli = "@multitool//tools/wasm-bindgen",
+)
+
+toolchain(
+    name = "toolchain",
+    toolchain = ":toolchain_impl",
+    toolchain_type = "@rules_rust_wasm_bindgen//:toolchain_type",
+)
