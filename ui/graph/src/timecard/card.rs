@@ -12,9 +12,9 @@ use bviz_ui_components::LabelLine;
 use bviz_ui_components::gesture::{
     Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer,
 };
-use bviz_ui_components::{Button, ListScroll, TextTooltip, TruncatingLabel};
+use bviz_ui_components::{Button, ListScroll, MenuItem, TextTooltip, TruncatingLabel};
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, div, prelude::*,
+    App, ClickEvent, Context, Div, Entity, ListSizingBehavior, Stateful, Window, div, prelude::*,
     uniform_list,
 };
 
@@ -81,12 +81,30 @@ pub(crate) fn control(
             "timecard-toggle",
             cx.listener(|view, _: &ClickEvent, _, cx| toggle(view, cx)),
         )
-        .when(labelled, |toggle| toggle.label("timing"))
+        .when(labelled, |toggle| toggle.label(NAME))
         .leading_icon("timer")
         .keys_for(&ToggleTiming, &view.focus_handle)
         .selected(view.timecard.up),
     )
 }
+
+/// The overflow menu's row putting the card up and away; `None` where no profile
+/// records an action.
+pub(crate) fn menu_row(
+    view: &GraphPanel,
+    window: &Window,
+    cx: &Context<GraphPanel>,
+) -> Option<MenuItem> {
+    timed(view, cx)?;
+    let panel = cx.weak_entity();
+    let row = MenuItem::new(NAME, move |_, cx| {
+        panel.update(cx, toggle).ok();
+    });
+    Some(row.keys_for(&ToggleTiming, &view.focus_handle, window))
+}
+
+/// What the card's toolbar control and its overflow menu row read.
+const NAME: &str = "timing";
 
 /// The row `index` of the card's list, which a click shows the node it is
 /// [shown](Shown) on where the graph holds one; `mnemonic` says what kind of

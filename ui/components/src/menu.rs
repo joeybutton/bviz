@@ -104,6 +104,24 @@ impl MenuItem {
         self.tooltip = Some(tooltip.into());
         self
     }
+
+    /// The row with its label in lowercase, the case of a toolbar's labels.
+    pub(crate) fn lowercased(mut self) -> Self {
+        self.label = lowercase_initial(&self.label).into();
+        self
+    }
+}
+
+/// `label` with its initial capital lowered, an initialism kept whole.
+fn lowercase_initial(label: &str) -> String {
+    let mut chars = label.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), second) if !second.is_some_and(char::is_uppercase) => first
+            .to_lowercase()
+            .chain(label[first.len_utf8()..].chars())
+            .collect(),
+        _ => label.to_owned(),
+    }
 }
 
 /// One row of the submenu a [`MenuItem::submenu`] row opens. A menu stands one
@@ -875,6 +893,15 @@ impl Render for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lowercased_label_keeps_its_initialisms() {
+        assert_eq!(lowercase_initial("Go back"), "go back");
+        assert_eq!(lowercase_initial("legend"), "legend");
+        assert_eq!(lowercase_initial("BEP outcomes"), "BEP outcomes");
+        assert_eq!(lowercase_initial("X"), "x");
+        assert_eq!(lowercase_initial(""), "");
+    }
 
     /// How tall a row of the lists laid out here stands.
     const ROW: Pixels = px(24.);

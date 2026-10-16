@@ -2,12 +2,14 @@
 //! what it explains until asked for.
 
 use crate::gesture::{Button as PointerButton, Entry, GestureRow, Gestures, Input, Place, Pointer};
-use crate::{Button, KeyScope, Priority, TextTooltip, ToolbarGroup, menu_chrome};
+use crate::{
+    Button, KeyScope, MenuItem, OverflowRows, Priority, TextTooltip, ToolbarGroup, menu_chrome,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     App, AvailableSpace, Bounds, Context, Div, ElementId, Entity, FocusHandle, Font, Hsla,
-    IntoElement, KeyBinding, MouseButton, Pixels, SharedString, Subscription, Window, div,
-    prelude::*, px, size,
+    IntoElement, KeyBinding, MouseButton, Pixels, SharedString, Subscription, WeakFocusHandle,
+    Window, div, prelude::*, px, size,
 };
 use std::rc::Rc;
 
@@ -61,7 +63,8 @@ pub fn legend_gestures() -> impl Iterator<Item = GestureRow> {
 /// less than any other group.
 const LEGEND_PRIORITY: Priority = 0;
 
-/// What a [`LegendToggle`] reads, and the icon it carries.
+/// What a [`LegendToggle`] and the legend's overflow menu row read, and the
+/// icon the toggle carries.
 const TOGGLE_LABEL: &str = "legend";
 const TOGGLE_ICON: &str = "swatches";
 
@@ -231,8 +234,9 @@ impl RenderOnce for LegendEntry {
 /// The popover a [`LegendState`] has open.
 struct Opened {
     /// Where focus stood when the popover opened, which closing it from
-    /// within hands focus back to.
-    from: FocusHandle,
+    /// within hands focus back to while it stands: a menu row opening the
+    /// popover leaves focus on a menu that is let go as it closes.
+    from: WeakFocusHandle,
     /// Closes the popover as focus leaves it.
     _dismiss: Subscription,
 }
@@ -283,7 +287,8 @@ impl LegendState {
         self.open = Some(Opened {
             from: window
                 .focused(cx)
-                .unwrap_or_else(|| self.view_focus.clone()),
+                .unwrap_or_else(|| self.view_focus.clone())
+                .downgrade(),
             _dismiss: dismiss,
         });
         self.popover_focus.focus(window, cx);
@@ -291,10 +296,11 @@ impl LegendState {
     }
 
     /// Closes the popover from within, handing focus back where it stood when
-    /// the popover opened.
+    /// the popover opened, or to the view where that is gone.
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Opened { from, .. }) = self.open.take() {
-            window.focus(&from, cx);
+            let to = from.upgrade().unwrap_or_else(|| self.view_focus.clone());
+            window.focus(&to, cx);
             cx.notify();
         }
     }
@@ -308,7 +314,8 @@ impl LegendState {
 }
 
 /// A view's legend, standing on its toolbar as the [`toggle`](Self::toggle)
-/// opening the popover, which shows every entry and the notes.
+/// or the [`menu_row`](Self::menu_row) opening the [`popover`](Self::popover),
+/// which shows every entry and the notes.
 #[derive(Clone)]
 pub struct Legend {
     id: ElementId,
@@ -351,13 +358,47 @@ impl Legend {
         }
     }
 
+    /// The legend as the overflow menu row opening the popover, naming the
+    /// keys of [`ShowLegend`].
+    pub fn menu_row(&self, window: &Window, cx: &App) -> MenuItem {
+        let state = self.state.clone();
+        let row = MenuItem::new(TOGGLE_LABEL, move |window, cx| {
+            state.update(cx, |state, cx| state.show(window, cx));
+        })
+        .keys_for(&ShowLegend, &self.state.read(cx).view_focus, window);
+        match self.keys_nothing() {
+            true => row.disabled(),
+            false => row,
+        }
+    }
+
+    /// The popover while it is open, opened under the element it is laid out
+    /// over, which [`ToolbarGroup::anchoring`] places where the legend is
+    /// reached. [`LegendState::show`] opens it only in a frame after one that
+    /// drew this, open or not.
+    pub fn popover(self) -> LegendPopover {
+        LegendPopover { legend: self }
+    }
+
     /// The legend as the group ending a toolbar: its toggle, standing icon-only
     /// once the row has no room for its name, parted from the controls before
-    /// it.
-    pub fn toolbar_group(self) -> ToolbarGroup {
-        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle())
-            .or(self.toggle().icon_only())
+    /// it, and then its menu row.
+    pub fn toolbar_group(self, window: &Window, cx: &App) -> ToolbarGroup {
+        let overflow = OverflowRows::row(self.menu_row(window, cx), false);
+        ToolbarGroup::new(LEGEND_PRIORITY, self.clone().toggle(), overflow)
+            .or(self.clone().toggle().icon_only())
+            .anchoring(self.popover())
             .parted()
+    }
+
+    fn keys_nothing(&self) -> bool {
+        self.entries.is_empty() && self.notes.is_empty()
+    }
+
+    /// Whether the popover shows in a frame reading `seen`: a legend keying
+    /// nothing has nothing to show, whatever its state.
+    fn shows(&self, seen: &Seen) -> bool {
+        seen.open && !self.keys_nothing()
     }
 
     /// What this frame reads of the legend's state.
@@ -389,7 +430,7 @@ impl Legend {
 
     /// Every entry and note, opened under the element it is a child of, the
     /// key laid out in `columns`.
-    fn popover(
+    fn sheet(
         &self,
         seen: &Seen,
         columns: u16,
@@ -441,19 +482,10 @@ impl LegendToggle {
 }
 
 impl RenderOnce for LegendToggle {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let legend = self.legend;
-        let colors = bviz_ui_theme::theme(window, cx).colors;
-        let measured = legend.widths(window, cx);
         let seen = legend.seen(cx);
-        // A legend keying nothing has nothing to show, whatever its state.
-        let open = seen.open && !measured.keys_nothing();
-        let popover = open.then(|| {
-            let inset = window.client_inset().unwrap_or_default();
-            let room = window.viewport_size().width - inset * 2.;
-            let columns = popover_columns(&measured.entry_widths, room);
-            legend.popover(&seen, columns, &measured, &colors)
-        });
+        let open = legend.shows(&seen);
         let state = legend.state.clone();
         let toggle = Button::new(legend.id.clone(), move |event, window, cx| {
             GESTURES.dispatch(Pointer::click(event), |intent| match intent {
@@ -466,20 +498,39 @@ impl RenderOnce for LegendToggle {
         .when(self.labelled, |toggle| toggle.label(TOGGLE_LABEL))
         .leading_icon(TOGGLE_ICON)
         .selected(open)
-        .disabled(measured.keys_nothing())
+        .disabled(legend.keys_nothing())
         // A tooltip would cover the popover the toggle holds open.
         .when(!open, |toggle| {
             toggle.keys_for(&ShowLegend, &seen.view_focus)
         });
         div()
-            .relative()
             .flex_none()
             // Keeps the press from an ancestor that focuses on it, which would
             // close the popover just before the click toggles it open again.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(toggle)
-            .children(popover)
-            .child(seen.drawn.mark())
+    }
+}
+
+/// A [`Legend`]'s popover, made by [`Legend::popover`].
+#[derive(IntoElement)]
+pub struct LegendPopover {
+    legend: Legend,
+}
+
+impl RenderOnce for LegendPopover {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let legend = self.legend;
+        let measured = legend.widths(window, cx);
+        let seen = legend.seen(cx);
+        let sheet = legend.shows(&seen).then(|| {
+            let colors = bviz_ui_theme::theme(window, cx).colors;
+            let inset = window.client_inset().unwrap_or_default();
+            let room = window.viewport_size().width - inset * 2.;
+            let columns = popover_columns(&measured.entry_widths, room);
+            legend.sheet(&seen, columns, &measured, &colors)
+        });
+        div().size_full().children(sheet).child(seen.drawn.mark())
     }
 }
 

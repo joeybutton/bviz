@@ -18,15 +18,12 @@ pub(crate) enum Kind {
         /// gives them up, its widest first.
         widths: Vec<Pixels>,
         priority: Priority,
-        /// Whether the group moves into the overflow menu once it stands at
-        /// its narrowest, rather than staying until the row leaves it out.
-        overflows: bool,
         /// Whether a rule parts the group from a control standing before it.
         parted: bool,
     },
-    /// An item taking the room the groups leave, at `least` through every
-    /// step of [`narrowings`] up to the overflow menu's trigger leaving the
-    /// row, before which it narrows to `floor`; narrower only past the last.
+    /// An item taking the room the groups leave, at `least` until every
+    /// group that can has moved into the overflow menu, then at `floor`
+    /// (see [`narrowings`]); narrower only past the last step.
     Filling { least: Pixels, floor: Pixels },
 }
 
@@ -43,8 +40,8 @@ pub(crate) struct Room {
     pub width: Pixels,
     /// Between neighbouring items of the row.
     pub gap: Pixels,
-    /// The trigger of the overflow menu, an item of the row ending the leading
-    /// ones while any group stands in the menu.
+    /// The trigger of the overflow menu, the item ending the row while any
+    /// group stands in the menu.
     pub overflow: Pixels,
     /// A rule parting a group from the control before it, with the gap after
     /// the rule.
@@ -63,8 +60,7 @@ pub(crate) enum Spot {
         ruled: bool,
     },
     Menu,
-    /// Out of the row and the menu: a group that cannot move into the menu,
-    /// in a row too narrow for it, or one in the menu whose trigger the row
+    /// Out of the row and the menu: a group in the menu whose trigger the row
     /// has no room for.
     Out,
 }
@@ -78,6 +74,25 @@ pub(crate) struct Fitted {
     /// The room no item takes between the leading items and the trailing
     /// ones, as the offsets of its edges past the row's left edge.
     pub free: (Pixels, Pixels),
+}
+
+impl Fitted {
+    /// Where along the row the item at `at` is reached, as the offset of its
+    /// left edge past the row's and its width: its own span, short of its
+    /// rule, while it stands in the row, and the overflow menu trigger's while
+    /// it stands in the menu.
+    pub fn reached_at(&self, at: usize, room: Room) -> Option<(Pixels, Pixels)> {
+        match self.spots[at] {
+            Spot::Row {
+                x, width, ruled, ..
+            } => Some(match ruled {
+                true => (x + room.rule, width - room.rule),
+                false => (x, width),
+            }),
+            Spot::Menu => self.trigger.map(|x| (x, room.overflow)),
+            Spot::Out => None,
+        }
+    }
 }
 
 /// How `items` stand in `room`: the first state of [`narrowings`] whose row
@@ -112,7 +127,6 @@ struct State {
 enum Stand {
     Shown(usize),
     Menu,
-    Out,
 }
 
 /// One step of the row narrowing.
@@ -129,36 +143,31 @@ enum Step {
 /// lowest priority first and, among equals, the one standing later in the
 /// row. Only once no group can narrow further do groups move into the
 /// overflow, in that same order, so that a control stays in the row, however
-/// compact, for as long as one can. A row still too narrow then leaves out the
-/// groups that cannot move into the menu, in that order, narrows each filling
-/// to its floor, and last leaves out the menu's trigger, which reaches every
-/// group given up before it.
+/// compact, for as long as one can. A row still too narrow then narrows each
+/// filling to its floor, so that the menu's trigger, which reaches every group
+/// given up before it, does not leave while a filling has room to give; and
+/// last leaves out the trigger.
 fn narrowings(items: &[Measure]) -> Vec<Step> {
     struct Group<'a> {
         at: usize,
         widths: &'a [Pixels],
         priority: Priority,
-        overflows: bool,
     }
     let mut order: Vec<Group> = (items.iter().enumerate().rev())
         .filter_map(|(at, item)| match &item.kind {
             Kind::Group {
-                widths,
-                priority,
-                overflows,
-                ..
+                widths, priority, ..
             } => Some(Group {
                 at,
                 widths,
                 priority: *priority,
-                overflows: *overflows,
             }),
             Kind::Filling { .. } => None,
         })
         .collect();
     order.sort_by_key(|group| group.priority);
     let presentations = order.iter().map(|group| group.widths.len());
-    let mut steps = Vec::with_capacity(presentations.clone().sum::<usize>() + order.len() + 1);
+    let mut steps = Vec::with_capacity(presentations.clone().sum::<usize>() + items.len() + 1);
     for stage in 1..presentations.max().unwrap_or(0) {
         steps.extend(
             (order.iter())
@@ -166,13 +175,7 @@ fn narrowings(items: &[Measure]) -> Vec<Step> {
                 .map(|group| Step::Narrow(group.at, Stand::Shown(stage))),
         );
     }
-    for (overflows, stand) in [(true, Stand::Menu), (false, Stand::Out)] {
-        steps.extend(
-            (order.iter())
-                .filter(|group| group.overflows == overflows)
-                .map(|group| Step::Narrow(group.at, stand)),
-        );
-    }
+    steps.extend((order.iter()).map(|group| Step::Narrow(group.at, Stand::Menu)));
     steps.extend(
         (items.iter().enumerate())
             .filter(
@@ -290,14 +293,12 @@ impl State {
         for item in &leading {
             x += place(item, x) + room.gap;
         }
-        let trigger = self.trigger().then(|| {
-            let at = x;
-            x += room.overflow + room.gap;
-            at
-        });
-        let trailing_start = room.width - spanned(trailing.iter().map(|item| item.width), room.gap);
+        let trigger = self.trigger().then(|| room.width - room.overflow);
+        let trailing_end = trigger.map_or(room.width, |at| at - room.gap);
+        let trailing_start =
+            trailing_end - spanned(trailing.iter().map(|item| item.width), room.gap);
         let free_end = match trailing.is_empty() {
-            true => room.width,
+            true => trailing_end,
             false => trailing_start - room.gap,
         };
         let free = (x, free_end);
@@ -339,12 +340,11 @@ mod tests {
         }
     }
 
-    fn group(widths: &[f32], priority: Priority, overflows: bool) -> Measure {
+    fn group(widths: &[f32], priority: Priority) -> Measure {
         Measure {
             kind: Kind::Group {
                 widths: widths.iter().map(|&width| px(width)).collect(),
                 priority,
-                overflows,
                 parted: false,
             },
             side: Side::Leading,
@@ -380,14 +380,13 @@ mod tests {
     }
 
     /// A row shaped as a graph's: a layout and a colour picker each dropping
-    /// its label, the marks also collapsing, and panel toggles going icon-only
-    /// but never into the menu.
+    /// its label, the marks also collapsing, and panel toggles going icon-only.
     fn graph_row() -> Vec<Measure> {
         vec![
-            group(&[150., 110.], 4, true),
-            group(&[140., 100.], 3, true),
-            group(&[260., 220., 110.], 2, true),
-            trailing(group(&[300., 100.], 1, false)),
+            group(&[150., 110.], 4),
+            group(&[140., 100.], 3),
+            group(&[260., 220., 110.], 2),
+            trailing(group(&[300., 100.], 1)),
         ]
     }
 
@@ -437,7 +436,7 @@ mod tests {
 
     #[test]
     fn every_group_narrows_before_any_overflows() {
-        use Stand::{Menu, Out, Shown};
+        use Stand::{Menu, Shown};
         let passed: Vec<(Vec<Stand>, bool)> = (passes(&graph_row()).into_iter())
             .map(|state| (state.stands, state.triggerless))
             .collect();
@@ -450,18 +449,18 @@ mod tests {
                 (vec![Shown(0), Shown(1), Shown(1), Shown(1)], false),
                 (vec![Shown(1), Shown(1), Shown(1), Shown(1)], false),
                 (vec![Shown(1), Shown(1), Shown(2), Shown(1)], false),
-                (vec![Shown(1), Shown(1), Menu, Shown(1)], false),
-                (vec![Shown(1), Menu, Menu, Shown(1)], false),
-                (vec![Menu, Menu, Menu, Shown(1)], false),
-                (vec![Menu, Menu, Menu, Out], false),
-                (vec![Menu, Menu, Menu, Out], true),
+                (vec![Shown(1), Shown(1), Shown(2), Menu], false),
+                (vec![Shown(1), Shown(1), Menu, Menu], false),
+                (vec![Shown(1), Menu, Menu, Menu], false),
+                (vec![Menu, Menu, Menu, Menu], false),
+                (vec![Menu, Menu, Menu, Menu], true),
             ]
         );
     }
 
     #[test]
     fn of_equal_priorities_the_later_group_gives_way_first() {
-        let groups = [group(&[50., 20.], 1, true), group(&[50., 20.], 1, true)];
+        let groups = [group(&[50., 20.], 1), group(&[50., 20.], 1)];
         assert_eq!(
             passes(&groups)[1].stands,
             [Stand::Shown(0), Stand::Shown(1)]
@@ -486,17 +485,36 @@ mod tests {
         let groups = graph_row();
         let all_narrowed = 110. + 100. + 110. + 100. + GAP_WIDTH * 3.;
         let fitted = fit(&groups, room(all_narrowed - 1.));
-        assert_eq!(seen(&fitted), [Shown(1), Shown(1), Menu, Shown(1)]);
-        assert_eq!(fitted.trigger, Some(px(110. + 100. + GAP_WIDTH * 2.)));
+        assert_eq!(seen(&fitted), [Shown(1), Shown(1), Shown(2), Menu]);
+        assert_eq!(fitted.trigger, Some(px(all_narrowed - 1. - OVERFLOW_WIDTH)));
+    }
+
+    /// The trigger ends the row, past the trailing items, wherever the
+    /// leading ones end.
+    #[test]
+    fn the_overflow_trigger_ends_the_row() {
+        let items = [
+            group(&[50.], 2),
+            group(&[60.], 1),
+            trailing(group(&[40.], 3)),
+        ];
+        let width = 50. + 60. + 40. + GAP_WIDTH * 2. - 1.;
+        let fitted = fit(&items, room(width));
+        assert_eq!(seen(&fitted), [Shown(0), Menu, Shown(0)]);
+        let trigger = width - OVERFLOW_WIDTH;
+        assert_eq!(fitted.trigger, Some(px(trigger)));
+        let legend = trigger - GAP_WIDTH - 40.;
+        assert!(matches!(fitted.spots[2], Spot::Row { x, .. } if x == px(legend)));
+        assert_eq!(fitted.free, (px(50. + GAP_WIDTH), px(legend - GAP_WIDTH)));
     }
 
     /// The trigger reaches every group the row has given up, so it is the last
     /// thing a row too narrow for its narrowest stand gives up in turn.
     #[test]
-    fn a_row_too_narrow_leaves_out_its_fixed_groups_before_the_trigger() {
+    fn a_row_too_narrow_for_the_trigger_leaves_every_group_out() {
         let groups = graph_row();
         let fitted = fit(&groups, room(OVERFLOW_WIDTH));
-        assert_eq!(seen(&fitted), [Menu, Menu, Menu, Out]);
+        assert_eq!(seen(&fitted), [Menu; 4]);
         assert_eq!(fitted.trigger, Some(Pixels::ZERO));
         let fitted = fit(&groups, room(OVERFLOW_WIDTH - 1.));
         assert_eq!(seen(&fitted), [Out; 4]);
@@ -505,7 +523,7 @@ mod tests {
 
     #[test]
     fn a_rule_takes_room_only_after_a_control() {
-        let items = [group(&[50.], 1, true), parted(group(&[60.], 2, false))];
+        let items = [group(&[50.], 1), parted(group(&[60.], 2))];
         let whole = 50. + GAP_WIDTH + RULE_WIDTH + 60.;
         let fitted = fit(&items, room(whole));
         assert_eq!(
@@ -522,12 +540,37 @@ mod tests {
         assert!(matches!(fitted.spots[1], Spot::Row { ruled: false, .. }));
     }
 
+    /// An item is reached at its own span, short of its rule, while it stands
+    /// in the row, at the trigger's while it stands in the menu, and nowhere
+    /// once the trigger has left the row too.
+    #[test]
+    fn an_item_is_reached_where_it_stands() {
+        let items = [group(&[50.], 2), parted(group(&[60.], 1))];
+        let whole = 50. + GAP_WIDTH + RULE_WIDTH + 60.;
+        let fitted = fit(&items, room(whole));
+        assert_eq!(
+            fitted.reached_at(1, room(whole)),
+            Some((px(50. + GAP_WIDTH + RULE_WIDTH), px(60.)))
+        );
+        let narrower = room(whole - 1.);
+        let fitted = fit(&items, narrower);
+        assert_eq!(seen(&fitted), [Shown(0), Menu]);
+        assert_eq!(
+            fitted.reached_at(1, narrower),
+            Some((px(whole - 1. - OVERFLOW_WIDTH), px(OVERFLOW_WIDTH)))
+        );
+        let too_narrow = room(OVERFLOW_WIDTH - 1.);
+        let fitted = fit(&items, too_narrow);
+        assert_eq!(fitted.reached_at(0, too_narrow), None);
+        assert_eq!(fitted.reached_at(1, too_narrow), None);
+    }
+
     /// A filling stands at its least while any group stands in the row: every
     /// group gives way first.
     #[test]
     fn a_filling_holds_its_least_while_groups_give_way() {
         const FIELD_LEAST: f32 = 240.;
-        let items = [group(&[90.], 1, true), filling(FIELD_LEAST)];
+        let items = [group(&[90.], 1), filling(FIELD_LEAST)];
         let both = 90. + FIELD_LEAST + GAP_WIDTH;
         assert_eq!(stands(&items, both), [Shown(0), Shown(0)]);
         let narrower = both - 1.;
@@ -550,7 +593,7 @@ mod tests {
     /// row, taking all of it.
     #[test]
     fn a_filling_too_narrow_for_its_least_takes_the_whole_row() {
-        let items = [group(&[90.], 1, true), filling(240.)];
+        let items = [group(&[90.], 1), filling(240.)];
         let fitted = fit(&items, room(100.));
         assert_eq!(seen(&fitted), [Out, Shown(0)]);
         assert_eq!(fitted.trigger, None);
@@ -564,7 +607,7 @@ mod tests {
     fn a_folding_filling_keeps_the_trigger_in_the_row() {
         const LEAST: f32 = 420.;
         const FLOOR: f32 = 120.;
-        let items = [group(&[90.], 1, true), folding(LEAST, FLOOR)];
+        let items = [group(&[90.], 1), folding(LEAST, FLOOR)];
         let beside_trigger = |least: f32| least + GAP_WIDTH + OVERFLOW_WIDTH;
         assert_eq!(stands(&items, beside_trigger(LEAST)), [Menu, Shown(0)]);
         let folded = fit(&items, room(beside_trigger(LEAST) - 1.));
@@ -579,6 +622,31 @@ mod tests {
         assert_eq!(whole.trigger, None);
     }
 
+    /// A trailing group moves into the menu, with every other group, before a
+    /// filling narrows below its least: a control in the menu stays in reach.
+    #[test]
+    fn every_group_moves_into_the_menu_before_a_filling_narrows() {
+        const LEAST: f32 = 300.;
+        const FLOOR: f32 = 120.;
+        const LEGEND: f32 = 30.;
+        let items = [
+            group(&[90.], 1),
+            folding(LEAST, FLOOR),
+            trailing(group(&[LEGEND], 0)),
+        ];
+        let beside_trigger = |filling: f32| filling + OVERFLOW_WIDTH + GAP_WIDTH;
+        let legend_out = beside_trigger(LEAST) + 90. + GAP_WIDTH;
+        assert_eq!(stands(&items, legend_out), [Shown(0), Shown(0), Menu]);
+        assert_eq!(
+            stands(&items, beside_trigger(LEAST)),
+            [Menu, Shown(0), Menu]
+        );
+        assert_eq!(
+            stands(&items, beside_trigger(LEAST) - 1.),
+            [Menu, Shown(1), Menu]
+        );
+    }
+
     /// A graph's query row as a layout at a fractional scale measured it: the
     /// boxes menu and the query field filling the rest, standing a little way
     /// into the window. The field stays in the row at every width, at its
@@ -590,7 +658,7 @@ mod tests {
         const FIELD_DEVICE: f32 = 326.;
         const MOST_DEVICE: usize = 1000;
         let least = FIELD_DEVICE / SCALE;
-        let items = [group(&[BOXES_DEVICE / SCALE], 1, true), filling(least)];
+        let items = [group(&[BOXES_DEVICE / SCALE], 1), filling(least)];
         for device in 0..MOST_DEVICE {
             let width = device as f32 / SCALE;
             let fitted = fit(&items, room(width));
@@ -648,7 +716,6 @@ mod tests {
                     kind: Kind::Group {
                         widths,
                         priority: rng.below(MOST_PRIORITY) as Priority,
-                        overflows: rng.below(3) > 0,
                         parted: rng.below(2) == 0,
                     },
                     side: match rng.below(3) {
@@ -660,7 +727,9 @@ mod tests {
             .collect();
         if rng.below(2) == 0 {
             let at = rng.below(items.len() as u64 + 1) as usize;
-            items.insert(at, filling(rng.width(scale, MOST_DEVICE_WIDTH)));
+            let least = rng.width(scale, MOST_DEVICE_WIDTH);
+            let floor = rng.width(scale, MOST_DEVICE_WIDTH).min(least);
+            items.insert(at, folding(least, floor));
         }
         items
     }

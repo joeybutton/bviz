@@ -10,7 +10,7 @@ use std::time::Duration;
 mod card;
 mod words;
 
-pub(crate) use card::{Card, card, control, gestures, toggle};
+pub(crate) use card::{Card, card, control, gestures, menu_row, toggle};
 pub(crate) use words::part_of;
 
 /// How many of the slowest actions the card lists: enough to scroll through

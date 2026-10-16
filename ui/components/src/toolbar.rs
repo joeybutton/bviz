@@ -1,9 +1,9 @@
 mod fit;
 
-use crate::button::ICON_SIZE;
+use crate::button::{ICON_SIZE, compact_icon_width};
 use crate::menu::{Menu, MenuEvent, MenuItem, over_window};
 use crate::{Button, CONTROL_HEIGHT, spinner};
-use fit::{Fitted, Kind, Measure, Room, Side, Spot};
+use fit::{Kind, Measure, Room, Side, Spot};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Div, ElementId, Empty, Entity,
     FocusHandle, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, RenderOnce,
@@ -15,6 +15,9 @@ pub use fit::Priority;
 
 /// Space the strip leaves above and below its controls.
 const PADDING: Pixels = px(4.);
+
+/// Space the strip leaves before its first control and after its last.
+const INSET: Pixels = px(8.);
 
 /// Room between neighbouring controls of a strip.
 const GAP: Pixels = px(8.);
@@ -44,43 +47,72 @@ fn badge_inset() -> Pixels {
 }
 
 /// A group of a [`OneRow`]'s controls, standing in the narrowest of its
-/// presentations the row's width calls for.
+/// presentations the row's width calls for, and in the row's overflow menu
+/// once even its narrowest finds no room.
 pub struct ToolbarGroup {
     priority: Priority,
     widest: AnyElement,
     narrower: Vec<AnyElement>,
-    overflow: Option<Overflow>,
+    overflow: OverflowRows,
+    anchored: Option<AnyElement>,
     parted: bool,
 }
 
-/// How a [`ToolbarGroup`] stands in its row's overflow menu.
-struct Overflow {
+/// How a [`ToolbarGroup`] stands in its row's overflow menu: as one row or
+/// more, so that every control of the row stays in reach, each labelled in
+/// lowercase like the row's controls.
+pub struct OverflowRows {
     items: Vec<MenuItem>,
-    /// Whether the group stands other than at rest.
+    /// Whether the group stands other than at rest, which marks the menu's
+    /// trigger while the group is in the menu.
     set: bool,
+}
+
+impl OverflowRows {
+    /// The group as the menu row `item`, `set` where it stands other than at
+    /// rest.
+    pub fn row(item: MenuItem, set: bool) -> Self {
+        Self::rows(item, [], set)
+    }
+
+    /// The group as the menu row `first` followed by `rest`, one for each of
+    /// its controls, `set` where it stands other than at rest.
+    pub fn rows(first: MenuItem, rest: impl IntoIterator<Item = MenuItem>, set: bool) -> Self {
+        Self {
+            items: (std::iter::once(first).chain(rest))
+                .map(MenuItem::lowercased)
+                .collect(),
+            set,
+        }
+    }
 }
 
 impl ToolbarGroup {
     /// A group standing as `widest` while the row has room for it, holding
-    /// out against the row narrowing by `priority`.
-    pub fn new(priority: Priority, widest: impl IntoElement) -> Self {
+    /// out against the row narrowing by `priority`, and as `overflow` in the
+    /// row's overflow menu.
+    pub fn new(priority: Priority, widest: impl IntoElement, overflow: OverflowRows) -> Self {
         Self {
             priority,
             widest: widest.into_any_element(),
             narrower: Vec::new(),
-            overflow: None,
+            overflow,
+            anchored: None,
             parted: false,
         }
     }
 
     /// A group standing as what `build` builds beside the word `name`, then
-    /// without it, holding out by `priority`.
+    /// without it, holding out by `priority`, and as `overflow` in the row's
+    /// overflow menu.
     pub fn named<E: IntoElement>(
         priority: Priority,
         name: impl Into<SharedString>,
+        overflow: OverflowRows,
         mut build: impl FnMut() -> E,
     ) -> Self {
-        Self::new(priority, beside().child(name.into()).child(build())).or(beside().child(build()))
+        let named = beside().child(name.into()).child(build());
+        Self::new(priority, named, overflow).or(beside().child(build()))
     }
 
     /// Offers `narrower` for the group to stand as once the row has no room
@@ -90,24 +122,13 @@ impl ToolbarGroup {
         self
     }
 
-    /// Lets the group leave the row for its overflow menu once it stands at
-    /// its narrowest, as the menu row `item`; `set` says the group stands
-    /// other than at rest, which marks the menu's trigger while it is there.
-    pub fn overflow(self, item: MenuItem, set: bool) -> Self {
-        self.overflow_rows(item, [], set)
-    }
-
-    /// Lets the group leave the row for its overflow menu as
-    /// [`overflow`](Self::overflow) does, as the menu row `first` followed by
-    /// `rest`, one for each of its controls.
-    pub fn overflow_rows(
-        mut self,
-        first: MenuItem,
-        rest: impl IntoIterator<Item = MenuItem>,
-        set: bool,
-    ) -> Self {
-        let items = std::iter::once(first).chain(rest).collect();
-        self.overflow = Some(Overflow { items, set });
+    /// Lays `element` out over where the group is reached: its own bounds
+    /// while it stands in the row, the overflow menu trigger's while it stands
+    /// in the menu, and nowhere once the row has no room for the trigger. A sheet the group
+    /// opens, placed in it by [`under_trigger`](crate::menu_chrome::under_trigger),
+    /// so opens under whichever the group is reached by.
+    pub fn anchoring(mut self, element: impl IntoElement) -> Self {
+        self.anchored = Some(element.into_any_element());
         self
     }
 
@@ -119,12 +140,20 @@ impl ToolbarGroup {
     }
 }
 
+/// The padding ending a band of controls whose last is a compact [`Button`]
+/// showing only an icon, which centres that icon where a [`OneRow`] centres an
+/// icon-only button ending it, so that the controls ending stacked bands line
+/// up.
+pub fn compact_band_end() -> Pixels {
+    INSET + (CONTROL_HEIGHT - compact_icon_width()) / 2.
+}
+
 /// A strip of controls held to one row, [`height`](Self::height) tall, so that
 /// what it holds never moves the content below it.
 ///
 /// Where the row is too narrow for its controls, its groups give way by
 /// [`Priority`], narrowing through the presentations they offer and then
-/// moving into a menu behind a trigger ending the left-hand controls.
+/// moving into a menu behind a trigger ending the row.
 #[derive(IntoElement)]
 pub struct OneRow {
     id: ElementId,
@@ -212,7 +241,7 @@ impl OneRow {
     /// Adds the element `build` builds as [`filling`](Self::filling) does,
     /// for an element that can stand narrower than its min-content width: it
     /// narrows down to `floor` before the row leaves out its overflow menu's
-    /// trigger, so that the groups in the menu stay in reach.
+    /// trigger, so that every control stays in reach, in the row or the menu.
     pub fn filling_down_to<E: IntoElement>(
         mut self,
         floor: Pixels,
@@ -379,7 +408,10 @@ impl IntoElement for Fitting {
 struct Measured {
     widest: (AnyElement, Size<Pixels>),
     narrower: Vec<(AnyElement, Size<Pixels>)>,
-    overflow: Option<Overflow>,
+    /// The rows a group stands as in the overflow menu; a filling never
+    /// leaves the row.
+    overflow: Option<OverflowRows>,
+    anchored: Option<AnyElement>,
     fills: bool,
 }
 
@@ -408,7 +440,6 @@ impl Measured {
                             .map(|(_, extent)| extent.width)
                             .collect(),
                         priority: group.priority,
-                        overflows: group.overflow.is_some(),
                         parted: group.parted,
                     },
                     side,
@@ -416,7 +447,8 @@ impl Measured {
                 let measured = Measured {
                     widest,
                     narrower,
-                    overflow: group.overflow,
+                    overflow: Some(group.overflow),
+                    anchored: group.anchored,
                     fills: false,
                 };
                 (measured, measure)
@@ -451,6 +483,7 @@ impl Measured {
                     widest: (held(standing), extent),
                     narrower: Vec::new(),
                     overflow: None,
+                    anchored: None,
                     fills: true,
                 };
                 (measured, measure)
@@ -511,6 +544,28 @@ fn prepaint_natural(
     element
 }
 
+/// Lays `element` out in a holder spanning `over`, for what it holds to place
+/// itself by.
+fn prepaint_over(
+    element: AnyElement,
+    over: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut holder = div()
+        .relative()
+        .w(over.size.width)
+        .h(over.size.height)
+        .child(element)
+        .into_any_element();
+    let space = size(
+        AvailableSpace::Definite(over.size.width),
+        AvailableSpace::Definite(over.size.height),
+    );
+    holder.prepaint_as_root(over.origin, space, window, cx);
+    holder
+}
+
 impl Element for Fitting {
     type RequestLayoutState = ();
     type PrepaintState = Vec<AnyElement>;
@@ -564,19 +619,26 @@ impl Element for Fitting {
                 .width,
             rule: RULE + GAP,
         };
-        let Fitted {
-            spots,
-            trigger,
-            free,
-        } = fit::fit(&measures, room);
+        let fitted = fit::fit(&measures, room);
         let mut overflowed = Vec::new();
         let mut set = false;
         let statuses = std::mem::take(&mut self.status);
         let mask = ContentMask { bounds };
         let laid = window.with_content_mask(Some(mask), |window| {
-            let mut laid = Vec::with_capacity(measured.len() + 2);
-            for (item, spot) in measured.into_iter().zip(spots) {
-                match spot {
+            let anchors = measured.iter().filter(|item| item.anchored.is_some());
+            let mut anchored = Vec::with_capacity(anchors.count());
+            let mut laid = Vec::with_capacity(measured.len() * 2 + anchored.capacity() + 2);
+            for (at, mut item) in measured.into_iter().enumerate() {
+                if let (Some(element), Some((x, width))) =
+                    (item.anchored.take(), fitted.reached_at(at, room))
+                {
+                    let over = Bounds::new(
+                        point(bounds.left() + x, bounds.top()),
+                        size(width, bounds.size.height),
+                    );
+                    anchored.push((element, over));
+                }
+                match fitted.spots[at] {
                     Spot::Row {
                         stage,
                         x,
@@ -602,7 +664,7 @@ impl Element for Fitting {
                     Spot::Out => {}
                 }
             }
-            if let Some(x) = trigger {
+            if let Some(x) = fitted.trigger {
                 let chosen = match set {
                     true => &mut self.trigger.marked,
                     false => &mut self.trigger.unmarked,
@@ -616,7 +678,10 @@ impl Element for Fitting {
                     cx,
                 ));
             }
-            let (free_start, free_end) = free;
+            for (element, over) in anchored {
+                laid.push(prepaint_over(element, over, window, cx));
+            }
+            let (free_start, free_end) = fitted.free;
             for mut status in statuses {
                 let extent = status.layout_as_root(natural(), window, cx);
                 if free_start + extent.width <= free_end {
@@ -683,7 +748,7 @@ fn strip(window: &mut Window, cx: &mut App) -> Div {
         // (the content it acts on) cannot squeeze the controls.
         .flex_none()
         .py(PADDING)
-        .px_2()
+        .px(INSET)
         .bg(colors.surface)
         .text_color(colors.text)
         .border_b(RULE)
