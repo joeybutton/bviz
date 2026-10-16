@@ -72,7 +72,9 @@ pub use sort::{Sort, sort_gesture, sort_header, sort_hint};
 pub use spinner::spinner;
 pub use text_input::TextInput;
 pub use toggle_group::{Presentation, Switch, ToggleGroup, ToggleSegment};
-pub use toolbar::{OneRow, OverflowRows, Priority, ToolbarGroup, ToolbarSeparator};
+pub use toolbar::{
+    OneRow, OverflowRows, Priority, ToolbarGroup, ToolbarSeparator, compact_band_end,
+};
 pub use tooltip::{
     CardAnchor, TextTooltip, beside_anchor, defer_tooltip, place_tooltips, room_beside,
     tooltip_extent,

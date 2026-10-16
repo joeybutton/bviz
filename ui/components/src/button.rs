@@ -15,6 +15,14 @@ const COMPACT_LINE_HEIGHT: f32 = 1.2;
 /// The width and height of a button's icon.
 pub(crate) const ICON_SIZE: Pixels = px(16.);
 
+/// Room a compact button leaves either side of its label or icon.
+const COMPACT_INSET: Pixels = px(8.);
+
+/// The width of a compact button showing only an icon.
+pub(crate) fn compact_icon_width() -> Pixels {
+    COMPACT_INSET * 2. + ICON_SIZE
+}
+
 /// Whether a key activates a focused button (enter or space).
 fn is_activate(key: &str) -> bool {
     key == "enter" || key == "space"
@@ -151,7 +159,7 @@ impl Button {
 
 fn sized(el: Stateful<Div>, button: &Button) -> Stateful<Div> {
     if button.compact {
-        el.px_2()
+        el.px(COMPACT_INSET)
             .py_0p5()
             .line_height(relative(COMPACT_LINE_HEIGHT))
     } else if button.ghost && button.label.is_none() {

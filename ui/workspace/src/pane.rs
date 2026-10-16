@@ -4,7 +4,9 @@ use crate::panel::keys_focus;
 use crate::workspace::{ClosePanel, ShowKeysAndGestures, ToggleMaximize};
 use crate::{AnyPanel, Documents, PanelEvent};
 use bviz_ui_components::gesture::{Pointer, scroll_pixels};
-use bviz_ui_components::{Button, KeysHelp, KeysHelpEvent, TextTooltip, overlay_canvas};
+use bviz_ui_components::{
+    Button, KeysHelp, KeysHelpEvent, TextTooltip, compact_band_end, overlay_canvas,
+};
 use bviz_ui_theme::ThemeColors;
 use gpui::{
     Anchor, AnyElement, AnyView, App, Bounds, ClickEvent, Div, ElementId, Entity, EntityId,
@@ -531,6 +533,7 @@ impl Pane {
             .flex_shrink_0()
             .w_full()
             .h(naming.height())
+            .pr(compact_band_end())
             .overflow_hidden()
             .bg(colors.surface)
             .border_b_1()
@@ -677,7 +680,8 @@ impl Pane {
             .flex_shrink_0()
             .w_full()
             .h(HANDLE_HEIGHT)
-            .px_2()
+            .pl_2()
+            .pr(compact_band_end())
             .overflow_hidden()
             .bg(colors.surface)
             .border_b_1()

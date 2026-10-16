@@ -1,6 +1,6 @@
 mod fit;
 
-use crate::button::ICON_SIZE;
+use crate::button::{ICON_SIZE, compact_icon_width};
 use crate::menu::{Menu, MenuEvent, MenuItem, over_window};
 use crate::{Button, CONTROL_HEIGHT, spinner};
 use fit::{Kind, Measure, Room, Side, Spot};
@@ -15,6 +15,9 @@ pub use fit::Priority;
 
 /// Space the strip leaves above and below its controls.
 const PADDING: Pixels = px(4.);
+
+/// Space the strip leaves before its first control and after its last.
+const INSET: Pixels = px(8.);
 
 /// Room between neighbouring controls of a strip.
 const GAP: Pixels = px(8.);
@@ -135,6 +138,14 @@ impl ToolbarGroup {
         self.parted = true;
         self
     }
+}
+
+/// The padding ending a band of controls whose last is a compact [`Button`]
+/// showing only an icon, which centres that icon where a [`OneRow`] centres an
+/// icon-only button ending it, so that the controls ending stacked bands line
+/// up.
+pub fn compact_band_end() -> Pixels {
+    INSET + (CONTROL_HEIGHT - compact_icon_width()) / 2.
 }
 
 /// A strip of controls held to one row, [`height`](Self::height) tall, so that
@@ -737,7 +748,7 @@ fn strip(window: &mut Window, cx: &mut App) -> Div {
         // (the content it acts on) cannot squeeze the controls.
         .flex_none()
         .py(PADDING)
-        .px_2()
+        .px(INSET)
         .bg(colors.surface)
         .text_color(colors.text)
         .border_b(RULE)
