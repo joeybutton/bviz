@@ -428,7 +428,11 @@ fn finish_merge(
 
     // The folded runs' teardown (per-chunk payload and index buffers) is pure
     // page-return work; detached so the load doesn't wait on it.
+    // Where threads cannot be spawned (wasm32), drop them inline.
+    #[cfg(not(target_family = "wasm"))]
     std::thread::spawn(move || drop(runs));
+    #[cfg(target_family = "wasm")]
+    drop(runs);
     parts
 }
 
@@ -561,6 +565,12 @@ fn merge_lanes(tasks: &mut [TidTask]) {
         // Thread sizes are heavily skewed toward a few big evaluator lanes, so
         // workers steal tasks one thread at a time.
         let workers = worker_count().min(tasks.len());
+        if workers <= 1 {
+            // One worker steals every task: run them on this thread, which
+            // needs no spawn where none is possible (wasm32).
+            tasks.iter_mut().for_each(merge_lane);
+            return;
+        }
         let stealer = std::sync::Mutex::new(tasks.iter_mut());
         std::thread::scope(|scope| {
             for _ in 0..workers {

@@ -210,33 +210,40 @@ fn parse_chunks_on_workers(
     prefault_bytes: usize,
 ) -> Option<Vec<Builder>> {
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let spawned = workers.min(chunks.len());
-    let parsed: Vec<(usize, Option<Builder>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..spawned)
-            .map(|shard| {
-                let next = &next;
-                scope.spawn(move || {
-                    // Fault this worker's arena share up front, in parallel
-                    // with the others, before entering the steal loop.
-                    interner.prefault_shard(shard, spawned, prefault_bytes);
-                    let mut writer = interner.writer();
-                    let mut parsed = Vec::new();
-                    let mut args_cap = 0;
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&chunk) = chunks.get(i) else { break };
-                        let builder = parse_chunk(chunk, &mut writer, &mut args_cap);
-                        parsed.push((i, builder));
-                    }
-                    parsed
+    let spawned = workers.min(chunks.len()).max(1);
+    let work = |shard: usize| {
+        // Fault this worker's arena share up front, in parallel with the
+        // others, before entering the steal loop.
+        interner.prefault_shard(shard, spawned, prefault_bytes);
+        let mut writer = interner.writer();
+        let mut parsed = Vec::new();
+        let mut args_cap = 0;
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(&chunk) = chunks.get(i) else { break };
+            let builder = parse_chunk(chunk, &mut writer, &mut args_cap);
+            parsed.push((i, builder));
+        }
+        parsed
+    };
+    // A single worker parses on this thread, which needs no spawn where none
+    // is possible (wasm32).
+    let parsed: Vec<(usize, Option<Builder>)> = if spawned == 1 {
+        work(0)
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..spawned)
+                .map(|shard| {
+                    let work = &work;
+                    scope.spawn(move || work(shard))
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect()
-    });
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        })
+    };
     // Chunks were stolen out of order; restore array order for the merge.
     let mut builders: Vec<Option<Builder>> = Vec::new();
     builders.resize_with(chunks.len(), || None);
