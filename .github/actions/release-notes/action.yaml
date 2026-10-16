@@ -36,6 +36,6 @@ runs:
         mv bviz ~/.local/bin/
         ```
 
-        The requirements for each platform are listed in the [README](${{ github.server_url }}/${{ github.repository }}#install).
+        The requirements for each platform are listed in the [README](${{ github.server_url }}/${{ github.repository }}/blob/${{ inputs.tag }}/README.md#install).
         EOF
         } > "${{ inputs.path }}"
