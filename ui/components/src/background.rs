@@ -26,11 +26,12 @@ where
 /// shell's own startup (font-database scan, window and GPU-surface setup)
 /// instead of following it. [`load_in_background`] takes the result from here,
 /// so the UI thread waits on it only once it has a frame to draw.
-pub struct Pending<T>(std::thread::JoinHandle<Result<T, String>>);
+/// In a browser, which runs one thread, the work runs instead once joined.
+pub struct Pending<T>(bviz_parallel::Background<Result<T, String>>);
 
 impl<T: Send + 'static> Pending<T> {
     pub fn start(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
-        Self(std::thread::spawn(work))
+        Self(bviz_parallel::background(work))
     }
 
     /// Blocks until the work finishes, reporting a panic in it the way the work

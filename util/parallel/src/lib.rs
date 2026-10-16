@@ -46,6 +46,11 @@ pub fn workers() -> &'static rayon::ThreadPool {
 /// too, as a map is drawn only once placed, so the pool gives up a single
 /// worker: that bounds the oversubscription at little cost to the pass.
 pub fn background_workers() -> &'static rayon::ThreadPool {
+    // One thread can belong to only one pool, so where every pool is the
+    // calling thread (wasm32) the long passes share the one pool.
+    if cfg!(target_family = "wasm") {
+        return workers();
+    }
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         pool_builder(worker_count().saturating_sub(1).max(1))
@@ -64,5 +69,50 @@ fn pool_builder(threads: usize) -> rayon::ThreadPoolBuilder {
         builder.num_threads(1).use_current_thread()
     } else {
         builder.num_threads(threads)
+    }
+}
+
+/// Whether this platform can start a thread: false in a browser (wasm32),
+/// where every pass runs on the calling thread.
+pub const CAN_SPAWN: bool = !cfg!(target_family = "wasm");
+
+/// Work running on a thread of its own where [`CAN_SPAWN`], so it overlaps
+/// whatever the caller does next; elsewhere it runs when it is joined.
+pub struct Background<T>(Inner<T>);
+
+enum Inner<T> {
+    Thread(std::thread::JoinHandle<T>),
+    Deferred(Box<dyn FnOnce() -> T + Send>),
+}
+
+/// Starts `work` as [`Background`] work.
+pub fn background<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Background<T> {
+    Background(if CAN_SPAWN {
+        Inner::Thread(std::thread::spawn(work))
+    } else {
+        Inner::Deferred(Box::new(work))
+    })
+}
+
+impl<T> Background<T> {
+    /// The work's result, waiting for it to finish; `Err` where it panicked.
+    pub fn join(self) -> std::thread::Result<T> {
+        match self.0 {
+            Inner::Thread(handle) => handle.join(),
+            Inner::Deferred(work) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn background_work_joins_with_its_result_or_its_panic() {
+        assert_eq!(super::background(|| 6 * 7).join().unwrap(), 42);
+        assert!(
+            super::background(|| -> u8 { panic!("boom") })
+                .join()
+                .is_err()
+        );
     }
 }
