@@ -22,11 +22,12 @@ rust_library(
     visibility = ["//ui/execlog:__pkg__"],
     deps = [
         "//invocation",
+        "//util/files",
         "//util/parallel",
         "@bazel_spawn_proto//:bazel_spawn_rust_proto",
         "@crates//:prost",
         "@crates//:rustc-hash",
-        "@crates//:zstd",
+        "@crates//:ruzstd",
     ],
 )
 

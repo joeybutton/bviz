@@ -15,4 +15,5 @@ bviz_invocation = { workspace = true }
 bviz_parallel = { workspace = true }
 prost = { workspace = true }
 rustc-hash = { workspace = true }
-zstd = { workspace = true }
+bviz_files = { workspace = true }
+ruzstd = { workspace = true }

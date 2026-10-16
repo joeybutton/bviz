@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{BufReader, Read};
 use std::ops::Range;
 use std::path::Path;
@@ -43,8 +42,8 @@ const OUTPUT_BYTES_PER_COMPRESSED_KIB: u64 = 192;
 const READ_CHUNK_BYTES: usize = 256 << 10;
 
 pub(crate) fn read_path(path: &Path) -> Result<Recorded<ExecLog>, LoadError> {
-    let file = File::open(path).map_err(LoadError::Io)?;
-    let compressed = file.metadata().map_err(LoadError::Io)?.len();
+    let file = bviz_files::open(path).map_err(LoadError::Io)?;
+    let compressed = file.size().map_err(LoadError::Io)?;
     read_compressed(file, compressed)
 }
 
@@ -53,7 +52,7 @@ pub(crate) fn read_compressed(
     log: impl Read + Send,
     compressed: u64,
 ) -> Result<Recorded<ExecLog>, LoadError> {
-    let decoder = zstd::stream::read::Decoder::new(log).map_err(LoadError::Io)?;
+    let decoder = zstd_decoder(std::io::BufReader::new(log)).map_err(LoadError::Io)?;
     let mut builder = Builder::with_capacity(compressed);
     let mut any_entry = false;
     let add = |entry: &[u8]| {
@@ -323,11 +322,17 @@ const PROBE_HEAD_BYTES: usize = 64 << 10;
 /// `path` is not a regular file: reading a pipe could block, and would take
 /// from it bytes it yields only once.
 pub fn probe_invocation_id(path: &Path) -> Option<InvocationId> {
-    if !std::fs::metadata(path).ok()?.is_file() {
+    if !bviz_files::is_file(path) {
         return None;
     }
-    let file = File::open(path).ok()?;
+    let file = bviz_files::open(path).ok()?;
     invocation_id_at_head(BufReader::new(file), PROBE_HEAD_BYTES)
+}
+
+/// A decoder of the zstd stream `log`: ruzstd, pure Rust, so the log reads
+/// the same on a desktop and in a browser. See [`crate::zstd`].
+fn zstd_decoder<R: std::io::BufRead>(log: R) -> std::io::Result<crate::zstd::Decoder<R>> {
+    Ok(crate::zstd::Decoder::new(log))
 }
 
 /// [`probe_invocation_id`] over the first `head_bytes` decoded bytes of a log.
@@ -335,7 +340,7 @@ fn invocation_id_at_head(log: impl std::io::BufRead, head_bytes: usize) -> Optio
     let mut head = Vec::with_capacity(head_bytes);
     // A stream that fails mid-way has still yielded the bytes ahead of the
     // failure.
-    let _ = zstd::stream::read::Decoder::with_buffer(log)
+    let _ = zstd_decoder(log)
         .ok()?
         .take(head_bytes as u64)
         .read_to_end(&mut head);
@@ -471,12 +476,14 @@ mod tests {
             .collect();
         let log = encode(&entries);
         let mut kept = 0;
+        // The encoder closes the frame with a 4-byte content checksum, which a
+        // cut can lose without losing a spawn, so the last cut lands ahead of it.
         let cuts = [
             1,
             log.len() / 4,
             log.len() / 2,
             log.len() * 3 / 4,
-            log.len() - 1,
+            log.len() - 5,
         ];
         for cut in cuts {
             let read = match read_compressed(&log[..cut], cut as u64) {
@@ -529,7 +536,10 @@ mod tests {
         let mut decoded = Vec::with_capacity(crate::wire::MAX_VARINT_BYTES + fields.len());
         prost::encoding::encode_varint(fields.len() as u64, &mut decoded);
         decoded.extend_from_slice(fields);
-        zstd::encode_all(decoded.as_slice(), 0).expect("compress in memory")
+        ruzstd::encoding::compress_to_vec(
+            decoded.as_slice(),
+            ruzstd::encoding::CompressionLevel::Fastest,
+        )
     }
 
     /// Field `number` of a message, holding the varint `value`.

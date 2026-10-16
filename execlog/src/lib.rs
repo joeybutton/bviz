@@ -13,6 +13,7 @@ mod spawn_fields;
 #[cfg(test)]
 mod test_log;
 mod wire;
+mod zstd;
 
 use bviz_invocation::Recorded;
 use bviz_invocation::spawn::{LoggedSpawn, LoggedSpawns};

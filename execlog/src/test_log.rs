@@ -96,7 +96,10 @@ pub(crate) fn encode(entries: &[ExecLogEntry]) -> Vec<u8> {
             .encode_length_delimited(&mut decoded)
             .expect("a Vec grows to fit");
     }
-    zstd::encode_all(decoded.as_slice(), 0).expect("compress in memory")
+    ruzstd::encoding::compress_to_vec(
+        decoded.as_slice(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    )
 }
 
 pub(crate) fn load(entries: &[ExecLogEntry]) -> ExecLog {
