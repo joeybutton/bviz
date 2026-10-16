@@ -1,0 +1,41 @@
+# gpui_platform from zed v1.6.3 (crates/gpui_platform), vendored unchanged but
+# for one thing: it takes gpui_web without its default `multithreaded`
+# feature. That feature runs gpui's background executor on Web Workers, which
+# needs a nightly compiler and a std rebuilt with atomics; without it the web
+# platform runs single-threaded on the stable toolchain the rest of bviz
+# builds with. Desktop targets resolve the same crates as before. See README.md.
+[package]
+name = "gpui_platform"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_platform.rs"
+
+[features]
+default = []
+font-kit = ["gpui_macos/font-kit"]
+test-support = ["gpui/test-support", "gpui_macos/test-support"]
+screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_windows/screen-capture", "gpui_linux/screen-capture"]
+runtime_shaders = ["gpui_macos/runtime_shaders"]
+wayland = ["gpui_linux/wayland"]
+x11 = ["gpui_linux/x11"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3", features = ["windows-manifest"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_linux = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gpui_web = { git = "https://github.com/zed-industries/zed", tag = "v1.6.3", default-features = false }
+console_error_panic_hook = "0.1.7"
