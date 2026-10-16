@@ -1368,6 +1368,8 @@ struct Row<X> {
 }
 
 // A lane's rows are sorted by value, so a row's size is what the sort moves.
+// The budget is for 64-bit targets; a 32-bit one (wasm32) has narrower `Str`s.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Row<()>>() == 48);
 
 /// One node's field values as [`Arena::push`] takes them, decomposed into the
